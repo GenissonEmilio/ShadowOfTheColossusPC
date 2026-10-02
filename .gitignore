@@ -1,0 +1,32 @@
+# Game data: never commit anything from the disc or derived from it.
+/disc/
+/iso/
+*.iso
+*.zip
+*.XFF
+*.bin
+*.raw
+SCUS_*
+
+# Build output and generated (game-derived) code
+/build/
+PS2Recomp/out/
+PS2Recomp/ps2xRuntime/src/runner/*
+!PS2Recomp/ps2xRuntime/src/runner/register_functions.cpp
+vu1rec_*.cpp
+
+# Runtime state
+/logs/
+/shots/
+/mc0/
+/mc1/
+imgui.ini
+*.log
+*.wav
+
+# Local scratch
+/dumps/
+/recomp/
+/fantaskink-SOTC/
+__pycache__/
+.DS_Store
