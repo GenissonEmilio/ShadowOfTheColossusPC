@@ -281,6 +281,10 @@ public:
     [[nodiscard]] bool checkpointDue(uint32_t cycles = kGeneratedCheckpointCycles) noexcept;
     void accountCycles(uint32_t cycles) noexcept;
     [[nodiscard]] bool isExecutingGuest() const noexcept;
+    [[nodiscard]] bool unwinding() const noexcept
+    {
+        return m_unwinding;
+    }
 
     // Kernel object API. All calls except postEvent/requestStop execute on the
     // EE executor and therefore need no host synchronization.
@@ -446,6 +450,10 @@ private:
     bool m_rescheduleRequested = false;
     bool m_timeSliceExpired = false;
     bool m_insideInterrupt = false;
+    // Set when checkpointDue() asks generated code to return to the scheduler.
+    // Until the scheduler re-dispatches, ctx->pc is the resume point of the
+    // deepest pending call, not a callee's return.
+    bool m_unwinding = false;
     uint32_t m_pendingEeTimerInterrupts = 0;
     uint64_t m_eeCycle = 0;
     std::chrono::steady_clock::time_point m_hostClockBase{};

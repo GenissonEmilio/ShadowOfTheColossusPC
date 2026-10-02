@@ -1525,7 +1525,9 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     const uint32_t entryPc = ctx->pc;
     targetFn(rdram, ctx, this);
 
-    if (isStopRequested() || ctx->pc == 0u)
+    // While unwinding to the scheduler, ctx->pc is where the deepest pending
+    // call resumes; it can equal this callee's entry in recursive code.
+    if (isStopRequested() || ctx->pc == 0u || (m_eeScheduler && m_eeScheduler->unwinding()))
     {
         return false;
     }
