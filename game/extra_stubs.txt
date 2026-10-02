@@ -1,0 +1,5 @@
+# handler@address bindings applied on top of the generated config (debug aids and fixes)
+# Fatal-error paths take (fmt, ...) like printf: log the message instead of rebooting.
+printf@0x00100C80
+printf@0x00100BF8
+printf@0x001B3410

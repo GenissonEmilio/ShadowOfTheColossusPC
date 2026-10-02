@@ -1,0 +1,280 @@
+#!/usr/bin/env bash
+# celosia: static recompilation of Shadow of the Colossus (USA, SCUS-97472).
+#
+#   ./celosia setup --iso <SotC.iso|.zip>   extract the disc and build everything
+#   ./celosia run                           play
+#   ./celosia help                          all commands and settings
+#
+# Settings (environment variables, all optional):
+#   CELOSIA_DISC   extracted disc directory          (default: ./disc)
+#   CELOSIA_BUILD  build + generated code directory  (default: ./build)
+#   CELOSIA_JOBS   parallel compile jobs             (default: CPU count)
+#   CELOSIA_CMAKE_ARGS  extra arguments for the CMake configure step
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+DISC=${CELOSIA_DISC:-$ROOT/disc}
+BUILD=${CELOSIA_BUILD:-$ROOT/build}
+JOBS=${CELOSIA_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 8)}
+CMAKE_DIR=$BUILD/cmake
+RUNNER_DIR=$BUILD/runner       # recompiled EE code (generated)
+VU1REC_DIR=$BUILD/vu1rec       # recompiled VU1 microcode (generated)
+VU1_DUMPS=$BUILD/vu1           # VU1 microcode images seen while playing
+WORK=$BUILD/recomp             # recompiler inputs/outputs per stage
+CAPTURES=$BUILD/captures       # RAM dumps taken when each module starts
+LOGS=$ROOT/logs
+BOOT=SCUS_974.72
+RUNNER=$CMAKE_DIR/ps2xRuntime/ps2EntryRunner
+RECOMP=$CMAKE_DIR/ps2xRecomp/ps2_recomp
+MODULES="KERNEL MANAGER GAMECORE"   # XFF modules, in load order
+
+say() { printf '\033[1;35m==>\033[0m %s\n' "$*"; }
+die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "'$1' is required ($2)"; }
+lower() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
+
+check_tools() {
+    need cmake "brew install cmake"
+    need ninja "brew install ninja"
+    need python3 "install Python 3.10+"
+    need bsdtar "ships with macOS; on Linux: apt install libarchive-tools"
+    need pkg-config "brew install pkg-config"
+}
+
+check_disc() {
+    [ -f "$DISC/$BOOT" ] || die "no $BOOT in $DISC (run: ./celosia setup --iso <path>)"
+    local m
+    for m in $MODULES; do
+        [ -f "$DISC/$m.XFF" ] || die "$DISC/$m.XFF missing: is this the USA release (SCUS-97472)?"
+    done
+}
+
+cmd_extract() {
+    local iso=${1:-}
+    [ -n "$iso" ] || die "usage: ./celosia extract <SotC.iso|.zip>"
+    [ -f "$iso" ] || die "$iso not found"
+    if [ -f "$DISC/$BOOT" ]; then
+        say "disc already extracted in $DISC"
+        return
+    fi
+    mkdir -p "$DISC"
+    case $(lower "$iso") in
+    *.zip)
+        say "unpacking $(basename "$iso")"
+        local tmp=$BUILD/iso
+        rm -rf "$tmp" && mkdir -p "$tmp"
+        (cd "$tmp" && unzip -q "$iso")
+        iso=$(find "$tmp" -iname '*.iso' | head -1)
+        [ -n "$iso" ] || die "no .iso inside the zip"
+        ;;
+    esac
+    say "extracting $(basename "$iso") to $DISC"
+    bsdtar -xf "$iso" -C "$DISC"
+    rm -rf "$BUILD/iso"
+    check_disc
+}
+
+cmd_configure() {
+    say "configuring CMake in $CMAKE_DIR"
+    mkdir -p "$RUNNER_DIR" "$VU1REC_DIR" "$LOGS"
+    # shellcheck disable=SC2086
+    cmake -S "$ROOT/PS2Recomp" -B "$CMAKE_DIR" -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DPS2X_BUILD_STUDIO=OFF -DPS2X_BUILD_TEST=OFF -DPS2X_BUILD_ANALYZER=OFF \
+        -DPS2X_ENABLE_AGRESSIVE_LOGS=OFF \
+        "-DPS2X_RUNNER_DIRS=$RUNNER_DIR;$VU1REC_DIR;$ROOT/game/overrides" \
+        ${CELOSIA_CMAKE_ARGS:-} >"$LOGS/configure.log" 2>&1 ||
+        { tail -30 "$LOGS/configure.log"; die "CMake configure failed (log: logs/configure.log)"; }
+}
+
+build_target() {
+    [ -f "$CMAKE_DIR/build.ninja" ] || cmd_configure
+    say "building $1"
+    cmake --build "$CMAKE_DIR" --target "$1" -j "$JOBS" >"$LOGS/build-$1.log" 2>&1 ||
+        { grep -m 20 -E "error|Error" "$LOGS/build-$1.log" || tail -30 "$LOGS/build-$1.log"; die "build of $1 failed (log: logs/build-$1.log)"; }
+}
+
+# Recompiles a stage directory (config.toml + functions.csv) into the runner.
+recompile() {
+    local dir=$1
+    build_target ps2_recomp
+    say "recompiling $(basename "$dir")"
+    rm -rf "$dir/output"
+    (cd "$dir" && "$RECOMP" config.toml >recomp.log 2>&1) ||
+        { tail -20 "$dir/recomp.log"; die "recompiler failed (log: $dir/recomp.log)"; }
+    find "$RUNNER_DIR" -maxdepth 1 -type f \( -name '*.cpp' -o -name '*.h' \) -delete
+    cp "$dir"/output/*.cpp "$dir"/output/*.h "$RUNNER_DIR/"
+    # New/removed files change the source glob.
+    cmake "$CMAKE_DIR" >"$LOGS/configure.log" 2>&1
+    build_target ps2EntryRunner
+}
+
+# Stage 0: only the boot ELF (SCUS) is recompiled.
+stage_boot() {
+    local dir=$WORK/scus
+    mkdir -p "$dir"
+    say "mapping $BOOT"
+    (cd "$ROOT/tools" && python3 - "$DISC/KERNEL.XFF" "$WORK/scus_symbols.txt" <<'EOF'
+import sys
+from xff import Xff, SHN_ABS
+# KERNEL.XFF imports the boot ELF's runtime by absolute address: free symbols.
+x = Xff(sys.argv[1])
+syms = sorted({(s.value, s.name) for s in x.symbols if s.shndx == SHN_ABS and s.name})
+with open(sys.argv[2], "w") as f:
+    for v, n in syms:
+        f.write(f"{v:08x} {n}\n")
+EOF
+    )
+    python3 "$ROOT/tools/funcmap_elf.py" "$DISC/$BOOT" "$WORK/scus_symbols.txt" "$dir/functions.csv" >/dev/null
+    sed "s|^input = .*|input = \"$DISC/$BOOT\"|" "$ROOT/game/scus.toml" >"$dir/config.toml"
+    recompile "$dir"
+}
+
+# Builds the combined ELF from every captured module, then recompiles it.
+stage_game() {
+    local dir=$WORK/game specs=() m
+    mkdir -p "$dir"
+    for m in $MODULES; do
+        local dump=$CAPTURES/$(lower "$m").bin
+        [ -f "$dump" ] && specs+=("$DISC/$m.XFF@auto@$dump")
+    done
+    say "linking SOTC.elf from ${#specs[@]} captured module(s)"
+    (cd "$ROOT/tools" &&
+        python3 build_elf.py "$dir" "$DISC/$BOOT" "$WORK/scus_symbols.txt" "${specs[@]}" &&
+        python3 gen_config.py "$dir" "$WORK/scus/config.toml") >"$LOGS/link.log" 2>&1 ||
+        { tail -20 "$LOGS/link.log"; die "linking failed (log: logs/link.log)"; }
+    recompile "$dir"
+}
+
+# Runs the game until it jumps into code that is not recompiled yet (the next
+# module's entry) and saves guest RAM at that moment.
+capture() {
+    local name=$1 out=$CAPTURES/$(lower "$1").bin pid i
+    mkdir -p "$CAPTURES"
+    rm -f "$out"
+    say "capturing $name (the game window opens briefly)"
+    (cd "$ROOT" && PS2X_DUMP_RAM_ON_MISSING=$out exec "$RUNNER" "$DISC/$BOOT") >"$LOGS/capture-$(lower "$name").log" 2>&1 &
+    pid=$!
+    for i in $(seq 240); do
+        if [ -f "$out" ] && [ "$(wc -c <"$out")" -ge 33554432 ]; then break; fi
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.5
+    done
+    sleep 1
+    kill "$pid" 2>/dev/null || true
+    sleep 1
+    kill -9 "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    [ -f "$out" ] && [ "$(wc -c <"$out")" -ge 33554432 ] ||
+        die "$name was never reached (log: logs/capture-$(lower "$name").log)"
+}
+
+cmd_setup() {
+    local iso=""
+    while [ $# -gt 0 ]; do
+        case $1 in
+        --iso) iso=${2:-}; shift 2 ;;
+        *) die "unknown option $1" ;;
+        esac
+    done
+    check_tools
+    if [ -n "$iso" ]; then cmd_extract "$iso"; fi
+    check_disc
+    cmd_configure
+    stage_boot
+    local m
+    for m in $MODULES; do
+        capture "$m"
+        stage_game
+    done
+    cmd_vu1
+    say "done. Play with: ./celosia run"
+}
+
+# Compiles the VU1 microcode images collected in $VU1_DUMPS into C++.
+cmd_vu1() {
+    if [ -z "$(ls "$VU1_DUMPS"/*.bin 2>/dev/null)" ]; then
+        say "collecting VU1 microcode (40s scripted run)"
+        cmd_autotest 40 >/dev/null
+    fi
+    say "recompiling VU1 microcode"
+    mkdir -p "$VU1REC_DIR"
+    (cd "$ROOT" && PS2X_VU1_GEN=$VU1_DUMPS:$VU1REC_DIR "$RUNNER" "$DISC/$BOOT") 2>&1 | grep vu1rec || true
+    cmake "$CMAKE_DIR" >"$LOGS/configure.log" 2>&1
+    build_target ps2EntryRunner
+}
+
+cmd_build() {
+    [ -d "$WORK/game" ] || die "nothing to build yet (run: ./celosia setup)"
+    cmake "$CMAKE_DIR" >"$LOGS/configure.log" 2>&1
+    build_target ps2EntryRunner
+}
+
+cmd_recompile() {
+    [ -d "$WORK/game" ] || die "nothing to recompile yet (run: ./celosia setup)"
+    stage_game
+}
+
+cmd_run() {
+    [ -x "$RUNNER" ] || die "not built yet (run: ./celosia setup --iso <path>)"
+    check_disc
+    mkdir -p "$LOGS" "$VU1_DUMPS"
+    say "playing (log: logs/play.log)"
+    cd "$ROOT"
+    PS2X_VU1_DUMP_MISSING=${PS2X_VU1_DUMP_MISSING:-$VU1_DUMPS} exec "$RUNNER" "$DISC/$BOOT" "$@" >"$LOGS/play.log" 2>&1
+}
+
+# Scripted run that saves screenshots: ./celosia autotest [seconds] [interval]
+cmd_autotest() {
+    local secs=${1:-40} pid
+    [ -x "$RUNNER" ] || die "not built yet"
+    mkdir -p "$LOGS" "$VU1_DUMPS"
+    rm -rf "$ROOT/shots/run" && mkdir -p "$ROOT/shots/run"
+    (cd "$ROOT" &&
+        PS2X_INPUT_SCRIPT=${PS2X_INPUT_SCRIPT:-"11:DOWN:0.3;12:CROSS:0.3"} \
+        PS2X_SNAPSHOT_DIR=shots/run PS2X_SNAPSHOT_SECONDS=${2:-5} \
+        PS2X_VU1_DUMP_MISSING=$VU1_DUMPS \
+        exec "$RUNNER" "$DISC/$BOOT") >"$LOGS/autotest.log" 2>&1 &
+    pid=$!
+    sleep "$secs"
+    kill "$pid" 2>/dev/null || true
+    sleep 1
+    kill -9 "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    echo "$(ls "$ROOT/shots/run" | wc -l | tr -d ' ') screenshots in shots/run, log: logs/autotest.log"
+}
+
+cmd_clean() {
+    say "removing $BUILD"
+    rm -rf "$BUILD"
+}
+
+cmd_help() {
+    sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    cat <<'EOF'
+
+Commands:
+  setup [--iso PATH]   extract the disc (if given) and run the whole pipeline
+  extract PATH         only extract an ISO (or a zip containing one)
+  run [args]           play (new VU1 microcode is saved for `vu1`)
+  vu1                  recompile collected VU1 microcode and rebuild
+  recompile            relink modules + recompile game code + rebuild
+  build                rebuild the runner (after editing PS2Recomp sources)
+  autotest [s] [int]   scripted run with periodic screenshots in shots/run
+  clean                delete the build directory
+EOF
+}
+
+case ${1:-help} in
+setup) shift; cmd_setup "$@" ;;
+extract) shift; cmd_extract "$@" ;;
+configure) cmd_configure ;;
+run) shift; cmd_run "$@" ;;
+vu1) cmd_vu1 ;;
+recompile) cmd_recompile ;;
+build) cmd_build ;;
+autotest) shift; cmd_autotest "$@" ;;
+clean) cmd_clean ;;
+help | -h | --help) cmd_help ;;
+*) die "unknown command '$1' (see ./celosia help)" ;;
+esac
