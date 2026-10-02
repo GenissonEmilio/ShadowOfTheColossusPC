@@ -1,3 +1,4 @@
+#include "runtime/ps2_stats.h"
 #include "runtime/ps2_vu1.h"
 #include "runtime/gs/ps2_gif_arbiter.h"
 #include "runtime/gs/gs_frontend.h"
@@ -665,6 +666,7 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
                 return;
             }
             case 0x6C: // XGKICK - send GIF packet from VU1 data memory
+                ps2_stats::vu1Xgkick.fetch_add(1, std::memory_order_relaxed);
                 startXgkick(static_cast<uint32_t>(static_cast<uint16_t>(m_state.vi[viS])));
                 return;
             case 0x70: // ESADD

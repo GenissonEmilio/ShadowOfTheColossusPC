@@ -3,6 +3,7 @@
 
 #include <array>
 #include <cstdint>
+#include <vector>
 
 class GS;
 class PS2Memory;
@@ -62,7 +63,31 @@ public:
     VU1State &state() { return m_state; }
     const VU1State &state() const { return m_state; }
 
-private:
+    // Ahead-of-time recompiled microcode (see ps2_vu1_rec.h). Generated code
+    // drives the same scheduler state, so the members below stay public.
+    using RecompiledFn = int (*)(VU1Interpreter &, uint8_t *vuData, uint32_t dataSize,
+                                 GS &gs, PS2Memory *memory, uint64_t budgetEnd);
+    static void registerRecompiled(uint64_t imageHash, RecompiledFn fn);
+    static int generateRecompiled(const char *dumpDir, const char *outDir);
+
+    RecompiledFn findRecompiled(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory);
+    RecompiledFn m_recFn = nullptr;
+    uint64_t m_recGeneration = ~0ull;
+    const uint8_t *m_recCode = nullptr;
+    bool m_recDisabled = false;
+    uint64_t m_recHash = 0;
+    void noteRecompiledBail();
+    uint32_t m_recTraceStartPc = 0;
+    void traceZeroXyzPacket();
+    std::vector<uint8_t> m_traceRunData;
+    VU1State m_traceRunState{};
+    std::vector<uint8_t> *m_gifCapture = nullptr;
+    bool m_gifCaptureOnly = false;
+    struct RecVerify;
+    RecVerify *beginRecVerify(uint8_t *vuCode, uint32_t codeSize, uint8_t *vuData,
+                              uint32_t dataSize, GS &gs, PS2Memory *memory, uint32_t maxCycles);
+    void endRecVerify(RecVerify *verify, const uint8_t *vuData, uint32_t dataSize);
+
     enum Pipeline : uint8_t
     {
         PipelineNone = 0,
@@ -187,6 +212,7 @@ private:
         uint32_t currentTagEnd = 0;
         uint32_t cycleCredit = 0;
         uint64_t issueCycle = 0;
+        uint64_t progressedCycle = 0; // last cycle whose PATH1 transfer is applied
         bool active = false;
         bool currentTagEop = false;
     };
@@ -209,6 +235,17 @@ private:
     uint64_t m_cachedCodeGeneration = 0;
     bool m_decodedCodeCacheValid = false;
 
+    uint64_t m_nextCommitCycle = 0;
+    // MAC/status flags are only computed when the loaded microcode reads them.
+    bool m_macStatusFlagsLive = true;
+    bool m_stickyFlagsLive = true;
+    void cheapFmacFlags(float *result, uint8_t dest, uint8_t laneFlags[4]);
+    bool m_flagScanValid = false;
+    uint64_t m_flagScanGeneration = 0;
+    const uint8_t *m_flagScanCode = nullptr;
+    void refreshFlagLiveness(const uint8_t *vuCode, uint32_t codeSize);
+    void normalizeResultsOnly(float *result, uint8_t dest);
+    void recomputeNextCommitCycle();
     std::array<FlagPipelineEntry, kMaxFlagEntries> m_flagPipeline{};
     ScalarPipelineEntry m_fdiv{};
     std::array<ScalarPipelineEntry, 2> m_efu{};
@@ -250,7 +287,8 @@ private:
     static void addVfWrite(InstructionUsage &usage, uint8_t reg, uint8_t lanes);
     static uint8_t vfReadLanes(const InstructionUsage &usage, uint8_t reg);
     DecodedInstructionPair decodeInstructionPair(const uint8_t *vuCode, uint32_t pc) const;
-    DecodedInstructionPair getDecodedInstructionPairForPc(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory, uint32_t pc);
+    const DecodedInstructionPair &getDecodedInstructionPairForPc(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory, uint32_t pc);
+    DecodedInstructionPair m_decodeScratch{};
     void rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t codeSize, const PS2Memory *memory, uint64_t generation);
 
     void execUpper(uint32_t instr);
@@ -277,11 +315,45 @@ private:
     void startXgkick(uint32_t qwordAddress);
 
     void resetScheduler();
-    void commitReadyPipelines();
+    void resetXgkickState()
+    {
+        // The packet buffer is only read up to copiedBytes, so it is left as is.
+        m_xgkick.sourceAddress = 0;
+        m_xgkick.totalBytes = 0;
+        m_xgkick.copiedBytes = 0;
+        m_xgkick.currentTagEnd = 0;
+        m_xgkick.cycleCredit = 0;
+        m_xgkick.issueCycle = 0;
+        m_xgkick.progressedCycle = 0;
+        m_xgkick.active = false;
+        m_xgkick.currentTagEop = false;
+    }
+    void commitReadyPipelines()
+    {
+        if (m_cycle >= m_nextCommitCycle)
+            commitReadyPipelinesSlow();
+    }
+    void commitReadyPipelinesSlow();
     void advanceOneCycle();
     void advanceTo(uint64_t targetCycle);
     void flushPipelines();
-    void progressXgkick();
+    // PATH1 copies one qword every two cycles. The copy is applied lazily:
+    // progressXgkick() only records that the cycle elapsed, and the transfer
+    // catches up before anything can observe it (a VU store commit, a check
+    // of whether the kick is still active, or the end of run()).
+    uint64_t m_xgkickDue = 0;
+    void progressXgkick() { m_xgkickDue = m_cycle; }
+    void catchUpXgkick()
+    {
+        if (m_xgkick.active && m_xgkick.progressedCycle < m_xgkickDue)
+            catchUpXgkickSlow();
+    }
+    void catchUpXgkickSlow();
+    bool xgkickActive()
+    {
+        catchUpXgkick();
+        return m_xgkick.active;
+    }
     void finishXgkick();
     uint64_t calculatePairReadyCycle(const DecodedInstructionPair &decoded) const;
     void markPairWrites(const DecodedInstructionPair &decoded);

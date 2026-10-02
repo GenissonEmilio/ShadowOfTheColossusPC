@@ -2,11 +2,32 @@
 #include "ps2_vu1_detail.h"
 
 #include <cmath>
+#if defined(__aarch64__) || defined(__arm64__)
+#include "sse2neon.h"
+#else
+#include <immintrin.h>
+#endif
 #include <cstring>
 #include <limits>
 
 namespace
 {
+    // Vector form of VU1Interpreter::normalizeOperand: denormals become signed
+    // zero and Inf/NaN become signed FLT_MAX.
+    inline void normalizeOperands4(const float *in, float *out)
+    {
+        const __m128i bits = _mm_loadu_si128(reinterpret_cast<const __m128i *>(in));
+        const __m128i sign = _mm_and_si128(bits, _mm_set1_epi32(static_cast<int>(0x80000000u)));
+        const __m128i exponent = _mm_and_si128(_mm_srli_epi32(bits, 23), _mm_set1_epi32(0xFF));
+        const __m128i isZeroExp = _mm_cmpeq_epi32(exponent, _mm_setzero_si128());
+        const __m128i isMaxExp = _mm_cmpeq_epi32(exponent, _mm_set1_epi32(0xFF));
+        __m128i result = bits;
+        result = _mm_or_si128(_mm_andnot_si128(isZeroExp, result), _mm_and_si128(isZeroExp, sign));
+        const __m128i clamped = _mm_or_si128(sign, _mm_set1_epi32(0x7F7FFFFF));
+        result = _mm_or_si128(_mm_andnot_si128(isMaxExp, result), _mm_and_si128(isMaxExp, clamped));
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(out), result);
+    }
+
     int32_t vuFloatToInt(float value, float scale)
     {
         const double scaled = static_cast<double>(value) * static_cast<double>(scale);
@@ -31,15 +52,12 @@ void VU1Interpreter::execUpper(uint32_t instr)
     uint8_t op = instr & 0x3F;
 
     float *vd = m_state.vf[fd];
-    float normalizedVs[4];
-    float normalizedVt[4];
-    float normalizedAcc[4];
-    for (uint32_t component = 0; component < 4u; ++component)
-    {
-        normalizedVs[component] = normalizeOperand(m_state.vf[fs][component]);
-        normalizedVt[component] = normalizeOperand(m_state.vf[ft][component]);
-        normalizedAcc[component] = normalizeOperand(m_state.acc[component]);
-    }
+    alignas(16) float normalizedVs[4];
+    alignas(16) float normalizedVt[4];
+    alignas(16) float normalizedAcc[4];
+    normalizeOperands4(m_state.vf[fs], normalizedVs);
+    normalizeOperands4(m_state.vf[ft], normalizedVt);
+    normalizeOperands4(m_state.acc, normalizedAcc);
     const float *vs = normalizedVs;
     const float *vt = normalizedVt;
     const float *acc = normalizedAcc;
