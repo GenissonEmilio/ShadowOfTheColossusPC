@@ -65,8 +65,10 @@ VU1Interpreter::RecompiledFn VU1Interpreter::findRecompiled(const uint8_t *vuCod
 {
     static const bool disabled = std::getenv("PS2X_VU1_EXACT") != nullptr ||
                                  std::getenv("PS2X_VU1_NOREC") != nullptr;
+    // With nothing recompiled yet, only keep going to record images.
+    static const bool collecting = std::getenv("PS2X_VU1_DUMP_MISSING") != nullptr;
     if (disabled || m_unit != Unit::VU1 || !memory || vuCode != memory->getVU1Code() ||
-        codeSize != 0x4000u || registry().empty())
+        codeSize != 0x4000u || (registry().empty() && !collecting))
         return nullptr;
     const uint64_t generation = memory->getVU1CodeGeneration();
     static uint64_t imageHash = 0;
