@@ -18,8 +18,9 @@ DMA, IOP, SPU2) is reimplemented in the runtime.
 | Boot, logos, intro cinematic | ✅ |
 | 3D rendering (VU1 recompiled, GS rasterizer) | ✅ |
 | Audio (SPU2: voices, ADSR, reverb, streaming) | ✅ |
-| Title screen menu | ❌ text not shown: memory card (libmc2) not emulated yet |
-| Gameplay | 🚧 blocked by the menu above |
+| Title screen, menus | ✅ |
+| Memory card (libmc2, PCSX2-compatible `memcards/Mcd001.ps2`) | ✅ detection, formatting/saving under test |
+| New Game, intro, riding Agro | ✅ |
 | Performance (M-series) | ~30 fps in the intro, ~20 fps in heavy scenes |
 
 ## Requirements
@@ -139,6 +140,9 @@ fixes. They are meant to go back upstream.
 
 - [ran-j/PS2Recomp](https://github.com/ran-j/PS2Recomp) and its contributors:
   the recompiler and runtime this port is built on.
+- [LightVelox/sotc-pc](https://github.com/LightVelox/sotc-pc), a Windows port of the PAL release on the
+  same base: its development notes pointed to several shared runtime bugs (DMA chain length, scheduler
+  unwinding).
 - Shadow of the Colossus © Sony Interactive Entertainment / Team Ico. This
   project is not affiliated with or endorsed by them.
 
