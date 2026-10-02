@@ -9,6 +9,7 @@
 #   CELOSIA_DISC   extracted disc directory          (default: ./disc)
 #   CELOSIA_BUILD  build + generated code directory  (default: ./build)
 #   CELOSIA_JOBS   parallel compile jobs             (default: CPU count)
+#   CELOSIA_MEMCARDS  memory card images              (default: ./memcards)
 #   CELOSIA_CMAKE_ARGS  extra arguments for the CMake configure step
 set -euo pipefail
 
@@ -23,6 +24,7 @@ VU1_DUMPS=$BUILD/vu1           # VU1 microcode images seen while playing
 WORK=$BUILD/recomp             # recompiler inputs/outputs per stage
 CAPTURES=$BUILD/captures       # RAM dumps taken when each module starts
 LOGS=$ROOT/logs
+MEMCARDS=${CELOSIA_MEMCARDS:-$ROOT/memcards}   # Mcd001.ps2 / Mcd002.ps2 (PCSX2 format)
 BOOT=SCUS_974.72
 RUNNER=$CMAKE_DIR/ps2xRuntime/ps2EntryRunner
 RECOMP=$CMAKE_DIR/ps2xRecomp/ps2_recomp
@@ -222,7 +224,7 @@ cmd_run() {
     mkdir -p "$LOGS" "$VU1_DUMPS"
     say "playing (log: logs/play.log)"
     cd "$ROOT"
-    PS2X_VU1_DUMP_MISSING=${PS2X_VU1_DUMP_MISSING:-$VU1_DUMPS} exec "$RUNNER" "$DISC/$BOOT" "$@" >"$LOGS/play.log" 2>&1
+    PS2X_MEMCARD_DIR=$MEMCARDS PS2X_VU1_DUMP_MISSING=${PS2X_VU1_DUMP_MISSING:-$VU1_DUMPS} exec "$RUNNER" "$DISC/$BOOT" "$@" >"$LOGS/play.log" 2>&1
 }
 
 # Scripted run that saves screenshots: ./celosia autotest [seconds] [interval]
@@ -234,7 +236,7 @@ cmd_autotest() {
     (cd "$ROOT" &&
         PS2X_INPUT_SCRIPT=${PS2X_INPUT_SCRIPT:-"11:DOWN:0.3;12:CROSS:0.3"} \
         PS2X_SNAPSHOT_DIR=shots/run PS2X_SNAPSHOT_SECONDS=${2:-5} \
-        PS2X_VU1_DUMP_MISSING=$VU1_DUMPS \
+        PS2X_VU1_DUMP_MISSING=$VU1_DUMPS PS2X_MEMCARD_DIR=${PS2X_MEMCARD_DIR:-$BUILD/autotest-memcards} \
         exec "$RUNNER" "$DISC/$BOOT") >"$LOGS/autotest.log" 2>&1 &
     pid=$!
     sleep "$secs"

@@ -20,6 +20,7 @@ vu1rec_*.cpp
 /shots/
 /mc0/
 /mc1/
+/memcards/
 imgui.ini
 *.log
 *.wav
