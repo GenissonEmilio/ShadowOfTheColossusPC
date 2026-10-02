@@ -103,7 +103,7 @@ recompile() {
     (cd "$dir" && "$RECOMP" config.toml >recomp.log 2>&1) ||
         { tail -20 "$dir/recomp.log"; die "recompiler failed (log: $dir/recomp.log)"; }
     find "$RUNNER_DIR" -maxdepth 1 -type f \( -name '*.cpp' -o -name '*.h' \) -delete
-    cp "$dir"/output/*.cpp "$dir"/output/*.h "$RUNNER_DIR/"
+    find "$dir/output" -maxdepth 1 -type f \( -name '*.cpp' -o -name '*.h' \) -exec sh -c 'cp "$@" "$0"' "$RUNNER_DIR" {} +
     # New/removed files change the source glob.
     cmake "$CMAKE_DIR" >"$LOGS/configure.log" 2>&1
     build_target ps2EntryRunner
@@ -181,6 +181,7 @@ cmd_setup() {
     if [ -n "$iso" ]; then cmd_extract "$iso"; fi
     check_disc
     cmd_configure
+    rm -rf "$CAPTURES"   # every capture depends on the stage before it
     stage_boot
     local m
     for m in $MODULES; do
