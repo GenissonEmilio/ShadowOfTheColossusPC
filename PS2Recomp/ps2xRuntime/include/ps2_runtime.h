@@ -2,6 +2,9 @@
 #define PS2_RUNTIME_H
 
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
+#include <utility>
 #include <cstdint>
 #include <vector>
 #include <string>
@@ -150,6 +153,8 @@ struct alignas(16) R5900Context
 
         // Initialize VU0 registers
         vu0_q = 1.0f; // Q register usually initialized to 1.0
+        // VF00 is hardwired to (0, 0, 0, 1); every thread context must see it.
+        vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
 
         // Reset COP0 registers
         cop0_random = 47; // Start at maximum value
@@ -237,6 +242,10 @@ inline uint8_t ps2PathWatchExtractByteFromWrite(uint32_t writeAddr, uint32_t wat
     return static_cast<uint8_t>((valueHi >> ((byteIndex - 8u) * 8u)) & 0xFFu);
 }
 
+inline bool g_ps2WatchWriteEnabled = std::getenv("PS2X_WATCH_WRITE") != nullptr;
+// Set by debugging hooks to log every guest store while true.
+inline bool g_ps2LogAllWrites = false;
+
 inline void ps2TraceGuestWrite(uint8_t *rdram,
                                uint32_t guestAddr,
                                uint32_t size,
@@ -246,13 +255,35 @@ inline void ps2TraceGuestWrite(uint8_t *rdram,
                                const R5900Context *ctx)
 {
     (void)rdram;
-    (void)guestAddr;
-    (void)size;
-    (void)valueLo;
-    (void)valueHi;
-    (void)op;
-    (void)ctx;
-    // TODO we dont need this anymore so on next release it will be deleted
+    // PS2X_WATCH_WRITE=<start>:<end> logs guest stores that touch the range.
+    if (__builtin_expect(!g_ps2WatchWriteEnabled, 1))
+        return;
+    if (g_ps2LogAllWrites)
+    {
+        static int logged = 0;
+        if (logged++ < 3000)
+            std::fprintf(stderr, "[write] %s addr=0x%08x size=%u lo=0x%016llx pc=0x%08x\n", op, guestAddr, size,
+                         static_cast<unsigned long long>(valueLo), ctx ? ctx->pc : 0u);
+        return;
+    }
+    static const std::pair<uint32_t, uint32_t> watch = []
+    {
+        const char *env = std::getenv("PS2X_WATCH_WRITE");
+        if (!env || !std::strchr(env, ':'))
+            return std::pair<uint32_t, uint32_t>(0u, 0u);
+        return std::pair<uint32_t, uint32_t>(static_cast<uint32_t>(std::strtoul(env, nullptr, 0)),
+                                             static_cast<uint32_t>(std::strtoul(std::strchr(env, ':') + 1, nullptr, 0)));
+    }();
+    if (__builtin_expect(watch.second == 0u, 1))
+        return;
+    const uint32_t phys = guestAddr & 0x1FFFFFFFu;
+    if (phys + size <= watch.first || phys >= watch.second)
+        return;
+    static std::atomic<uint32_t> logged{0};
+    if (logged.fetch_add(1) < 400u)
+        std::fprintf(stderr, "[watch] %s addr=0x%08x lo=0x%016llx hi=0x%016llx pc=0x%08x ra=0x%08x\n", op, guestAddr,
+                     static_cast<unsigned long long>(valueLo), static_cast<unsigned long long>(valueHi),
+                     ctx ? ctx->pc : 0u, ctx ? static_cast<uint32_t>(_mm_cvtsi128_si32(ctx->r[31])) : 0u);
 }
 
 inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
@@ -261,12 +292,10 @@ inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
                                     const char *op,
                                     const R5900Context *ctx)
 {
-    (void)rdram;
-    (void)guestAddr;
-    (void)size;
-    (void)op;
-    (void)ctx;
-    // TODO we dont need this anymore so on next release it will be deleted
+    // Bulk writes from host-implemented helpers (memcpy/memset...).
+    if (__builtin_expect(!g_ps2WatchWriteEnabled, 1))
+        return;
+    ps2TraceGuestWrite(rdram, guestAddr, size, 0u, 0u, op, ctx);
 }
 
 class PS2Runtime
@@ -337,6 +366,7 @@ public:
     // TODO remove this later need to update all tests
     bool registerFunction(uint32_t address, RecompiledFunction func);
     RecompiledFunction lookupFunction(uint32_t address);
+    void dumpDispatchProfile();
     bool hasFunction(uint32_t address) const;
     bool dispatchGuestBranch(uint8_t *rdram,
                              R5900Context *ctx,
@@ -386,6 +416,7 @@ public:
     uint32_t reserveAsyncCallbackStack(uint32_t size, uint32_t alignment = 16u);
 
     void drainCompletedDmacHandlers(uint8_t *rdram);
+    uint32_t m_reportedGsCsrEvents = 0u;
 
     void requestStop();
     bool isStopRequested() const;

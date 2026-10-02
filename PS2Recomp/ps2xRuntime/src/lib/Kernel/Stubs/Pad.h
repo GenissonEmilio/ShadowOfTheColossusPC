@@ -28,6 +28,13 @@ namespace ps2_stubs
     void scePadPortClose(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void scePadPortOpen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void scePadRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void scePad2Init(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void scePad2End(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void scePad2CreateSocket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void scePad2DeleteSocket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void scePad2GetState(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void scePad2GetButtonProfile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void scePad2Read(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void scePadReqIntToStr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void scePadSetActAlign(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void scePadSetActDirect(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);

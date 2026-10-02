@@ -383,6 +383,7 @@ add_library(ps2_runtime STATIC
     src/lib/gs/ps2_gs_memory.cpp
     src/lib/gs/gs_frontend.cpp
     src/lib/gs/gs_cpu_backend.cpp
+    src/lib/gs/gs_async_backend.cpp
     src/lib/ps2_iop_host.cpp
     src/lib/ps2_memory.cpp
     src/lib/ps2_pad.cpp
@@ -393,6 +394,7 @@ add_library(ps2_runtime STATIC
     src/lib/vu/ps2_vu1_core.cpp
     src/lib/vu/ps2_vu1_upper.cpp
     src/lib/vu/ps2_vu1_lower.cpp
+    src/lib/vu/ps2_vu1_rec.cpp
     src/lib/games_database.cpp
 )
 
@@ -437,9 +439,15 @@ target_sources(ps2_runtime PRIVATE
     ${KERNEL_SRC_FILES}
 )
 
-file(GLOB RUNNER_SRC_FILES CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/runner/*.cpp"
-)
+# Directories holding the recompiled game code (and any hand-written game
+# overrides). Defaults to src/runner; projects can keep generated code out of
+# the source tree by pointing this at their own directories.
+set(PS2X_RUNNER_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/src/runner" CACHE STRING "Directories with ps2EntryRunner sources")
+set(RUNNER_SRC_FILES)
+foreach(runner_dir IN LISTS PS2X_RUNNER_DIRS)
+    file(GLOB runner_dir_files CONFIGURE_DEPENDS "${runner_dir}/*.cpp")
+    list(APPEND RUNNER_SRC_FILES ${runner_dir_files})
+endforeach()
 
 set(RUNNER_MAIN_CPP "${CMAKE_CURRENT_SOURCE_DIR}/src/runner/main.cpp")
 set(ROOT_MAIN_CPP "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
@@ -511,6 +519,7 @@ target_link_libraries(ps2EntryRunner
     PRIVATE
     ps2_runtime
 )
+target_include_directories(ps2EntryRunner PRIVATE ${PS2X_RUNNER_DIRS})
 
 if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID)
     target_sources(ps2EntryRunner PRIVATE

@@ -1,3 +1,6 @@
+#include <set>
+#include <map>
+#include "runtime/ps2_stats.h"
 #include "ps2_runtime.h"
 #include "ps2_log.h"
 #include "ps2_stubs.h"
@@ -26,6 +29,8 @@
 #include <thread>
 #include <unordered_map>
 #include <sstream>
+#include <cstdio>
+#include <cstdlib>
 
 namespace ps2_stubs
 {
@@ -679,6 +684,37 @@ bool PS2Runtime::syncCoreSubsystems()
                                          (cpuContext->vu0_fbrst & (1u << 10)) != 0u;
                                      m_vu1.state().tBitEnabled =
                                          (cpuContext->vu0_fbrst & (1u << 11)) != 0u;
+                                     // PS2X_VU1_DUMP=<dir>: save each distinct VU1 code image and its entry PCs.
+                                     static const char *vu1DumpDir = std::getenv("PS2X_VU1_DUMP");
+                                     if (vu1DumpDir)
+                                     {
+                                         static std::map<uint64_t, std::set<uint32_t>> seen;
+                                         const uint8_t *code = m_memory.getVU1Code();
+                                         uint64_t hash = 1469598103934665603ull;
+                                         for (uint32_t i = 0; i < PS2_VU1_CODE_SIZE; ++i)
+                                             hash = (hash ^ code[i]) * 1099511628211ull;
+                                         auto &entries = seen[hash];
+                                         if (entries.empty())
+                                         {
+                                             char path[512];
+                                             std::snprintf(path, sizeof(path), "%s/%016llx.bin", vu1DumpDir, static_cast<unsigned long long>(hash));
+                                             if (FILE *f = std::fopen(path, "wb"))
+                                             {
+                                                 std::fwrite(code, 1, PS2_VU1_CODE_SIZE, f);
+                                                 std::fclose(f);
+                                             }
+                                         }
+                                         if (entries.insert(startPC).second)
+                                         {
+                                             char path[512];
+                                             std::snprintf(path, sizeof(path), "%s/%016llx.entries", vu1DumpDir, static_cast<unsigned long long>(hash));
+                                             if (FILE *f = std::fopen(path, "a"))
+                                             {
+                                                 std::fprintf(f, "%04x\n", startPC);
+                                                 std::fclose(f);
+                                             }
+                                         }
+                                     }
                                      m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
                                                    m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
                                                    m_gs, &m_memory, startPC, top, itop, 65536);
@@ -713,10 +749,41 @@ bool PS2Runtime::syncCoreSubsystems()
     return true;
 }
 
+namespace
+{
+    // Host audio: the IOP's SPU2 produces 48 kHz stereo into a ring buffer
+    // that raylib's audio thread drains through this callback.
+    std::atomic<ps2x::iop::IopSubsystem *> g_spu2AudioSource{nullptr};
+
+    void spu2AudioCallback(void *buffer, unsigned int frames)
+    {
+        auto *out = static_cast<int16_t *>(buffer);
+        size_t produced = 0;
+        if (ps2x::iop::IopSubsystem *iop = g_spu2AudioSource.load(std::memory_order_acquire))
+            produced = iop->readAudio(out, frames);
+        if (produced < frames)
+            std::memset(out + produced * 2u, 0, (frames - produced) * 2u * sizeof(int16_t));
+    }
+}
+
 bool PS2Runtime::initialize(const char *title)
 {
     try
     {
+        // PS2X_VU1_GEN=<dump dir>:<output dir> writes recompiled VU1 microcode
+        // for every image saved with PS2X_VU1_DUMP, then exits.
+        if (const char *gen = std::getenv("PS2X_VU1_GEN"))
+        {
+            const std::string spec(gen);
+            const size_t colon = spec.find(':');
+            if (colon == std::string::npos)
+            {
+                std::cerr << "PS2X_VU1_GEN expects <dump dir>:<output dir>" << std::endl;
+                std::exit(1);
+            }
+            std::exit(VU1Interpreter::generateRecompiled(spec.substr(0, colon).c_str(),
+                                                         spec.substr(colon + 1).c_str()));
+        }
         if (!m_memory.initialize())
         {
             std::cerr << "Failed to initialize PS2 memory" << std::endl;
@@ -735,6 +802,16 @@ bool PS2Runtime::initialize(const char *title)
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
         InitAudioDevice();
         m_audioBackend.setAudioReady(IsAudioDeviceReady());
+        // PS2X_NO_SPU2_AUDIO=1 keeps the SPU2 silent on the host.
+        if (IsAudioDeviceReady() && m_iopSubsystem && !std::getenv("PS2X_NO_SPU2_AUDIO"))
+        {
+            static AudioStream spu2Stream{};
+            g_spu2AudioSource.store(m_iopSubsystem.get(), std::memory_order_release);
+            SetAudioStreamBufferSizeDefault(1024);
+            spu2Stream = LoadAudioStream(48000, 16, 2);
+            SetAudioStreamCallback(spu2Stream, spu2AudioCallback);
+            PlayAudioStream(spu2Stream);
+        }
 #endif
         SetTargetFPS(60);
         if (m_debugUiInitCallback)
@@ -1134,9 +1211,44 @@ const char *describeGuestBranchKind(PS2Runtime::GuestBranchKind kind)
     }
 }
 
+namespace
+{
+    // PS2X_DISPATCH_PROFILE: per-address counts of dispatched guest functions.
+    std::vector<uint32_t> &dispatchProfile()
+    {
+        static std::vector<uint32_t> counts(std::getenv("PS2X_DISPATCH_PROFILE") ? (PS2_RAM_SIZE >> 2) : 0u);
+        return counts;
+    }
+}
+
+void PS2Runtime::dumpDispatchProfile()
+{
+    auto &counts = dispatchProfile();
+    if (counts.empty())
+        return;
+    std::vector<std::pair<uint32_t, uint32_t>> top;
+    for (uint32_t i = 0; i < counts.size(); ++i)
+        if (counts[i])
+            top.emplace_back(counts[i], i << 2);
+    std::sort(top.begin(), top.end(), std::greater<>());
+    if (FILE *out = std::fopen("logs/dispatch_profile.txt", "w"))
+    {
+        for (const auto &[count, addr] : top)
+            std::fprintf(out, "%08x %u\n", addr, count);
+        std::fclose(out);
+    }
+    std::cerr << "[dispatch] distinct=" << top.size();
+    for (size_t i = 0; i < top.size() && i < 80; ++i)
+        std::cerr << " " << std::hex << top[i].second << std::dec << ":" << top[i].first;
+    std::cerr << std::endl;
+    std::fill(counts.begin(), counts.end(), 0u);
+}
+
 PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
 {
     pushDispatchPc(address);
+    if (auto &counts = dispatchProfile(); !counts.empty())
+        ++counts[(address & (PS2_RAM_SIZE - 1u)) >> 2];
 
     uint32_t slot = 0u;
     if (generatedFunctionTableSlot(address, slot))
@@ -1272,6 +1384,21 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
         readGuestU32Offset(a0Word0, 0x04u, vtableSlot4) &&
         readGuestU32Offset(a0Word0, 0x08u, vtableSlot8) &&
         readGuestU32Offset(a0Word0, 0x0cu, vtableSlotC);
+
+    // Dump guest RAM so dynamically loaded modules (e.g. relocated overlays)
+    // can be captured exactly as the game laid them out.
+    if (firstReport && rdram)
+    {
+        if (const char *dumpPath = std::getenv("PS2X_DUMP_RAM_ON_MISSING"))
+        {
+            if (FILE *dump = std::fopen(dumpPath, "wb"))
+            {
+                std::fwrite(rdram, 1, PS2_RAM_SIZE, dump);
+                std::fclose(dump);
+                std::cerr << "[guest-branch:missing-target] RAM dumped to " << dumpPath << std::endl;
+            }
+        }
+    }
 
     if (firstReport)
     {
@@ -1469,6 +1596,18 @@ void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx, uint32_t encod
                                    ? encodedSyscallId
                                    : getRegU32(ctx, 3); // $v1 / $3 is the EE kernel syscall number
 
+    static const bool traceSyscalls = std::getenv("PS2X_TRACE_SYSCALLS") != nullptr;
+    if (traceSyscalls)
+    {
+        std::cerr << "[syscall] id=0x" << std::hex << syscallId
+                  << " thread=" << std::dec << m_eeScheduler->snapshot().runningThreadId
+                  << std::hex << " ra=0x" << getRegU32(ctx, 31)
+                  << " a0=0x" << getRegU32(ctx, 4)
+                  << " a1=0x" << getRegU32(ctx, 5)
+                  << " a2=0x" << getRegU32(ctx, 6)
+                  << std::dec << std::endl;
+    }
+
     if (ps2_syscalls::dispatchNumericSyscall(syscallId, rdram, ctx, this))
     {
         return;
@@ -1488,6 +1627,19 @@ void PS2Runtime::drainCompletedDmacHandlers(uint8_t *rdram)
     for (uint32_t cause : m_memory.consumeCompletedDmacCauses())
     {
         ps2_syscalls::dispatchDmacHandlersForCause(rdram, this, cause);
+    }
+
+    // GS interrupt (INTC cause 0): raised when SIGNAL/FINISH events set CSR bits
+    // that IMR (SIGMSK bit 8, FINISHMSK bit 9) does not mask. The guest handler
+    // acknowledges by writing the bits back to CSR, so only rising edges count.
+    GSRegisters &gs = m_memory.gs();
+    const uint32_t events = static_cast<uint32_t>(gs.csr.load(std::memory_order_acquire) & 0x3u);
+    const uint32_t risen = events & ~m_reportedGsCsrEvents;
+    m_reportedGsCsrEvents = events;
+    const uint32_t unmasked = ~static_cast<uint32_t>(gs.imr >> 8) & 0x3u;
+    if ((risen & unmasked) != 0u)
+    {
+        m_eeScheduler->dispatchIrq(false, 0u);
     }
 }
 
@@ -2417,12 +2569,187 @@ void PS2Runtime::run()
                                                << " gsw=" << curGs
                                                << " vif=" << curVif
                                                << std::endl);
+                static const uint64_t dumpTick = []
+                {
+                    const char *env = std::getenv("PS2X_DUMP_RAM_AT_TICK");
+                    return env ? std::strtoull(env, nullptr, 10) : 0ull;
+                }();
+                if (dumpTick != 0 && tick == dumpTick)
+                {
+                    const char *dumpPath = std::getenv("PS2X_DUMP_RAM_PATH");
+                    if (FILE *dump = std::fopen(dumpPath ? dumpPath : "ram_dump.bin", "wb"))
+                    {
+                        std::fwrite(m_memory.getRDRAM(), 1, PS2_RAM_SIZE, dump);
+                        std::fclose(dump);
+                        RUNTIME_LOG("[run:tick] RAM dumped at tick " << tick << std::endl);
+                    }
+                }
+                for (const auto &t : eeSnapshot.threads)
+                {
+                    RUNTIME_LOG("[run:thread] id=" << t.id
+                                                   << " status=" << static_cast<int>(t.status)
+                                                   << " wait=" << static_cast<int>(t.waitReason)
+                                                   << " waitId=" << t.waitId
+                                                   << " prio=" << t.currentPriority
+                                                   << std::hex
+                                                   << " entry=0x" << t.entry
+                                                   << " pc=0x" << t.pc
+                                                   << " ra=0x" << t.ra
+                                                   << std::dec
+                                                   << (t.id == eeSnapshot.runningThreadId ? " RUNNING" : "")
+                                                   << std::endl);
+                }
 
             }
         });
         uint32_t presentWidth = FB_WIDTH;
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
         UploadFrame(frameTex, this, presentWidth, presentHeight);
+
+        static const bool statsEnabled = std::getenv("PS2X_STATS") != nullptr;
+        static double nextStats = 5.0;
+        if (statsEnabled && GetTime() >= nextStats)
+        {
+            nextStats += 5.0;
+            static uint64_t lastStatChains = 0;
+            const uint64_t statChains = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
+            std::cerr << "[stats] t=" << static_cast<int>(GetTime())
+                      << " gameFps=" << (statChains - lastStatChains) / 5.0
+                      << " mscal=" << ps2_stats::vu1Mscal.exchange(0)
+                      << " vu1Instr=" << ps2_stats::vu1Instr.exchange(0)
+                      << " vu1Stall=" << ps2_stats::vu1StallCycles.exchange(0)
+                      << " vu1Rec=" << ps2_stats::vu1RecRuns.exchange(0) << "/" << ps2_stats::vu1RecBails.exchange(0)
+                      << "/" << ps2_stats::vu1InterpRuns.exchange(0)
+                      << " xgkick=" << ps2_stats::vu1Xgkick.exchange(0)
+                      << " mscnt=" << ps2_stats::vu1Mscnt.exchange(0)
+                      << " unpack=" << ps2_stats::vifUnpack.exchange(0)
+                      << " vif1KB=" << (ps2_stats::vif1Bytes.exchange(0) >> 10)
+                      << " prims(pt,ln,lstrip,tri,tstrip,tfan,sprite)=";
+            for (int i = 0; i < 7; ++i)
+                std::cerr << ps2_stats::gsPrims[i].exchange(0) << (i < 6 ? "," : "");
+            lastStatChains = statChains;
+            dumpDispatchProfile();
+            std::cerr << " vif:";
+            for (int op = 0; op < 128; ++op)
+                if (const uint64_t n = ps2_stats::vifOpcodes[op].exchange(0))
+                    std::cerr << " " << std::hex << op << std::dec << "=" << n;
+            std::cerr << std::endl;
+        }
+
+        // PS2X_DUMP_GS_BUFFERS_AT=<s> PS2X_DUMP_GS_BUFFERS="psm:block:bw:w:h;...":
+        // write GS local-memory buffers (read through the GS swizzle) as PPM files.
+        static const double gsBufferDumpAt = []
+        {
+            const char *env = std::getenv("PS2X_DUMP_GS_BUFFERS_AT");
+            return env ? std::atof(env) : 0.0;
+        }();
+        static bool gsBuffersDumped = false;
+        if (gsBufferDumpAt > 0.0 && !gsBuffersDumped && GetTime() >= gsBufferDumpAt)
+        {
+            gsBuffersDumped = true;
+            std::string spec = std::getenv("PS2X_DUMP_GS_BUFFERS") ? std::getenv("PS2X_DUMP_GS_BUFFERS") : "";
+            int index = 0;
+            size_t pos = 0;
+            while (pos < spec.size())
+            {
+                size_t end = spec.find(';', pos);
+                if (end == std::string::npos)
+                    end = spec.size();
+                unsigned psm = 0, block = 0, bw = 0, w = 0, h = 0;
+                if (std::sscanf(spec.substr(pos, end - pos).c_str(), "%x:%u:%u:%u:%u", &psm, &block, &bw, &w, &h) == 5)
+                {
+                    char path[256];
+                    std::snprintf(path, sizeof(path), "logs/gsbuf_%d_%u_psm%x.ppm", index, block, psm);
+                    if (FILE *f = std::fopen(path, "wb"))
+                    {
+                        std::fprintf(f, "P6\n%u %u\n255\n", w, h);
+                        for (unsigned y = 0; y < h; ++y)
+                            for (unsigned x = 0; x < w; ++x)
+                            {
+                                const uint32_t v = m_gs.ReadVram(psm, block, bw, x, y);
+                                const uint8_t rgb[3] = {static_cast<uint8_t>(v), static_cast<uint8_t>(v >> 8), static_cast<uint8_t>(v >> 16)};
+                                std::fwrite(rgb, 1, 3, f);
+                            }
+                        std::fclose(f);
+                    }
+                }
+                ++index;
+                pos = end + 1;
+            }
+            std::cerr << "[dump] GS buffers written at t=" << GetTime() << std::endl;
+        }
+
+        // PS2X_DUMP_RAM_AT_SECONDS=<s> [PS2X_DUMP_RAM_PATH=<file>]: one-shot guest RAM dump.
+        static const double ramDumpAt = []
+        {
+            const char *env = std::getenv("PS2X_DUMP_RAM_AT_SECONDS");
+            return env ? std::atof(env) : 0.0;
+        }();
+        static bool ramDumped = false;
+        if (ramDumpAt > 0.0 && !ramDumped && GetTime() >= ramDumpAt)
+        {
+            ramDumped = true;
+            const char *dumpPath = std::getenv("PS2X_DUMP_RAM_PATH");
+            if (FILE *dump = std::fopen(dumpPath ? dumpPath : "ram_dump.bin", "wb"))
+            {
+                std::fwrite(m_memory.getRDRAM(), 1, PS2_RAM_SIZE, dump);
+                std::fclose(dump);
+                std::cerr << "[dump] guest RAM written at t=" << GetTime() << std::endl;
+            }
+            if (const char *vramPath = std::getenv("PS2X_DUMP_GSVRAM_PATH"))
+            {
+                if (FILE *dump = std::fopen(vramPath, "wb"))
+                {
+                    std::fwrite(m_memory.getGSVRAM(), 1, PS2_GS_VRAM_SIZE, dump);
+                    std::fclose(dump);
+                }
+            }
+        }
+
+        // PS2X_THREAD_DUMP=<seconds>: periodically print EE thread states.
+        static const double threadDumpPeriod = []
+        {
+            const char *env = std::getenv("PS2X_THREAD_DUMP");
+            return env ? std::max(1.0, std::atof(env)) : 0.0;
+        }();
+        static double nextThreadDump = threadDumpPeriod;
+        if (threadDumpPeriod > 0.0 && GetTime() >= nextThreadDump)
+        {
+            nextThreadDump += threadDumpPeriod;
+            const auto ee = m_eeScheduler->snapshot();
+            std::cerr << "[threads] t=" << GetTime() << " cycle=" << ee.eeCycle << std::endl;
+            for (const auto &t : ee.threads)
+            {
+                std::cerr << "[threads]   id=" << t.id << " status=" << static_cast<int>(t.status)
+                          << " wait=" << static_cast<int>(t.waitReason) << " waitId=" << t.waitId
+                          << " prio=" << t.currentPriority << std::hex << " entry=0x" << t.entry
+                          << " pc=0x" << t.pc << " ra=0x" << t.ra << std::dec
+                          << (t.id == ee.runningThreadId ? " RUNNING" : "") << std::endl;
+            }
+        }
+
+        // Optional periodic capture of the guest frame (without the debug UI):
+        // PS2X_SNAPSHOT_DIR=<dir> [PS2X_SNAPSHOT_SECONDS=<n>, default 5].
+        static const char *snapshotDir = std::getenv("PS2X_SNAPSHOT_DIR");
+        if (snapshotDir)
+        {
+            static const double snapshotPeriod = []
+            {
+                const char *env = std::getenv("PS2X_SNAPSHOT_SECONDS");
+                return env ? std::max(0.5, std::atof(env)) : 5.0;
+            }();
+            static double nextSnapshot = snapshotPeriod;
+            static int snapshotIndex = 0;
+            if (GetTime() >= nextSnapshot)
+            {
+                nextSnapshot += snapshotPeriod;
+                Image shot = LoadImageFromTexture(frameTex);
+                ImageCrop(&shot, Rectangle{0.0f, 0.0f, static_cast<float>(presentWidth), static_cast<float>(presentHeight)});
+                const std::string path = std::string(snapshotDir) + "/frame_" + std::to_string(snapshotIndex++) + ".png";
+                ExportImage(shot, path.c_str());
+                UnloadImage(shot);
+            }
+        }
 
         BeginDrawing();
         ClearBackground(BLACK);
@@ -2440,6 +2767,23 @@ void PS2Runtime::run()
             dstWidth,
             dstHeight};
         DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+        {
+            // FPS overlay: game frames = display lists sent to VIF1 per second.
+            static double windowStart = GetTime();
+            static uint64_t lastChains = 0;
+            static int gameFps = 0;
+            const double now = GetTime();
+            if (now - windowStart >= 1.0)
+            {
+                const uint64_t chains = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
+                gameFps = static_cast<int>((chains - lastChains) / (now - windowStart) + 0.5);
+                lastChains = chains;
+                windowStart = now;
+            }
+            const std::string fpsText = "game " + std::to_string(gameFps) + " fps | host " + std::to_string(GetFPS()) + " fps";
+            DrawRectangle(8, GetScreenHeight() - 30, MeasureText(fpsText.c_str(), 20) + 12, 26, Color{0, 0, 0, 160});
+            DrawText(fpsText.c_str(), 14, GetScreenHeight() - 27, 20, Color{120, 255, 120, 255});
+        }
         if (m_debugUiInitialized && m_debugUiDrawCallback)
         {
             m_debugUiDrawCallback(*this, m_debugUiUserData);

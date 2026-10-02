@@ -484,6 +484,13 @@
     X(scePadPortClose)                        \
     X(scePadPortOpen)                         \
     X(scePadRead)                             \
+    X(scePad2Init)                            \
+    X(scePad2End)                             \
+    X(scePad2CreateSocket)                    \
+    X(scePad2DeleteSocket)                    \
+    X(scePad2GetState)                        \
+    X(scePad2GetButtonProfile)                \
+    X(scePad2Read)                            \
     X(scePadReqIntToStr)                      \
     X(scePadSetActAlign)                      \
     X(scePadSetActDirect)                     \

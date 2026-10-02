@@ -838,7 +838,7 @@ namespace
     {
     public:
         Ps2VaListCursor(uint8_t *rdram, PS2Runtime *runtime, uint32_t vaListAddr)
-            : m_rdram(rdram), m_runtime(runtime), m_curr(vaListAddr)
+            : m_rdram(rdram), m_runtime(runtime), m_curr(vaListAddr), m_slot(slotSize())
         {
         }
 
@@ -846,22 +846,39 @@ namespace
         {
             uint32_t value = 0;
             (void)tryReadWordFromGuest(m_rdram, m_runtime, m_curr, value);
-            m_curr += 4;
+            m_curr += m_slot;
             return value;
         }
 
         uint64_t nextU64()
         {
             m_curr = (m_curr + 7u) & ~7u;
-            const uint64_t low = nextU32();
-            const uint64_t high = nextU32();
-            return low | (high << 32);
+            uint32_t low = 0;
+            uint32_t high = 0;
+            (void)tryReadWordFromGuest(m_rdram, m_runtime, m_curr, low);
+            (void)tryReadWordFromGuest(m_rdram, m_runtime, m_curr + 4u, high);
+            m_curr += 8u;
+            return static_cast<uint64_t>(low) | (static_cast<uint64_t>(high) << 32);
         }
 
     private:
+        // EE GCC (EABI, 64-bit GPRs) spills variadic register args with `sd`,
+        // so every va_list slot is 8 bytes. PS2X_VA_SLOT_SIZE=4 restores the
+        // old 4-byte stepping for titles built differently.
+        static uint32_t slotSize()
+        {
+            static const uint32_t size = []
+            {
+                const char *env = std::getenv("PS2X_VA_SLOT_SIZE");
+                return (env && std::atoi(env) == 4) ? 4u : 8u;
+            }();
+            return size;
+        }
+
         uint8_t *m_rdram;
         PS2Runtime *m_runtime;
         uint32_t m_curr = 0;
+        uint32_t m_slot = 8;
     };
 
     template <typename NextU32Fn, typename NextU64Fn, typename ReadStringFn>

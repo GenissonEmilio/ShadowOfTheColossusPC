@@ -357,6 +357,11 @@ public:
     // second executor. Production execution calls reset() before run().
     void bindMainContextForSyscall(R5900Context &ctx, uint8_t *rdram);
 
+    // Let real time pull the EE cycle counter forward (see syncCyclesToHostClock).
+    // Off by default: it makes thread interleaving, and so guest heap layout,
+    // depend on host speed.
+    void enableHostClockSync();
+    void syncCyclesToHostClock();
     [[nodiscard]] EeKernelSnapshot snapshot() const;
     void publishSnapshot();
 
@@ -402,6 +407,23 @@ private:
     uint8_t *m_rdram = nullptr;
     std::array<std::deque<int>, kPriorityCount> m_readyQueues{};
     std::unordered_map<int, GuestThread> m_threads;
+    // Shared VU0 register state (see EeScheduler::run()).
+    struct Vu0OwnerKey
+    {
+        int threadId = 0;
+        size_t depth = 0;
+        uint64_t sequence = 0;
+        bool operator==(const Vu0OwnerKey &o) const
+        {
+            return threadId == o.threadId && depth == o.depth && sequence == o.sequence;
+        }
+    };
+    std::vector<uint8_t> m_vu0Global;
+    Vu0OwnerKey m_vu0Owner{};
+    bool m_vu0OwnerValid = false;
+    void saveGlobalVu0(R5900Context &ctx);
+    void loadGlobalVu0(R5900Context &ctx);
+    void flushVu0Owner();
     std::unordered_map<int, EeSemaphore> m_semaphores;
     std::unordered_map<int, EeEventFlag> m_eventFlags;
     std::unordered_map<int, EeAlarm> m_alarms;
@@ -426,6 +448,8 @@ private:
     bool m_insideInterrupt = false;
     uint32_t m_pendingEeTimerInterrupts = 0;
     uint64_t m_eeCycle = 0;
+    std::chrono::steady_clock::time_point m_hostClockBase{};
+    bool m_hostClockSync = false;
     uint64_t m_sliceEndCycle = kDefaultTimeSliceCycles;
     std::thread::id m_executorThread{};
     std::atomic<bool> m_running{false};

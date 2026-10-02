@@ -112,6 +112,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_insideInterrupt = false;
     m_pendingEeTimerInterrupts = 0u;
     m_eeCycle = 0u;
+    m_hostClockBase = std::chrono::steady_clock::now();
     m_sliceEndCycle = kDefaultTimeSliceCycles;
     m_stopRequested.store(false, std::memory_order_release);
     m_checkpointPending.store(false, std::memory_order_release);
@@ -232,6 +233,9 @@ void EeScheduler::run()
         {
             if (!running->invocations.empty())
             {
+                if (m_vu0OwnerValid && m_vu0Owner.threadId == running->id &&
+                    m_vu0Owner.depth == running->invocations.size())
+                    flushVu0Owner();
                 GuestInvocation completed = std::move(running->invocations.back());
                 running->invocations.pop_back();
                 if (completed.onComplete)
@@ -292,6 +296,23 @@ void EeScheduler::run()
             continue;
         }
 
+        // VU0 registers are one hardware unit shared by every thread and
+        // interrupt handler, but each guest context carries its own copy.
+        // Keep them coherent by moving the live VU0 state into whichever
+        // context runs next.
+        static const bool sharedVu0 = std::getenv("PS2X_VU0_PER_THREAD") == nullptr;
+        if (sharedVu0)
+        {
+            const Vu0OwnerKey key{m_currentThreadId, running->invocations.size(),
+                                  running->invocations.empty() ? 0u : running->invocations.back().sequence};
+            if (!m_vu0OwnerValid || !(key == m_vu0Owner))
+            {
+                flushVu0Owner();
+                loadGlobalVu0(context);
+                m_vu0Owner = key;
+                m_vu0OwnerValid = true;
+            }
+        }
         try
         {
             m_insideInterrupt = !running->invocations.empty() && running->invocations.back().kind == GuestInvocationKind::Interrupt;
@@ -1207,6 +1228,9 @@ int EeScheduler::addIrqHandler(bool dmac,
                                   sp,
                                   true,
                                   append ? ++tail : --head});
+    std::cerr << "[irq] add " << (dmac ? "dmac" : "intc") << " cause=" << cause << std::hex
+              << " handler=0x" << handler << " arg=0x" << argument << std::dec << " id=" << id
+              << (m_runtime.hasFunction(handler) ? "" : " (NO RECOMPILED FUNCTION: will never run)") << std::endl;
     return id;
 }
 
@@ -1259,6 +1283,14 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
     if (cause < 32u && (mask & (1u << cause)) == 0u)
     {
         return;
+    }
+    {
+        static uint64_t counts[2][64] = {};
+        const uint64_t n = ++counts[dmac ? 1 : 0][cause & 63u];
+        if (n == 1 || n % 600 == 0)
+        {
+            std::cerr << "[irq] dispatch " << (dmac ? "dmac" : "intc") << " cause=" << cause << " count=" << n << std::endl;
+        }
     }
     const auto &handlers = dmac ? m_dmacHandlers : m_intcHandlers;
     std::vector<EeIrqHandler> matching;
@@ -1441,6 +1473,50 @@ const GuestThread *EeScheduler::currentThread() const
 int EeScheduler::currentThreadId() const noexcept
 {
     return m_currentThreadId;
+}
+
+namespace
+{
+    // VU0 register block inside R5900Context: vu0_vf .. vu0_cf.
+    inline uint8_t *vu0Block(R5900Context &ctx) { return reinterpret_cast<uint8_t *>(&ctx.vu0_vf[0]); }
+    inline size_t vu0BlockSize(R5900Context &ctx)
+    {
+        return static_cast<size_t>(reinterpret_cast<uint8_t *>(&ctx.vu0_cf[4]) - vu0Block(ctx));
+    }
+}
+
+void EeScheduler::saveGlobalVu0(R5900Context &ctx)
+{
+    const size_t size = vu0BlockSize(ctx);
+    m_vu0Global.resize(size);
+    std::memcpy(m_vu0Global.data(), vu0Block(ctx), size);
+}
+
+void EeScheduler::loadGlobalVu0(R5900Context &ctx)
+{
+    const size_t size = vu0BlockSize(ctx);
+    if (m_vu0Global.size() == size)
+        std::memcpy(vu0Block(ctx), m_vu0Global.data(), size);
+}
+
+// The owner context holds the live VU0 registers; copy them back to the
+// shared store before another context takes over or the owner goes away.
+void EeScheduler::flushVu0Owner()
+{
+    if (!m_vu0OwnerValid)
+        return;
+    m_vu0OwnerValid = false;
+    GuestThread *owner = thread(m_vu0Owner.threadId);
+    if (!owner)
+        return;
+    if (m_vu0Owner.depth == 0u)
+    {
+        saveGlobalVu0(owner->context);
+        return;
+    }
+    if (owner->invocations.size() >= m_vu0Owner.depth &&
+        owner->invocations[m_vu0Owner.depth - 1u].sequence == m_vu0Owner.sequence)
+        saveGlobalVu0(owner->invocations[m_vu0Owner.depth - 1u].context);
 }
 
 R5900Context *EeScheduler::currentContext()
@@ -1640,6 +1716,8 @@ void EeScheduler::makeRunning(GuestThread &item)
 
 void EeScheduler::makeDormant(GuestThread &item)
 {
+    if (m_vu0OwnerValid && m_vu0Owner.threadId == item.id)
+        flushVu0Owner();
     removeReady(item);
     removeFromWaitObject(item);
     item.status = EeThreadStatus::Dormant;
@@ -1680,10 +1758,25 @@ void EeScheduler::removeFromWaitObject(GuestThread &item)
     item.wait = {};
 }
 
+static bool traceScheduler()
+{
+    static const bool enabled = std::getenv("PS2X_TRACE_SCHED") != nullptr;
+    return enabled;
+}
+
 void EeScheduler::blockCurrent(EeWaitState wait)
 {
     GuestThread *self = currentThread();
     assert(self != nullptr);
+    if (traceScheduler())
+    {
+        R5900Context *selfCtx = &self->activeContext();
+        std::cerr << "[sched] block thread=" << self->id
+                  << " reason=" << static_cast<int>(wait.reason)
+                  << std::hex << " ra=0x" << GPR_U32(selfCtx, 31)
+                  << " a0=0x" << GPR_U32(selfCtx, 4) << std::dec << std::endl;
+    }
+    syncCyclesToHostClock();
     self->wait = std::move(wait);
     self->status = self->suspendCount == 0 ? EeThreadStatus::Waiting : EeThreadStatus::WaitingSuspended;
     m_currentThreadId = 0;
@@ -1693,6 +1786,11 @@ void EeScheduler::blockCurrent(EeWaitState wait)
 
 void EeScheduler::makeReady(GuestThread &item, int result, bool interruptSafe)
 {
+    if (traceScheduler())
+    {
+        std::cerr << "[sched] ready thread=" << item.id << " by=" << m_currentThreadId
+                  << " irq=" << (m_insideInterrupt ? 1 : 0) << std::endl;
+    }
     auto completion = std::move(item.wait.completion);
     item.wait = {};
     setReturnS32(&item.activeContext(), result);
@@ -2096,6 +2194,45 @@ bool EeScheduler::hasReadyAtOrAbovePriority(int priority) const
         }
     }
     return false;
+}
+
+// Recompiled code charges far fewer EE cycles than the host time it takes to
+// switch threads, so wait-heavy guest code would drag emulated time (VBlank,
+// timers, IOP) below real time. Let real time pull the cycle counter forward.
+void EeScheduler::syncCyclesToHostClock()
+{
+    if (!m_hostClockSync)
+    {
+        return;
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - m_hostClockBase;
+    const uint64_t hostCycles = microsecondsToEeCycles(static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count()));
+    if (hostCycles > m_eeCycle)
+    {
+        uint64_t lag = hostCycles - m_eeCycle;
+        // Never replay more than two frames at once; forget older lag instead.
+        const uint64_t maxLag = 2u * kVBlankPeriodCycles;
+        if (lag > maxLag)
+        {
+            m_hostClockBase += std::chrono::microseconds((lag - maxLag) * 1000000ull / kEeClockHz);
+            lag = maxLag;
+        }
+        while (lag != 0u)
+        {
+            const uint64_t step = std::min<uint64_t>(lag, kVBlankPeriodCycles);
+            accountCycles(static_cast<uint32_t>(step));
+            lag -= step;
+        }
+    }
+}
+
+void EeScheduler::enableHostClockSync()
+{
+    // Start counting real time from the current emulated time.
+    m_hostClockBase = std::chrono::steady_clock::now() -
+                      std::chrono::microseconds(m_eeCycle * 1000000ull / kEeClockHz);
+    m_hostClockSync = true;
 }
 
 void EeScheduler::renewTimeSlice()

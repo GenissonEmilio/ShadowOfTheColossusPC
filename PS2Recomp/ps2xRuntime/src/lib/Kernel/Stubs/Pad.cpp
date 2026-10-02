@@ -1,3 +1,6 @@
+#include <map>
+#include <string>
+#include <cstdlib>
 #include "Common.h"
 #include "Pad.h"
 
@@ -859,5 +862,143 @@ namespace ps2_stubs
         std::lock_guard<std::mutex> lock(g_padOverrideMutex);
         g_padOverrideEnabled = false;
         g_padOverrideState = PadInputState{};
+    }
+
+    // libpad2 (used with DBCMAN). Sockets map to controller ports; only port 0
+    // is backed by the host keyboard/gamepad. Button bytes use the libpad bit
+    // order and are active-low; then RX, RY, LX, LY and 12 pressure bytes.
+    namespace
+    {
+        constexpr int kPad2MaxSockets = 8;
+        std::array<int, kPad2MaxSockets> g_pad2SocketPort = [] { std::array<int, kPad2MaxSockets> a{}; a.fill(-1); return a; }();
+        std::mutex g_pad2Mutex;
+
+        bool tracePad2()
+        {
+            static const bool enabled = std::getenv("PS2X_TRACE_PAD") != nullptr;
+            return enabled;
+        }
+
+        void tracePad2Call(const char *name, int socket, int result)
+        {
+            if (!tracePad2())
+                return;
+            static std::map<std::string, uint32_t> counts;
+            const uint32_t n = ++counts[name];
+            if (n <= 3 || n % 600 == 0)
+                std::cerr << "[pad2] " << name << " socket=" << socket << " -> " << result << " (call " << n << ")" << std::endl;
+        }
+
+        int pad2SocketPort(int socket)
+        {
+            std::lock_guard<std::mutex> lock(g_pad2Mutex);
+            return (socket >= 0 && socket < kPad2MaxSockets) ? g_pad2SocketPort[socket] : -1;
+        }
+    }
+
+    void scePad2Init(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        setReturnS32(ctx, 1);
+    }
+
+    void scePad2End(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        std::lock_guard<std::mutex> lock(g_pad2Mutex);
+        g_pad2SocketPort.fill(-1);
+        setReturnS32(ctx, 1);
+    }
+
+    void scePad2CreateSocket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+    {
+        tracePad2Call("CreateSocket", -1, 0);
+        const uint8_t *param = getConstMemPtr(rdram, getRegU32(ctx, 4));
+        int port = 0;
+        if (param)
+        {
+            std::memcpy(&port, param + 4, sizeof(port)); // scePad2SocketParam.port
+        }
+        std::lock_guard<std::mutex> lock(g_pad2Mutex);
+        for (int socket = 0; socket < kPad2MaxSockets; ++socket)
+        {
+            if (g_pad2SocketPort[socket] < 0)
+            {
+                g_pad2SocketPort[socket] = port;
+                setReturnS32(ctx, socket);
+                return;
+            }
+        }
+        setReturnS32(ctx, -1);
+    }
+
+    void scePad2DeleteSocket(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        const int socket = static_cast<int>(getRegU32(ctx, 4));
+        std::lock_guard<std::mutex> lock(g_pad2Mutex);
+        if (socket >= 0 && socket < kPad2MaxSockets)
+        {
+            g_pad2SocketPort[socket] = -1;
+        }
+        setReturnS32(ctx, 1);
+    }
+
+    void scePad2GetState(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        // scePad2StateStable for the host-backed port, NoLink otherwise.
+        const int socket = static_cast<int>(getRegU32(ctx, 4));
+        const int state = pad2SocketPort(socket) == 0 ? 1 : 0;
+        tracePad2Call("GetState", socket, state);
+        setReturnS32(ctx, state);
+    }
+
+    void scePad2GetButtonProfile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+    {
+        uint8_t *profile = getMemPtr(rdram, getRegU32(ctx, 5));
+        if (!profile || pad2SocketPort(static_cast<int>(getRegU32(ctx, 4))) != 0)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+        // DualShock 2: all 16 buttons, 4 stick axes + 4 analog dirs, 8 pressure buttons.
+        profile[0] = 0xFF;
+        profile[1] = 0xFF;
+        profile[2] = 0xFF;
+        profile[3] = 0xFF;
+        setReturnS32(ctx, 4);
+    }
+
+    void scePad2Read(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        constexpr int kPad2DataSize = 18;
+        uint8_t *out = getMemPtr(rdram, getRegU32(ctx, 5));
+        uint8_t state[32]{};
+        if (!out || !runtime || pad2SocketPort(static_cast<int>(getRegU32(ctx, 4))) != 0 ||
+            !runtime->padBackend().readState(0, 0, state, sizeof(state)))
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+        std::memcpy(out, state + 2, 6); // buttons lo/hi, RX, RY, LX, LY
+        tracePad2Call("Read", static_cast<int>(getRegU32(ctx, 4)), kPad2DataSize);
+        if (tracePad2())
+        {
+            static uint64_t lastInput = ~0ull;
+            uint64_t input = 0;
+            std::memcpy(&input, state + 2, 6);
+            if (input != lastInput)
+            {
+                lastInput = input;
+                std::cerr << "[pad2] input buttons=0x" << std::hex << static_cast<uint32_t>(state[2] | (state[3] << 8))
+                          << " lx=0x" << static_cast<uint32_t>(state[6]) << " ly=0x" << static_cast<uint32_t>(state[7])
+                          << std::dec << std::endl;
+            }
+        }
+        // Pressure for the 8 pressure-sensitive buttons: full when pressed.
+        const uint16_t pressed = static_cast<uint16_t>(~(state[2] | (state[3] << 8)));
+        const int pressureBits[12] = {5, 7, 4, 6, 12, 13, 14, 15, 10, 11, 8, 9}; // R,L,U,D,tri,cir,x,sq,L1,R1,L2,R2
+        for (int i = 0; i < 12; ++i)
+        {
+            out[6 + i] = (pressed & (1u << pressureBits[i])) ? 0xFF : 0x00;
+        }
+        setReturnS32(ctx, kPad2DataSize);
     }
 }

@@ -1,3 +1,9 @@
+#include <map>
+#include <sstream>
+#include <string>
+#include <tuple>
+#include <vector>
+#include <cstdlib>
 #include "runtime/ps2_pad.h"
 #include "ps2_host_backend.h"
 #include <cstring>
@@ -87,36 +93,88 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
         data[4] = static_cast<uint8_t>(128 + rx * 127);
         data[5] = static_cast<uint8_t>(128 + ry * 127);
     }
-    else
+
+    // Keyboard, laid out like an arcade panel (works alongside a gamepad):
+    //   WASD = left stick, arrows = D-pad
+    //   Y U I O = Square Triangle L1 L2 (top row)
+    //   H J K L = Cross  Circle   R1 R2 (bottom row)
+    //   Z = Start, X = Select
+    if (IsKeyDown(KEY_Y))
+        clearBit(PAD_SQUARE);
+    if (IsKeyDown(KEY_U))
+        clearBit(PAD_TRIANGLE);
+    if (IsKeyDown(KEY_I))
+        clearBit(PAD_L1);
+    if (IsKeyDown(KEY_O))
+        clearBit(PAD_L2);
+    if (IsKeyDown(KEY_H))
+        clearBit(PAD_CROSS);
+    if (IsKeyDown(KEY_J))
+        clearBit(PAD_CIRCLE);
+    if (IsKeyDown(KEY_K))
+        clearBit(PAD_R1);
+    if (IsKeyDown(KEY_L))
+        clearBit(PAD_R2);
+    if (IsKeyDown(KEY_Z))
+        clearBit(PAD_START);
+    if (IsKeyDown(KEY_X))
+        clearBit(PAD_SELECT);
+    if (IsKeyDown(KEY_UP))
+        clearBit(PAD_UP);
+    if (IsKeyDown(KEY_DOWN))
+        clearBit(PAD_DOWN);
+    if (IsKeyDown(KEY_LEFT))
+        clearBit(PAD_LEFT);
+    if (IsKeyDown(KEY_RIGHT))
+        clearBit(PAD_RIGHT);
+
+    auto keyAxis = [](int negative, int positive) -> int
+    { return (IsKeyDown(positive) ? 1 : 0) - (IsKeyDown(negative) ? 1 : 0); };
+    auto setStick = [&data](int xIndex, int yIndex, int x, int y)
     {
-        if (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W))
-            clearBit(PAD_UP);
-        if (IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S))
-            clearBit(PAD_DOWN);
-        if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A))
-            clearBit(PAD_LEFT);
-        if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D))
-            clearBit(PAD_RIGHT);
-        if (IsKeyDown(KEY_X) || IsKeyDown(KEY_SPACE))
-            clearBit(PAD_CROSS);
-        if (IsKeyDown(KEY_C) || IsKeyDown(KEY_ESCAPE))
-            clearBit(PAD_CIRCLE);
-        if (IsKeyDown(KEY_Z) || IsKeyDown(KEY_KP_0))
-            clearBit(PAD_SQUARE);
-        if (IsKeyDown(KEY_V) || IsKeyDown(KEY_KP_1))
-            clearBit(PAD_TRIANGLE);
-        if (IsKeyDown(KEY_Q))
-            clearBit(PAD_L1);
-        if (IsKeyDown(KEY_E))
-            clearBit(PAD_R1);
-        if (IsKeyDown(KEY_LEFT_SHIFT))
-            clearBit(PAD_L2);
-        if (IsKeyDown(KEY_RIGHT_SHIFT))
-            clearBit(PAD_R2);
-        if (IsKeyDown(KEY_ENTER))
-            clearBit(PAD_START);
-        if (IsKeyDown(KEY_TAB))
-            clearBit(PAD_SELECT);
+        if (x == 0 && y == 0)
+            return;
+        data[xIndex] = static_cast<uint8_t>(x < 0 ? 0x00 : (x > 0 ? 0xFF : kPadStickCenter));
+        data[yIndex] = static_cast<uint8_t>(y < 0 ? 0x00 : (y > 0 ? 0xFF : kPadStickCenter));
+    };
+    setStick(6, 7, keyAxis(KEY_A, KEY_D), keyAxis(KEY_W, KEY_S));
+
+    // PS2X_INPUT_SCRIPT="<sec>:<BUTTON>:<duration>;..." scripted presses for testing.
+    static const std::vector<std::tuple<double, uint16_t, double>> script = []
+    {
+        std::vector<std::tuple<double, uint16_t, double>> out;
+        const char *env = std::getenv("PS2X_INPUT_SCRIPT");
+        if (!env)
+            return out;
+        const std::map<std::string, uint16_t> names = {
+            {"UP", PAD_UP}, {"DOWN", PAD_DOWN}, {"LEFT", PAD_LEFT}, {"RIGHT", PAD_RIGHT},
+            {"CROSS", PAD_CROSS}, {"CIRCLE", PAD_CIRCLE}, {"SQUARE", PAD_SQUARE}, {"TRIANGLE", PAD_TRIANGLE},
+            {"L1", PAD_L1}, {"L2", PAD_L2}, {"R1", PAD_R1}, {"R2", PAD_R2},
+            {"START", PAD_START}, {"SELECT", PAD_SELECT}};
+        std::stringstream all(env);
+        std::string item;
+        while (std::getline(all, item, ';'))
+        {
+            std::stringstream fields(item);
+            std::string at, name, dur;
+            if (std::getline(fields, at, ':') && std::getline(fields, name, ':'))
+            {
+                std::getline(fields, dur, ':');
+                const auto it = names.find(name);
+                if (it != names.end())
+                    out.emplace_back(std::atof(at.c_str()), it->second, dur.empty() ? 0.2 : std::atof(dur.c_str()));
+            }
+        }
+        return out;
+    }();
+    if (!script.empty())
+    {
+        const double now = GetTime();
+        for (const auto &[at, mask, duration] : script)
+        {
+            if (now >= at && now < at + duration)
+                clearBit(mask);
+        }
     }
 
     data[2] = static_cast<uint8_t>(btns & 0xFF);

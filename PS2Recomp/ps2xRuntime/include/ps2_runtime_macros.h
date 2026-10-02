@@ -141,9 +141,28 @@ static inline uint32_t ps2_plzcw32(uint32_t x)
 #define PS2_PNOR(a, b) _mm_xor_si128(_mm_or_si128((__m128i)(a), (__m128i)(b)), _mm_set1_epi32(0xFFFFFFFF))
 
 // PS2 VU (Vector Unit) operations
-#define PS2_VADD(a, b) _mm_add_ps((__m128)(a), (__m128)(b))
-#define PS2_VSUB(a, b) _mm_sub_ps((__m128)(a), (__m128)(b))
-#define PS2_VMUL(a, b) _mm_mul_ps((__m128)(a), (__m128)(b))
+// VU floats have no denormals, infinities or NaNs: denormals read and
+// produce signed zero, Inf/NaN read as signed FLT_MAX and overflow clamps to
+// signed FLT_MAX. Without this, NaN spreads through game math (bone matrices).
+static inline __m128 ps2VuNormalize(__m128 v)
+{
+    const __m128i bits = _mm_castps_si128(v);
+    const __m128i sign = _mm_and_si128(bits, _mm_set1_epi32(static_cast<int>(0x80000000u)));
+    const __m128i exponent = _mm_and_si128(bits, _mm_set1_epi32(0x7F800000));
+    const __m128i isZeroExp = _mm_cmpeq_epi32(exponent, _mm_setzero_si128());
+    const __m128i isMaxExp = _mm_cmpeq_epi32(exponent, _mm_set1_epi32(0x7F800000));
+    __m128i result = _mm_or_si128(_mm_andnot_si128(isZeroExp, bits), _mm_and_si128(isZeroExp, sign));
+    const __m128i clamped = _mm_or_si128(sign, _mm_set1_epi32(0x7F7FFFFF));
+    result = _mm_or_si128(_mm_andnot_si128(isMaxExp, result), _mm_and_si128(isMaxExp, clamped));
+    return _mm_castsi128_ps(result);
+}
+static inline float ps2VuNormalizeScalar(float v)
+{
+    return _mm_cvtss_f32(ps2VuNormalize(_mm_set1_ps(v)));
+}
+#define PS2_VADD(a, b) ps2VuNormalize(_mm_add_ps(ps2VuNormalize((__m128)(a)), ps2VuNormalize((__m128)(b))))
+#define PS2_VSUB(a, b) ps2VuNormalize(_mm_sub_ps(ps2VuNormalize((__m128)(a)), ps2VuNormalize((__m128)(b))))
+#define PS2_VMUL(a, b) ps2VuNormalize(_mm_mul_ps(ps2VuNormalize((__m128)(a)), ps2VuNormalize((__m128)(b))))
 #define PS2_VDIV(a, b) _mm_div_ps((__m128)(a), (__m128)(b))
 #define PS2_VMULQ(a, q) _mm_mul_ps((__m128)(a), _mm_set1_ps(q))
 #define PS2_VBLEND(a, b, mask) PS2_BLENDV_PS((__m128)(a), (__m128)(b), (__m128)(mask))
@@ -732,6 +751,45 @@ inline __m128i ps2_qfsrv(__m128i rs, __m128i rt, uint32_t sa)
 // Additional VU0 operations
 #define PS2_VSQRT(x) sqrtf(x)
 #define PS2_VRSQRT(x) (1.0f / sqrtf(x))
+
+// VU DIV / SQRT / RSQRT into Q, including the divide-by-zero results
+// (signed FLT_MAX) and SQRT/RSQRT taking the magnitude of a negative input.
+static inline float ps2VuDivQ(float fs, float ft)
+{
+    fs = ps2VuNormalizeScalar(fs);
+    ft = ps2VuNormalizeScalar(ft);
+    if (ft == 0.0f)
+    {
+        uint32_t a, b;
+        std::memcpy(&a, &fs, 4);
+        std::memcpy(&b, &ft, 4);
+        const uint32_t r = ((a ^ b) & 0x80000000u) | 0x7F7FFFFFu;
+        float out;
+        std::memcpy(&out, &r, 4);
+        return out;
+    }
+    return ps2VuNormalizeScalar(fs / ft);
+}
+static inline float ps2VuSqrtQ(float ft)
+{
+    return ps2VuNormalizeScalar(sqrtf(std::fabs(ps2VuNormalizeScalar(ft))));
+}
+static inline float ps2VuRsqrtQ(float fs, float ft)
+{
+    fs = ps2VuNormalizeScalar(fs);
+    ft = ps2VuNormalizeScalar(ft);
+    if (ft == 0.0f)
+    {
+        uint32_t a, b;
+        std::memcpy(&a, &fs, 4);
+        std::memcpy(&b, &ft, 4);
+        const uint32_t r = ((a ^ b) & 0x80000000u) | 0x7F7FFFFFu;
+        float out;
+        std::memcpy(&out, &r, 4);
+        return out;
+    }
+    return ps2VuNormalizeScalar(fs / sqrtf(std::fabs(ft)));
+}
 
 #define GPR_U32(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0U : static_cast<uint32_t>(PS2_EXTRACT_EPI32_0(ctx_ptr->r[reg_idx])))
 #define GPR_S32(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0 : PS2_EXTRACT_EPI32_0(ctx_ptr->r[reg_idx]))

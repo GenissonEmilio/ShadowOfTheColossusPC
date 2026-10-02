@@ -1,3 +1,5 @@
+#include "runtime/ps2_stats.h"
+#include <cstdlib>
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_address.h"
 #include "runtime/gs/gs_frontend.h"
@@ -1521,6 +1523,20 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             break;
                     }
 
+                    if (channelBase == 0x10009000u)
+                        ps2_stats::vif1Chains.fetch_add(1, std::memory_order_relaxed);
+                    static const bool traceChains = std::getenv("PS2X_TRACE_DMA") != nullptr;
+                    if (traceChains && channelBase == 0x10009000u)
+                    {
+                        static uint32_t chainLogs = 0;
+                        if (chainLogs++ < 2000)
+                        {
+                            std::cerr << "[dma:vif1] start=0x" << std::hex << m_ioRegisters[channelBase + 0x30]
+                                      << " end=0x" << tagAddr << std::dec << " tags=" << tagsProcessed
+                                      << " bytes=" << chainBuf.size() << " asp=" << asp
+                                      << (tagsProcessed >= kMaxChainTags ? " HIT_TAG_LIMIT" : "") << std::endl;
+                        }
+                    }
                     m_ioRegisters[channelBase + 0x30] = tagAddr;
                     m_ioRegisters[channelBase + 0x40] = asr0;
                     m_ioRegisters[channelBase + 0x50] = asr1;
