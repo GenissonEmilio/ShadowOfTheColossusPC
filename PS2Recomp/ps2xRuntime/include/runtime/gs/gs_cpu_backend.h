@@ -6,6 +6,7 @@
 
 #include <array>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 
 class GSCpuBackend final : public GSRasterBackend
@@ -79,8 +80,37 @@ private:
     // CLUT contents each queued draw was submitted with: loading a new CLUT
     // starts a new version instead of flushing the queue.
     std::vector<std::array<uint16_t, 512>> m_clutVersions;
+    std::vector<uint64_t> m_clutVersionHash;
     std::vector<uint32_t> m_pendingClut;
     bool m_clutChanged = true;
+    uint64_t m_clutHash = 0; // content hash of m_clut
+
+    // Decoded-texture cache: textures sampled by queued draws are converted to
+    // linear RGBA once and reused while none of their VRAM pages is written.
+    struct TextureKey
+    {
+        uint32_t tbp0 = 0, tbw = 0, psm = 0, tw = 0, th = 0;
+        uint32_t cpsm = 0, csm = 0, csa = 0, texa = 0;
+        uint64_t clutHash = 0;
+        bool operator==(const TextureKey &) const = default;
+    };
+    struct TextureKeyHash
+    {
+        size_t operator()(const TextureKey &key) const noexcept;
+    };
+    struct DecodedTexture
+    {
+        std::vector<uint32_t> texels;
+        uint32_t width = 0, height = 0;
+        uint64_t epoch = 0;
+    };
+    std::unordered_map<TextureKey, DecodedTexture, TextureKeyHash> m_textureCache;
+    size_t m_textureCacheBytes = 0;
+    std::array<uint64_t, 512> m_pageEpoch{}; // last write to each 8 KiB VRAM page
+    uint64_t m_epochCounter = 1;
+    std::vector<const DecodedTexture *> m_pendingTexture;
+    const DecodedTexture *decodedTexture(const GSDrawState &state, const uint16_t *clut, uint64_t clutHash);
+    void markVramWritten(uint64_t begin, uint64_t end);
     std::pair<uint64_t, uint64_t> m_uploadRange{0u, 0u}; // destination of the host->local transfer
     // True when queued draws read or write VRAM bytes in [begin, end).
     bool pendingTouches(uint64_t begin, uint64_t end) const;
@@ -92,7 +122,7 @@ private:
     std::pair<uint64_t, uint64_t> m_lastTexRange{0u, 0u};
     std::pair<uint64_t, uint64_t> m_lastFrameRange{0u, 0u};
     std::pair<uint64_t, uint64_t> m_lastZRange{0u, 0u};
-    void flushPendingUnlocked();
+    void flushPendingUnlocked(const char *reason = "other");
     void UpdateTextureReadMode(const GSPrimitiveBatch &batch);
     void drawRowsParallel(int y0, int y1, int rowWidth, const std::function<void(int)> &drawRow);
 

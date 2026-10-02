@@ -1,3 +1,4 @@
+#include <map>
 #include <chrono>
 #include "runtime/ps2_stats.h"
 #include "runtime/gs/gs_parallel.h"
@@ -9,6 +10,9 @@ namespace
     // queue in parallel (full range when drawing immediately).
     // CLUT version of the draw being rasterized by a band worker (null: current).
     thread_local const uint16_t *t_clut = nullptr;
+    // Decoded texture of the draw being rasterized by a band worker (null: sample VRAM).
+    thread_local const void *t_texture = nullptr;
+    const bool kTextureCacheEnabled = std::getenv("PS2X_GS_NOTEXCACHE") == nullptr;
     void bufferRange(uint32_t baseBytes, uint32_t bufferWidthPixels, uint32_t heightPixels, uint32_t psm,
                      uint64_t &begin, uint64_t &end);
     thread_local int t_bandY0 = INT_MIN;
@@ -547,7 +551,7 @@ void GSCpuBackend::Initialize(uint8_t *vram, uint32_t vramSize)
 void GSCpuBackend::Reset()
 {
     std::lock_guard<std::mutex> lock(m_mutex);
-    flushPendingUnlocked();
+    flushPendingUnlocked("Reset");
     ResetUnlocked();
 }
 
@@ -562,6 +566,9 @@ void GSCpuBackend::ResetUnlocked()
     m_transferState.direction = 3u;
     m_localToHostBuffer.clear();
     m_localToHostReadPos = 0u;
+    m_textureCache.clear();
+    m_textureCacheBytes = 0;
+    markVramWritten(0u, static_cast<uint64_t>(m_pageEpoch.size()) * 8192u);
 }
 
 namespace
@@ -573,6 +580,7 @@ namespace
         bool on = std::getenv("PS2X_GS_PROFILE") != nullptr;
         double serial = 0, banded = 0;
         uint64_t serialDraws = 0, bandedDraws = 0, flushes = 0, hazardFlushes = 0;
+        std::map<std::string, uint64_t> reasons;
         std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
         void report()
         {
@@ -583,6 +591,9 @@ namespace
             std::fprintf(stderr, "[gsprof] serial=%.0fms (%llu draws) banded=%.0fms (%llu draws, %llu flushes, %llu hazard)\n",
                          serial * 1000, (unsigned long long)serialDraws, banded * 1000, (unsigned long long)bandedDraws,
                          (unsigned long long)flushes, (unsigned long long)hazardFlushes);
+            for (const auto &[why, n] : reasons)
+                std::fprintf(stderr, "[gsprof]   %s %llu\n", why.c_str(), (unsigned long long)n);
+            reasons.clear();
             serial = banded = 0;
             serialDraws = bandedDraws = flushes = hazardFlushes = 0;
         }
@@ -655,9 +666,11 @@ void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
     if (immediate || !m_textureDirectRead)
     {
         // Feedback draws read what earlier draws wrote: keep them serial.
-        flushPendingUnlocked();
+        flushPendingUnlocked("Submit");
         const auto t0 = std::chrono::steady_clock::now();
         DrawPrimitive(batch);
+        markVramWritten(m_lastFrameRange.first, m_lastFrameRange.second);
+        markVramWritten(m_lastZRange.first, m_lastZRange.second);
         if (g_gsProfile.on)
         {
             g_gsProfile.serial += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -685,7 +698,7 @@ void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
     {
         if (g_gsProfile.on && !m_pending.empty())
             ++g_gsProfile.hazardFlushes;
-        flushPendingUnlocked();
+        flushPendingUnlocked("Submit");
     }
     auto addRange = [](std::vector<std::pair<uint64_t, uint64_t>> &list, const std::pair<uint64_t, uint64_t> &range)
     {
@@ -708,18 +721,21 @@ void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
     if (m_clutChanged || m_clutVersions.empty())
     {
         m_clutVersions.push_back(m_clut);
+        m_clutVersionHash.push_back(m_clutHash);
         m_clutChanged = false;
     }
     m_pendingClut.push_back(static_cast<uint32_t>(m_clutVersions.size() - 1u));
     m_pending.push_back(batch);
     if (m_pending.size() >= 4096u)
-        flushPendingUnlocked();
+        flushPendingUnlocked("Submit");
 }
 
-void GSCpuBackend::flushPendingUnlocked()
+void GSCpuBackend::flushPendingUnlocked(const char *reason)
 {
     if (m_pending.empty())
         return;
+    if (g_gsProfile.on)
+        ++g_gsProfile.reasons[reason];
     constexpr int kBandRows = 16;
     // Bin every primitive into the bands its (conservative) Y range touches,
     // so each band only walks the primitives that can draw into it.
@@ -764,6 +780,23 @@ void GSCpuBackend::flushPendingUnlocked()
             m_bandBins[b].push_back(index);
     }
     m_textureDirectRead = true;
+    // Entries are never evicted while queued draws hold pointers to them.
+    if (m_textureCacheBytes > (256u << 20))
+    {
+        m_textureCache.clear();
+        m_textureCacheBytes = 0;
+    }
+    m_pendingTexture.assign(m_pending.size(), nullptr);
+    if (kTextureCacheEnabled)
+    {
+        for (uint32_t index = 0; index < m_pending.size(); ++index)
+        {
+            const GSPrimitiveBatch &batch = m_pending[index];
+            if (batch.state.prim.tme && batch.vertexCount != 0u)
+                m_pendingTexture[index] = decodedTexture(batch.state, m_clutVersions[m_pendingClut[index]].data(),
+                                                         m_clutVersionHash[m_pendingClut[index]]);
+        }
+    }
     const auto t0 = std::chrono::steady_clock::now();
     if (g_gsProfile.on)
     {
@@ -777,9 +810,11 @@ void GSCpuBackend::flushPendingUnlocked()
                                       for (const uint32_t index : m_bandBins[band])
                                       {
                                           t_clut = m_clutVersions[m_pendingClut[index]].data();
+                                          t_texture = m_pendingTexture[index];
                                           DrawPrimitive(m_pending[index]);
                                       }
                                       t_clut = nullptr;
+                                      t_texture = nullptr;
                                       t_bandY0 = INT_MIN;
                                       t_bandY1 = INT_MAX;
                                   });
@@ -788,12 +823,132 @@ void GSCpuBackend::flushPendingUnlocked()
         g_gsProfile.banded += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         g_gsProfile.report();
     }
+    for (const auto &range : m_pendingWrites)
+        markVramWritten(range.first, range.second);
     m_pending.clear();
+    m_pendingTexture.clear();
     m_pendingClut.clear();
     m_clutVersions.clear();
+    m_clutVersionHash.clear();
     m_clutChanged = true;
     m_pendingWrites.clear();
     m_pendingReads.clear();
+}
+
+size_t GSCpuBackend::TextureKeyHash::operator()(const TextureKey &key) const noexcept
+{
+    uint64_t hash = key.clutHash ^ 0x9E3779B97F4A7C15ull;
+    for (const uint32_t value : {key.tbp0, key.tbw, key.psm, key.tw, key.th, key.cpsm, key.csm, key.csa, key.texa})
+        hash = (hash ^ value) * 1099511628211ull;
+    return static_cast<size_t>(hash);
+}
+
+void GSCpuBackend::markVramWritten(uint64_t begin, uint64_t end)
+{
+    if (end <= begin)
+        return;
+    const uint64_t epoch = ++m_epochCounter;
+    const uint64_t firstPage = begin / 8192u;
+    const uint64_t lastPage = std::min<uint64_t>((end - 1u) / 8192u, firstPage + m_pageEpoch.size() - 1u);
+    for (uint64_t page = firstPage; page <= lastPage; ++page)
+        m_pageEpoch[page % m_pageEpoch.size()] = epoch;
+}
+
+const GSCpuBackend::DecodedTexture *GSCpuBackend::decodedTexture(const GSDrawState &state, const uint16_t *clut, uint64_t clutHash)
+{
+    const auto &tex = state.context.tex0;
+    const uint32_t width = state.textureWidth;
+    const uint32_t height = state.textureHeight;
+    // Very large textures sampled by small draws cost more to decode than to sample.
+    if (!m_vram || width * height > 512u * 512u)
+        return nullptr;
+    const bool indexed = isFourBitIndexedPsm(tex.psm) || isEightBitIndexedPsm(tex.psm);
+    TextureKey key;
+    key.tbp0 = tex.tbp0;
+    key.tbw = tex.tbw;
+    key.psm = tex.psm;
+    key.tw = tex.tw;
+    key.th = tex.th;
+    key.texa = static_cast<uint32_t>(state.texa.ta0) | (static_cast<uint32_t>(state.texa.ta1) << 8) |
+               (state.texa.aem ? 0x10000u : 0u);
+    if (indexed)
+    {
+        key.cpsm = tex.cpsm;
+        key.csm = tex.csm;
+        key.csa = tex.csa;
+        key.clutHash = clutHash;
+    }
+
+    uint64_t begin = 0, end = 0;
+    bufferRange(tex.tbp0 * 256u, std::max<uint32_t>(width, tex.tbw * 64u), height, tex.psm, begin, end);
+    uint64_t newestWrite = 0;
+    const uint64_t firstPage = begin / 8192u;
+    const uint64_t lastPage = std::min<uint64_t>((end - 1u) / 8192u, firstPage + m_pageEpoch.size() - 1u);
+    for (uint64_t page = firstPage; page <= lastPage; ++page)
+        newestWrite = std::max(newestWrite, m_pageEpoch[page % m_pageEpoch.size()]);
+
+    DecodedTexture &entry = m_textureCache[key];
+    if (!entry.texels.empty() && entry.epoch >= newestWrite)
+        return &entry;
+
+    if (entry.texels.size() != static_cast<size_t>(width) * height)
+    {
+        m_textureCacheBytes += static_cast<size_t>(width) * height * 4u;
+        entry.texels.resize(static_cast<size_t>(width) * height);
+    }
+    entry.width = width;
+    entry.height = height;
+    entry.epoch = m_epochCounter;
+    auto decodeRows = [&](int y0, int y1)
+    {
+        t_clut = clut;
+        for (int y = y0; y < y1; ++y)
+        {
+            uint32_t *row = entry.texels.data() + static_cast<size_t>(y) * width;
+            for (uint32_t x = 0; x < width; ++x)
+            {
+                const uint32_t raw = ReadVramUnlocked(tex.psm, tex.tbp0, tex.tbw, x, static_cast<uint32_t>(y));
+                switch (tex.psm)
+                {
+                case GS_PSM_CT32:
+                case GS_PSM_Z32:
+                case GS_PSM_CT24:
+                case GS_PSM_Z24:
+                    row[x] = applyTexa(state.texa, tex.psm, raw);
+                    break;
+                case GS_PSM_CT16:
+                case GS_PSM_CT16S:
+                case GS_PSM_Z16:
+                case GS_PSM_Z16S:
+                    row[x] = applyTexa(state.texa, tex.psm, Rgba5551ToRgba8888(raw));
+                    break;
+                case GS_PSM_T8:
+                case GS_PSM_T8H:
+                case GS_PSM_T4:
+                case GS_PSM_T4HL:
+                case GS_PSM_T4HH:
+                    row[x] = LookupCLUT(state, static_cast<u8>(raw), tex.cpsm, tex.csm, tex.csa, tex.psm);
+                    break;
+                default:
+                    row[x] = 0xFFFF00FFu;
+                    break;
+                }
+            }
+        }
+        t_clut = nullptr;
+    };
+    if (width * height >= 64u * 1024u)
+    {
+        constexpr int kRows = 32;
+        const int chunks = static_cast<int>((height + kRows - 1) / kRows);
+        GSParallelFor::instance().run(chunks, [&](int chunk)
+                                      { decodeRows(chunk * kRows, std::min<int>(static_cast<int>(height), (chunk + 1) * kRows)); });
+    }
+    else
+    {
+        decodeRows(0, static_cast<int>(height));
+    }
+    return &entry;
 }
 
 bool GSCpuBackend::pendingTouches(uint64_t begin, uint64_t end) const
@@ -850,7 +1005,7 @@ void GSCpuBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
     {
         if (cb < range.second && range.first < ce)
         {
-            flushPendingUnlocked();
+            flushPendingUnlocked("LoadClut");
             break;
         }
     }
@@ -860,6 +1015,17 @@ void GSCpuBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
 
 void GSCpuBackend::LoadClutUnlocked(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
 {
+    struct HashOnExit
+    {
+        GSCpuBackend &backend;
+        ~HashOnExit()
+        {
+            uint64_t hash = 1469598103934665603ull;
+            for (const uint16_t entry : backend.m_clut)
+                hash = (hash ^ entry) * 1099511628211ull;
+            backend.m_clutHash = hash;
+        }
+    } hashOnExit{*this};
     const bool fourBit = isFourBitIndexedPsm(tex0.psm);
     const bool sixteenBit = tex0.cpsm == GS_PSM_CT16 || tex0.cpsm == GS_PSM_CT16S;
     const bool thirtyTwoBit = tex0.cpsm == GS_PSM_CT32 || tex0.cpsm == GS_PSM_CT24;
@@ -909,7 +1075,7 @@ void GSCpuBackend::LoadClutUnlocked(const GSTex0Reg &tex0, const GSTexClutReg &t
 void GSCpuBackend::Flush()
 {
     std::lock_guard<std::mutex> lock(m_mutex);
-    flushPendingUnlocked();
+    flushPendingUnlocked("Flush");
 }
 
 void GSCpuBackend::TextureFlush()
@@ -923,13 +1089,13 @@ void GSCpuBackend::TextureFlush()
 void GSCpuBackend::Sync(GSSyncReason)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
-    flushPendingUnlocked();
+    flushPendingUnlocked("Sync");
 }
 
 uint32_t GSCpuBackend::ReadVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const
 {
     std::lock_guard<std::mutex> lock(m_mutex);
-    const_cast<GSCpuBackend *>(this)->flushPendingUnlocked();
+    const_cast<GSCpuBackend *>(this)->flushPendingUnlocked("ReadVram");
     return ReadVramUnlocked(psm, base, bw, x, y);
 }
 
@@ -1047,8 +1213,9 @@ void GSCpuBackend::UpdateTextureReadMode(const GSPrimitiveBatch &batch)
 void GSCpuBackend::WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
-    flushPendingUnlocked();
+    flushPendingUnlocked("WriteVram");
     WriteVramUnlocked(psm, base, bw, x, y, value);
+    markVramWritten(0u, static_cast<uint64_t>(m_pageEpoch.size()) * 8192u);
 }
 
 void GSCpuBackend::WriteVramUnlocked(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value)
@@ -1061,7 +1228,7 @@ void GSCpuBackend::WriteVramUnlocked(uint32_t psm, uint32_t base, uint32_t bw, u
 void GSCpuBackend::SnapshotVram(std::vector<uint8_t> &out) const
 {
     std::lock_guard<std::mutex> lock(m_mutex);
-    const_cast<GSCpuBackend *>(this)->flushPendingUnlocked();
+    const_cast<GSCpuBackend *>(this)->flushPendingUnlocked("SnapshotVram");
     if (!m_vram || m_vramSize == 0u)
     {
         out.clear();
@@ -1074,7 +1241,7 @@ void GSCpuBackend::SnapshotVram(std::vector<uint8_t> &out) const
 GSTransferSnapshot GSCpuBackend::GetTransferSnapshot() const
 {
     std::lock_guard<std::mutex> lock(m_mutex);
-    const_cast<GSCpuBackend *>(this)->flushPendingUnlocked();
+    const_cast<GSCpuBackend *>(this)->flushPendingUnlocked("GetTransferSnapshot");
     GSTransferSnapshot result = m_transferState;
     result.localToHostPendingBytes = m_localToHostReadPos < m_localToHostBuffer.size()
                                          ? m_localToHostBuffer.size() - m_localToHostReadPos
@@ -1534,10 +1701,13 @@ uint32_t GSCpuBackend::SampleTexture(const GSDrawState &state, float s, float t,
         texVf = t * invQ * static_cast<float>(texH);
     }
 
+    const DecodedTexture *decoded = static_cast<const DecodedTexture *>(t_texture);
     auto samplePoint = [&](int sampleU, int sampleV) -> uint32_t
     {
         sampleU = wrapTextureCoordinate(sampleU, texW, wrapU, minU, maxU);
         sampleV = wrapTextureCoordinate(sampleV, texH, wrapV, minV, maxV);
+        if (decoded && static_cast<uint32_t>(sampleU) < decoded->width && static_cast<uint32_t>(sampleV) < decoded->height)
+            return decoded->texels[static_cast<size_t>(sampleV) * decoded->width + static_cast<uint32_t>(sampleU)];
 
         u32 out = ReadTextureVramUnlocked(tex.psm, tex.tbp0, tex.tbw, sampleU, sampleV);
 
@@ -1790,10 +1960,39 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
     const float invAbsDenom = 1.0f / std::fabs(denom);
     constexpr float kEdgeEpsilon = 1.0e-4f;
 
+    // Each barycentric weight is linear in x along a row: w = k * px + c.
+    // Solving w >= -eps per edge gives the row's covered span; it is padded by
+    // a pixel and every pixel still runs the exact test below, so coverage is
+    // unchanged while pixels far outside the triangle are skipped.
+    const float k0 = (fy1 - fy2) * winding * invAbsDenom;
+    const float k1 = (fy2 - fy0) * winding * invAbsDenom;
+    const float k2 = -(k0 + k1);
     for (int y = minY; y <= maxY; ++y)
     {
         float py = static_cast<float>(y) + 0.5f;
-        for (int x = minX; x <= maxX; ++x)
+        const float c0 = ((fy1 - fy2) * -fx2 + (fx2 - fx1) * (py - fy2)) * winding * invAbsDenom;
+        const float c1 = ((fy2 - fy0) * -fx2 + (fx0 - fx2) * (py - fy2)) * winding * invAbsDenom;
+        const float c2 = 1.0f - c0 - c1;
+        float spanLo = static_cast<float>(minX), spanHi = static_cast<float>(maxX) + 1.0f;
+        bool empty = false;
+        for (const auto [k, c] : {std::pair{k0, c0}, std::pair{k1, c1}, std::pair{k2, c2}})
+        {
+            if (std::fabs(k) < 1.0e-12f)
+            {
+                empty |= c < -kEdgeEpsilon * 4.0f;
+                continue;
+            }
+            const float bound = (-kEdgeEpsilon - c) / k - 0.5f; // in pixel-index space
+            if (k > 0.0f)
+                spanLo = std::max(spanLo, bound);
+            else
+                spanHi = std::min(spanHi, bound);
+        }
+        if (empty || !(spanLo <= spanHi + 2.0f))
+            continue;
+        const int rowX0 = std::max(minX, static_cast<int>(std::floor(spanLo)) - 1);
+        const int rowX1 = std::min(maxX, static_cast<int>(std::ceil(spanHi)) + 1);
+        for (int x = rowX0; x <= rowX1; ++x)
         {
             float px = static_cast<float>(x) + 0.5f;
 
@@ -1951,11 +2150,11 @@ void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
         // dsax can push the rectangle one page column further.
         m_uploadRange.second += 8192u;
         if (pendingTouches(m_uploadRange.first, m_uploadRange.second))
-            flushPendingUnlocked();
+            flushPendingUnlocked("BeginTransfer");
     }
     else
     {
-        flushPendingUnlocked();
+        flushPendingUnlocked("BeginTransfer");
     }
     m_transfer = command;
     m_transferState.x = command.trxpos.dsax;
@@ -1966,7 +2165,13 @@ void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
     m_transferState.localToHostPendingBytes = 0u;
 
     if (command.direction == 2u)
+    {
+        uint64_t begin = 0, end = 0;
+        bufferRange(command.bitbltbuf.dbp * 256u, std::max<uint32_t>(1u, command.bitbltbuf.dbw) * 64u,
+                    static_cast<uint32_t>(command.trxpos.dsay) + command.trxreg.rrh, command.bitbltbuf.dpsm, begin, end);
+        markVramWritten(begin, end + 8192u);
         PerformLocalToLocalTransfer();
+    }
     else if (command.direction == 1u)
         PerformLocalToHostTransfer();
 }
@@ -1975,7 +2180,8 @@ void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (pendingTouches(m_uploadRange.first, m_uploadRange.second))
-        flushPendingUnlocked();
+        flushPendingUnlocked("UploadImage");
+    markVramWritten(m_uploadRange.first, m_uploadRange.second);
     if (!data || sizeBytes == 0u || !m_vram || m_transferState.direction != 0u)
         return;
     if (m_transfer.trxreg.rrw == 0u || m_transfer.trxreg.rrh == 0u || m_transferState.totalPixels == 0u)
@@ -2193,7 +2399,7 @@ void GSCpuBackend::PerformLocalToHostTransfer()
 uint32_t GSCpuBackend::ConsumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
-    flushPendingUnlocked();
+    flushPendingUnlocked("ConsumeLocalToHostBytes");
     if (!dst || maxBytes == 0u || m_localToHostReadPos >= m_localToHostBuffer.size())
         return 0u;
     const size_t count = std::min<size_t>(maxBytes, m_localToHostBuffer.size() - m_localToHostReadPos);
@@ -2206,7 +2412,7 @@ uint32_t GSCpuBackend::ConsumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
 bool GSCpuBackend::ClearFramebuffer(const GSContext &context, uint32_t rgba)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
-    flushPendingUnlocked();
+    flushPendingUnlocked("ClearFramebuffer");
     if (!m_vram || context.frame.fbw == 0u)
         return false;
 
@@ -2220,6 +2426,11 @@ bool GSCpuBackend::ClearFramebuffer(const GSContext &context, uint32_t rgba)
     uint8_t a = static_cast<uint8_t>(rgba >> 24u);
     if ((context.fba & 1ull) != 0ull && context.frame.psm != GS_PSM_CT24)
         a |= 0x80u;
+    {
+        uint64_t begin = 0, end = 0;
+        bufferRange(context.frame.fbp * 8192u, std::max<uint32_t>(context.frame.fbw, 1u) * 64u, y1 + 1u, context.frame.psm, begin, end);
+        markVramWritten(begin, end);
+    }
 
     const uint32_t fbp = GSInternal::framePageBaseToBlock(context.frame.fbp);
     const uint32_t fbw = std::max<uint32_t>(context.frame.fbw, 1u);
