@@ -1346,7 +1346,9 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     uint32_t asr1 = m_ioRegisters[channelBase + 0x50];
                     uint32_t asp = (chcr >> 4) & 0x3u;
                     const bool tieEnabled = (chcr & (1u << 7)) != 0u;
-                    const int kMaxChainTags = 4096;
+                    // Only a guard against malformed loops: real chains exceed 4096 tags
+                    // (SotC's canyon frames build ~4,600), and a cut chain desyncs the GIF.
+                    const int kMaxChainTags = 1 << 20;
                     std::vector<uint8_t> chainBuf;
 
                     auto appendData = [&](uint32_t srcAddr, uint32_t qwCount)
@@ -1535,6 +1537,15 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                       << " end=0x" << tagAddr << std::dec << " tags=" << tagsProcessed
                                       << " bytes=" << chainBuf.size() << " asp=" << asp
                                       << (tagsProcessed >= kMaxChainTags ? " HIT_TAG_LIMIT" : "") << std::endl;
+                        }
+                    }
+                    if (tagsProcessed >= kMaxChainTags)
+                    {
+                        static bool reported = false;
+                        if (!reported)
+                        {
+                            reported = true;
+                            std::cerr << "[dma] chain at 0x" << std::hex << channelBase << " hit the tag limit" << std::dec << std::endl;
                         }
                     }
                     m_ioRegisters[channelBase + 0x30] = tagAddr;
