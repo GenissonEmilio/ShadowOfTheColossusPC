@@ -439,6 +439,27 @@
     X(sceMcSync)                              \
     X(sceMcUnformat)                          \
     X(sceMcWrite)                             \
+    X(_sceMcCoreInit)                         \
+    X(_sceMcCoreEnd)                          \
+    X(_sceMcCoreCreateSocket)                 \
+    X(_sceMcCoreCheckSocket)                  \
+    X(_sceMcCoreDeleteSocket)                 \
+    X(_sceMcCoreChangeSocketTypeMc2Dbc)       \
+    X(_sceMcCoreChangeSocketTypeDbc2Mc)       \
+    X(_sceMcCoreGetConnection)                \
+    X(_sceMcCoreGetCardSpec)                  \
+    X(_sceMcCoreSetCardSpec)                  \
+    X(_sceMcCoreCheckNewCard)                 \
+    X(_sceMcCoreClearNewCardFlag)             \
+    X(_sceMcCoreAuthentication)               \
+    X(_sceMcCoreSetWriteBackHole)             \
+    X(_sceMcCoreWriteBack)                    \
+    X(_sceMcCoreReadClock)                    \
+    X(_sceMcCoreReadPage)                     \
+    X(_sceMcCoreReadPage2)                    \
+    X(_sceMcCoreWritePage)                    \
+    X(_sceMcCoreWriteSameData)                \
+    X(_sceMcCoreBlockErase)                   \
     X(sceMpegAddBs)                           \
     X(sceMpegAddCallback)                     \
     X(sceMpegAddStrCallback)                  \
