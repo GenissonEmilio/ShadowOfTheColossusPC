@@ -1558,12 +1558,18 @@ void EeScheduler::bindMainContextForSyscall(R5900Context &ctx, uint8_t *rdram)
 
 EeKernelSnapshot EeScheduler::snapshot() const
 {
+    m_snapshotWanted.store(true, std::memory_order_relaxed);
     std::lock_guard lock(m_snapshotMutex);
     return m_snapshot;
 }
 
 void EeScheduler::publishSnapshot()
 {
+    constexpr uint64_t kSnapshotIntervalCycles = 294912000ull / 100ull; // 10 ms of EE time
+    if (!m_snapshotWanted.exchange(false, std::memory_order_relaxed) &&
+        m_eeCycle - m_snapshotCycle < kSnapshotIntervalCycles)
+        return;
+    m_snapshotCycle = m_eeCycle;
     EeKernelSnapshot next{};
     next.sequence = ++m_snapshotSequence;
     next.eeCycle = m_eeCycle;

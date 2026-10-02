@@ -483,6 +483,10 @@ private:
     std::atomic<uint64_t> m_nextDeadlineCycle{0};
 
     mutable std::mutex m_snapshotMutex;
+    // Snapshots only feed debugging views: rebuild them when one was asked
+    // for, or every few EE milliseconds, instead of on every scheduler event.
+    mutable std::atomic<bool> m_snapshotWanted{true};
+    uint64_t m_snapshotCycle = 0;
     EeKernelSnapshot m_snapshot;
     uint64_t m_snapshotSequence = 0;
 };

@@ -7,6 +7,10 @@ namespace
 {
     // Row band rendered by the current thread while flushing the primitive
     // queue in parallel (full range when drawing immediately).
+    // CLUT version of the draw being rasterized by a band worker (null: current).
+    thread_local const uint16_t *t_clut = nullptr;
+    void bufferRange(uint32_t baseBytes, uint32_t bufferWidthPixels, uint32_t heightPixels, uint32_t psm,
+                     uint64_t &begin, uint64_t &end);
     thread_local int t_bandY0 = INT_MIN;
     thread_local int t_bandY1 = INT_MAX;
     bool inBandMode() { return t_bandY0 != INT_MIN; }
@@ -560,6 +564,31 @@ void GSCpuBackend::ResetUnlocked()
     m_localToHostReadPos = 0u;
 }
 
+namespace
+{
+    // PS2X_GS_PROFILE=1: per-second split of raster time (serial feedback draws
+    // vs banded parallel flushes) and how often the queue is flushed.
+    struct GsProfile
+    {
+        bool on = std::getenv("PS2X_GS_PROFILE") != nullptr;
+        double serial = 0, banded = 0;
+        uint64_t serialDraws = 0, bandedDraws = 0, flushes = 0, hazardFlushes = 0;
+        std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+        void report()
+        {
+            const auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration<double>(now - last).count() < 1.0)
+                return;
+            last = now;
+            std::fprintf(stderr, "[gsprof] serial=%.0fms (%llu draws) banded=%.0fms (%llu draws, %llu flushes, %llu hazard)\n",
+                         serial * 1000, (unsigned long long)serialDraws, banded * 1000, (unsigned long long)bandedDraws,
+                         (unsigned long long)flushes, (unsigned long long)hazardFlushes);
+            serial = banded = 0;
+            serialDraws = bandedDraws = flushes = hazardFlushes = 0;
+        }
+    } g_gsProfile;
+}
+
 void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -627,7 +656,14 @@ void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
     {
         // Feedback draws read what earlier draws wrote: keep them serial.
         flushPendingUnlocked();
+        const auto t0 = std::chrono::steady_clock::now();
         DrawPrimitive(batch);
+        if (g_gsProfile.on)
+        {
+            g_gsProfile.serial += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            ++g_gsProfile.serialDraws;
+            g_gsProfile.report();
+        }
         return;
     }
     // Bands run in parallel, so a draw must not sample memory that an earlier
@@ -646,7 +682,11 @@ void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
     if (overlapsAny(m_lastTexRange, m_pendingWrites) ||
         overlapsAny(m_lastFrameRange, m_pendingReads) ||
         overlapsAny(m_lastZRange, m_pendingReads))
+    {
+        if (g_gsProfile.on && !m_pending.empty())
+            ++g_gsProfile.hazardFlushes;
         flushPendingUnlocked();
+    }
     auto addRange = [](std::vector<std::pair<uint64_t, uint64_t>> &list, const std::pair<uint64_t, uint64_t> &range)
     {
         if (range.second <= range.first)
@@ -665,6 +705,12 @@ void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
     addRange(m_pendingWrites, m_lastFrameRange);
     addRange(m_pendingWrites, m_lastZRange);
     addRange(m_pendingReads, m_lastTexRange);
+    if (m_clutChanged || m_clutVersions.empty())
+    {
+        m_clutVersions.push_back(m_clut);
+        m_clutChanged = false;
+    }
+    m_pendingClut.push_back(static_cast<uint32_t>(m_clutVersions.size() - 1u));
     m_pending.push_back(batch);
     if (m_pending.size() >= 4096u)
         flushPendingUnlocked();
@@ -718,24 +764,54 @@ void GSCpuBackend::flushPendingUnlocked()
             m_bandBins[b].push_back(index);
     }
     m_textureDirectRead = true;
+    const auto t0 = std::chrono::steady_clock::now();
+    if (g_gsProfile.on)
+    {
+        ++g_gsProfile.flushes;
+        g_gsProfile.bandedDraws += m_pending.size();
+    }
     GSParallelFor::instance().run(bands, [this](int band)
                                   {
                                       t_bandY0 = band * kBandRows;
                                       t_bandY1 = t_bandY0 + kBandRows - 1;
                                       for (const uint32_t index : m_bandBins[band])
+                                      {
+                                          t_clut = m_clutVersions[m_pendingClut[index]].data();
                                           DrawPrimitive(m_pending[index]);
+                                      }
+                                      t_clut = nullptr;
                                       t_bandY0 = INT_MIN;
                                       t_bandY1 = INT_MAX;
                                   });
+    if (g_gsProfile.on)
+    {
+        g_gsProfile.banded += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        g_gsProfile.report();
+    }
     m_pending.clear();
+    m_pendingClut.clear();
+    m_clutVersions.clear();
+    m_clutChanged = true;
     m_pendingWrites.clear();
     m_pendingReads.clear();
+}
+
+bool GSCpuBackend::pendingTouches(uint64_t begin, uint64_t end) const
+{
+    if (m_pending.empty() || end <= begin)
+        return false;
+    for (const auto &range : m_pendingWrites)
+        if (begin < range.second && range.first < end)
+            return true;
+    for (const auto &range : m_pendingReads)
+        if (begin < range.second && range.first < end)
+            return true;
+    return false;
 }
 
 void GSCpuBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
-    flushPendingUnlocked();
     if (!m_vram || (!isFourBitIndexedPsm(tex0.psm) && !isEightBitIndexedPsm(tex0.psm)))
         return;
 
@@ -767,7 +843,19 @@ void GSCpuBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
         return;
     }
 
+    // The CLUT is read from VRAM now: queued draws must not still be writing it.
+    uint64_t cb = 0, ce = 0;
+    bufferRange(tex0.cbp * 256u, 64u * std::max<uint32_t>(1u, texclut.cbw), 16u + texclut.cov, tex0.cpsm, cb, ce);
+    for (const auto &range : m_pendingWrites)
+    {
+        if (cb < range.second && range.first < ce)
+        {
+            flushPendingUnlocked();
+            break;
+        }
+    }
     LoadClutUnlocked(tex0, texclut);
+    m_clutChanged = true;
 }
 
 void GSCpuBackend::LoadClutUnlocked(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
@@ -826,8 +914,9 @@ void GSCpuBackend::Flush()
 
 void GSCpuBackend::TextureFlush()
 {
+    // Queued draws read VRAM directly and uploads flush on overlap, so only
+    // the page cache (used by serial feedback draws) needs dropping.
     std::lock_guard<std::mutex> lock(m_mutex);
-    flushPendingUnlocked();
     m_texturePageCache.Invalidate();
 }
 
@@ -1380,6 +1469,7 @@ uint32_t GSCpuBackend::LookupCLUT(const GSDrawState &state,
                                   uint8_t csa,
                                   uint8_t sourcePsm)
 {
+    const uint16_t *clut = t_clut ? t_clut : m_clut.data();
     const bool sixteenBit = cpsm == GS_PSM_CT16 || cpsm == GS_PSM_CT16S;
     const uint32_t csaMask = sixteenBit ? 0x1Fu : 0x0Fu;
     const uint32_t clutBase = (static_cast<uint32_t>(csa) & csaMask) << 4u;
@@ -1398,17 +1488,17 @@ uint32_t GSCpuBackend::LookupCLUT(const GSDrawState &state,
     {
     case GS_PSM_CT32:
     {
-        const uint32_t raw = static_cast<uint32_t>(m_clut[clutIndex]) | (static_cast<uint32_t>(m_clut[clutIndex + 256u]) << 16u);
+        const uint32_t raw = static_cast<uint32_t>(clut[clutIndex]) | (static_cast<uint32_t>(clut[clutIndex + 256u]) << 16u);
         return applyTexa(state.texa, cpsm, raw);
     }
     case GS_PSM_CT24:
     {
-        const uint32_t raw = static_cast<uint32_t>(m_clut[clutIndex]) | (static_cast<uint32_t>(m_clut[clutIndex + 256u]) << 16u);
+        const uint32_t raw = static_cast<uint32_t>(clut[clutIndex]) | (static_cast<uint32_t>(clut[clutIndex + 256u]) << 16u);
         return applyTexa(state.texa, cpsm, raw & 0x00FFFFFFu);
     }
     case GS_PSM_CT16:
     case GS_PSM_CT16S:
-        return applyTexa(state.texa, cpsm, Rgba5551ToRgba8888(m_clut[clutIndex]));
+        return applyTexa(state.texa, cpsm, Rgba5551ToRgba8888(clut[clutIndex]));
     default:
         break;
     }
@@ -1852,7 +1942,21 @@ void GSCpuBackend::DrawLine(const GSPrimitiveBatch &batch)
 void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
-    flushPendingUnlocked();
+    if (command.direction == 0u)
+    {
+        // Uploads only have to wait for queued draws touching the destination.
+        bufferRange(command.bitbltbuf.dbp * 256u, std::max<uint32_t>(1u, command.bitbltbuf.dbw) * 64u,
+                    static_cast<uint32_t>(command.trxpos.dsay) + command.trxreg.rrh, command.bitbltbuf.dpsm,
+                    m_uploadRange.first, m_uploadRange.second);
+        // dsax can push the rectangle one page column further.
+        m_uploadRange.second += 8192u;
+        if (pendingTouches(m_uploadRange.first, m_uploadRange.second))
+            flushPendingUnlocked();
+    }
+    else
+    {
+        flushPendingUnlocked();
+    }
     m_transfer = command;
     m_transferState.x = command.trxpos.dsax;
     m_transferState.y = command.trxpos.dsay;
@@ -1870,7 +1974,8 @@ void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
 void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
-    flushPendingUnlocked();
+    if (pendingTouches(m_uploadRange.first, m_uploadRange.second))
+        flushPendingUnlocked();
     if (!data || sizeBytes == 0u || !m_vram || m_transferState.direction != 0u)
         return;
     if (m_transfer.trxreg.rrw == 0u || m_transfer.trxreg.rrh == 0u || m_transferState.totalPixels == 0u)

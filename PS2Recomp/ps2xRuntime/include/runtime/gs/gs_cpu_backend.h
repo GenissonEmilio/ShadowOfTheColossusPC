@@ -76,6 +76,14 @@ private:
     GSMem::TexturePageCache m_texturePageCache;
     bool m_textureDirectRead = false;
     std::vector<GSPrimitiveBatch> m_pending;
+    // CLUT contents each queued draw was submitted with: loading a new CLUT
+    // starts a new version instead of flushing the queue.
+    std::vector<std::array<uint16_t, 512>> m_clutVersions;
+    std::vector<uint32_t> m_pendingClut;
+    bool m_clutChanged = true;
+    std::pair<uint64_t, uint64_t> m_uploadRange{0u, 0u}; // destination of the host->local transfer
+    // True when queued draws read or write VRAM bytes in [begin, end).
+    bool pendingTouches(uint64_t begin, uint64_t end) const;
     std::vector<std::vector<uint32_t>> m_bandBins;
     // VRAM byte ranges written by queued draws, and the ranges of the draw
     // being submitted (set by UpdateTextureReadMode).
