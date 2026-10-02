@@ -1,3 +1,19 @@
+#include <chrono>
+#include "runtime/ps2_stats.h"
+#include "runtime/gs/gs_parallel.h"
+#include <climits>
+
+namespace
+{
+    // Row band rendered by the current thread while flushing the primitive
+    // queue in parallel (full range when drawing immediately).
+    thread_local int t_bandY0 = INT_MIN;
+    thread_local int t_bandY1 = INT_MAX;
+    bool inBandMode() { return t_bandY0 != INT_MIN; }
+}
+#include <set>
+#include <sstream>
+#include <cstdlib>
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/gs/ps2_gs_common.h"
 #include "runtime/gs/ps2_gs_psmct16.h"
@@ -527,6 +543,7 @@ void GSCpuBackend::Initialize(uint8_t *vram, uint32_t vramSize)
 void GSCpuBackend::Reset()
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+    flushPendingUnlocked();
     ResetUnlocked();
 }
 
@@ -548,12 +565,177 @@ void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_vram || batch.vertexCount == 0u)
         return;
-    DrawPrimitive(batch);
+    ps2_stats::gsPrims[static_cast<uint32_t>(batch.state.prim.type) & 7u].fetch_add(1, std::memory_order_relaxed);
+    // PS2X_GS_SKIP_TBP=<tbp0>: debugging aid, drop textured draws from that address.
+    static const long skipTbp = std::getenv("PS2X_GS_SKIP_TBP") ? std::atol(std::getenv("PS2X_GS_SKIP_TBP")) : -1;
+    if (skipTbp >= 0 && batch.state.prim.tme && batch.state.context.tex0.tbp0 == static_cast<uint32_t>(skipTbp))
+        return;
+
+    // PS2X_GS_TRACE_ALL_AT=<seconds>: log every primitive (type, target, texture,
+    // bounding box) for a short window starting at that time.
+    static const double traceAllAt = std::getenv("PS2X_GS_TRACE_ALL_AT") ? std::atof(std::getenv("PS2X_GS_TRACE_ALL_AT")) : -1.0;
+    if (traceAllAt >= 0.0)
+    {
+        static const auto start = std::chrono::steady_clock::now();
+        static int logged = 0;
+        const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        if (t >= traceAllAt && logged < 20000)
+        {
+            ++logged;
+            const auto &c = batch.state.context;
+            float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+            for (uint32_t i = 0; i < batch.vertexCount; ++i)
+            {
+                x0 = std::min(x0, batch.vertices[i].x - (c.xyoffset.ofx >> 4));
+                y0 = std::min(y0, batch.vertices[i].y - (c.xyoffset.ofy >> 4));
+                x1 = std::max(x1, batch.vertices[i].x - (c.xyoffset.ofx >> 4));
+                y1 = std::max(y1, batch.vertices[i].y - (c.xyoffset.ofy >> 4));
+            }
+            std::fprintf(stderr, "[gs:all] type=%u fbp=%u tme=%u tbp=%u psm=0x%x abe=%u bbox=(%.0f,%.0f)-(%.0f,%.0f) rgba=(%u,%u,%u,%u)\n",
+                         (unsigned)batch.state.prim.type, c.frame.fbp, (unsigned)batch.state.prim.tme, c.tex0.tbp0, (unsigned)c.tex0.psm,
+                         (unsigned)batch.state.prim.abe, x0, y0, x1, y1, batch.vertices[0].r, batch.vertices[0].g, batch.vertices[0].b, batch.vertices[0].a);
+        }
+    }
+    // PS2X_GS_TRACE_AT=<seconds>: log the sprite draws (post-processing passes)
+    // issued during a short window starting at that time.
+    static const double traceAt = std::getenv("PS2X_GS_TRACE_AT") ? std::atof(std::getenv("PS2X_GS_TRACE_AT")) : -1.0;
+    if (traceAt >= 0.0 && batch.state.prim.type == GS_PRIM_SPRITE)
+    {
+        static const auto start = std::chrono::steady_clock::now();
+        static int logged = 0;
+        const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        if (t >= traceAt && logged < 3000)
+        {
+            ++logged;
+            const auto &c = batch.state.context;
+            const GSVertex &a0 = batch.vertices[0], &a1 = batch.vertices[1];
+            std::fprintf(stderr,
+                         "[gs:spr] z0=%.0f z1=%.0f zpsm=0x%x fbp=%u fbw=%u fpsm=0x%x fbmsk=0x%x zbuf=0x%llx tme=%u fst=%u abe=%u tbp=%u tbw=%u psm=0x%x tw=%u th=%u tfx=%u tcc=%u tex1=0x%llx clamp=0x%llx alpha=0x%llx test=0x%llx sc=(%u,%u,%u,%u) ofs=(%u,%u) xy=(%.1f,%.1f)-(%.1f,%.1f) uv=(%u,%u)-(%u,%u) st=(%.4f,%.4f)-(%.4f,%.4f) rgba=(%u,%u,%u,%u)\n",
+                         a0.z, a1.z, c.zbuf.psm, c.frame.fbp, c.frame.fbw, c.frame.psm, c.frame.fbmsk, (unsigned long long)c.zbuf.zbp | ((unsigned long long)c.zbuf.zmask << 32),
+                         (unsigned)batch.state.prim.tme, (unsigned)batch.state.prim.fst, (unsigned)batch.state.prim.abe,
+                         c.tex0.tbp0, (unsigned)c.tex0.tbw, (unsigned)c.tex0.psm, (unsigned)c.tex0.tw, (unsigned)c.tex0.th, (unsigned)c.tex0.tfx, (unsigned)c.tex0.tcc,
+                         (unsigned long long)c.tex1, (unsigned long long)c.clamp, (unsigned long long)c.alpha, (unsigned long long)c.test,
+                         c.scissor.x0, c.scissor.y0, c.scissor.x1, c.scissor.y1, c.xyoffset.ofx >> 4, c.xyoffset.ofy >> 4,
+                         a0.x, a0.y, a1.x, a1.y, a0.u >> 4, a0.v >> 4, a1.u >> 4, a1.v >> 4, a0.s / a0.q, a0.t / a0.q, a1.s / a1.q, a1.t / a1.q,
+                         a0.r, a0.g, a0.b, a0.a);
+        }
+    }
+
+    static const bool immediate = std::getenv("PS2X_GS_IMMEDIATE") != nullptr;
+    UpdateTextureReadMode(batch);
+    if (immediate || !m_textureDirectRead)
+    {
+        // Feedback draws read what earlier draws wrote: keep them serial.
+        flushPendingUnlocked();
+        DrawPrimitive(batch);
+        return;
+    }
+    // Bands run in parallel, so a draw must not sample memory that an earlier
+    // queued draw is still writing (render-to-texture passes like the bloom
+    // downsample): finish the queued draws first.
+    // Likewise a draw must not overwrite memory a queued draw still samples.
+    auto overlapsAny = [](const std::pair<uint64_t, uint64_t> &range, const std::vector<std::pair<uint64_t, uint64_t>> &list)
+    {
+        if (range.second <= range.first)
+            return false;
+        for (const auto &other : list)
+            if (range.first < other.second && other.first < range.second)
+                return true;
+        return false;
+    };
+    if (overlapsAny(m_lastTexRange, m_pendingWrites) ||
+        overlapsAny(m_lastFrameRange, m_pendingReads) ||
+        overlapsAny(m_lastZRange, m_pendingReads))
+        flushPendingUnlocked();
+    auto addRange = [](std::vector<std::pair<uint64_t, uint64_t>> &list, const std::pair<uint64_t, uint64_t> &range)
+    {
+        if (range.second <= range.first)
+            return;
+        for (auto &existing : list)
+        {
+            if (range.first <= existing.second && existing.first <= range.second)
+            {
+                existing.first = std::min(existing.first, range.first);
+                existing.second = std::max(existing.second, range.second);
+                return;
+            }
+        }
+        list.push_back(range);
+    };
+    addRange(m_pendingWrites, m_lastFrameRange);
+    addRange(m_pendingWrites, m_lastZRange);
+    addRange(m_pendingReads, m_lastTexRange);
+    m_pending.push_back(batch);
+    if (m_pending.size() >= 4096u)
+        flushPendingUnlocked();
+}
+
+void GSCpuBackend::flushPendingUnlocked()
+{
+    if (m_pending.empty())
+        return;
+    constexpr int kBandRows = 16;
+    // Bin every primitive into the bands its (conservative) Y range touches,
+    // so each band only walks the primitives that can draw into it.
+    int maxY = 0;
+    for (const auto &batch : m_pending)
+        maxY = std::max<int>(maxY, batch.state.context.scissor.y1);
+    const int bands = maxY / kBandRows + 1;
+    if (m_bandBins.size() < static_cast<size_t>(bands))
+        m_bandBins.resize(bands);
+    for (int b = 0; b < bands; ++b)
+        m_bandBins[b].clear();
+    for (uint32_t index = 0; index < m_pending.size(); ++index)
+    {
+        const GSPrimitiveBatch &batch = m_pending[index];
+        const auto &ctx = batch.state.context;
+        int y0 = static_cast<int>(ctx.scissor.y0);
+        int y1 = static_cast<int>(ctx.scissor.y1);
+        if (batch.vertexCount > 0)
+        {
+            const float ofy = static_cast<float>(ctx.xyoffset.ofy >> 4);
+            float lo = batch.vertices[0].y, hi = batch.vertices[0].y;
+            for (uint32_t v = 1; v < batch.vertexCount; ++v)
+            {
+                lo = std::min(lo, batch.vertices[v].y);
+                hi = std::max(hi, batch.vertices[v].y);
+            }
+            // Generous margins: rasterizers round, and lines/points have width.
+            y0 = std::max(y0, static_cast<int>(std::floor(lo - ofy)) - 2);
+            y1 = std::min(y1, static_cast<int>(std::ceil(hi - ofy)) + 2);
+        }
+        static const bool noBinning = std::getenv("PS2X_GS_NOBIN") != nullptr;
+        if (noBinning)
+        {
+            y0 = 0;
+            y1 = maxY;
+        }
+        if (y1 < y0 || y1 < 0)
+            continue;
+        const int b0 = std::max(0, y0 / kBandRows);
+        const int b1 = std::min(bands - 1, y1 / kBandRows);
+        for (int b = b0; b <= b1; ++b)
+            m_bandBins[b].push_back(index);
+    }
+    m_textureDirectRead = true;
+    GSParallelFor::instance().run(bands, [this](int band)
+                                  {
+                                      t_bandY0 = band * kBandRows;
+                                      t_bandY1 = t_bandY0 + kBandRows - 1;
+                                      for (const uint32_t index : m_bandBins[band])
+                                          DrawPrimitive(m_pending[index]);
+                                      t_bandY0 = INT_MIN;
+                                      t_bandY1 = INT_MAX;
+                                  });
+    m_pending.clear();
+    m_pendingWrites.clear();
+    m_pendingReads.clear();
 }
 
 void GSCpuBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+    flushPendingUnlocked();
     if (!m_vram || (!isFourBitIndexedPsm(tex0.psm) && !isEightBitIndexedPsm(tex0.psm)))
         return;
 
@@ -638,23 +820,27 @@ void GSCpuBackend::LoadClutUnlocked(const GSTex0Reg &tex0, const GSTexClutReg &t
 
 void GSCpuBackend::Flush()
 {
-    // CPU backend is immediate. GPU backends may submit command buffers here.
+    std::lock_guard<std::mutex> lock(m_mutex);
+    flushPendingUnlocked();
 }
 
 void GSCpuBackend::TextureFlush()
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+    flushPendingUnlocked();
     m_texturePageCache.Invalidate();
 }
 
 void GSCpuBackend::Sync(GSSyncReason)
 {
-    // CPU backend is immediate. GPU backends may wait on fences/readbacks here.
+    std::lock_guard<std::mutex> lock(m_mutex);
+    flushPendingUnlocked();
 }
 
 uint32_t GSCpuBackend::ReadVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+    const_cast<GSCpuBackend *>(this)->flushPendingUnlocked();
     return ReadVramUnlocked(psm, base, bw, x, y);
 }
 
@@ -670,12 +856,109 @@ uint32_t GSCpuBackend::ReadTextureVramUnlocked(uint32_t psm, uint32_t base, uint
     if (!m_vram)
         return 0u;
 
+    if (m_textureDirectRead)
+        return ReadVramUnlocked(psm, base, bw, x, y);
     return GSMem::ReadTexture(m_texturePageCache, m_vram, psm, base, bw, x, y);
+}
+
+namespace
+{
+    // Page geometry (in pixels) of each storage format; a GS page is 8 KiB.
+    void pageDims(uint32_t psm, uint32_t &w, uint32_t &h)
+    {
+        switch (psm & 0x3Fu)
+        {
+        case 0x02: case 0x0A: case 0x32: case 0x3A: w = 64; h = 64; break;   // 16-bit
+        case 0x13: w = 128; h = 64; break;                                   // T8
+        case 0x14: w = 128; h = 128; break;                                  // T4
+        default: w = 64; h = 32; break;                                      // 32/24-bit, T8H, T4HL/HH
+        }
+    }
+
+    // VRAM byte range [begin, end) touched by rows [0, heightPixels) of a buffer.
+    void bufferRange(uint32_t baseBytes, uint32_t bufferWidthPixels, uint32_t heightPixels, uint32_t psm,
+                     uint64_t &begin, uint64_t &end)
+    {
+        uint32_t pw = 0, ph = 0;
+        pageDims(psm, pw, ph);
+        const uint64_t pagesPerRow = std::max<uint32_t>(1u, (bufferWidthPixels + pw - 1u) / pw);
+        uint64_t pageRows = (std::max<uint32_t>(heightPixels, 1u) + ph - 1u) / ph;
+        if (baseBytes % 8192u != 0u)
+            ++pageRows; // a non page-aligned base can spill into one more page row
+        begin = baseBytes;
+        end = begin + pagesPerRow * pageRows * 8192u;
+    }
+}
+
+void GSCpuBackend::UpdateTextureReadMode(const GSPrimitiveBatch &batch)
+{
+    // The page cache only matters when a draw samples memory it is also writing
+    // (feedback effects). Otherwise read VRAM directly and skip the page copies.
+    const GSDrawState &state = batch.state;
+    const auto &ctx = state.context;
+    if (!state.prim.tme || batch.vertexCount == 0u)
+    {
+        m_textureDirectRead = true;
+        m_lastTexRange = {0u, 0u};
+        // Untextured draws still write: track the whole frame/Z area.
+        const uint32_t frameW = std::max<uint32_t>(1u, ctx.frame.fbw) * 64u;
+        const uint32_t rows = static_cast<uint32_t>(ctx.scissor.y1) + 1u;
+        uint64_t fb = 0, fe = 0, zb = 0, ze = 0;
+        bufferRange(ctx.frame.fbp * 8192u, frameW, rows, ctx.frame.psm, fb, fe);
+        bufferRange(ctx.zbuf.zbp * 8192u, frameW, rows, ctx.zbuf.psm | 0x30u, zb, ze);
+        const bool zWrites = !ctx.zbuf.zmask && ((ctx.test >> 16) & 1u) != 0u;
+        m_lastFrameRange = {fb, fe};
+        m_lastZRange = zWrites ? std::make_pair(zb, ze) : std::make_pair<uint64_t, uint64_t>(0u, 0u);
+        return;
+    }
+    const uint32_t texW = 1u << std::min<uint32_t>(ctx.tex0.tw, 10u);
+    const uint32_t texH = 1u << std::min<uint32_t>(ctx.tex0.th, 10u);
+    float maxV = 0.0f, maxY = 0.0f;
+    for (uint32_t i = 0; i < batch.vertexCount && i < batch.vertices.size(); ++i)
+    {
+        const GSVertex &vtx = batch.vertices[i];
+        const float v = state.prim.fst ? static_cast<float>(vtx.v) / 16.0f
+                                       : (vtx.q != 0.0f ? vtx.t / vtx.q : vtx.t) * static_cast<float>(texH);
+        maxV = std::max(maxV, v);
+        maxY = std::max(maxY, vtx.y - static_cast<float>(ctx.xyoffset.ofy >> 4));
+    }
+    // Rows actually sampled (+2 for bilinear neighbours / rounding), clamped to the texture.
+    const uint32_t texRows = std::min<uint32_t>(texH, static_cast<uint32_t>(std::ceil(std::max(0.0f, maxV))));
+    const uint32_t drawRows = std::min<uint32_t>(static_cast<uint32_t>(ctx.scissor.y1) + 1u,
+                                                 static_cast<uint32_t>(std::max(0.0f, maxY)) + 2u);
+    uint64_t tb = 0, te = 0, fb = 0, fe = 0, zb = 0, ze = 0;
+    bufferRange(ctx.tex0.tbp0 * 256u, std::max<uint32_t>(texW, ctx.tex0.tbw * 64u), texRows, ctx.tex0.psm, tb, te);
+    const uint32_t frameW = std::max<uint32_t>(1u, ctx.frame.fbw) * 64u;
+    bufferRange(ctx.frame.fbp * 8192u, frameW, drawRows, ctx.frame.psm, fb, fe);
+    bufferRange(ctx.zbuf.zbp * 8192u, frameW, drawRows, ctx.zbuf.psm | 0x30u, zb, ze);
+    auto overlaps = [](uint64_t a0, uint64_t a1, uint64_t b0, uint64_t b1)
+    { return a0 < b1 && b0 < a1; };
+    const bool zWrites = !ctx.zbuf.zmask && ((ctx.test >> 16) & 1u) != 0u; // TEST.ZTE
+    m_textureDirectRead = !overlaps(tb, te, fb, fe) && !(zWrites && overlaps(tb, te, zb, ze));
+    m_lastTexRange = {tb, te};
+    m_lastFrameRange = {fb, fe};
+    m_lastZRange = zWrites ? std::make_pair(zb, ze) : std::make_pair<uint64_t, uint64_t>(0u, 0u);
+    if (!m_textureDirectRead)
+        m_texturePageCache.Invalidate();
+    static const bool trace = std::getenv("PS2X_TRACE_TEXREAD") != nullptr;
+    if (trace)
+    {
+        static std::set<std::string> seen;
+        std::ostringstream key;
+        key << "tbp=" << ctx.tex0.tbp0 << " tbw=" << static_cast<int>(ctx.tex0.tbw) << " psm=0x" << std::hex << static_cast<int>(ctx.tex0.psm) << std::dec
+            << " tw=" << static_cast<int>(ctx.tex0.tw) << " th=" << static_cast<int>(ctx.tex0.th)
+            << " fbp=" << ctx.frame.fbp << " fbw=" << ctx.frame.fbw << " zbp=" << ctx.zbuf.zbp << " zmask=" << ctx.zbuf.zmask
+            << " y1=" << ctx.scissor.y1 << " direct=" << m_textureDirectRead
+            << " tex=[" << std::hex << tb << "," << te << ") frame=[" << fb << "," << fe << ") z=[" << zb << "," << ze << ")" << std::dec;
+        if (seen.insert(key.str()).second)
+            std::cerr << "[gs:texread] " << key.str() << std::endl;
+    }
 }
 
 void GSCpuBackend::WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+    flushPendingUnlocked();
     WriteVramUnlocked(psm, base, bw, x, y, value);
 }
 
@@ -689,6 +972,7 @@ void GSCpuBackend::WriteVramUnlocked(uint32_t psm, uint32_t base, uint32_t bw, u
 void GSCpuBackend::SnapshotVram(std::vector<uint8_t> &out) const
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+    const_cast<GSCpuBackend *>(this)->flushPendingUnlocked();
     if (!m_vram || m_vramSize == 0u)
     {
         out.clear();
@@ -701,6 +985,7 @@ void GSCpuBackend::SnapshotVram(std::vector<uint8_t> &out) const
 GSTransferSnapshot GSCpuBackend::GetTransferSnapshot() const
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+    const_cast<GSCpuBackend *>(this)->flushPendingUnlocked();
     GSTransferSnapshot result = m_transferState;
     result.localToHostPendingBytes = m_localToHostReadPos < m_localToHostBuffer.size()
                                          ? m_localToHostBuffer.size() - m_localToHostReadPos
@@ -712,6 +997,58 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
 {
     const GSDrawState &state = batch.state;
     const auto &ctx = state.context;
+    if (!inBandMode())
+        UpdateTextureReadMode(batch);
+    // PS2X_TRACE_TEX: log each distinct textured-draw setup once.
+    static const bool traceTex = std::getenv("PS2X_TRACE_TEX") != nullptr;
+    // PS2X_TRACE_DRAW_TBP=<tbp0>: dump the vertices of the first draws using that texture.
+    static const char *traceDrawTbp = std::getenv("PS2X_TRACE_DRAW_TBP");
+    static const char *traceDrawPsm = std::getenv("PS2X_TRACE_DRAW_PSM");
+    static const double traceDrawAt = std::getenv("PS2X_TRACE_DRAW_AT") ? std::atof(std::getenv("PS2X_TRACE_DRAW_AT")) : 0.0;
+    static const auto traceDrawStart = std::chrono::steady_clock::now();
+    if (traceDrawTbp && state.prim.tme && ctx.tex0.tbp0 == static_cast<uint32_t>(std::atoi(traceDrawTbp)) &&
+        (!inBandMode() || t_bandY0 == 0) &&
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - traceDrawStart).count() >= traceDrawAt &&
+        (!traceDrawPsm || ctx.tex0.psm == static_cast<uint32_t>(std::strtoul(traceDrawPsm, nullptr, 0))))
+    {
+        static std::atomic<int> dumped{0};
+        if (dumped.fetch_add(1) < 400)
+        {
+            std::ostringstream line;
+            line << "[gs:draw] type=" << static_cast<uint32_t>(state.prim.type) << " psm=0x" << std::hex << static_cast<uint32_t>(ctx.tex0.psm) << std::dec
+                 << " tw=" << static_cast<uint32_t>(ctx.tex0.tw) << " test=0x" << std::hex << ctx.test << " alpha=0x" << ctx.alpha << std::dec << " fge=" << static_cast<uint32_t>(state.prim.fge);
+            for (uint32_t i = 0; i < batch.vertexCount; ++i)
+            {
+                const GSVertex &v = batch.vertices[i];
+                line << " | xy=(" << v.x << "," << v.y << ") z=" << v.z << " stq=(" << v.s << "," << v.t << "," << v.q << ") st/q=("
+                     << (v.q != 0.0f ? v.s / v.q : 0.0f) << "," << (v.q != 0.0f ? v.t / v.q : 0.0f) << ") rgba=("
+                     << static_cast<int>(v.r) << "," << static_cast<int>(v.g) << "," << static_cast<int>(v.b) << "," << static_cast<int>(v.a) << ")";
+            }
+            std::cerr << line.str() << std::endl;
+        }
+    }
+    if (traceTex)
+    {
+        static std::set<std::string> seen;
+        std::ostringstream key;
+        key << "fbp=" << ctx.frame.fbp << " fbw=" << ctx.frame.fbw << " fpsm=0x" << std::hex << static_cast<uint32_t>(ctx.frame.psm) << std::dec
+            << " fbmsk=0x" << std::hex << ctx.frame.fbmsk << std::dec << " tme=" << static_cast<uint32_t>(state.prim.tme) << " "
+            << "type=" << static_cast<uint32_t>(state.prim.type) << " fst=" << static_cast<uint32_t>(state.prim.fst)
+            << " tbp0=" << ctx.tex0.tbp0 << " tbw=" << static_cast<uint32_t>(ctx.tex0.tbw)
+            << " psm=0x" << std::hex << static_cast<uint32_t>(ctx.tex0.psm) << std::dec
+            << " tw=" << static_cast<uint32_t>(ctx.tex0.tw) << " th=" << static_cast<uint32_t>(ctx.tex0.th)
+            << " tcc=" << static_cast<uint32_t>(ctx.tex0.tcc) << " tfx=" << static_cast<uint32_t>(ctx.tex0.tfx)
+            << " cbp=" << ctx.tex0.cbp << " cpsm=0x" << std::hex << static_cast<uint32_t>(ctx.tex0.cpsm) << std::dec
+            << " csm=" << static_cast<uint32_t>(ctx.tex0.csm) << " csa=" << static_cast<uint32_t>(ctx.tex0.csa)
+            << " clamp=0x" << std::hex << ctx.clamp << std::dec;
+        if (seen.insert(key.str()).second)
+        {
+            std::cerr << "[gs:tex] " << key.str()
+                      << " uv0=(" << (batch.vertices[0].u >> 4) << "," << (batch.vertices[0].v >> 4) << ")"
+                      << " stq0=(" << batch.vertices[0].s << "," << batch.vertices[0].t << "," << batch.vertices[0].q << ")"
+                      << " xy0=(" << batch.vertices[0].x << "," << batch.vertices[0].y << ")" << std::endl;
+        }
+    }
     PS2_IF_AGRESSIVE_LOGS({
         const uint32_t primitiveIndex = s_debugPrimitiveCount.fetch_add(1u, std::memory_order_relaxed);
         if (primitiveIndex < 64u)
@@ -849,7 +1186,31 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
 void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog)
 {
     const auto &ctx = state.context;
+    // PS2X_PROBE="x,y,x2,y2,seconds": log every draw writing those two pixels
+    // of FRAME 224-ish buffers during a short window (debug aid).
+    static const struct Probe
+    {
+        int x0 = -1, y0 = -1, x1 = -1, y1 = -1;
+        double at = 0.0;
+        Probe()
+        {
+            if (const char *e = std::getenv("PS2X_PROBE"))
+                std::sscanf(e, "%d,%d,%d,%d,%lf", &x0, &y0, &x1, &y1, &at);
+        }
+    } probe;
+    if (__builtin_expect(probe.x0 >= 0, 0) && ((x == probe.x0 && y == probe.y0) || (x == probe.x1 && y == probe.y1)))
+    {
+        static const auto start = std::chrono::steady_clock::now();
+        static std::atomic<int> logged{0};
+        const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        if (t >= probe.at && logged.fetch_add(1) < 600)
+            std::fprintf(stderr, "[probe] (%d,%d) fbp=%u fpsm=0x%x prim=%u tme=%u abe=%u tbp=%u tpsm=0x%x alpha=0x%llx test=0x%llx fbmsk=0x%x in=(%u,%u,%u,%u)\n",
+                         x, y, ctx.frame.fbp, ctx.frame.psm, (unsigned)state.prim.type, (unsigned)state.prim.tme, (unsigned)state.prim.abe,
+                         ctx.tex0.tbp0, (unsigned)ctx.tex0.psm, (unsigned long long)ctx.alpha, (unsigned long long)ctx.test, ctx.frame.fbmsk, r, g, b, a);
+    }
     if (x < ctx.scissor.x0 || x > ctx.scissor.x1 || y < ctx.scissor.y0 || y > ctx.scissor.y1)
+        return;
+    if (y < t_bandY0 || y > t_bandY1)
         return;
 
     if (state.prim.fge)
@@ -1166,26 +1527,24 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
     const GSVertex &v1 = batch.vertices[1];
     const auto &ctx = state.context;
 
-    int ofx = ctx.xyoffset.ofx >> 4;
-    int ofy = ctx.xyoffset.ofy >> 4;
-
-    int x0 = static_cast<int>(v0.x) - ofx;
-    int y0 = static_cast<int>(v0.y) - ofy;
-    int x1 = static_cast<int>(v1.x) - ofx;
-    int y1 = static_cast<int>(v1.y) - ofy;
+    // GS rasterization: pixel centres are at integer coordinates and a sprite
+    // covers ceil(x0) <= x < ceil(x1) (likewise in y), using the exact 12.4
+    // positions. Texture coordinates are interpolated from those positions,
+    // which is what half-pixel offsets in downsample/blur passes rely on.
+    const float ofx = static_cast<float>(ctx.xyoffset.ofx) / 16.0f;
+    const float ofy = static_cast<float>(ctx.xyoffset.ofy) / 16.0f;
+    const float sx0 = v0.x - ofx;
+    const float sy0 = v0.y - ofy;
+    const float sx1 = v1.x - ofx;
+    const float sy1 = v1.y - ofy;
     u32 z1 = static_cast<u32>(v1.z);
 
-    if (x0 > x1)
-        std::swap(x0, x1);
-    if (y0 > y1)
-        std::swap(y0, y1);
-
-    const int unclippedX0 = x0;
-    const int unclippedY0 = y0;
-    const int spanX = std::max(1, x1 - x0);
-    const int spanY = std::max(1, y1 - y0);
-    const int unclippedX1 = unclippedX0 + spanX - 1;
-    const int unclippedY1 = unclippedY0 + spanY - 1;
+    const int unclippedX0 = static_cast<int>(std::ceil(std::min(sx0, sx1)));
+    const int unclippedY0 = static_cast<int>(std::ceil(std::min(sy0, sy1)));
+    const int unclippedX1 = static_cast<int>(std::ceil(std::max(sx0, sx1))) - 1;
+    const int unclippedY1 = static_cast<int>(std::ceil(std::max(sy0, sy1))) - 1;
+    if (unclippedX1 < unclippedX0 || unclippedY1 < unclippedY0)
+        return;
 
     // If the sprite rectangle is fully outside scissor, nothing should render.
     if (unclippedX1 < ctx.scissor.x0 || unclippedX0 > ctx.scissor.x1 ||
@@ -1195,7 +1554,13 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
     const int drawX0 = clampInt(unclippedX0, ctx.scissor.x0, ctx.scissor.x1);
     const int drawY0 = clampInt(unclippedY0, ctx.scissor.y0, ctx.scissor.y1);
     const int drawX1 = clampInt(unclippedX1, ctx.scissor.x0, ctx.scissor.x1);
-    const int drawY1 = clampInt(unclippedY1, ctx.scissor.y0, ctx.scissor.y1);
+    const int drawY1Scissor = clampInt(unclippedY1, ctx.scissor.y0, ctx.scissor.y1);
+    const int drawY0Band = std::max(drawY0, t_bandY0);
+    const int drawY1 = std::min(drawY1Scissor, t_bandY1);
+    if (drawY0Band > drawY1)
+        return;
+    const float invDx = (sx1 != sx0) ? 1.0f / (sx1 - sx0) : 0.0f;
+    const float invDy = (sy1 != sy0) ? 1.0f / (sy1 - sy0) : 0.0f;
 
     const uint64_t alphaReg = ctx.alpha;
     const uint8_t alphaMode = static_cast<uint8_t>(alphaReg & 0xFFu);
@@ -1227,21 +1592,14 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
             v1f = (v1.t / q1) * static_cast<float>(texH);
         }
 
-        float spriteW = static_cast<float>(spanX);
-        float spriteH = static_cast<float>(spanY);
-        if (spriteW < 1.0f)
-            spriteW = 1.0f;
-        if (spriteH < 1.0f)
-            spriteH = 1.0f;
-
-        for (int y = drawY0; y <= drawY1; ++y)
+        auto drawRow = [&](int y)
         {
-            float ty = (static_cast<float>(y - unclippedY0) + 0.5f) / spriteH;
+            const float ty = (static_cast<float>(y) - sy0) * invDy;
             float texVf = v0f + (v1f - v0f) * ty;
 
             for (int x = drawX0; x <= drawX1; ++x)
             {
-                float tx = (static_cast<float>(x - unclippedX0) + 0.5f) / spriteW;
+                const float tx = (static_cast<float>(x) - sx0) * invDx;
                 float texUf = u0f + (u1f - u0f) * tx;
                 uint32_t texel = 0xFFFF00FFu;
                 if (state.prim.fst)
@@ -1265,14 +1623,41 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                 const TextureCombineResult color = combineTexture(tex, r, g, b, a, tr, tg, tb, ta);
                 WritePixel(state, x, y, z1, color.r, color.g, color.b, color.a, v1.fog);
             }
-        }
+        };
+        drawRowsParallel(drawY0Band, drawY1, drawX1 - drawX0 + 1, drawRow);
     }
     else
     {
-        for (int y = drawY0; y <= drawY1; ++y)
-            for (int x = drawX0; x <= drawX1; ++x)
-                WritePixel(state, x, y, z1, r, g, b, a, v1.fog);
+        drawRowsParallel(drawY0Band, drawY1, drawX1 - drawX0 + 1, [&](int y)
+                         {
+                             for (int x = drawX0; x <= drawX1; ++x)
+                                 WritePixel(state, x, y, z1, r, g, b, a, v1.fog);
+                         });
     }
+}
+
+void GSCpuBackend::drawRowsParallel(int y0, int y1, int rowWidth, const std::function<void(int)> &drawRow)
+{
+    // Rows write disjoint pixels, so large primitives can be split into bands.
+    // Feedback draws (texture overlapping the target) stay serial and use the
+    // page cache to keep their read-before-write behaviour.
+    const int rows = y1 - y0 + 1;
+    constexpr int kMinParallelPixels = 8192;
+    constexpr int kRowsPerBand = 8;
+    if (inBandMode() || rows <= kRowsPerBand || rows * rowWidth < kMinParallelPixels || !m_textureDirectRead)
+    {
+        for (int y = y0; y <= y1; ++y)
+            drawRow(y);
+        return;
+    }
+    const int bands = (rows + kRowsPerBand - 1) / kRowsPerBand;
+    GSParallelFor::instance().run(bands, [&](int band)
+                                  {
+                                      const int first = y0 + band * kRowsPerBand;
+                                      const int last = std::min(y1, first + kRowsPerBand - 1);
+                                      for (int y = first; y <= last; ++y)
+                                          drawRow(y);
+                                  });
 }
 
 void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
@@ -1302,6 +1687,10 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
     maxX = clampInt(maxX, ctx.scissor.x0, ctx.scissor.x1);
     minY = clampInt(minY, ctx.scissor.y0, ctx.scissor.y1);
     maxY = clampInt(maxY, ctx.scissor.y0, ctx.scissor.y1);
+    minY = std::max(minY, t_bandY0);
+    maxY = std::min(maxY, t_bandY1);
+    if (minY > maxY)
+        return;
 
     float denom = (fy1 - fy2) * (fx0 - fx2) + (fx2 - fx1) * (fy0 - fy2);
     if (std::fabs(denom) < 0.001f)
@@ -1463,6 +1852,7 @@ void GSCpuBackend::DrawLine(const GSPrimitiveBatch &batch)
 void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+    flushPendingUnlocked();
     m_transfer = command;
     m_transferState.x = command.trxpos.dsax;
     m_transferState.y = command.trxpos.dsay;
@@ -1480,6 +1870,7 @@ void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
 void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+    flushPendingUnlocked();
     if (!data || sizeBytes == 0u || !m_vram || m_transferState.direction != 0u)
         return;
     if (m_transfer.trxreg.rrw == 0u || m_transfer.trxreg.rrh == 0u || m_transferState.totalPixels == 0u)
@@ -1697,6 +2088,7 @@ void GSCpuBackend::PerformLocalToHostTransfer()
 uint32_t GSCpuBackend::ConsumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+    flushPendingUnlocked();
     if (!dst || maxBytes == 0u || m_localToHostReadPos >= m_localToHostBuffer.size())
         return 0u;
     const size_t count = std::min<size_t>(maxBytes, m_localToHostBuffer.size() - m_localToHostReadPos);
@@ -1709,6 +2101,7 @@ uint32_t GSCpuBackend::ConsumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
 bool GSCpuBackend::ClearFramebuffer(const GSContext &context, uint32_t rgba)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+    flushPendingUnlocked();
     if (!m_vram || context.frame.fbw == 0u)
         return false;
 
@@ -1862,7 +2255,11 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
     PresentationFrame result{};
     const GSPmodeState pmode = decodePmode(request.pmode);
     const GSSmode2State smode2 = decodeSMode2(request.smode2);
-    const bool fieldMode = smode2.interlaced && !smode2.frameMode;
+    // In FIELD mode the GS scans out every other line of a full-height frame
+    // per field. Showing a single field line-doubled halves the vertical
+    // resolution, so the whole frame is shown (weave) unless PS2X_GS_BOB=1.
+    static const bool bobFields = std::getenv("PS2X_GS_BOB") != nullptr;
+    const bool fieldMode = bobFields && smode2.interlaced && !smode2.frameMode;
     const bool oddField = (request.vsyncTick & 1ull) != 0ull;
     const GSFrameReg displayFrame1 = decodeDisplayFrame(request.dispfb1);
     const GSFrameReg displayFrame2 = decodeDisplayFrame(request.dispfb2);

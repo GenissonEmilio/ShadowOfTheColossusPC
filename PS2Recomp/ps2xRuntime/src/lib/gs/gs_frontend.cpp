@@ -1,5 +1,9 @@
+#include <chrono>
+#include <set>
+#include <cstdlib>
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/gs_cpu_backend.h"
+#include "runtime/gs/gs_async_backend.h"
 #include "ps2_log.h"
 #include "runtime/ps2_memory.h"
 #include <atomic>
@@ -105,8 +109,20 @@ namespace
 }
 
 
+namespace
+{
+    // PS2X_GS_SYNC=1 rasterizes on the calling thread (no GS raster thread).
+    std::unique_ptr<GSRasterBackend> makeDefaultBackend()
+    {
+        static const bool synchronous = std::getenv("PS2X_GS_SYNC") != nullptr;
+        if (synchronous)
+            return std::make_unique<GSCpuBackend>();
+        return std::make_unique<GSAsyncBackend>(std::make_unique<GSCpuBackend>());
+    }
+}
+
 GS::GS()
-    : m_backend(std::make_unique<GSCpuBackend>())
+    : m_backend(makeDefaultBackend())
 {
     reset();
 }
@@ -117,7 +133,7 @@ void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
     m_localMemorySize = vramSize;
     m_privRegs = privRegs;
     if (!m_backend)
-        m_backend = std::make_unique<GSCpuBackend>();
+        m_backend = makeDefaultBackend();
     m_backend->Initialize(vram, vramSize);
     reset();
 }
@@ -679,6 +695,22 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 
         uint32_t nloop = static_cast<uint32_t>(tagLo & 0x7FFF);
         uint8_t flg = static_cast<uint8_t>((tagLo >> 58) & 0x3);
+        // PS2X_GIF_TRACE_AT=<seconds>: log GIF tags (format/regs/prim) for a window.
+        static const double gifTraceAt = std::getenv("PS2X_GIF_TRACE_AT") ? std::atof(std::getenv("PS2X_GIF_TRACE_AT")) : -1.0;
+        if (gifTraceAt >= 0.0)
+        {
+            static const auto start = std::chrono::steady_clock::now();
+            static int logged = 0;
+            const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            if (t >= gifTraceAt && logged < 4000)
+            {
+                ++logged;
+                std::fprintf(stderr, "[gif] nloop=%u flg=%u nreg=%u regs=%016llx pre=%u prim=0x%llx eop=%u\n", nloop, flg,
+                             static_cast<unsigned>((tagLo >> 60) & 0xF), static_cast<unsigned long long>(tagHi),
+                             static_cast<unsigned>((tagLo >> 46) & 1), static_cast<unsigned long long>((tagLo >> 47) & 0x7FF),
+                             static_cast<unsigned>((tagLo >> 15) & 1));
+            }
+        }
         uint32_t nreg = static_cast<uint32_t>((tagLo >> 60) & 0xF);
         if (nreg == 0)
             nreg = 16;
@@ -1384,6 +1416,24 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
     {
         m_trxdir = static_cast<uint32_t>(value & 0x3);
 
+        static const bool traceTrx = std::getenv("PS2X_TRACE_TEX") != nullptr;
+        if (traceTrx)
+        {
+            static std::set<std::string> seenTrx;
+            std::ostringstream trxKey;
+            trxKey << m_trxdir << ":" << m_bitbltbuf.dbp << ":" << static_cast<uint32_t>(m_bitbltbuf.dpsm) << ":" << m_trxreg.rrw << "x" << m_trxreg.rrh;
+            if (seenTrx.insert(trxKey.str()).second)
+            {
+                std::cerr << "[gs:trx] dir=" << m_trxdir << " dbp=" << m_bitbltbuf.dbp
+                          << " dbw=" << static_cast<uint32_t>(m_bitbltbuf.dbw)
+                          << " dpsm=0x" << std::hex << static_cast<uint32_t>(m_bitbltbuf.dpsm) << std::dec
+                          << " sbp=" << m_bitbltbuf.sbp << " spsm=0x" << std::hex << static_cast<uint32_t>(m_bitbltbuf.spsm) << std::dec
+                          << " dsa=(" << m_trxpos.dsax << "," << m_trxpos.dsay << ")"
+                          << " ssa=(" << m_trxpos.ssax << "," << m_trxpos.ssay << ")"
+                          << " size=" << m_trxreg.rrw << "x" << m_trxreg.rrh << std::endl;
+            }
+        }
+
         if (m_backend)
         {
             GSTransferCommand command{};
@@ -1635,7 +1685,7 @@ uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
 void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
 {
     if (!backend)
-        backend = std::make_unique<GSCpuBackend>();
+        backend = makeDefaultBackend();
 
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
