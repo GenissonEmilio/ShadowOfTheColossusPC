@@ -1,10 +1,11 @@
 """List static (jal/j) callers of a function, recursively up to a depth.
 Usage: callers.py <name|0xaddr> [depth]"""
-import sys, bisect
+import os, sys, bisect
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
 from elfmini import Elf
-e = Elf('recomp/game/SOTC.elf')
-rows = [l.strip().split(",") for l in open('recomp/game/functions.csv').readlines()[1:]]
+GAME = os.path.join(os.environ.get('CELOSIA_BUILD', 'build'), 'recomp/game')
+e = Elf(f'{GAME}/SOTC.elf')
+rows = [l.strip().split(",") for l in open(f'{GAME}/functions.csv').readlines()[1:]]
 starts = [int(r[1], 16) for r in rows]
 byname = {r[0]: int(r[1], 16) for r in rows}
 def func_of(a):
