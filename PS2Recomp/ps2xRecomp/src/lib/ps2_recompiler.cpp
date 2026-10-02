@@ -1020,6 +1020,24 @@ namespace ps2recomp
                 }
             }
             m_codeGenerator->setRelocationCallNames(relocationCallNames);
+            if (!m_config.dynamicImmediatesPath.empty())
+            {
+                std::ifstream dynFile(m_config.dynamicImmediatesPath);
+                if (!dynFile.is_open())
+                {
+                    m_reporter.error("config", "Could not open dynamic immediates file: " + m_config.dynamicImmediatesPath);
+                    return false;
+                }
+                std::unordered_set<uint32_t> dynamicImmediates;
+                std::string line;
+                while (std::getline(dynFile, line))
+                {
+                    if (!line.empty() && line[0] != '#')
+                        dynamicImmediates.insert(static_cast<uint32_t>(std::stoul(line, nullptr, 16)));
+                }
+                m_reporter.info("config", "Loaded " + std::to_string(dynamicImmediates.size()) + " dynamic immediate sites");
+                m_codeGenerator->setDynamicImmediates(dynamicImmediates);
+            }
             m_codeGenerator->setBootstrapInfo(m_bootstrapInfo);
             m_codeGenerator->setConfiguredJumpTables(m_config.jumpTables);
             m_codeGenerator->setEmitInstructionComments(true);

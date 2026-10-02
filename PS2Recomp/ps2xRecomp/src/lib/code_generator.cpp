@@ -120,6 +120,11 @@ namespace ps2recomp
         m_relocationCallNames = callNames;
     }
 
+    void CodeGenerator::setDynamicImmediates(const std::unordered_set<uint32_t> &addresses)
+    {
+        m_dynamicImmediates = addresses;
+    }
+
     void CodeGenerator::setConfiguredJumpTables(const std::vector<JumpTable> &jumpTables)
     {
         m_configJumpTableTargetsByAddress.clear();

@@ -178,6 +178,9 @@ namespace ps2recomp
         std::string inputPath;
         std::string outputPath;
         std::string ghidraMapPath;
+        // Text file of instruction addresses whose immediates are rewritten by the
+        // game's own dynamic linker at run time (one hex address per line).
+        std::string dynamicImmediatesPath;
         bool singleFileOutput = false;
         bool lowMemoryMode = false;
         uint32_t outputWorkerThreads = 0;

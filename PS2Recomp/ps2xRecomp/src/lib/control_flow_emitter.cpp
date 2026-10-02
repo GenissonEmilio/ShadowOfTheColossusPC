@@ -322,6 +322,31 @@ namespace ps2recomp
 
     void ControlFlowEmitter::emitStaticJump(StaticBranchKind kind)
     {
+        if (m_gen.isDynamicImmediate(m_branchInst.address))
+        {
+            // The guest linker rewrites this J/JAL when it binds an imported symbol,
+            // so decode the target from the live instruction word.
+            m_ss << "    {\n";
+            m_ss << fmt::format("        const uint32_t jumpTarget = 0x{:X}u | ((READ32(0x{:X}u) & 0x3FFFFFFu) << 2);\n",
+                                (m_branchInst.address + 4u) & 0xF0000000u, m_branchInst.address);
+            if (kind == StaticBranchKind::Call)
+            {
+                m_ss << fmt::format("        SET_GPR_U32(ctx, 31, 0x{:X}u);\n", fallthroughPc());
+            }
+            emitDelaySlot("        ");
+            m_ss << "        ctx->pc = jumpTarget;\n";
+            if (kind == StaticBranchKind::Call)
+            {
+                emitExternalRegisterCallDispatch("jumpTarget", "        ");
+            }
+            else
+            {
+                emitExternalRegisterJumpDispatch("jumpTarget", RegisterBranchKind::Jump, 0u, "        ");
+            }
+            m_ss << "    }\n";
+            return;
+        }
+
         if (kind == StaticBranchKind::Call)
         {
             m_ss << fmt::format("    SET_GPR_U32(ctx, 31, 0x{:X}u);\n", fallthroughPc());

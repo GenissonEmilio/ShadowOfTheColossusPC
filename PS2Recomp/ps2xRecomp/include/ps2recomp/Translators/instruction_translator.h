@@ -17,6 +17,8 @@ namespace ps2recomp
         std::string translate(const Instruction &inst, const MemoryAccessHint &memoryHint);
 
     private:
+        std::string translateWithImmediates(const Instruction &inst, const MemoryAccessHint &memoryHint,
+                                            const std::string &simm, const std::string &imm);
         MemoryAccessHint effectiveMemoryHintFor(const Instruction &inst, const MemoryAccessHint &memoryHint) const;
         std::string translateMemoryRead(const Instruction &inst,
                                         const MemoryAccessHint &memoryHint,
