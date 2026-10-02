@@ -1,4 +1,5 @@
 #include "iop_emulator.h"
+#include <cstring>
 #include "imports/iop_cdvd.h"
 #include "core/iop_cpu.h"
 #include "imports/iop_heaplib.h"
@@ -177,7 +178,10 @@ namespace ps2x::iop::detail
         void schedulePendingDma()
         {
             if (const auto dma = memory.takeDmaStart())
+            {
                 pendingDmaInterrupts[dma->irq] = totalCycles + dma->delayCycles;
+                idleUntil = 0;
+            }
         }
 
         bool readRam(uint32_t address, void *destination, size_t size) const
@@ -252,6 +256,7 @@ namespace ps2x::iop::detail
             {
                 if (const auto callback = cdvd.takeCompletionCallback())
                 {
+                    idleUntil = 0;
                     pendingGuestCallbacks.emplace(
                         totalCycles + kCdvdCompletionCycles,
                         ScheduledGuestCallback{
@@ -481,6 +486,27 @@ namespace ps2x::iop::detail
         }
 
         // Not that good to use exception handling for control flow but will do for now
+        void tickSpu2()
+        {
+            Spu2 &spu = memory.spu2();
+            spu.advanceTo(totalCycles);
+            if (spu.takeIrq() && !servicingSpuInterrupt)
+            {
+                servicingSpuInterrupt = true;
+                try
+                {
+                    (void)intrman.dispatchInterrupt(9, *this); // IOP interrupt line 9: SPU2
+                }
+                catch (...)
+                {
+                    servicingSpuInterrupt = false;
+                    throw;
+                }
+                servicingSpuInterrupt = false;
+            }
+        }
+        bool servicingSpuInterrupt = false;
+
         void servicePendingDmaInterrupts()
         {
             if (servicingDmaInterrupts || pendingDmaInterrupts.empty())
@@ -558,20 +584,35 @@ namespace ps2x::iop::detail
             try
             {
                 const uint64_t target = totalCycles + cycles;
+                // Nothing can become runnable before idleUntil unless something
+                // external arrives (which resets it), so idle time is skipped
+                // without rescanning threads, timers and DMA every EE step.
+                if (target <= idleUntil)
+                {
+                    totalCycles = target;
+                    tickSpu2();
+                    return;
+                }
+                if (totalCycles < idleUntil)
+                    totalCycles = idleUntil;
                 while (totalCycles < target)
                 {
+                    tickSpu2();
                     servicePendingDmaInterrupts();
                     servicePendingGuestCallbacks();
                     timrman.serviceDue(totalCycles, *this);
                     IopThread *next = kernel.beginNextReady(totalCycles);
                     if (!next)
                     {
-                        uint64_t nextWake = kernel.nextWakeCycle(target);
+                        uint64_t nextWake = kernel.nextWakeCycle(UINT64_MAX);
                         for (const auto &[irq, completionCycle] : pendingDmaInterrupts)
                             nextWake = std::min(nextWake, completionCycle);
                         if (!pendingGuestCallbacks.empty())
                             nextWake = std::min(nextWake, pendingGuestCallbacks.begin()->first);
                         nextWake = timrman.nextEventCycle(nextWake);
+                        // The SPU2 runs continuously; check its interrupt every 64 samples.
+                        nextWake = std::min<uint64_t>(nextWake, totalCycles + Spu2::CyclesPerSample * 64u);
+                        idleUntil = std::max(totalCycles + 1u, nextWake);
                         totalCycles = std::max(totalCycles + 1u, std::min(target, nextWake));
                         continue;
                     }
@@ -655,7 +696,20 @@ namespace ps2x::iop::detail
         ModuleLoadResult loadModuleBuffer(uint32_t guestAddress, const void *arguments, uint32_t argumentSize)
         {
             std::vector<uint8_t> image;
-            if (!IopModuleLoader::readElfFromGuest(host, guestAddress, image))
+            // sceSifLoadModuleBuffer takes an IOP address: games DMA the IRX into
+            // IOP RAM first. Fall back to EE RAM for callers that pass EE buffers.
+            const uint32_t physical = IopMemory::physicalAddress(guestAddress);
+            static constexpr uint8_t kElfMagic[4] = {0x7F, 'E', 'L', 'F'};
+            uint8_t magic[4]{};
+            if (physical < IopMemory::RamSize &&
+                memory.readRam(guestAddress, magic, sizeof(magic)) &&
+                std::memcmp(magic, kElfMagic, sizeof(magic)) == 0)
+            {
+                image.resize(IopMemory::RamSize - physical);
+                if (!memory.readRam(guestAddress, image.data(), image.size()))
+                    return {true, -1, -1};
+            }
+            else if (!IopModuleLoader::readElfFromGuest(host, guestAddress, image))
                 return {true, -1, -1};
             std::ostringstream tag;
             tag << "buffer@0x" << std::hex << guestAddress;
@@ -700,6 +754,7 @@ namespace ps2x::iop::detail
         uint32_t nextModuleId = 1;
         uint32_t moduleCursor = kModuleLoadBase;
         uint64_t totalCycles = 0;
+        uint64_t idleUntil = 0;
         uint64_t totalInstructions = 0;
         uint64_t eeCycleCarry = 0;
         CpuState *activeCpu = nullptr;
@@ -726,16 +781,19 @@ namespace ps2x::iop::detail
 
     ModuleLoadResult IopEmulator::loadModule(std::string_view path, const void *arguments, uint32_t argumentSize)
     {
+        m_impl->idleUntil = 0;
         return m_impl->loadModule(path, arguments, argumentSize);
     }
 
     ModuleLoadResult IopEmulator::loadModuleBuffer(uint32_t guestAddress, const void *arguments, uint32_t argumentSize)
     {
+        m_impl->idleUntil = 0;
         return m_impl->loadModuleBuffer(guestAddress, arguments, argumentSize);
     }
 
     bool IopEmulator::stopModule(int32_t moduleId, int32_t *result)
     {
+        m_impl->idleUntil = 0;
         return m_impl->stopModule(moduleId, result);
     }
 
@@ -748,8 +806,14 @@ namespace ps2x::iop::detail
             m_impl->runCycles(iopCycles);
     }
 
+    size_t IopEmulator::readAudio(int16_t *destination, size_t frames) noexcept
+    {
+        return m_impl->memory.spu2().readOutput(destination, frames);
+    }
+
     RpcResult IopEmulator::handleRpc(const RpcRequest &request)
     {
+        m_impl->idleUntil = 0;
         return m_impl->rpc.handleRpc(request, *m_impl);
     }
 
@@ -760,6 +824,7 @@ namespace ps2x::iop::detail
 
     void IopEmulator::onSifTransfer(const SifTransfer &transfer)
     {
+        m_impl->idleUntil = 0;
         m_impl->rpc.onSifTransfer(transfer);
     }
 
@@ -781,12 +846,14 @@ namespace ps2x::iop::detail
 
     bool IopEmulator::writeMemory(uint32_t address, const void *source, size_t size)
     {
+        m_impl->idleUntil = 0;
         return isMemoryRange(address, size) &&
                m_impl->memory.writeRam(address, source, size);
     }
 
     bool IopEmulator::zeroMemory(uint32_t address, size_t size)
     {
+        m_impl->idleUntil = 0;
         return isMemoryRange(address, size) &&
                m_impl->memory.zeroRam(address, size);
     }

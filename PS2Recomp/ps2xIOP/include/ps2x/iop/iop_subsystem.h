@@ -27,6 +27,8 @@ namespace ps2x::iop
         [[nodiscard]] ModuleLoadResult loadModuleBuffer(uint32_t guestAddress, const void *arguments = nullptr, uint32_t argumentSize = 0);
         [[nodiscard]] bool stopModule(int32_t moduleId, int32_t *result = nullptr);
         void runEeCycles(uint64_t eeCycles) noexcept;
+        // Interleaved stereo 48 kHz frames produced by the SPU2 (any thread).
+        size_t readAudio(int16_t *destination, size_t frames) noexcept;
 
         [[nodiscard]] RpcAbi selectRpcAbi(const RpcAbiRequest &request) const;
         [[nodiscard]] bool canBindRpc(uint32_t sid) const noexcept;

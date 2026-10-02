@@ -37,6 +37,7 @@ namespace ps2x::iop::detail
         m_interruptMask = 0;
         m_interruptControl = 1;
         m_dmaStart.reset();
+        m_spu2.reset();
     }
 
     uint32_t IopMemory::physicalAddress(uint32_t address) noexcept
@@ -51,6 +52,8 @@ namespace ps2x::iop::detail
             return m_ram[phys];
         if (phys >= ScratchBase && phys < ScratchBase + ScratchSize)
             return m_scratch[phys - ScratchBase];
+        if (Spu2::isRegister(phys))
+            return static_cast<uint8_t>(m_spu2.read16(phys & ~1u) >> ((phys & 1u) * 8u));
         const uint32_t value = readHardware32(phys & ~3u);
         return static_cast<uint8_t>(value >> ((phys & 3u) * 8u));
     }
@@ -64,6 +67,8 @@ namespace ps2x::iop::detail
             std::memcpy(&value, m_ram.data() + phys, sizeof(value));
             return value;
         }
+        if (Spu2::isRegister(phys) && (phys & 1u) == 0u)
+            return m_spu2.read16(phys);
         return static_cast<uint16_t>(read8(address) | (static_cast<uint16_t>(read8(address + 1u)) << 8u));
     }
 
@@ -82,6 +87,8 @@ namespace ps2x::iop::detail
             std::memcpy(&value, m_scratch.data() + (phys - ScratchBase), sizeof(value));
             return value;
         }
+        if ((phys & 3u) == 0u && Spu2::isRegister(phys))
+            return m_spu2.read16(phys) | (static_cast<uint32_t>(m_spu2.read16(phys + 2u)) << 16u);
         if ((phys & 3u) == 0u && isHardwareAddress(phys))
             return readHardware32(phys);
 
@@ -105,6 +112,15 @@ namespace ps2x::iop::detail
             m_scratch[phys - ScratchBase] = value;
             return;
         }
+        if (Spu2::isRegister(phys))
+        {
+            // Byte writes to SPU2 registers are rare; merge into the halfword.
+            uint16_t current = m_spu2.read16(phys & ~1u);
+            const uint32_t shift = (phys & 1u) * 8u;
+            current = static_cast<uint16_t>((current & ~(0xFFu << shift)) | (static_cast<uint32_t>(value) << shift));
+            m_spu2.write16(phys & ~1u, current);
+            return;
+        }
         const uint32_t aligned = phys & ~3u;
         uint32_t current = readHardware32(aligned);
         const uint32_t shift = (phys & 3u) * 8u;
@@ -119,6 +135,11 @@ namespace ps2x::iop::detail
         {
             std::memcpy(m_ram.data() + phys, &value, sizeof(value));
             markOwned(phys, sizeof(value));
+            return;
+        }
+        if (Spu2::isRegister(phys) && (phys & 1u) == 0u)
+        {
+            m_spu2.write16(phys, value);
             return;
         }
         write8(address, static_cast<uint8_t>(value));
@@ -137,6 +158,12 @@ namespace ps2x::iop::detail
         if ((phys & 3u) == 0u && phys >= ScratchBase && phys + 3u < ScratchBase + ScratchSize)
         {
             std::memcpy(m_scratch.data() + (phys - ScratchBase), &value, sizeof(value));
+            return;
+        }
+        if ((phys & 3u) == 0u && Spu2::isRegister(phys))
+        {
+            m_spu2.write16(phys, static_cast<uint16_t>(value));
+            m_spu2.write16(phys + 2u, static_cast<uint16_t>(value >> 16u));
             return;
         }
         if ((phys & 3u) == 0u)
@@ -253,25 +280,27 @@ namespace ps2x::iop::detail
         const bool secondCore = address == kDmaSpu1Chcr;
         m_hardware[address] = value & ~kDmaStart;
 
-        const uint32_t statusAddress = 0x1F900344u + (secondCore ? 0x400u : 0u);
-        const uint32_t alignedStatus = statusAddress & ~3u;
-        const uint32_t shift = (statusAddress & 2u) * 8u;
-        uint32_t status = 0u;
-        if (const auto current = m_hardware.find(alignedStatus); current != m_hardware.end())
-            status = current->second;
-        status |= 0x80u << shift;
-        m_hardware[alignedStatus] = status;
-
         const uint32_t blockControlAddress = address - sizeof(uint32_t);
         uint32_t blockControl = 0u;
         if (const auto current = m_hardware.find(blockControlAddress); current != m_hardware.end())
             blockControl = current->second;
+        uint32_t madr = 0u;
+        if (const auto current = m_hardware.find(address - 2u * sizeof(uint32_t)); current != m_hardware.end())
+            madr = current->second & 0x1FFFFCu;
         const uint32_t wordsPerBlock = std::max<uint32_t>(blockControl & 0xFFFFu, 1u);
         const uint32_t blockCount = std::max<uint32_t>(blockControl >> 16u, 1u);
         const uint64_t transferWords = static_cast<uint64_t>(wordsPerBlock) * blockCount;
+        uint32_t bytes = static_cast<uint32_t>(std::min<uint64_t>(transferWords * 4u, RamSize));
+        if (madr + bytes > RamSize)
+            bytes = RamSize - madr;
+        // CHCR bit 0: 1 = IOP RAM to SPU2, 0 = SPU2 to IOP RAM.
+        const int core = secondCore ? 1 : 0;
+        const uint64_t delay = (value & 1u) != 0u
+                                   ? m_spu2.dmaWrite(core, m_ram.data() + madr, bytes)
+                                   : m_spu2.dmaRead(core, m_ram.data() + madr, bytes);
         m_dmaStart = DmaStart{
             secondCore ? kDmaSpu1Irq : kDmaSpu0Irq,
-            std::max<uint64_t>(transferWords * 2u, 64u),
+            std::max<uint64_t>(delay, 64u),
         };
     }
 
@@ -299,7 +328,8 @@ namespace ps2x::iop::detail
             return address;
         }
 
-        uint32_t candidate = alignUp(m_heapCursor, alignment);
+        // First fit from the heap base so freed blocks are reused, like IOP sysmem.
+        uint32_t candidate = alignUp(HeapBase, alignment);
         for (;;)
         {
             bool overlap = false;

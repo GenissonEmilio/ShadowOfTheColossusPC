@@ -8,6 +8,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "iop_spu2.h"
+
 namespace ps2x::iop::detail
 {
     class IopMemory
@@ -22,7 +24,8 @@ namespace ps2x::iop::detail
         static constexpr uint32_t Spu2End = 0x1FA00000u;
         static constexpr uint32_t SifBase = 0x1D000000u;
         static constexpr uint32_t SifEnd = 0x1D001000u;
-        static constexpr uint32_t HeapBase = 0x00120000u;
+        // Modules load from 0x10000 up to HeapBase; the rest is the sysmem heap.
+        static constexpr uint32_t HeapBase = 0x00080000u;
         static constexpr uint32_t HeapLimit = 0x001F0000u;
 
         struct Allocation
@@ -72,6 +75,8 @@ namespace ps2x::iop::detail
 
         [[nodiscard]] static uint32_t physicalAddress(uint32_t address) noexcept;
 
+        [[nodiscard]] Spu2 &spu2() noexcept { return m_spu2; }
+
     private:
         [[nodiscard]] uint32_t readHardware32(uint32_t address) const;
         void writeHardware32(uint32_t address, uint32_t value);
@@ -87,5 +92,6 @@ namespace ps2x::iop::detail
         uint32_t m_interruptMask = 0;
         uint32_t m_interruptControl = 1;
         std::optional<DmaStart> m_dmaStart;
+        mutable Spu2 m_spu2;
     };
 }
