@@ -12,6 +12,8 @@ namespace
     thread_local const uint16_t *t_clut = nullptr;
     // Decoded texture of the draw being rasterized by a band worker (null: sample VRAM).
     thread_local const void *t_texture = nullptr;
+    // Copy of VRAM that a feedback draw samples instead of the live memory.
+    thread_local const uint8_t *t_textureVram = nullptr;
     const bool kTextureCacheEnabled = std::getenv("PS2X_GS_NOTEXCACHE") == nullptr;
     void bufferRange(uint32_t baseBytes, uint32_t bufferWidthPixels, uint32_t heightPixels, uint32_t psm,
                      uint64_t &begin, uint64_t &end);
@@ -668,7 +670,39 @@ void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
         // Feedback draws read what earlier draws wrote: keep them serial.
         flushPendingUnlocked("Submit");
         const auto t0 = std::chrono::steady_clock::now();
-        DrawPrimitive(batch);
+        if (!immediate && batch.state.prim.tme && m_vram)
+        {
+            // Sample a copy of the texture's VRAM taken before the draw: rows
+            // no longer depend on each other, so the draw is split into bands.
+            const auto &tex = batch.state.context.tex0;
+            uint64_t begin = 0, end = 0;
+            bufferRange(tex.tbp0 * 256u, std::max<uint32_t>(batch.state.textureWidth, tex.tbw * 64u),
+                        batch.state.textureHeight, tex.psm, begin, end);
+            if (m_feedbackVram.size() != m_vramSize)
+                m_feedbackVram.assign(m_vramSize, 0u);
+            const uint64_t length = std::min<uint64_t>(end - begin, m_vramSize);
+            const uint64_t first = begin % m_vramSize;
+            const uint64_t head = std::min<uint64_t>(length, m_vramSize - first);
+            std::memcpy(m_feedbackVram.data() + first, m_vram + first, head);
+            if (head < length)
+                std::memcpy(m_feedbackVram.data(), m_vram, length - head); // wraps around VRAM
+            constexpr int kBandRows = 16;
+            const int bands = static_cast<int>(batch.state.context.scissor.y1) / kBandRows + 1;
+            GSParallelFor::instance().run(bands, [&](int band)
+                                          {
+                                              t_bandY0 = band * kBandRows;
+                                              t_bandY1 = t_bandY0 + kBandRows - 1;
+                                              t_textureVram = m_feedbackVram.data();
+                                              DrawPrimitive(batch);
+                                              t_textureVram = nullptr;
+                                              t_bandY0 = INT_MIN;
+                                              t_bandY1 = INT_MAX;
+                                          });
+        }
+        else
+        {
+            DrawPrimitive(batch);
+        }
         markVramWritten(m_lastFrameRange.first, m_lastFrameRange.second);
         markVramWritten(m_lastZRange.first, m_lastZRange.second);
         if (g_gsProfile.on)
@@ -1111,6 +1145,8 @@ uint32_t GSCpuBackend::ReadTextureVramUnlocked(uint32_t psm, uint32_t base, uint
     if (!m_vram)
         return 0u;
 
+    if (t_textureVram)
+        return m_readVramFuncs[psm & 0x3Fu](const_cast<uint8_t *>(t_textureVram), base, bw, x, y);
     if (m_textureDirectRead)
         return ReadVramUnlocked(psm, base, bw, x, y);
     return GSMem::ReadTexture(m_texturePageCache, m_vram, psm, base, bw, x, y);
@@ -2138,6 +2174,29 @@ void GSCpuBackend::DrawLine(const GSPrimitiveBatch &batch)
     }
 }
 
+bool GSCpuBackend::uploadTouchesPending(const GSTransferCommand &command) const
+{
+    if (m_pending.empty())
+        return false;
+    // Only the pages under the destination rectangle matter.
+    uint32_t pw = 0, ph = 0;
+    pageDims(command.bitbltbuf.dpsm, pw, ph);
+    const uint32_t pagesPerRow = std::max<uint32_t>(1u, (std::max<uint32_t>(1u, command.bitbltbuf.dbw) * 64u + pw - 1u) / pw);
+    const uint32_t basePage = command.bitbltbuf.dbp / 32u;
+    const uint32_t spill = (command.bitbltbuf.dbp % 32u) != 0u ? 1u : 0u; // block offset can cross a page
+    const uint32_t x0 = command.trxpos.dsax, y0 = command.trxpos.dsay;
+    const uint32_t x1 = x0 + std::max<uint32_t>(1u, command.trxreg.rrw) - 1u;
+    const uint32_t y1 = y0 + std::max<uint32_t>(1u, command.trxreg.rrh) - 1u;
+    for (uint32_t py = y0 / ph; py <= y1 / ph; ++py)
+    {
+        const uint64_t rowFirst = static_cast<uint64_t>(basePage) + static_cast<uint64_t>(py) * pagesPerRow + x0 / pw;
+        const uint64_t rowLast = static_cast<uint64_t>(basePage) + static_cast<uint64_t>(py) * pagesPerRow + x1 / pw + spill;
+        if (pendingTouches(rowFirst * 8192u, (rowLast + 1u) * 8192u))
+            return true;
+    }
+    return false;
+}
+
 void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -2149,7 +2208,7 @@ void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
                     m_uploadRange.first, m_uploadRange.second);
         // dsax can push the rectangle one page column further.
         m_uploadRange.second += 8192u;
-        if (pendingTouches(m_uploadRange.first, m_uploadRange.second))
+        if (uploadTouchesPending(command))
             flushPendingUnlocked("BeginTransfer");
     }
     else
@@ -2179,7 +2238,8 @@ void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
 void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
-    if (pendingTouches(m_uploadRange.first, m_uploadRange.second))
+    // Draws can be queued between the pieces of an IMAGE transfer.
+    if (uploadTouchesPending(m_transfer))
         flushPendingUnlocked("UploadImage");
     markVramWritten(m_uploadRange.first, m_uploadRange.second);
     if (!data || sizeBytes == 0u || !m_vram || m_transferState.direction != 0u)

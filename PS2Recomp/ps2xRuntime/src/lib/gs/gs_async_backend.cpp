@@ -1,6 +1,7 @@
 #include "runtime/gs/gs_async_backend.h"
 #include "ThreadNaming.h"
 
+#include <chrono>
 #include <cstring>
 
 namespace
@@ -60,10 +61,27 @@ void GSAsyncBackend::drain() const
 void GSAsyncBackend::workerLoop()
 {
     std::unique_lock<std::mutex> lock(m_queueMutex);
+    bool unflushed = false;
     for (;;)
     {
-        m_workCv.wait(lock, [this]
-                      { return m_stop || !m_producing.commands.empty(); });
+        auto ready = [this]
+        { return m_stop || !m_producing.commands.empty(); };
+        // Readers of VRAM flush the inner backend themselves, so queued draws
+        // are only flushed here once the producer goes quiet: while commands
+        // keep coming, they accumulate into larger batches that split better
+        // across the raster threads.
+        if (!unflushed)
+        {
+            m_workCv.wait(lock, ready);
+        }
+        else if (!m_workCv.wait_for(lock, std::chrono::microseconds(500), ready))
+        {
+            lock.unlock();
+            m_inner->Flush();
+            unflushed = false;
+            lock.lock();
+            continue;
+        }
         if (m_producing.commands.empty() && m_stop)
             return;
         std::swap(m_producing, m_consuming);
@@ -73,7 +91,7 @@ void GSAsyncBackend::workerLoop()
 
         for (const Command &command : m_consuming.commands)
             execute(command, m_consuming);
-        m_inner->Flush();
+        unflushed = true;
         m_consuming.commands.clear();
         m_consuming.bytes.clear();
 
@@ -168,7 +186,8 @@ void GSAsyncBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
 
 void GSAsyncBackend::Flush()
 {
-    // The worker flushes the inner backend after every chunk.
+    // The worker flushes the inner backend when the queue goes idle, and
+    // every VRAM reader flushes it first.
 }
 
 void GSAsyncBackend::TextureFlush()

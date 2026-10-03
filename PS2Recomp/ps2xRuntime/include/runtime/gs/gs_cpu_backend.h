@@ -109,11 +109,13 @@ private:
     std::array<uint64_t, 512> m_pageEpoch{}; // last write to each 8 KiB VRAM page
     uint64_t m_epochCounter = 1;
     std::vector<const DecodedTexture *> m_pendingTexture;
+    std::vector<uint8_t> m_feedbackVram; // pre-draw texture copy for feedback draws
     const DecodedTexture *decodedTexture(const GSDrawState &state, const uint16_t *clut, uint64_t clutHash);
     void markVramWritten(uint64_t begin, uint64_t end);
     std::pair<uint64_t, uint64_t> m_uploadRange{0u, 0u}; // destination of the host->local transfer
     // True when queued draws read or write VRAM bytes in [begin, end).
     bool pendingTouches(uint64_t begin, uint64_t end) const;
+    bool uploadTouchesPending(const GSTransferCommand &command) const;
     std::vector<std::vector<uint32_t>> m_bandBins;
     // VRAM byte ranges written by queued draws, and the ranges of the draw
     // being submitted (set by UpdateTextureReadMode).
