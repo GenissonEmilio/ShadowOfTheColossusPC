@@ -66,6 +66,31 @@ private:
     using WriteVramFunc = void (*)(uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
     using ReadVramFunc = uint32_t (*)(uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t);
 
+    // Per-primitive constants of the pixel pipeline, decoded once instead of
+    // for every pixel.
+    struct PixelPipe
+    {
+        const GSDrawState *state = nullptr;
+        int scissorX0 = 0, scissorX1 = 0, rowY0 = 0, rowY1 = 0; // scissor, Y also clipped to the band
+        bool fge = false;
+        uint8_t fogR = 0, fogG = 0, fogB = 0;
+        uint32_t fbp = 0, fbw = 1, fpsm = 0, zbp = 0, zpsm = 0;
+        uint64_t test = 0;
+        uint32_t ztestMethod = 0;
+        bool abe = false, pabe = false;
+        uint8_t asel = 0, bsel = 0, csel = 0, dsel = 0, fix = 0;
+        bool forceAlphaMsb = false; // FBA
+        uint32_t fbmsk = 0;
+        bool zmask = false;
+        bool frame16 = false, dateRead = false;
+        uint32_t (*readFrame)(uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t) = nullptr;
+        uint32_t (*readZ)(uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t) = nullptr;
+        void (*writeFrame)(uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) = nullptr;
+        void (*writeZ)(uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) = nullptr;
+    };
+    PixelPipe makePixelPipe(const GSDrawState &state) const;
+    void WritePixel(const PixelPipe &pipe, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog);
+
     static constexpr size_t kPsmHandlerCount = 1u << 6u;
     mutable std::mutex m_mutex;
     uint8_t *m_vram = nullptr;

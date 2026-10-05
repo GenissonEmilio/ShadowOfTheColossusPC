@@ -1485,8 +1485,54 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
     }
 }
 
+GSCpuBackend::PixelPipe GSCpuBackend::makePixelPipe(const GSDrawState &state) const
+{
+    const auto &ctx = state.context;
+    PixelPipe pipe;
+    pipe.state = &state;
+    pipe.scissorX0 = ctx.scissor.x0;
+    pipe.scissorX1 = ctx.scissor.x1;
+    pipe.rowY0 = std::max<int>(ctx.scissor.y0, t_bandY0);
+    pipe.rowY1 = std::min<int>(ctx.scissor.y1, t_bandY1);
+    pipe.fge = state.prim.fge;
+    pipe.fogR = state.fogR;
+    pipe.fogG = state.fogG;
+    pipe.fogB = state.fogB;
+    pipe.fbp = GSInternal::framePageBaseToBlock(ctx.frame.fbp);
+    pipe.fbw = std::max<u32>(ctx.frame.fbw, 1u);
+    pipe.fpsm = ctx.frame.psm;
+    pipe.zbp = GSInternal::framePageBaseToBlock(ctx.zbuf.zbp);
+    pipe.zpsm = ctx.zbuf.psm;
+    pipe.test = ctx.test;
+    pipe.ztestMethod = static_cast<uint32_t>((ctx.test >> 17) & 3u);
+    pipe.abe = state.prim.abe;
+    pipe.pabe = state.pabe;
+    pipe.asel = ctx.alpha & 3;
+    pipe.bsel = (ctx.alpha >> 2) & 3;
+    pipe.csel = (ctx.alpha >> 4) & 3;
+    pipe.dsel = (ctx.alpha >> 6) & 3;
+    pipe.fix = static_cast<uint8_t>((ctx.alpha >> 32) & 0xFF);
+    pipe.forceAlphaMsb = (ctx.fba & 0x1ull) != 0ull && ctx.frame.psm != GS_PSM_CT24;
+    pipe.fbmsk = ctx.frame.fbmsk;
+    pipe.zmask = ctx.zbuf.zmask;
+    pipe.frame16 = bitsPerPixel(pipe.fpsm) == 16;
+    pipe.dateRead = ((ctx.test >> 14) & 0x1u) != 0u &&
+                    (pipe.fpsm == GS_PSM_CT32 || pipe.fpsm == GS_PSM_CT16 || pipe.fpsm == GS_PSM_CT16S);
+    pipe.readFrame = m_readVramFuncs[pipe.fpsm & 0x3Fu];
+    pipe.readZ = m_readVramFuncs[pipe.zpsm & 0x3Fu];
+    pipe.writeFrame = m_writeVramFuncs[pipe.fpsm & 0x3Fu];
+    pipe.writeZ = m_writeVramFuncs[pipe.zpsm & 0x3Fu];
+    return pipe;
+}
+
 void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog)
 {
+    WritePixel(makePixelPipe(state), x, y, z, r, g, b, a, fog);
+}
+
+void GSCpuBackend::WritePixel(const PixelPipe &pipe, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog)
+{
+    const GSDrawState &state = *pipe.state;
     const auto &ctx = state.context;
     // PS2X_PROBE="x,y,x2,y2,seconds": log every draw writing those two pixels
     // of FRAME 224-ish buffers during a short window (debug aid).
@@ -1510,12 +1556,10 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
                          x, y, ctx.frame.fbp, ctx.frame.psm, (unsigned)state.prim.type, (unsigned)state.prim.tme, (unsigned)state.prim.abe,
                          ctx.tex0.tbp0, (unsigned)ctx.tex0.psm, (unsigned long long)ctx.alpha, (unsigned long long)ctx.test, ctx.frame.fbmsk, r, g, b, a);
     }
-    if (x < ctx.scissor.x0 || x > ctx.scissor.x1 || y < ctx.scissor.y0 || y > ctx.scissor.y1)
-        return;
-    if (y < t_bandY0 || y > t_bandY1)
+    if (x < pipe.scissorX0 || x > pipe.scissorX1 || y < pipe.rowY0 || y > pipe.rowY1)
         return;
 
-    if (state.prim.fge)
+    if (pipe.fge)
     {
         const uint32_t inverseFog = 255u - fog;
         auto applyFog = [&](uint8_t input, uint8_t fogColor) -> uint8_t
@@ -1523,58 +1567,37 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
             return static_cast<uint8_t>(((static_cast<uint32_t>(fog) * input) >> 8) + ((inverseFog * fogColor) >> 8));
         };
 
-        r = applyFog(r, state.fogR);
-        g = applyFog(g, state.fogG);
-        b = applyFog(b, state.fogB);
+        r = applyFog(r, pipe.fogR);
+        g = applyFog(g, pipe.fogG);
+        b = applyFog(b, pipe.fogB);
     }
 
-    const u32 fbp = GSInternal::framePageBaseToBlock(ctx.frame.fbp);
-    const u32 fbw = std::max<u32>(ctx.frame.fbw, 1u);
-    const u32 fpsm = ctx.frame.psm;
-    const u32 zbp = GSInternal::framePageBaseToBlock(ctx.zbuf.zbp);
-    const u32 zpsm = ctx.zbuf.psm;
-
-    const PixelWriteMask writeMask = classifyAlphaTest(ctx.test, a, static_cast<uint8_t>(fpsm));
+    const u32 fpsm = pipe.fpsm;
+    const PixelWriteMask writeMask = classifyAlphaTest(pipe.test, a, static_cast<uint8_t>(fpsm));
     if (!writeMask.writesAnything())
-    {
         return;
-    }
 
-    const uint32_t ztestMethod = static_cast<uint32_t>((ctx.test >> 17) & 3u);
-    const bool alphaBlendEnabled = state.prim.abe;
     const bool preserveDestinationAlpha = writeMask.writeRgb && !writeMask.writeAlpha && fpsm == GS_PSM_CT32;
-    const bool destinationAlphaTestNeedsRead = ((ctx.test >> 14) & 0x1u) != 0u && (fpsm == GS_PSM_CT32 || fpsm == GS_PSM_CT16 || fpsm == GS_PSM_CT16S);
-
-    // small optimization, avoid reading the framebuffer for simple draws
-    // TODO: only one address lookup for rmw
-    const bool frmw = destinationAlphaTestNeedsRead || (writeMask.writesFramebuffer() && ((ctx.frame.fbmsk != 0) || alphaBlendEnabled || preserveDestinationAlpha));
+    // Avoid reading the framebuffer for simple draws.
+    const bool frmw = pipe.dateRead || (writeMask.writesFramebuffer() && (pipe.fbmsk != 0 || pipe.abe || preserveDestinationAlpha));
 
     u32 rawFramebufferPixel = 0;
     u32 fbrgba = 0;
     if (frmw)
     {
-        rawFramebufferPixel = ReadVramUnlocked(fpsm, fbp, fbw, x, y);
+        rawFramebufferPixel = pipe.readFrame(m_vram, pipe.fbp, pipe.fbw, x, y);
         fbrgba = rawFramebufferPixel;
-
-        if (bitsPerPixel(fpsm) == 16)
-        {
+        if (pipe.frame16)
             fbrgba = Rgba5551ToRgba8888(fbrgba);
-        }
         else if (fpsm == GS_PSM_CT24)
-        {
-            // The GS supplies 0x80 as destination alpha for RGB24 blending.
-            fbrgba |= 0x80000000u;
-        }
+            fbrgba |= 0x80000000u; // the GS supplies 0x80 as destination alpha for RGB24 blending
     }
 
-    if (!passesDestinationAlphaTest(ctx.test, static_cast<uint8_t>(fpsm), rawFramebufferPixel))
-    {
+    if (pipe.dateRead && !passesDestinationAlphaTest(pipe.test, static_cast<uint8_t>(fpsm), rawFramebufferPixel))
         return;
-    }
 
     bool zpass = false;
-    uint32_t storedZ = 0u;
-    switch (ztestMethod)
+    switch (pipe.ztestMethod)
     {
     case 0:
         zpass = false;
@@ -1583,96 +1606,53 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
         zpass = true;
         break;
     case 2:
-        storedZ = ReadVramUnlocked(zpsm, zbp, fbw, x, y);
-        zpass = static_cast<uint32_t>(z) >= storedZ;
+        zpass = static_cast<uint32_t>(z) >= pipe.readZ(m_vram, pipe.zbp, pipe.fbw, x, y);
         break;
     case 3:
-        storedZ = ReadVramUnlocked(zpsm, zbp, fbw, x, y);
-        zpass = static_cast<uint32_t>(z) > storedZ;
+        zpass = static_cast<uint32_t>(z) > pipe.readZ(m_vram, pipe.zbp, pipe.fbw, x, y);
         break;
     }
-
     if (!zpass)
-    {
         return;
-    }
 
     if (writeMask.writesFramebuffer())
     {
-        const u8 srcR = r;
-        const u8 srcG = g;
-        const u8 srcB = b;
-
-        if (state.prim.abe)
+        // PABE disables alpha blending when the source alpha MSB is clear.
+        if (pipe.abe && !(pipe.pabe && (a & 0x80u) == 0u))
         {
-            uint8_t dr = fbrgba & 0xFF;
-            uint8_t dg = (fbrgba >> 8) & 0xFF;
-            uint8_t db = (fbrgba >> 16) & 0xFF;
-            uint8_t da = (fbrgba >> 24) & 0xFF;
-
-            // PABE disables alpha blending when the source alpha MSB is clear.
-            if (!(state.pabe && (a & 0x80u) == 0u))
+            const uint8_t dr = fbrgba & 0xFF;
+            const uint8_t dg = (fbrgba >> 8) & 0xFF;
+            const uint8_t db = (fbrgba >> 16) & 0xFF;
+            const uint8_t da = (fbrgba >> 24) & 0xFF;
+            auto pickRGB = [](uint8_t sel, int cs, int cd) -> int
             {
-                uint64_t alphaReg = ctx.alpha;
-                uint8_t asel = alphaReg & 3;
-                uint8_t bsel = (alphaReg >> 2) & 3;
-                uint8_t csel = (alphaReg >> 4) & 3;
-                uint8_t dsel = (alphaReg >> 6) & 3;
-                uint8_t fix = static_cast<uint8_t>((alphaReg >> 32) & 0xFF);
-
-                auto pickRGB = [&](uint8_t sel, int cs, int cd) -> int
-                {
-                    if (sel == 0)
-                        return cs;
-                    if (sel == 1)
-                        return cd;
-                    return 0;
-                };
-                int cAlpha = (csel == 0) ? a : (csel == 1) ? da
-                                                           : fix;
-
-                r = clampU8(((pickRGB(asel, r, dr) - pickRGB(bsel, r, dr)) * cAlpha >> 7) + pickRGB(dsel, r, dr));
-                g = clampU8(((pickRGB(asel, g, dg) - pickRGB(bsel, g, dg)) * cAlpha >> 7) + pickRGB(dsel, g, dg));
-                b = clampU8(((pickRGB(asel, b, db) - pickRGB(bsel, b, db)) * cAlpha >> 7) + pickRGB(dsel, b, db));
-            }
-            else
-            {
-                r = srcR;
-                g = srcG;
-                b = srcB;
-            }
+                if (sel == 0)
+                    return cs;
+                if (sel == 1)
+                    return cd;
+                return 0;
+            };
+            const int cAlpha = (pipe.csel == 0) ? a : (pipe.csel == 1) ? da : pipe.fix;
+            r = clampU8(((pickRGB(pipe.asel, r, dr) - pickRGB(pipe.bsel, r, dr)) * cAlpha >> 7) + pickRGB(pipe.dsel, r, dr));
+            g = clampU8(((pickRGB(pipe.asel, g, dg) - pickRGB(pipe.bsel, g, dg)) * cAlpha >> 7) + pickRGB(pipe.dsel, g, dg));
+            b = clampU8(((pickRGB(pipe.asel, b, db) - pickRGB(pipe.bsel, b, db)) * cAlpha >> 7) + pickRGB(pipe.dsel, b, db));
         }
 
-        if (writeMask.writeAlpha && (ctx.fba & 0x1ull) != 0ull && ctx.frame.psm != GS_PSM_CT24)
-        {
+        if (writeMask.writeAlpha && pipe.forceAlphaMsb)
             a = static_cast<uint8_t>(a | 0x80u);
-        }
 
         u32 pixel = pack32(r, g, b, a);
-
-        if (ctx.frame.fbmsk != 0)
-        {
-            pixel = (pixel & ~ctx.frame.fbmsk) | (fbrgba & ctx.frame.fbmsk);
-        }
-
+        if (pipe.fbmsk != 0)
+            pixel = (pixel & ~pipe.fbmsk) | (fbrgba & pipe.fbmsk);
         if (preserveDestinationAlpha)
-        {
             pixel = (pixel & 0x00FFFFFFu) | (fbrgba & 0xFF000000u);
-        }
-
-        // format conversion
-        if (bitsPerPixel(fpsm) == 16)
-        {
+        if (pipe.frame16)
             pixel = Rgba8888ToRgba5551(pixel);
-        }
-
-        WriteVramUnlocked(fpsm, fbp, fbw, x, y, pixel);
+        pipe.writeFrame(m_vram, pipe.fbp, pipe.fbw, x, y, pixel);
     }
 
-    if (writeMask.writeDepth && !ctx.zbuf.zmask)
-    {
-        WriteVramUnlocked(zpsm, zbp, fbw, x, y, z);
-    }
+    if (writeMask.writeDepth && !pipe.zmask)
+        pipe.writeZ(m_vram, pipe.zbp, pipe.fbw, x, y, z);
 }
 
 uint32_t GSCpuBackend::LookupCLUT(const GSDrawState &state,
@@ -1794,10 +1774,29 @@ uint32_t GSCpuBackend::SampleTexture(const GSDrawState &state, float s, float t,
     const float fx = sampleU - static_cast<float>(u0);
     const float fy = sampleV - static_cast<float>(v0);
 
-    const uint32_t c00 = samplePoint(u0, v0);
-    const uint32_t c10 = samplePoint(u1, v0);
-    const uint32_t c01 = samplePoint(u0, v1);
-    const uint32_t c11 = samplePoint(u1, v1);
+    uint32_t c00, c10, c01, c11;
+    // Decoded texture: wrap each coordinate once and read the four texels directly.
+    const int wu0 = decoded ? wrapTextureCoordinate(u0, texW, wrapU, minU, maxU) : 0;
+    const int wu1 = decoded ? wrapTextureCoordinate(u1, texW, wrapU, minU, maxU) : 0;
+    const int wv0 = decoded ? wrapTextureCoordinate(v0, texH, wrapV, minV, maxV) : 0;
+    const int wv1 = decoded ? wrapTextureCoordinate(v1, texH, wrapV, minV, maxV) : 0;
+    if (decoded && static_cast<uint32_t>(wu0) < decoded->width && static_cast<uint32_t>(wu1) < decoded->width &&
+        static_cast<uint32_t>(wv0) < decoded->height && static_cast<uint32_t>(wv1) < decoded->height)
+    {
+        const uint32_t *row0 = decoded->texels.data() + static_cast<size_t>(wv0) * decoded->width;
+        const uint32_t *row1 = decoded->texels.data() + static_cast<size_t>(wv1) * decoded->width;
+        c00 = row0[wu0];
+        c10 = row0[wu1];
+        c01 = row1[wu0];
+        c11 = row1[wu1];
+    }
+    else
+    {
+        c00 = samplePoint(u0, v0);
+        c10 = samplePoint(u1, v0);
+        c01 = samplePoint(u0, v1);
+        c11 = samplePoint(u1, v1);
+    }
 
     const uint8_t r = lerpChannel(static_cast<uint8_t>(c00 & 0xFFu),
                                   static_cast<uint8_t>(c10 & 0xFFu),
@@ -1829,6 +1828,7 @@ uint32_t GSCpuBackend::SampleTexture(const GSDrawState &state, float s, float t,
 void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
 {
     const GSDrawState &state = batch.state;
+    const PixelPipe pipe = makePixelPipe(state);
     const GSVertex &v0 = batch.vertices[0];
     const GSVertex &v1 = batch.vertices[1];
     const auto &ctx = state.context;
@@ -1927,7 +1927,7 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                 uint8_t ta = static_cast<uint8_t>((texel >> 24) & 0xFF);
 
                 const TextureCombineResult color = combineTexture(tex, r, g, b, a, tr, tg, tb, ta);
-                WritePixel(state, x, y, z1, color.r, color.g, color.b, color.a, v1.fog);
+                WritePixel(pipe, x, y, z1, color.r, color.g, color.b, color.a, v1.fog);
             }
         };
         drawRowsParallel(drawY0Band, drawY1, drawX1 - drawX0 + 1, drawRow);
@@ -1937,7 +1937,7 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
         drawRowsParallel(drawY0Band, drawY1, drawX1 - drawX0 + 1, [&](int y)
                          {
                              for (int x = drawX0; x <= drawX1; ++x)
-                                 WritePixel(state, x, y, z1, r, g, b, a, v1.fog);
+                                 WritePixel(pipe, x, y, z1, r, g, b, a, v1.fog);
                          });
     }
 }
@@ -2010,6 +2010,7 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
     // Solving w >= -eps per edge gives the row's covered span; it is padded by
     // a pixel and every pixel still runs the exact test below, so coverage is
     // unchanged while pixels far outside the triangle are skipped.
+    const PixelPipe pipe = makePixelPipe(state);
     const float k0 = (fy1 - fy2) * winding * invAbsDenom;
     const float k1 = (fy2 - fy0) * winding * invAbsDenom;
     const float k2 = -(k0 + k1);
@@ -2112,7 +2113,7 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
             }
 
             const uint8_t fog = clampU8(static_cast<int>(v0.fog * w0 + v1.fog * w1 + v2.fog * w2));
-            WritePixel(state, x, y, static_cast<u32>(z + 0.5), r, g, b, a, fog);
+            WritePixel(pipe, x, y, static_cast<u32>(z + 0.5), r, g, b, a, fog);
         }
     }
 }
@@ -2120,6 +2121,7 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
 void GSCpuBackend::DrawLine(const GSPrimitiveBatch &batch)
 {
     const GSDrawState &state = batch.state;
+    const PixelPipe pipe = makePixelPipe(state);
     const GSVertex &v0 = batch.vertices[0];
     const GSVertex &v1 = batch.vertices[1];
     const auto &ctx = state.context;
@@ -2164,7 +2166,7 @@ void GSCpuBackend::DrawLine(const GSPrimitiveBatch &batch)
 
         double z = (v0.z + (v1.z - v0.z) * t);
         const uint8_t fog = clampU8(static_cast<int>(v0.fog + (v1.fog - v0.fog) * t));
-        WritePixel(state, x0, y0, static_cast<u32>(z), r, g, b, a, fog);
+        WritePixel(pipe, x0, y0, static_cast<u32>(z), r, g, b, a, fog);
 
         if (x0 == x1 && y0 == y1)
             break;
