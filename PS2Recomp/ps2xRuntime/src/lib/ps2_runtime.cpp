@@ -673,17 +673,24 @@ bool PS2Runtime::syncCoreSubsystems()
     m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)
                                     { m_gs.processGIFPacket(data, size); });
     m_memory.setGifArbiter(&m_gifArbiter);
+    m_memory.setVu0FbrstProvider([this]
+                                 {
+                                     const R5900Context *context = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
+                                     return (context ? context : &m_cpuContext)->vu0_fbrst; });
     m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t top, uint32_t itop)
                                  {
-                                     R5900Context *cpuContext = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
+                                     // On the MTVU worker the EE context belongs to another
+                                     // thread: use the FBRST captured with the job and keep
+                                     // the stop bits out of the EE's VPU_STAT.
+                                     const bool worker = PS2Memory::onVu1Worker();
+                                     R5900Context *cpuContext = (!worker && m_eeScheduler) ? m_eeScheduler->currentContext() : nullptr;
                                      if (!cpuContext)
                                      {
                                          cpuContext = &m_cpuContext;
                                      }
-                                     m_vu1.state().dBitEnabled =
-                                         (cpuContext->vu0_fbrst & (1u << 10)) != 0u;
-                                     m_vu1.state().tBitEnabled =
-                                         (cpuContext->vu0_fbrst & (1u << 11)) != 0u;
+                                     const uint32_t fbrst = worker ? m_memory.vu1WorkerFbrst() : cpuContext->vu0_fbrst;
+                                     m_vu1.state().dBitEnabled = (fbrst & (1u << 10)) != 0u;
+                                     m_vu1.state().tBitEnabled = (fbrst & (1u << 11)) != 0u;
                                      // PS2X_VU1_DUMP=<dir>: save each distinct VU1 code image and its entry PCs.
                                      static const char *vu1DumpDir = std::getenv("PS2X_VU1_DUMP");
                                      if (vu1DumpDir)
@@ -718,24 +725,26 @@ bool PS2Runtime::syncCoreSubsystems()
                                      m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
                                                    m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
                                                    m_gs, &m_memory, startPC, top, itop, 65536);
+                                     if (!worker)
                                      cpuContext->vu0_vpu_stat =
                                          (cpuContext->vu0_vpu_stat & ~0x0600u) |
                                          (m_vu1.state().stoppedByD ? 0x0200u : 0u) |
                                          (m_vu1.state().stoppedByT ? 0x0400u : 0u); });
     m_memory.setVu1MscntCallback([this](uint32_t top, uint32_t itop)
                                  {
-                                     R5900Context *cpuContext = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
+                                     const bool worker = PS2Memory::onVu1Worker();
+                                     R5900Context *cpuContext = (!worker && m_eeScheduler) ? m_eeScheduler->currentContext() : nullptr;
                                      if (!cpuContext)
                                      {
                                          cpuContext = &m_cpuContext;
                                      }
-                                     m_vu1.state().dBitEnabled =
-                                         (cpuContext->vu0_fbrst & (1u << 10)) != 0u;
-                                     m_vu1.state().tBitEnabled =
-                                         (cpuContext->vu0_fbrst & (1u << 11)) != 0u;
+                                     const uint32_t fbrst = worker ? m_memory.vu1WorkerFbrst() : cpuContext->vu0_fbrst;
+                                     m_vu1.state().dBitEnabled = (fbrst & (1u << 10)) != 0u;
+                                     m_vu1.state().tBitEnabled = (fbrst & (1u << 11)) != 0u;
                                      m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
                                                   m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
                                                   m_gs, &m_memory, top, itop, 65536);
+                                     if (!worker)
                                      cpuContext->vu0_vpu_stat =
                                          (cpuContext->vu0_vpu_stat & ~0x0600u) |
                                          (m_vu1.state().stoppedByD ? 0x0200u : 0u) |

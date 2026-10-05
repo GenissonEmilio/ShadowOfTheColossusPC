@@ -10,6 +10,9 @@
 #include <atomic>
 #include <iostream>
 #include <mutex>
+#include <condition_variable>
+#include <deque>
+#include <thread>
 
 #include "gs/ps2_gif_arbiter.h"
 #if defined(_MSC_VER)
@@ -264,6 +267,17 @@ public:
     PS2Memory();
     ~PS2Memory();
 
+    // Waits until queued VIF1/GIF work has run (no-op without MTVU).
+    void syncVu1()
+    {
+        if (m_mtvuOutstanding.load(std::memory_order_acquire) != 0u && !onVu1Worker())
+            mtvuSyncSlow();
+    }
+    static bool onVu1Worker();
+    // VU0 FBRST (D/T bit enables) for the VU1 run in progress on the worker.
+    uint32_t vu1WorkerFbrst() const { return m_mtvuFbrst; }
+    void setVu0FbrstProvider(std::function<uint32_t()> provider) { m_vu0FbrstProvider = std::move(provider); }
+
     PS2Memory(const PS2Memory &) = delete;
     PS2Memory &operator=(const PS2Memory &) = delete;
     PS2Memory(PS2Memory &&) = delete;
@@ -423,6 +437,33 @@ public:
     std::vector<PendingTransfer> m_pendingVif1Transfers;
     std::mutex m_completedDmacMutex;
     std::vector<uint32_t> m_completedDmacCauses;
+
+    // MTVU (default; PS2X_MTVU=0 disables): VIF1 packets (VU1 microprograms, XGKICK) and GIF
+    // PATH3 packets run in order on a worker thread. DMA completes as soon as
+    // the data is queued; the EE waits for the worker only when it touches
+    // VIF1/GIF registers, VU1 memory or GS registers.
+    struct MtvuJob
+    {
+        bool gif = false;
+        uint32_t fbrst = 0;
+        std::vector<uint8_t> data;
+    };
+    bool m_mtvuEnabled = false;
+    std::thread m_mtvuThread;
+    std::mutex m_mtvuMutex;
+    std::condition_variable m_mtvuWork;
+    std::condition_variable m_mtvuIdle;
+    std::deque<MtvuJob> m_mtvuQueue;
+    std::atomic<uint32_t> m_mtvuOutstanding{0};
+    bool m_mtvuStop = false;
+    uint32_t m_mtvuFbrst = 0;
+    bool m_mtvuDeferredGif = false;
+    bool m_mtvuDeferredVif1 = false;
+    std::function<uint32_t()> m_vu0FbrstProvider;
+    void mtvuEnqueue(MtvuJob &&job);
+    void mtvuWorkerLoop();
+    void mtvuSyncSlow();
+    std::vector<uint8_t> copyTransferData(const PendingTransfer &transfer);
 
     struct CodeRegion
     {

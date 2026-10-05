@@ -18,6 +18,16 @@ namespace
     void bufferRange(uint32_t baseBytes, uint32_t bufferWidthPixels, uint32_t heightPixels, uint32_t psm,
                      uint64_t &begin, uint64_t &end);
     thread_local int t_bandY0 = INT_MIN;
+    // Rows per parallel raster band (PS2X_GS_BAND_ROWS overrides).
+    int bandRows()
+    {
+        static const int rows = []
+        {
+            const char *env = std::getenv("PS2X_GS_BAND_ROWS");
+            return env ? std::clamp(std::atoi(env), 2, 256) : 8;
+        }();
+        return rows;
+    }
     thread_local int t_bandY1 = INT_MAX;
     bool inBandMode() { return t_bandY0 != INT_MIN; }
 }
@@ -686,7 +696,7 @@ void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
             std::memcpy(m_feedbackVram.data() + first, m_vram + first, head);
             if (head < length)
                 std::memcpy(m_feedbackVram.data(), m_vram, length - head); // wraps around VRAM
-            constexpr int kBandRows = 16;
+            const int kBandRows = bandRows();
             const int bands = static_cast<int>(batch.state.context.scissor.y1) / kBandRows + 1;
             GSParallelFor::instance().run(bands, [&](int band)
                                           {
@@ -770,7 +780,7 @@ void GSCpuBackend::flushPendingUnlocked(const char *reason)
         return;
     if (g_gsProfile.on)
         ++g_gsProfile.reasons[reason];
-    constexpr int kBandRows = 16;
+    const int kBandRows = bandRows();
     // Bin every primitive into the bands its (conservative) Y range touches,
     // so each band only walks the primitives that can draw into it.
     int maxY = 0;
@@ -837,7 +847,7 @@ void GSCpuBackend::flushPendingUnlocked(const char *reason)
         ++g_gsProfile.flushes;
         g_gsProfile.bandedDraws += m_pending.size();
     }
-    GSParallelFor::instance().run(bands, [this](int band)
+    GSParallelFor::instance().run(bands, [this, kBandRows](int band)
                                   {
                                       t_bandY0 = band * kBandRows;
                                       t_bandY1 = t_bandY0 + kBandRows - 1;
