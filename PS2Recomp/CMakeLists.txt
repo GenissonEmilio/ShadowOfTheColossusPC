@@ -10,6 +10,9 @@ if(NOT DEFINED CMAKE_TOOLCHAIN_FILE AND DEFINED ENV{VITASDK})
 endif()
 
 project(PS2RetroX)
+if(APPLE)
+    enable_language(OBJC OBJCXX) # Metal GS rasterizer (OBJC keeps raylib's .m files Objective-C)
+endif()
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 

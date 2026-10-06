@@ -115,9 +115,11 @@ namespace
     std::unique_ptr<GSRasterBackend> makeDefaultBackend()
     {
         static const bool synchronous = std::getenv("PS2X_GS_SYNC") != nullptr;
+        auto backend = std::make_unique<GSCpuBackend>();
+        backend->allowGpu();
         if (synchronous)
-            return std::make_unique<GSCpuBackend>();
-        return std::make_unique<GSAsyncBackend>(std::make_unique<GSCpuBackend>());
+            return backend;
+        return std::make_unique<GSAsyncBackend>(std::move(backend));
     }
 }
 

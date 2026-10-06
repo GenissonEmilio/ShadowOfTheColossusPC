@@ -3,8 +3,10 @@
 
 #include "runtime/gs/gs_backend.h"
 #include "runtime/gs/gs_texture_page_cache.h"
+#include "runtime/gs/gs_metal_raster.h"
 
 #include <array>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -13,6 +15,8 @@ class GSCpuBackend final : public GSRasterBackend
 {
 public:
     GSCpuBackend();
+    // The backend of the live GS memory may rasterize on the GPU (PS2X_GS_GPU=1).
+    void allowGpu() { m_gpuAllowed = true; }
 
     void Initialize(uint8_t *vram, uint32_t vramSize) override;
     void Reset() override;
@@ -150,6 +154,11 @@ private:
     std::pair<uint64_t, uint64_t> m_lastFrameRange{0u, 0u};
     std::pair<uint64_t, uint64_t> m_lastZRange{0u, 0u};
     void flushPendingUnlocked(const char *reason = "other");
+    void rasterizePendingCpu();
+    void rasterizePendingGpu();
+    void finishPendingUnlocked();
+    std::unique_ptr<GSMetalRaster> m_gpu; // PS2X_GS_GPU=1 (macOS)
+    bool m_gpuAllowed = false;
     void UpdateTextureReadMode(const GSPrimitiveBatch &batch);
     void drawRowsParallel(int y0, int y1, int rowWidth, const std::function<void(int)> &drawRow);
 

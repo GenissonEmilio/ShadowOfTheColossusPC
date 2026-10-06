@@ -540,6 +540,10 @@ namespace GSMem
 
 	void InitLookupTables();
 
+	// Raw page lookup tables ([block][y][x] of u16 pixel offsets) for GPU
+	// rasterizers, in this order: C32, Z32, C16, C16S, Z16, Z16S, P8, P4.
+	const u16* PageTableData(u32 index, u32& entries, u32& pageWidth, u32& pageHeight);
+
     // Shares swizzle, VRAM wrapping, and lane extraction with the direct reads.
     u32 ReadTexture(TexturePageCache& cache, const u8* data, u32 psm, u32 bp, u32 bw, u32 x, u32 y);
 

@@ -41,6 +41,7 @@ namespace
 #include "runtime/gs/ps2_gs_psmt4.h"
 #include "runtime/gs/ps2_gs_psmt8.h"
 #include "runtime/gs/ps2_gs_memory.h"
+#include "runtime/gs/gs_metal_raster.h"
 #include "ps2_log.h"
 #include <atomic>
 #include <algorithm>
@@ -53,8 +54,67 @@ namespace
 
 using namespace GSInternal;
 
+// No fused multiply-add: plain IEEE float arithmetic, so the GPU rasterizer
+// (which disables contraction too) reproduces these results bit for bit.
+#pragma clang fp contract(off)
+
 namespace
 {
+    // Interpolation with explicit fused multiply-adds, written identically in
+    // the GPU shaders so both renderers round the same way.
+    inline float interp3(float a, float b, float c, float w0, float w1, float w2)
+    {
+        return std::fma(c, w2, std::fma(b, w1, a * w0));
+    }
+
+    inline float lerpf(float a, float b, float t)
+    {
+        return std::fma(b - a, t, a);
+    }
+
+    // Triangle Z as a float pair (hi + lo). The GPU rasterizer runs the very
+    // same operations, so both round every pixel's Z identically.
+    struct DepthPair
+    {
+        float hi, lo;
+    };
+
+    inline DepthPair twoSum(float a, float b)
+    {
+        const float s = a + b;
+        const float bb = s - a;
+        return {s, (a - (s - bb)) + (b - bb)};
+    }
+
+    inline DepthPair depthAdd(DepthPair a, DepthPair b)
+    {
+        DepthPair s = twoSum(a.hi, b.hi);
+        s.lo += a.lo + b.lo;
+        return twoSum(s.hi, s.lo);
+    }
+
+    inline DepthPair depthMul(float w, DepthPair z)
+    {
+        const float p = w * z.hi;
+        const float e = std::fma(w, z.hi, -p);
+        return twoSum(p, e + w * z.lo);
+    }
+
+    inline DepthPair depthSplit(double z)
+    {
+        const float hi = static_cast<float>(z);
+        return {hi, static_cast<float>(z - static_cast<double>(hi))};
+    }
+
+    inline uint32_t depthRound(DepthPair z)
+    {
+        const DepthPair h = depthAdd(z, {0.5f, 0.0f});
+        const float fh = std::floor(h.hi);
+        const float rem = (h.hi - fh) + h.lo;
+        const int64_t value = static_cast<int64_t>(fh) + static_cast<int64_t>(std::floor(rem));
+        return static_cast<uint32_t>(std::clamp<int64_t>(value, 0, 0xFFFFFFFFll));
+    }
+
     float fabsQ(float q)
     {
         return (std::fabs(q) > 1.0e-8f) ? q : 1.0f;
@@ -330,9 +390,9 @@ namespace
 
     uint8_t lerpChannel(uint8_t c00, uint8_t c10, uint8_t c01, uint8_t c11, float fx, float fy)
     {
-        const float top = static_cast<float>(c00) + (static_cast<float>(c10) - static_cast<float>(c00)) * fx;
-        const float bottom = static_cast<float>(c01) + (static_cast<float>(c11) - static_cast<float>(c01)) * fx;
-        return clampU8(static_cast<int>(std::lround(top + (bottom - top) * fy)));
+        const float top = lerpf(static_cast<float>(c00), static_cast<float>(c10), fx);
+        const float bottom = lerpf(static_cast<float>(c01), static_cast<float>(c11), fx);
+        return clampU8(static_cast<int>(std::lround(lerpf(top, bottom, fy))));
     }
 }
 
@@ -558,6 +618,14 @@ void GSCpuBackend::Initialize(uint8_t *vram, uint32_t vramSize)
     m_vram = vram;
     m_vramSize = vramSize;
     ResetUnlocked();
+#ifdef PS2X_HAVE_METAL
+    // PS2X_GS_GPU=1: rasterize on the GPU (only the backend of the live GS
+    // memory; scratch backends used for presentation stay on the CPU).
+    static const bool wantGpu = std::getenv("PS2X_GS_GPU") && std::atoi(std::getenv("PS2X_GS_GPU")) != 0;
+    m_gpu.reset();
+    if (wantGpu && m_gpuAllowed && vram)
+        m_gpu = GSMetalRaster::create(vram, vramSize);
+#endif
 }
 
 void GSCpuBackend::Reset()
@@ -678,7 +746,7 @@ void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
     if (immediate || !m_textureDirectRead)
     {
         // Feedback draws read what earlier draws wrote: keep them serial.
-        flushPendingUnlocked("Submit");
+        flushPendingUnlocked("Feedback");
         const auto t0 = std::chrono::steady_clock::now();
         if (!immediate && batch.state.prim.tme && m_vram)
         {
@@ -742,7 +810,7 @@ void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
     {
         if (g_gsProfile.on && !m_pending.empty())
             ++g_gsProfile.hazardFlushes;
-        flushPendingUnlocked("Submit");
+        flushPendingUnlocked("Hazard");
     }
     auto addRange = [](std::vector<std::pair<uint64_t, uint64_t>> &list, const std::pair<uint64_t, uint64_t> &range)
     {
@@ -771,15 +839,51 @@ void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
     m_pendingClut.push_back(static_cast<uint32_t>(m_clutVersions.size() - 1u));
     m_pending.push_back(batch);
     if (m_pending.size() >= 4096u)
-        flushPendingUnlocked("Submit");
+        flushPendingUnlocked("Full");
 }
 
 void GSCpuBackend::flushPendingUnlocked(const char *reason)
 {
+#ifdef PS2X_HAVE_METAL
+    if (m_gpu)
+    {
+        // GPU work only has to be committed to keep draw order (Metal orders
+        // passes that touch the same memory); the CPU waits for it only when
+        // it is about to read or write GS memory itself.
+        if (!m_pending.empty())
+        {
+            if (g_gsProfile.on)
+                ++g_gsProfile.reasons[reason];
+            rasterizePendingGpu();
+            finishPendingUnlocked();
+        }
+        const bool orderingOnly = std::strcmp(reason, "Hazard") == 0 || std::strcmp(reason, "Full") == 0 ||
+                                  std::strcmp(reason, "Flush") == 0;
+        if (!orderingOnly)
+        {
+            const auto w0 = std::chrono::steady_clock::now();
+            m_gpu->waitIdle();
+            if (g_gsProfile.on)
+            {
+                const double waited = std::chrono::duration<double>(std::chrono::steady_clock::now() - w0).count();
+                g_gsProfile.serial += waited; // reported as "serial" in GPU mode: time the CPU waits for the GPU
+                ++g_gsProfile.reasons[std::string("wait:") + reason];
+                g_gsProfile.report();
+            }
+        }
+        return;
+    }
+#endif
     if (m_pending.empty())
         return;
     if (g_gsProfile.on)
         ++g_gsProfile.reasons[reason];
+    rasterizePendingCpu();
+    finishPendingUnlocked();
+}
+
+void GSCpuBackend::rasterizePendingCpu()
+{
     const int kBandRows = bandRows();
     // Bin every primitive into the bands its (conservative) Y range touches,
     // so each band only walks the primitives that can draw into it.
@@ -867,6 +971,10 @@ void GSCpuBackend::flushPendingUnlocked(const char *reason)
         g_gsProfile.banded += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         g_gsProfile.report();
     }
+}
+
+void GSCpuBackend::finishPendingUnlocked()
+{
     for (const auto &range : m_pendingWrites)
         markVramWritten(range.first, range.second);
     m_pending.clear();
@@ -878,6 +986,323 @@ void GSCpuBackend::flushPendingUnlocked(const char *reason)
     m_pendingWrites.clear();
     m_pendingReads.clear();
 }
+
+#ifdef PS2X_HAVE_METAL
+namespace
+{
+    bool isTargetPsm(uint32_t psm) { return psm == GS_PSM_CT32 || psm == GS_PSM_CT24 || psm == GS_PSM_CT16 || psm == GS_PSM_CT16S; }
+    bool isDepthPsm(uint32_t psm) { return psm == GS_PSM_Z32 || psm == GS_PSM_Z24 || psm == GS_PSM_Z16 || psm == GS_PSM_Z16S; }
+    bool isTexturePsm(uint32_t psm)
+    {
+        switch (psm)
+        {
+        case GS_PSM_CT32: case GS_PSM_CT24: case GS_PSM_CT16: case GS_PSM_CT16S:
+        case GS_PSM_T8: case GS_PSM_T4: case GS_PSM_T8H: case GS_PSM_T4HL: case GS_PSM_T4HH:
+        case GS_PSM_Z32: case GS_PSM_Z24: case GS_PSM_Z16: case GS_PSM_Z16S:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    // Formats and primitive types the GPU path reproduces exactly.
+    bool gpuCanDraw(const GSPrimitiveBatch &batch)
+    {
+        const GSDrawState &state = batch.state;
+        const auto &ctx = state.context;
+        const auto type = state.prim.type;
+        const bool triangle = type == GS_PRIM_TRIANGLE || type == GS_PRIM_TRISTRIP || type == GS_PRIM_TRIFAN;
+        if (!(triangle && batch.vertexCount >= 3) && !(type == GS_PRIM_SPRITE && batch.vertexCount >= 2))
+            return false;
+        if (!isTargetPsm(ctx.frame.psm))
+            return false;
+        const uint32_t ztst = static_cast<uint32_t>((ctx.test >> 17) & 3u);
+        if ((ztst >= 2u || !ctx.zbuf.zmask) && !isDepthPsm(ctx.zbuf.psm))
+            return false;
+        if (state.prim.tme && !isTexturePsm(ctx.tex0.psm))
+            return false;
+        return true;
+    }
+
+    void splitDepth(double z, float &hi, float &lo)
+    {
+        const DepthPair pair = depthSplit(z);
+        hi = pair.hi;
+        lo = pair.lo;
+    }
+
+    uint32_t packRgba(const GSVertex &v)
+    {
+        return static_cast<uint32_t>(v.r) | (static_cast<uint32_t>(v.g) << 8) | (static_cast<uint32_t>(v.b) << 16) | (static_cast<uint32_t>(v.a) << 24);
+    }
+
+    // Same setup as DrawTriangle (without band clipping).
+    bool setupGpuTriangle(const GSPrimitiveBatch &batch, GSGpuPrim &p)
+    {
+        const GSDrawState &state = batch.state;
+        const auto &ctx = state.context;
+        const int ofx = ctx.xyoffset.ofx >> 4;
+        const int ofy = ctx.xyoffset.ofy >> 4;
+        float fx[3], fy[3];
+        for (int i = 0; i < 3; ++i)
+        {
+            fx[i] = batch.vertices[i].x - static_cast<float>(ofx);
+            fy[i] = batch.vertices[i].y - static_cast<float>(ofy);
+        }
+        int minX = static_cast<int>(std::floor(std::min({fx[0], fx[1], fx[2]})));
+        int maxX = static_cast<int>(std::ceil(std::max({fx[0], fx[1], fx[2]})));
+        int minY = static_cast<int>(std::floor(std::min({fy[0], fy[1], fy[2]})));
+        int maxY = static_cast<int>(std::ceil(std::max({fy[0], fy[1], fy[2]})));
+        minX = clampInt(minX, ctx.scissor.x0, ctx.scissor.x1);
+        maxX = clampInt(maxX, ctx.scissor.x0, ctx.scissor.x1);
+        minY = clampInt(minY, ctx.scissor.y0, ctx.scissor.y1);
+        maxY = clampInt(maxY, ctx.scissor.y0, ctx.scissor.y1);
+        if (minY > maxY)
+            return false;
+        const float denom = (fy[1] - fy[2]) * (fx[0] - fx[2]) + (fx[2] - fx[1]) * (fy[0] - fy[2]);
+        if (std::fabs(denom) < 0.001f)
+            return false;
+        p.kind = 0;
+        p.x0 = minX;
+        p.x1 = maxX;
+        p.y0 = minY;
+        p.y1 = maxY;
+        p.winding = (denom < 0.0f) ? -1.0f : 1.0f;
+        p.invAbsDenom = 1.0f / std::fabs(denom);
+        for (int i = 0; i < 3; ++i)
+        {
+            const GSVertex &v = batch.vertices[i];
+            p.fx[i] = fx[i];
+            p.fy[i] = fy[i];
+            splitDepth(v.z, p.zhi[i], p.zlo[i]);
+            p.rgba[i] = packRgba(v);
+            p.s[i] = v.s;
+            p.t[i] = v.t;
+            p.q[i] = v.q;
+            p.u[i] = static_cast<float>(v.u);
+            p.v[i] = static_cast<float>(v.v);
+            p.fog[i] = static_cast<float>(v.fog);
+        }
+        return true;
+    }
+
+    // Same setup as DrawSprite (without band clipping).
+    bool setupGpuSprite(const GSPrimitiveBatch &batch, GSGpuPrim &p)
+    {
+        const GSDrawState &state = batch.state;
+        const GSVertex &v0 = batch.vertices[0];
+        const GSVertex &v1 = batch.vertices[1];
+        const auto &ctx = state.context;
+        const float ofx = static_cast<float>(ctx.xyoffset.ofx) / 16.0f;
+        const float ofy = static_cast<float>(ctx.xyoffset.ofy) / 16.0f;
+        const float sx0 = v0.x - ofx, sy0 = v0.y - ofy, sx1 = v1.x - ofx, sy1 = v1.y - ofy;
+        const int unclippedX0 = static_cast<int>(std::ceil(std::min(sx0, sx1)));
+        const int unclippedY0 = static_cast<int>(std::ceil(std::min(sy0, sy1)));
+        const int unclippedX1 = static_cast<int>(std::ceil(std::max(sx0, sx1))) - 1;
+        const int unclippedY1 = static_cast<int>(std::ceil(std::max(sy0, sy1))) - 1;
+        if (unclippedX1 < unclippedX0 || unclippedY1 < unclippedY0)
+            return false;
+        if (unclippedX1 < ctx.scissor.x0 || unclippedX0 > ctx.scissor.x1 ||
+            unclippedY1 < ctx.scissor.y0 || unclippedY0 > ctx.scissor.y1)
+            return false;
+        p.kind = 1;
+        p.x0 = clampInt(unclippedX0, ctx.scissor.x0, ctx.scissor.x1);
+        p.y0 = clampInt(unclippedY0, ctx.scissor.y0, ctx.scissor.y1);
+        p.x1 = clampInt(unclippedX1, ctx.scissor.x0, ctx.scissor.x1);
+        p.y1 = clampInt(unclippedY1, ctx.scissor.y0, ctx.scissor.y1);
+        p.fx[0] = sx0;
+        p.fy[0] = sy0;
+        p.fx[1] = sx1;
+        p.fy[1] = sy1;
+        p.winding = (sx1 != sx0) ? 1.0f / (sx1 - sx0) : 0.0f;
+        p.invAbsDenom = (sy1 != sy0) ? 1.0f / (sy1 - sy0) : 0.0f;
+        const uint32_t z1 = static_cast<uint32_t>(v1.z);
+        std::memcpy(&p.zhi[0], &z1, sizeof(z1));
+        p.rgba[0] = packRgba(v1);
+        p.fog[0] = static_cast<float>(v1.fog);
+        if (state.prim.tme)
+        {
+            if (state.prim.fst)
+            {
+                p.su0 = static_cast<float>(v0.u >> 4);
+                p.sv0 = static_cast<float>(v0.v >> 4);
+                p.su1 = static_cast<float>(v1.u >> 4);
+                p.sv1 = static_cast<float>(v1.v >> 4);
+            }
+            else
+            {
+                const float q0 = fabsQ(v0.q);
+                const float q1 = fabsQ(v1.q);
+                p.su0 = (v0.s / q0) * static_cast<float>(state.textureWidth);
+                p.sv0 = (v0.t / q0) * static_cast<float>(state.textureHeight);
+                p.su1 = (v1.s / q1) * static_cast<float>(state.textureWidth);
+                p.sv1 = (v1.t / q1) * static_cast<float>(state.textureHeight);
+            }
+        }
+        return true;
+    }
+
+    GSGpuState makeGpuState(const GSDrawState &state, uint32_t clutIndex)
+    {
+        const auto &ctx = state.context;
+        GSGpuState st{};
+        st.fbp = framePageBaseToBlock(ctx.frame.fbp);
+        st.fbw = std::max<uint32_t>(ctx.frame.fbw, 1u);
+        st.fpsm = ctx.frame.psm;
+        st.fbmsk = ctx.frame.fbmsk;
+        st.zbp = framePageBaseToBlock(ctx.zbuf.zbp);
+        st.zpsm = ctx.zbuf.psm;
+        st.zmask = ctx.zbuf.zmask ? 1u : 0u;
+        st.test = static_cast<uint32_t>(ctx.test);
+        st.asel = ctx.alpha & 3u;
+        st.bsel = (ctx.alpha >> 2) & 3u;
+        st.csel = (ctx.alpha >> 4) & 3u;
+        st.dsel = (ctx.alpha >> 6) & 3u;
+        st.fix = static_cast<uint32_t>((ctx.alpha >> 32) & 0xFFu);
+        st.abe = state.prim.abe ? 1u : 0u;
+        st.pabe = state.pabe ? 1u : 0u;
+        st.fba = ((ctx.fba & 1u) != 0u && ctx.frame.psm != GS_PSM_CT24) ? 1u : 0u;
+        st.fge = state.prim.fge ? 1u : 0u;
+        st.fogR = state.fogR;
+        st.fogG = state.fogG;
+        st.fogB = state.fogB;
+        st.iip = state.prim.iip ? 1u : 0u;
+        st.tme = state.prim.tme ? 1u : 0u;
+        st.fst = state.prim.fst ? 1u : 0u;
+        st.linear = state.linearFilter ? 1u : 0u;
+        st.tbp0 = ctx.tex0.tbp0;
+        st.tbw = ctx.tex0.tbw;
+        st.tpsm = ctx.tex0.psm;
+        st.texW = state.textureWidth;
+        st.texH = state.textureHeight;
+        st.tcc = ctx.tex0.tcc;
+        st.tfx = ctx.tex0.tfx;
+        st.cpsm = ctx.tex0.cpsm;
+        st.csm = ctx.tex0.csm;
+        st.csa = ctx.tex0.csa;
+        st.wrapU = static_cast<uint32_t>(ctx.clamp & 0x3u);
+        st.wrapV = static_cast<uint32_t>((ctx.clamp >> 2) & 0x3u);
+        st.minU = static_cast<uint32_t>((ctx.clamp >> 4) & 0x3FFu);
+        st.maxU = static_cast<uint32_t>((ctx.clamp >> 14) & 0x3FFu);
+        st.minV = static_cast<uint32_t>((ctx.clamp >> 24) & 0x3FFu);
+        st.maxV = static_cast<uint32_t>((ctx.clamp >> 34) & 0x3FFu);
+        st.ta0 = state.texa.ta0;
+        st.aem = state.texa.aem ? 1u : 0u;
+        st.ta1 = state.texa.ta1;
+        st.clut = clutIndex;
+        return st;
+    }
+}
+
+void GSCpuBackend::rasterizePendingGpu()
+{
+    static const bool verify = std::getenv("PS2X_GS_GPU_VERIFY") != nullptr;
+    std::vector<uint8_t> before, gpuResult;
+    if (verify)
+        before.assign(m_vram, m_vram + m_vramSize);
+
+    std::vector<uint16_t> cluts;
+    cluts.reserve(m_clutVersions.size() * 512u);
+    for (const auto &version : m_clutVersions)
+        cluts.insert(cluts.end(), version.begin(), version.end());
+
+    std::vector<GSGpuPrim> prims;
+    std::vector<GSGpuState> states;
+    prims.reserve(m_pending.size());
+    auto submit = [&]
+    {
+        if (!prims.empty())
+            m_gpu->draw(prims.data(), prims.size(), states.data(), states.size(), cluts.data(), m_clutVersions.size());
+        prims.clear();
+        states.clear();
+    };
+    m_textureDirectRead = true;
+    for (uint32_t index = 0; index < m_pending.size(); ++index)
+    {
+        const GSPrimitiveBatch &batch = m_pending[index];
+        if (!gpuCanDraw(batch))
+        {
+            // Lines, points and unusual formats: CPU, in order.
+            submit();
+            m_gpu->waitIdle();
+            t_clut = m_clutVersions[m_pendingClut[index]].data();
+            DrawPrimitive(batch);
+            t_clut = nullptr;
+            continue;
+        }
+        GSGpuPrim prim;
+        const bool sprite = batch.state.prim.type == GS_PRIM_SPRITE;
+        if (!(sprite ? setupGpuSprite(batch, prim) : setupGpuTriangle(batch, prim)))
+            continue;
+        const GSGpuState state = makeGpuState(batch.state, m_pendingClut[index]);
+        if (states.empty() || std::memcmp(&states.back(), &state, sizeof(state)) != 0)
+            states.push_back(state);
+        prim.state = static_cast<uint32_t>(states.size() - 1u);
+        prims.push_back(prim);
+    }
+    submit();
+
+    if (verify)
+    {
+        m_gpu->waitIdle();
+        // PS2X_GS_GPU_VERIFY=1: redo the batch on the CPU from the same memory
+        // and report the bytes that differ. The CPU result is kept.
+        gpuResult.assign(m_vram, m_vram + m_vramSize);
+        std::memcpy(m_vram, before.data(), m_vramSize);
+        rasterizePendingCpu();
+        static uint64_t batches = 0, mismatchedBatches = 0, mismatchedBytes = 0;
+        ++batches;
+        size_t diff = 0, first = SIZE_MAX;
+        for (size_t i = 0; i < m_vramSize; ++i)
+        {
+            if (gpuResult[i] != m_vram[i])
+            {
+                if (first == SIZE_MAX)
+                    first = i;
+                ++diff;
+            }
+        }
+        if (diff)
+        {
+            ++mismatchedBatches;
+            mismatchedBytes += diff;
+            if (mismatchedBatches <= 20)
+                std::fprintf(stderr, "[gs:gpu-verify] batch %llu (%zu draws): %zu bytes differ, first at 0x%zx (cpu %02x gpu %02x)\n",
+                             (unsigned long long)batches, m_pending.size(), diff, first, m_vram[first], gpuResult[first]);
+            if (mismatchedBatches <= 3)
+            {
+                const size_t at = first & ~size_t(15);
+                for (const auto &[name, data] : {std::pair<const char *, const uint8_t *>{"before", before.data()},
+                                                 {"cpu   ", m_vram}, {"gpu   ", gpuResult.data()}})
+                {
+                    std::fprintf(stderr, "[gs:gpu-verify]   %s %06zx:", name, at);
+                    for (size_t i = 0; i < 16; ++i)
+                        std::fprintf(stderr, " %02x", data[at + i]);
+                    std::fprintf(stderr, "\n");
+                }
+                for (const GSPrimitiveBatch &batch : m_pending)
+                {
+                    const auto &c = batch.state.context;
+                    std::fprintf(stderr, "[gs:gpu-verify]   type=%u gpu=%d fbp=%u fbw=%u fpsm=0x%x zbp=%u zpsm=0x%x zmask=%u test=0x%llx tme=%u fst=%u tbp=%u tbw=%u tpsm=0x%x tfx=%u tcc=%u lin=%d abe=%u alpha=0x%llx fge=%u iip=%u fbmsk=0x%x xy0=(%.1f,%.1f) xy1=(%.1f,%.1f) uv0=(%u,%u) stq0=(%g,%g,%g) rgba1=(%u,%u,%u,%u)\n",
+                                 (unsigned)batch.state.prim.type, (int)gpuCanDraw(batch), c.frame.fbp, c.frame.fbw, c.frame.psm, c.zbuf.zbp, c.zbuf.psm, (unsigned)c.zbuf.zmask,
+                                 (unsigned long long)c.test, (unsigned)batch.state.prim.tme, (unsigned)batch.state.prim.fst, c.tex0.tbp0, (unsigned)c.tex0.tbw, (unsigned)c.tex0.psm,
+                                 (unsigned)c.tex0.tfx, (unsigned)c.tex0.tcc, (int)batch.state.linearFilter, (unsigned)batch.state.prim.abe, (unsigned long long)c.alpha,
+                                 (unsigned)batch.state.prim.fge, (unsigned)batch.state.prim.iip, c.frame.fbmsk,
+                                 batch.vertices[0].x - (c.xyoffset.ofx >> 4), batch.vertices[0].y - (c.xyoffset.ofy >> 4),
+                                 batch.vertices[1].x - (c.xyoffset.ofx >> 4), batch.vertices[1].y - (c.xyoffset.ofy >> 4),
+                                 batch.vertices[0].u, batch.vertices[0].v, batch.vertices[0].s, batch.vertices[0].t, batch.vertices[0].q,
+                                 batch.vertices[1].r, batch.vertices[1].g, batch.vertices[1].b, batch.vertices[1].a);
+                    std::fprintf(stderr, "[gs:gpu-verify]     z=(%.3f, %.3f, %.3f) xy2=(%.4f,%.4f)\n", batch.vertices[0].z, batch.vertices[1].z, batch.vertices[2].z,
+                                 batch.vertices[2].x - (c.xyoffset.ofx >> 4), batch.vertices[2].y - (c.xyoffset.ofy >> 4));
+                }
+            }
+        }
+        if ((batches % 2000u) == 0u)
+            std::fprintf(stderr, "[gs:gpu-verify] %llu batches, %llu differ (%llu bytes)\n",
+                         (unsigned long long)batches, (unsigned long long)mismatchedBatches, (unsigned long long)mismatchedBytes);
+    }
+}
+#endif
 
 size_t GSCpuBackend::TextureKeyHash::operator()(const TextureKey &key) const noexcept
 {
@@ -1901,12 +2326,12 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
         auto drawRow = [&](int y)
         {
             const float ty = (static_cast<float>(y) - sy0) * invDy;
-            float texVf = v0f + (v1f - v0f) * ty;
+            float texVf = lerpf(v0f, v1f, ty);
 
             for (int x = drawX0; x <= drawX1; ++x)
             {
                 const float tx = (static_cast<float>(x) - sx0) * invDx;
-                float texUf = u0f + (u1f - u0f) * tx;
+                float texUf = lerpf(u0f, u1f, tx);
                 uint32_t texel = 0xFFFF00FFu;
                 if (state.prim.fst)
                 {
@@ -2011,6 +2436,7 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
     // a pixel and every pixel still runs the exact test below, so coverage is
     // unchanged while pixels far outside the triangle are skipped.
     const PixelPipe pipe = makePixelPipe(state);
+    const DepthPair z0 = depthSplit(v0.z), z1 = depthSplit(v1.z), z2 = depthSplit(v2.z);
     const float k0 = (fy1 - fy2) * winding * invAbsDenom;
     const float k1 = (fy2 - fy0) * winding * invAbsDenom;
     const float k2 = -(k0 + k1);
@@ -2043,22 +2469,22 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
         {
             float px = static_cast<float>(x) + 0.5f;
 
-            float w0 = (((fy1 - fy2) * (px - fx2) + (fx2 - fx1) * (py - fy2)) * winding) * invAbsDenom;
-            float w1 = (((fy2 - fy0) * (px - fx2) + (fx0 - fx2) * (py - fy2)) * winding) * invAbsDenom;
+            float w0 = (std::fma(fy1 - fy2, px - fx2, (fx2 - fx1) * (py - fy2)) * winding) * invAbsDenom;
+            float w1 = (std::fma(fy2 - fy0, px - fx2, (fx0 - fx2) * (py - fy2)) * winding) * invAbsDenom;
             float w2 = 1.0f - w0 - w1;
 
             if (w0 < -kEdgeEpsilon || w1 < -kEdgeEpsilon || w2 < -kEdgeEpsilon)
                 continue;
 
-            double z = v0.z * w0 + v1.z * w1 + v2.z * w2;
+            const uint32_t z = depthRound(depthAdd(depthAdd(depthMul(w0, z0), depthMul(w1, z1)), depthMul(w2, z2)));
 
             uint8_t r, g, b, a;
             if (state.prim.iip)
             {
-                r = clampU8(static_cast<int>(v0.r * w0 + v1.r * w1 + v2.r * w2));
-                g = clampU8(static_cast<int>(v0.g * w0 + v1.g * w1 + v2.g * w2));
-                b = clampU8(static_cast<int>(v0.b * w0 + v1.b * w1 + v2.b * w2));
-                a = clampU8(static_cast<int>(v0.a * w0 + v1.a * w1 + v2.a * w2));
+                r = clampU8(static_cast<int>(interp3(v0.r, v1.r, v2.r, w0, w1, w2)));
+                g = clampU8(static_cast<int>(interp3(v0.g, v1.g, v2.g, w0, w1, w2)));
+                b = clampU8(static_cast<int>(interp3(v0.b, v1.b, v2.b, w0, w1, w2)));
+                a = clampU8(static_cast<int>(interp3(v0.a, v1.a, v2.a, w0, w1, w2)));
             }
             else
             {
@@ -2074,8 +2500,8 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
                 uint16_t iu, iv;
                 if (state.prim.fst)
                 {
-                    iu = static_cast<uint16_t>(v0.u * w0 + v1.u * w1 + v2.u * w2);
-                    iv = static_cast<uint16_t>(v0.v * w0 + v1.v * w1 + v2.v * w2);
+                    iu = static_cast<uint16_t>(interp3(v0.u, v1.u, v2.u, w0, w1, w2));
+                    iv = static_cast<uint16_t>(interp3(v0.v, v1.v, v2.v, w0, w1, w2));
                     is = 0.0f;
                     it = 0.0f;
                     iq = 1.0f;
@@ -2085,9 +2511,9 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
                     // The GS DDA interpolates the homogeneous S, T and Q
                     // values. Texel coordinates are calculated from S/Q and
                     // T/Q only after interpolation.
-                    is = v0.s * w0 + v1.s * w1 + v2.s * w2;
-                    it = v0.t * w0 + v1.t * w1 + v2.t * w2;
-                    iq = v0.q * w0 + v1.q * w1 + v2.q * w2;
+                    is = interp3(v0.s, v1.s, v2.s, w0, w1, w2);
+                    it = interp3(v0.t, v1.t, v2.t, w0, w1, w2);
+                    iq = interp3(v0.q, v1.q, v2.q, w0, w1, w2);
                     iu = 0;
                     iv = 0;
                 }
@@ -2112,8 +2538,8 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
                 a = color.a;
             }
 
-            const uint8_t fog = clampU8(static_cast<int>(v0.fog * w0 + v1.fog * w1 + v2.fog * w2));
-            WritePixel(pipe, x, y, static_cast<u32>(z + 0.5), r, g, b, a, fog);
+            const uint8_t fog = clampU8(static_cast<int>(interp3(v0.fog, v1.fog, v2.fog, w0, w1, w2)));
+            WritePixel(pipe, x, y, z, r, g, b, a, fog);
         }
     }
 }

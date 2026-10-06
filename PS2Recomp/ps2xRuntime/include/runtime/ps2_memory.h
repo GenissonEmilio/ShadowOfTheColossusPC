@@ -10,6 +10,7 @@
 #include <atomic>
 #include <iostream>
 #include <mutex>
+#include <new>
 #include <condition_variable>
 #include <deque>
 #include <thread>
@@ -274,6 +275,7 @@ public:
             mtvuSyncSlow();
     }
     static bool onVu1Worker();
+    static const std::align_val_t kGsVramAlignment;
     // VU0 FBRST (D/T bit enables) for the VU1 run in progress on the worker.
     uint32_t vu1WorkerFbrst() const { return m_mtvuFbrst; }
     void setVu0FbrstProvider(std::function<uint32_t()> provider) { m_vu0FbrstProvider = std::move(provider); }

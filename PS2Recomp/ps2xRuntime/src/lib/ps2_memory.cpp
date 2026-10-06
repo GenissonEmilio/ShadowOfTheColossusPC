@@ -254,6 +254,8 @@ namespace
     thread_local bool t_onVu1Worker = false;
 }
 
+const std::align_val_t PS2Memory::kGsVramAlignment{16384};
+
 bool PS2Memory::onVu1Worker()
 {
     return t_onVu1Worker;
@@ -362,7 +364,7 @@ PS2Memory::~PS2Memory()
 
     if (m_gsVRAM)
     {
-        delete[] m_gsVRAM;
+        ::operator delete[](m_gsVRAM, kGsVramAlignment);
         m_gsVRAM = nullptr;
     }
 
@@ -401,7 +403,8 @@ bool PS2Memory::initialize(size_t ramSize)
         delete[] m_rdram;
         delete[] m_scratchpad;
         delete[] iop_ram;
-        delete[] m_gsVRAM;
+        if (m_gsVRAM)
+            ::operator delete[](m_gsVRAM, kGsVramAlignment);
         delete[] m_vu0Code;
         delete[] m_vu0Data;
         delete[] m_vu1Code;
@@ -467,8 +470,8 @@ bool PS2Memory::initialize(size_t ramSize)
         gs_regs.dispfb2 = gs_regs.dispfb1;
         gs_regs.display2 = gs_regs.display1;
 
-        // Allocate GS VRAM (4MB)
-        m_gsVRAM = new uint8_t[PS2_GS_VRAM_SIZE];
+        // Allocate GS VRAM (4MB), page aligned so a GPU rasterizer can share it.
+        m_gsVRAM = static_cast<uint8_t *>(::operator new[](PS2_GS_VRAM_SIZE, kGsVramAlignment));
         std::memset(m_gsVRAM, 0, PS2_GS_VRAM_SIZE);
 
         m_vu0Code = new uint8_t[PS2_VU0_CODE_SIZE];

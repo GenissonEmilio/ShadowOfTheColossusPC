@@ -220,6 +220,31 @@ namespace GSMem
         PixelStorageTraits<P4>::InitPageLookupTable(PageTableP4, BlockTableP4, ColumnTable4);
     }
 
+    const u16* PageTableData(u32 index, u32& entries, u32& pageWidth, u32& pageHeight)
+    {
+        auto describe = [&](const auto& table, u32 w, u32 h) -> const u16*
+        {
+            entries = static_cast<u32>(sizeof(table) / sizeof(u16));
+            pageWidth = w;
+            pageHeight = h;
+            return &table[0][0][0];
+        };
+        switch (index)
+        {
+        case 0: return describe(PageTableC32, 64, 32);
+        case 1: return describe(PageTableZ32, 64, 32);
+        case 2: return describe(PageTableC16, 64, 64);
+        case 3: return describe(PageTableC16S, 64, 64);
+        case 4: return describe(PageTableZ16, 64, 64);
+        case 5: return describe(PageTableZ16S, 64, 64);
+        case 6: return describe(PageTableP8, 128, 64);
+        case 7: return describe(PageTableP4, 128, 128);
+        default:
+            entries = pageWidth = pageHeight = 0;
+            return nullptr;
+        }
+    }
+
     u32 ReadTexture(TexturePageCache& cache, const u8* data, u32 psm, u32 bp, u32 bw, u32 x, u32 y)
     {
         switch (static_cast<PixelStorageMode>(psm & 0x3Fu))
