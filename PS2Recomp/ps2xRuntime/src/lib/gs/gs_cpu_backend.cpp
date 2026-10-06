@@ -1207,13 +1207,16 @@ void GSCpuBackend::rasterizePendingGpu()
         cluts.insert(cluts.end(), version.begin(), version.end());
 
     std::vector<GSGpuPrim> prims;
+    std::vector<uint64_t> keys;
     std::vector<GSGpuState> states;
     prims.reserve(m_pending.size());
+    keys.reserve(m_pending.size());
     auto submit = [&]
     {
         if (!prims.empty())
-            m_gpu->draw(prims.data(), prims.size(), states.data(), states.size(), cluts.data(), m_clutVersions.size());
+            m_gpu->draw(prims.data(), keys.data(), prims.size(), states.data(), states.size(), cluts.data(), m_clutVersions.size());
         prims.clear();
+        keys.clear();
         states.clear();
     };
     m_textureDirectRead = true;
@@ -1239,6 +1242,7 @@ void GSCpuBackend::rasterizePendingGpu()
             states.push_back(state);
         prim.state = static_cast<uint32_t>(states.size() - 1u);
         prims.push_back(prim);
+        keys.push_back(GSMetalRaster::pipelineKey(prim.kind, state));
     }
     submit();
 

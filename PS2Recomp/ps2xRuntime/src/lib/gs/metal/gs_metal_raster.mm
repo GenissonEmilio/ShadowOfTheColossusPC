@@ -4,11 +4,12 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
-#include <vector>
+#include <unordered_map>
 
 namespace
 {
@@ -16,12 +17,12 @@ namespace
 #include "gs_metal_shaders.inc"
         ;
 
-    // Mirrors TableInfo in the shaders.
-    struct TableInfo
+    // Mirrors SwizzleInfo in the shaders.
+    struct SwizzleInfo
     {
-        uint32_t offset[8];
-        uint32_t pw[8];
-        uint32_t ph[8];
+        uint32_t pw[8], ph[8], colW[8], colH[8], blkW[8], blkH[8];
+        uint8_t block[8][32];
+        uint16_t column[8][512];
     };
 
     // GS coordinates span 0..2047; the shaders map them onto this target.
@@ -32,10 +33,10 @@ struct GSMetalRaster::Impl
 {
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> queue = nil;
-    id<MTLRenderPipelineState> pipeline = nil;
+    id<MTLLibrary> library = nil;
     id<MTLBuffer> vram = nil;
-    id<MTLBuffer> tables = nil;
-    TableInfo tableInfo{};
+    id<MTLBuffer> swizzle = nil;
+    std::unordered_map<uint64_t, id<MTLRenderPipelineState>> pipelines;
 
     // Per-submission inputs. A slot is reused only once the GPU is done with it.
     struct Slot
@@ -62,6 +63,40 @@ struct GSMetalRaster::Impl
         return [device newBufferWithLength:size options:MTLResourceStorageModeShared];
     }
 
+    // Pipeline specialized on a key from pipelineKey (function constants).
+    id<MTLRenderPipelineState> pipelineFor(uint64_t key)
+    {
+        auto it = pipelines.find(key);
+        if (it != pipelines.end())
+            return it->second;
+        @autoreleasepool
+        {
+            MTLFunctionConstantValues *values = [[MTLFunctionConstantValues new] autorelease];
+            const uint32_t constants[6] = {
+                static_cast<uint32_t>(key & 1u),
+                static_cast<uint32_t>((key >> 1) & 0x1FFFu),
+                static_cast<uint32_t>((key >> 14) & 0x3Fu),
+                static_cast<uint32_t>((key >> 20) & 0x3Fu),
+                static_cast<uint32_t>((key >> 26) & 0x3Fu),
+                static_cast<uint32_t>(key >> 32),
+            };
+            for (NSUInteger i = 0; i < 6; ++i)
+                [values setConstantValue:&constants[i] type:MTLDataTypeUInt atIndex:i];
+            NSError *error = nil;
+            MTLRenderPipelineDescriptor *desc = [[MTLRenderPipelineDescriptor new] autorelease];
+            desc.vertexFunction = [[library newFunctionWithName:@"gsVertex"] autorelease];
+            desc.fragmentFunction = [[library newFunctionWithName:@"gsFragment" constantValues:values error:&error] autorelease];
+            desc.rasterSampleCount = 1;
+            id<MTLRenderPipelineState> pipeline =
+                desc.fragmentFunction ? [device newRenderPipelineStateWithDescriptor:desc error:&error] : nil;
+            if (!pipeline)
+                std::cerr << "[gs:metal] pipeline " << std::hex << key << std::dec << " failed: "
+                          << (error ? [[error localizedDescription] UTF8String] : "?") << std::endl;
+            pipelines.emplace(key, pipeline);
+            return pipeline;
+        }
+    }
+
     ~Impl()
     {
         if (last)
@@ -74,10 +109,12 @@ struct GSMetalRaster::Impl
             [slot.commands release];
         }
         [last release];
-        [pipeline release];
+        for (auto &[key, pipeline] : pipelines)
+            [pipeline release];
+        [library release];
         [queue release];
         [vram release];
-        [tables release];
+        [swizzle release];
         [device release];
     }
 };
@@ -113,20 +150,23 @@ std::unique_ptr<GSMetalRaster> GSMetalRaster::create(uint8_t *vramPtr, size_t vr
                                                      options:MTLResourceStorageModeShared
                                                  deallocator:nil];
 
-        // Swizzle tables, the same ones the CPU uses.
-        std::vector<uint16_t> tableData;
+        // Swizzle geometry and tables, the same ones the CPU builds its page tables from.
+        SwizzleInfo info{};
         for (uint32_t i = 0; i < 8; ++i)
         {
             uint32_t entries = 0, pw = 0, ph = 0;
-            const uint16_t *table = GSMem::PageTableData(i, entries, pw, ph);
-            impl->tableInfo.offset[i] = static_cast<uint32_t>(tableData.size());
-            impl->tableInfo.pw[i] = pw;
-            impl->tableInfo.ph[i] = ph;
-            tableData.insert(tableData.end(), table, table + entries);
+            GSMem::PageTableData(i, entries, pw, ph);
+            const GSMem::SwizzleTables tables = GSMem::SwizzleTableData(i);
+            info.pw[i] = pw;
+            info.ph[i] = ph;
+            info.colW[i] = tables.columnWidth;
+            info.colH[i] = tables.columnHeight;
+            info.blkW[i] = tables.blockWidth;
+            info.blkH[i] = tables.blockHeight;
+            std::memcpy(info.block[i], tables.block, tables.blockWidth * tables.blockHeight);
+            std::memcpy(info.column[i], tables.column, tables.columnWidth * tables.columnHeight * sizeof(uint16_t));
         }
-        impl->tables = [impl->device newBufferWithBytes:tableData.data()
-                                                 length:tableData.size() * sizeof(uint16_t)
-                                                options:MTLResourceStorageModeShared];
+        impl->swizzle = [impl->device newBufferWithBytes:&info length:sizeof(info) options:MTLResourceStorageModeShared];
 
         NSError *error = nil;
         MTLCompileOptions *options = [[MTLCompileOptions new] autorelease];
@@ -141,23 +181,12 @@ std::unique_ptr<GSMetalRaster> GSMetalRaster::create(uint8_t *vramPtr, size_t vr
         {
             options.fastMathEnabled = NO;
         }
-        id<MTLLibrary> library = [impl->device newLibraryWithSource:[NSString stringWithUTF8String:kShaderSource]
-                                                           options:options
-                                                             error:&error];
-        if (!library)
+        impl->library = [impl->device newLibraryWithSource:[NSString stringWithUTF8String:kShaderSource]
+                                                   options:options
+                                                     error:&error];
+        if (!impl->library)
         {
             std::cerr << "[gs:metal] shader compile failed: " << [[error localizedDescription] UTF8String] << std::endl;
-            return nullptr;
-        }
-        MTLRenderPipelineDescriptor *desc = [[MTLRenderPipelineDescriptor new] autorelease];
-        desc.vertexFunction = [[library newFunctionWithName:@"gsVertex"] autorelease];
-        desc.fragmentFunction = [[library newFunctionWithName:@"gsFragment"] autorelease];
-        desc.rasterSampleCount = 1;
-        impl->pipeline = [impl->device newRenderPipelineStateWithDescriptor:desc error:&error];
-        [library release];
-        if (!impl->pipeline)
-        {
-            std::cerr << "[gs:metal] pipeline failed: " << [[error localizedDescription] UTF8String] << std::endl;
             return nullptr;
         }
         impl->queue = [impl->device newCommandQueue];
@@ -166,7 +195,23 @@ std::unique_ptr<GSMetalRaster> GSMetalRaster::create(uint8_t *vramPtr, size_t vr
     }
 }
 
-void GSMetalRaster::draw(const GSGpuPrim *prims, size_t primCount,
+uint64_t GSMetalRaster::pipelineKey(uint32_t kind, const GSGpuState &st)
+{
+    // Fields a draw does not use are left out, so they do not split pipelines.
+    const bool tme = st.tme != 0u;
+    const uint32_t ztst = (st.test >> 17) & 3u;
+    const bool usesZ = ztst >= 2u || st.zmask == 0u;
+    uint32_t flags = tme ? 1u : 0u;
+    if (tme)
+        flags |= (st.fst << 1) | (st.linear << 2) | (st.tcc << 9) | ((st.tfx & 3u) << 10);
+    flags |= (st.iip << 3) | (st.fge << 4) | (st.abe << 5) | (st.pabe << 6) | (st.zmask << 7) | (st.fba << 8);
+    flags |= (st.fbmsk != 0u ? 1u : 0u) << 12;
+    return static_cast<uint64_t>(kind & 1u) | (static_cast<uint64_t>(flags) << 1) |
+           (static_cast<uint64_t>(st.fpsm & 0x3Fu) << 14) | (static_cast<uint64_t>(usesZ ? st.zpsm & 0x3Fu : 0u) << 20) |
+           (static_cast<uint64_t>(tme ? st.tpsm & 0x3Fu : 0u) << 26) | (static_cast<uint64_t>(st.test & 0x7F00Fu) << 32);
+}
+
+void GSMetalRaster::draw(const GSGpuPrim *prims, const uint64_t *keys, size_t primCount,
                          const GSGpuState *states, size_t stateCount,
                          const uint16_t *cluts, size_t clutCount)
 {
@@ -198,7 +243,6 @@ void GSMetalRaster::draw(const GSGpuPrim *prims, size_t primCount,
 
         id<MTLCommandBuffer> commands = [impl.queue commandBuffer];
         id<MTLRenderCommandEncoder> encoder = [commands renderCommandEncoderWithDescriptor:pass];
-        [encoder setRenderPipelineState:impl.pipeline];
         [encoder setViewport:MTLViewport{0, 0, double(kTargetSize), double(kTargetSize), 0, 1}];
         [encoder setVertexBuffer:slot.prims offset:0 atIndex:1];
         const uint32_t primBase = 0;
@@ -206,31 +250,43 @@ void GSMetalRaster::draw(const GSGpuPrim *prims, size_t primCount,
         [encoder setFragmentBuffer:impl.vram offset:0 atIndex:0];
         [encoder setFragmentBuffer:slot.prims offset:0 atIndex:1];
         [encoder setFragmentBuffer:slot.states offset:0 atIndex:2];
-        [encoder setFragmentBuffer:impl.tables offset:0 atIndex:3];
+        [encoder setFragmentBuffer:impl.swizzle offset:0 atIndex:3];
         [encoder setFragmentBuffer:slot.cluts offset:0 atIndex:4];
-        [encoder setFragmentBytes:&impl.tableInfo length:sizeof(TableInfo) atIndex:5];
         [encoder setFragmentBuffer:impl.vram offset:0 atIndex:7];
-        // One bounding quad per primitive; raster order groups keep overlapping
-        // pixels in submission order.
-        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6 instanceCount:primCount];
+        // One bounding quad per primitive, in runs sharing a specialized
+        // pipeline; raster order groups keep overlapping pixels in order.
+        for (size_t start = 0; start < primCount;)
+        {
+            size_t end = start + 1;
+            while (end < primCount && keys[end] == keys[start])
+                ++end;
+            if (id<MTLRenderPipelineState> pipeline = impl.pipelineFor(keys[start]))
+            {
+                [encoder setRenderPipelineState:pipeline];
+                [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6
+                          instanceCount:end - start baseInstance:start];
+            }
+            start = end;
+        }
         [encoder endEncoding];
+
         // PS2X_GS_PROFILE=1: GPU execution time per second.
         static const bool profile = std::getenv("PS2X_GS_PROFILE") != nullptr;
         if (profile)
         {
+            const size_t pipelineCount = impl.pipelines.size();
             [commands addCompletedHandler:^(id<MTLCommandBuffer> done) {
                 static std::atomic<double> busy{0.0};
                 static std::atomic<uint64_t> buffers{0};
                 static std::atomic<double> windowStart{0.0};
-                const double gpu = done.GPUEndTime - done.GPUStartTime;
-                busy.store(busy.load() + gpu);
+                busy.store(busy.load() + (done.GPUEndTime - done.GPUStartTime));
                 buffers.fetch_add(1);
                 if (windowStart.load() == 0.0)
                     windowStart.store(done.GPUStartTime);
                 if (done.GPUEndTime - windowStart.load() >= 1.0)
                 {
-                    std::fprintf(stderr, "[gs:metal] gpu busy %.0f ms/s over %llu command buffers\n", busy.load() * 1000.0,
-                                 (unsigned long long)buffers.load());
+                    std::fprintf(stderr, "[gs:metal] gpu busy %.0f ms/s over %llu command buffers, %zu pipelines\n",
+                                 busy.load() * 1000.0, (unsigned long long)buffers.load(), pipelineCount);
                     busy.store(0.0);
                     buffers.store(0);
                     windowStart.store(done.GPUEndTime);

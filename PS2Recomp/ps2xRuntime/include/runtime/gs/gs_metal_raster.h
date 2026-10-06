@@ -51,9 +51,13 @@ public:
 
     // Queues the primitives for rasterization (in submission order) without
     // waiting. cluts holds clutCount CLUTs of 512 entries.
-    void draw(const GSGpuPrim *prims, size_t primCount,
+    // keys[i] selects the specialized pipeline of prims[i] (see pipelineKey).
+    void draw(const GSGpuPrim *prims, const uint64_t *keys, size_t primCount,
               const GSGpuState *states, size_t stateCount,
               const uint16_t *cluts, size_t clutCount);
+
+    // Specialization key of a primitive: kind plus the state's switches.
+    static uint64_t pipelineKey(uint32_t kind, const GSGpuState &state);
     // Waits until all queued work has been executed.
     void waitIdle();
 

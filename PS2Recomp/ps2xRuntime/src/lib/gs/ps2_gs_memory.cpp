@@ -245,6 +245,26 @@ namespace GSMem
         }
     }
 
+    SwizzleTables SwizzleTableData(u32 index)
+    {
+        auto make = [](const auto& block, u32 bw, u32 bh, const auto& column, u32 cw, u32 ch) -> SwizzleTables
+        {
+            return {&block[0][0], bw, bh, &column[0][0], cw, ch};
+        };
+        switch (index)
+        {
+        case 0: return make(BlockTableC32, 8, 4, ColumnTable32, 8, 8);
+        case 1: return make(BlockTableZ32, 8, 4, ColumnTable32, 8, 8);
+        case 2: return make(BlockTableC16, 4, 8, ColumnTable16, 16, 8);
+        case 3: return make(BlockTableC16S, 4, 8, ColumnTable16, 16, 8);
+        case 4: return make(BlockTableZ16, 4, 8, ColumnTable16, 16, 8);
+        case 5: return make(BlockTableZ16S, 4, 8, ColumnTable16, 16, 8);
+        case 6: return make(BlockTableP8, 8, 4, ColumnTable8, 16, 16);
+        case 7: return make(BlockTableP4, 4, 8, ColumnTable4, 32, 16);
+        default: return {nullptr, 0, 0, nullptr, 0, 0};
+        }
+    }
+
     u32 ReadTexture(TexturePageCache& cache, const u8* data, u32 psm, u32 bp, u32 bw, u32 x, u32 y)
     {
         switch (static_cast<PixelStorageMode>(psm & 0x3Fu))

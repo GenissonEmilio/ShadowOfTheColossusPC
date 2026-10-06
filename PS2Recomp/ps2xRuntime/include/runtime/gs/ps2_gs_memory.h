@@ -544,6 +544,19 @@ namespace GSMem
 	// rasterizers, in this order: C32, Z32, C16, C16S, Z16, Z16S, P8, P4.
 	const u16* PageTableData(u32 index, u32& entries, u32& pageWidth, u32& pageHeight);
 
+	// The small tables the page tables are built from (same order as above):
+	// block table [y][x] of blockWidth x blockHeight, column table [y][x] of
+	// columnWidth x columnHeight. Page entry = (base % 32 + block) * pixels
+	// per block + column, for in-page x, y.
+	struct SwizzleTables
+	{
+		const u8* block;
+		u32 blockWidth, blockHeight;
+		const u16* column;
+		u32 columnWidth, columnHeight;
+	};
+	SwizzleTables SwizzleTableData(u32 index);
+
     // Shares swizzle, VRAM wrapping, and lane extraction with the direct reads.
     u32 ReadTexture(TexturePageCache& cache, const u8* data, u32 psm, u32 bp, u32 bw, u32 x, u32 y);
 

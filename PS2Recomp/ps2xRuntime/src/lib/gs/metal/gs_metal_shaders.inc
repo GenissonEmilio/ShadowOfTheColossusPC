@@ -38,12 +38,47 @@ struct GpuState
     uint ta0, aem, ta1, clut;
 };
 
-struct TableInfo
+// Swizzle geometry of the eight layouts (C32, Z32, C16, C16S, Z16, Z16S, P8,
+// P4): page, column and block extents plus the small block/column tables.
+struct SwizzleInfo
 {
-    uint offset[8];
-    uint pw[8];
-    uint ph[8];
+    uint pw[8], ph[8], colW[8], colH[8], blkW[8], blkH[8];
+    uchar block[8][32];
+    ushort column[8][512];
 };
+
+// Pipeline specialization: the per-draw switches are compile-time constants,
+// so each variant only contains the code its draws need.
+constant uint FC_KIND [[function_constant(0)]];  // 0 = triangle, 1 = sprite
+constant uint FC_FLAGS [[function_constant(1)]]; // see specializeState
+constant uint FC_FPSM [[function_constant(2)]];
+constant uint FC_ZPSM [[function_constant(3)]];
+constant uint FC_TPSM [[function_constant(4)]];
+constant uint FC_TEST [[function_constant(5)]];  // TEST bits except AREF
+constant uint kTestSwitchMask = 0x7F00Fu;
+
+inline GpuState specializeState(device const GpuState &in)
+{
+    GpuState st = in;
+    st.tme = FC_FLAGS & 1u;
+    st.fst = (FC_FLAGS >> 1) & 1u;
+    st.linear = (FC_FLAGS >> 2) & 1u;
+    st.iip = (FC_FLAGS >> 3) & 1u;
+    st.fge = (FC_FLAGS >> 4) & 1u;
+    st.abe = (FC_FLAGS >> 5) & 1u;
+    st.pabe = (FC_FLAGS >> 6) & 1u;
+    st.zmask = (FC_FLAGS >> 7) & 1u;
+    st.fba = (FC_FLAGS >> 8) & 1u;
+    st.tcc = (FC_FLAGS >> 9) & 1u;
+    st.tfx = (FC_FLAGS >> 10) & 3u;
+    if (((FC_FLAGS >> 12) & 1u) == 0u)
+        st.fbmsk = 0u;
+    st.fpsm = FC_FPSM;
+    st.zpsm = FC_ZPSM;
+    st.tpsm = FC_TPSM;
+    st.test = (in.test & ~kTestSwitchMask) | FC_TEST;
+    return st;
+}
 
 struct VOut
 {
@@ -88,21 +123,26 @@ inline int tableFor(uint psm)
     }
 }
 
-inline uint pixelAddress(device const ushort *tables, constant TableInfo &ti, int table, uint block, uint bw, uint x, uint y)
+// Same value as the CPU's page lookup table entry:
+// (base % 32 + block id) * pixels per block + column id.
+inline uint pixelAddress(constant SwizzleInfo &sw, int table, uint block, uint bw, uint x, uint y)
 {
-    const uint pw = ti.pw[table], ph = ti.ph[table];
+    const uint pw = sw.pw[table], ph = sw.ph[table];
+    const uint cw = sw.colW[table], ch = sw.colH[table];
     const uint page = block / 32u + (y / ph) * ((bw * 64u) / pw) + x / pw;
-    const uint idx = tables[ti.offset[table] + ((block % 32u) * ph + (y % ph)) * pw + (x % pw)];
-    return page * (pw * ph) + idx;
+    const uint lx = x % pw, ly = y % ph;
+    const uint blockId = sw.block[table][((ly / ch) % sw.blkH[table]) * sw.blkW[table] + (lx / cw) % sw.blkW[table]];
+    const uint columnId = sw.column[table][(ly % ch) * cw + (lx % cw)];
+    return page * (pw * ph) + ((block % 32u) + blockId) * (cw * ch) + columnId;
 }
 
-inline uint readVram(device const uchar *vram, device const ushort *tables, constant TableInfo &ti,
+inline uint readVram(device const uchar *vram, constant SwizzleInfo &sw,
                      uint psm, uint block, uint bw, uint x, uint y)
 {
     const int table = tableFor(psm);
     if (table < 0)
         return 0u;
-    const uint pixel = pixelAddress(tables, ti, table, block, bw, x, y);
+    const uint pixel = pixelAddress(sw, table, block, bw, x, y);
     switch (psm)
     {
     case 0: case 48:
@@ -129,11 +169,11 @@ inline uint readVram(device const uchar *vram, device const ushort *tables, cons
 }
 
 // Frame and Z buffers (32/24/16-bit formats only; other formats stay on the CPU).
-inline uint readTarget(device uchar *vram, device const ushort *tables, constant TableInfo &ti,
+inline uint readTarget(device uchar *vram, constant SwizzleInfo &sw,
                        uint psm, uint block, uint bw, uint x, uint y)
 {
     const int table = tableFor(psm);
-    const uint pixel = pixelAddress(tables, ti, table, block, bw, x, y);
+    const uint pixel = pixelAddress(sw, table, block, bw, x, y);
     switch (psm)
     {
     case 0: case 48:
@@ -145,11 +185,11 @@ inline uint readTarget(device uchar *vram, device const ushort *tables, constant
     }
 }
 
-inline void writeTarget(device uchar *vram, device const ushort *tables, constant TableInfo &ti,
+inline void writeTarget(device uchar *vram, constant SwizzleInfo &sw,
                         uint psm, uint block, uint bw, uint x, uint y, uint value)
 {
     const int table = tableFor(psm);
-    const uint pixel = pixelAddress(tables, ti, table, block, bw, x, y);
+    const uint pixel = pixelAddress(sw, table, block, bw, x, y);
     switch (psm)
     {
     case 0: case 48:
@@ -181,7 +221,7 @@ inline uint rgba8888To5551(uint c)
     return ((c & 0xFFu) >> 3) | ((((c >> 8) & 0xFFu) >> 3) << 5) | ((((c >> 16) & 0xFFu) >> 3) << 10) | ((((c >> 24) & 0xFFu) >> 7) << 15);
 }
 
-inline uint applyTexa(device const GpuState &st, uint psm, uint texel)
+inline uint applyTexa(thread const GpuState &st, uint psm, uint texel)
 {
     if (psm == 0u)
         return texel;
@@ -194,7 +234,7 @@ inline uint applyTexa(device const GpuState &st, uint psm, uint texel)
     return (texel & 0x00FFFFFFu) | (a << 24);
 }
 
-inline uint lookupClut(device const GpuState &st, device const ushort *clut, uint index)
+inline uint lookupClut(thread const GpuState &st, device const ushort *clut, uint index)
 {
     const bool sixteenBit = st.cpsm == 2u || st.cpsm == 10u;
     const uint csaMask = sixteenBit ? 0x1Fu : 0x0Fu;
@@ -228,12 +268,11 @@ inline int wrapCoord(int c, int size, uint mode, uint minV, uint maxV)
     }
 }
 
-inline uint samplePoint(device const GpuState &st, device const uchar *vram, device const ushort *tables,
-                        constant TableInfo &ti, device const ushort *clut, int su, int sv)
+inline uint samplePoint(thread const GpuState &st, device const uchar *vram, constant SwizzleInfo &sw, device const ushort *clut, int su, int sv)
 {
     su = wrapCoord(su, int(st.texW), st.wrapU, st.minU, st.maxU);
     sv = wrapCoord(sv, int(st.texH), st.wrapV, st.minV, st.maxV);
-    const uint raw = readVram(vram, tables, ti, st.tpsm, st.tbp0, st.tbw, uint(su), uint(sv));
+    const uint raw = readVram(vram, sw, st.tpsm, st.tbp0, st.tbw, uint(su), uint(sv));
     switch (st.tpsm)
     {
     case 0: case 48: case 1: case 49:
@@ -262,8 +301,7 @@ inline uint lerpChannel(uint c00, uint c10, uint c01, uint c11, float fx, float 
     return clampU8(int(round(lerpf(top, bottom, fy))));
 }
 
-inline uint sampleTexture(device const GpuState &st, device const uchar *vram, device const ushort *tables,
-                          constant TableInfo &ti, device const ushort *clut, float s, float t, float q, uint u, uint v)
+inline uint sampleTexture(thread const GpuState &st, device const uchar *vram, constant SwizzleInfo &sw, device const ushort *clut, float s, float t, float q, uint u, uint v)
 {
     float texUf, texVf;
     if (st.fst != 0u)
@@ -278,24 +316,24 @@ inline uint sampleTexture(device const GpuState &st, device const uchar *vram, d
         texVf = t * invQ * float(st.texH);
     }
     if (st.linear == 0u)
-        return samplePoint(st, vram, tables, ti, clut, int(texUf), int(texVf));
+        return samplePoint(st, vram, sw, clut, int(texUf), int(texVf));
     const float sampleU = texUf - 0.5f;
     const float sampleV = texVf - 0.5f;
     const int u0 = int(floor(sampleU));
     const int v0 = int(floor(sampleV));
     const float fx = sampleU - float(u0);
     const float fy = sampleV - float(v0);
-    const uint c00 = samplePoint(st, vram, tables, ti, clut, u0, v0);
-    const uint c10 = samplePoint(st, vram, tables, ti, clut, u0 + 1, v0);
-    const uint c01 = samplePoint(st, vram, tables, ti, clut, u0, v0 + 1);
-    const uint c11 = samplePoint(st, vram, tables, ti, clut, u0 + 1, v0 + 1);
+    const uint c00 = samplePoint(st, vram, sw, clut, u0, v0);
+    const uint c10 = samplePoint(st, vram, sw, clut, u0 + 1, v0);
+    const uint c01 = samplePoint(st, vram, sw, clut, u0, v0 + 1);
+    const uint c11 = samplePoint(st, vram, sw, clut, u0 + 1, v0 + 1);
     uint out = 0u;
     for (uint shift = 0u; shift < 32u; shift += 8u)
         out |= lerpChannel((c00 >> shift) & 0xFFu, (c10 >> shift) & 0xFFu, (c01 >> shift) & 0xFFu, (c11 >> shift) & 0xFFu, fx, fy) << shift;
     return out;
 }
 
-inline uint4 combineTexture(device const GpuState &st, uint4 c, uint texel)
+inline uint4 combineTexture(thread const GpuState &st, uint4 c, uint texel)
 {
     const uint tr = texel & 0xFFu, tg = (texel >> 8) & 0xFFu, tb = (texel >> 16) & 0xFFu, ta = texel >> 24;
     const bool hasAlpha = st.tcc != 0u;
@@ -352,7 +390,7 @@ inline uint dfToU32Rounded(DF z)
 
 // ---- Pixel pipeline (WritePixel) --------------------------------------------
 
-inline void writePixel(device const GpuState &st, device uchar *target, device const ushort *tables, constant TableInfo &ti,
+inline void writePixel(thread const GpuState &st, device uchar *target, constant SwizzleInfo &sw,
                        uint x, uint y, uint z, uint4 c, uint fog)
 {
     uint r = c.r, g = c.g, b = c.b, a = c.a;
@@ -407,7 +445,7 @@ inline void writePixel(device const GpuState &st, device uchar *target, device c
     uint raw = 0u, fb = 0u;
     if (frmw)
     {
-        raw = readTarget(target, tables, ti, st.fpsm, st.fbp, st.fbw, x, y);
+        raw = readTarget(target, sw, st.fpsm, st.fbp, st.fbw, x, y);
         fb = frame16 ? rgba5551To8888(raw) : (st.fpsm == 1u ? (raw | 0x80000000u) : raw);
     }
     if (date)
@@ -423,11 +461,11 @@ inline void writePixel(device const GpuState &st, device uchar *target, device c
     case 0:
         return;
     case 2:
-        if (!(z >= readTarget(target, tables, ti, st.zpsm, st.zbp, st.fbw, x, y)))
+        if (!(z >= readTarget(target, sw, st.zpsm, st.zbp, st.fbw, x, y)))
             return;
         break;
     case 3:
-        if (!(z > readTarget(target, tables, ti, st.zpsm, st.zbp, st.fbw, x, y)))
+        if (!(z > readTarget(target, sw, st.zpsm, st.zbp, st.fbw, x, y)))
             return;
         break;
     default:
@@ -459,10 +497,10 @@ inline void writePixel(device const GpuState &st, device uchar *target, device c
             pixel = (pixel & 0x00FFFFFFu) | (fb & 0xFF000000u);
         if (frame16)
             pixel = rgba8888To5551(pixel);
-        writeTarget(target, tables, ti, st.fpsm, st.fbp, st.fbw, x, y, pixel);
+        writeTarget(target, sw, st.fpsm, st.fbp, st.fbw, x, y, pixel);
     }
     if (writeDepth && st.zmask == 0u)
-        writeTarget(target, tables, ti, st.zpsm, st.zbp, st.fbw, x, y, z);
+        writeTarget(target, sw, st.zpsm, st.zbp, st.fbw, x, y, z);
 }
 
 inline uint4 unpackRgba(uint c) { return uint4(c & 0xFFu, (c >> 8) & 0xFFu, (c >> 16) & 0xFFu, c >> 24); }
@@ -471,18 +509,17 @@ fragment void gsFragment(VOut in [[stage_in]],
                          device uchar *target [[buffer(0), raster_order_group(0)]],
                          device const GpuPrim *prims [[buffer(1)]],
                          device const GpuState *states [[buffer(2)]],
-                         device const ushort *tables [[buffer(3)]],
+                         constant SwizzleInfo &sw [[buffer(3)]],
                          device const ushort *cluts [[buffer(4)]],
-                         constant TableInfo &ti [[buffer(5)]],
                          device const uchar *vram [[buffer(7)]])
 {
     const uint x = uint(in.position.x);
     const uint y = uint(in.position.y);
     device const GpuPrim &p = prims[in.prim];
-    device const GpuState &st = states[p.state];
+    const GpuState st = specializeState(states[p.state]);
     device const ushort *clut = cluts + st.clut * 512u;
 
-    if (p.kind == 0u)
+    if (FC_KIND == 0u)
     {
         const float px = float(x) + 0.5f, py = float(y) + 0.5f;
         const float fx0 = p.fx[0], fx1 = p.fx[1], fx2 = p.fx[2];
@@ -519,19 +556,19 @@ fragment void gsFragment(VOut in [[stage_in]],
                 const float fu = interp3(p.u[0], p.u[1], p.u[2], w0, w1, w2);
                 const float fv = interp3(p.v[0], p.v[1], p.v[2], w0, w1, w2);
                 // Like the CPU's float -> uint16 conversion: negatives saturate to 0.
-                texel = sampleTexture(st, vram, tables, ti, clut, 0.0f, 0.0f, 1.0f, uint(max(fu, 0.0f)) & 0xFFFFu, uint(max(fv, 0.0f)) & 0xFFFFu);
+                texel = sampleTexture(st, vram, sw, clut, 0.0f, 0.0f, 1.0f, uint(max(fu, 0.0f)) & 0xFFFFu, uint(max(fv, 0.0f)) & 0xFFFFu);
             }
             else
             {
                 const float is = interp3(p.s[0], p.s[1], p.s[2], w0, w1, w2);
                 const float it = interp3(p.t[0], p.t[1], p.t[2], w0, w1, w2);
                 const float iq = interp3(p.q[0], p.q[1], p.q[2], w0, w1, w2);
-                texel = sampleTexture(st, vram, tables, ti, clut, is, it, iq, 0u, 0u);
+                texel = sampleTexture(st, vram, sw, clut, is, it, iq, 0u, 0u);
             }
             c = combineTexture(st, c, texel);
         }
         const uint fog = clampU8(int(interp3(p.fog[0], p.fog[1], p.fog[2], w0, w1, w2)));
-        writePixel(st, target, tables, ti, x, y, z, c, fog);
+        writePixel(st, target, sw, x, y, z, c, fog);
     }
     else
     {
@@ -550,15 +587,15 @@ fragment void gsFragment(VOut in [[stage_in]],
             {
                 const int fixedU = int((texUf * 16.0f) + 0.5f);
                 const int fixedV = int((texVf * 16.0f) + 0.5f);
-                texel = sampleTexture(st, vram, tables, ti, clut, 0.0f, 0.0f, 1.0f, uint(clamp(fixedU, 0, 0xFFFF)), uint(clamp(fixedV, 0, 0xFFFF)));
+                texel = sampleTexture(st, vram, sw, clut, 0.0f, 0.0f, 1.0f, uint(clamp(fixedU, 0, 0xFFFF)), uint(clamp(fixedV, 0, 0xFFFF)));
             }
             else
             {
-                texel = sampleTexture(st, vram, tables, ti, clut, texUf / float(st.texW), texVf / float(st.texH), 1.0f, 0u, 0u);
+                texel = sampleTexture(st, vram, sw, clut, texUf / float(st.texW), texVf / float(st.texH), 1.0f, 0u, 0u);
             }
             c = combineTexture(st, c, texel);
         }
-        writePixel(st, target, tables, ti, x, y, as_type<uint>(p.zhi[0]), c, uint(p.fog[0]));
+        writePixel(st, target, sw, x, y, as_type<uint>(p.zhi[0]), c, uint(p.fog[0]));
     }
 }
 )MSL"
