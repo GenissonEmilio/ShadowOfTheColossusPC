@@ -18,6 +18,7 @@ namespace ps2_stats
     inline std::atomic<uint64_t> gsPrims[8]{};
     inline std::atomic<uint64_t> gsPixels{0};
     inline std::atomic<uint64_t> vif1Chains{0};
+    inline std::atomic<uint64_t> presentedFrames{0};
     inline std::atomic<uint64_t> vu1RecRuns{0};
     inline std::atomic<uint64_t> vu1RecBails{0};
     inline std::atomic<uint64_t> vu1InterpRuns{0}; // one display list per game frame

@@ -1,5 +1,6 @@
 #include "runtime/gs/gs_async_backend.h"
 #include "ThreadNaming.h"
+#include "runtime/ps2_stats.h"
 
 #include <chrono>
 #include <cstring>
@@ -31,11 +32,12 @@ GSAsyncBackend::~GSAsyncBackend()
         m_worker.join();
 }
 
-void GSAsyncBackend::enqueue(Command &&command, const uint8_t *data, uint32_t size)
+void GSAsyncBackend::enqueue(Command &&command, const uint8_t *data, uint32_t size, bool waitForSpace)
 {
     std::unique_lock<std::mutex> lock(m_queueMutex);
-    m_spaceCv.wait(lock, [this]
-                   { return m_producing.commands.size() < kMaxQueuedCommands; });
+    if (waitForSpace)
+        m_spaceCv.wait(lock, [this]
+                       { return m_producing.commands.size() < kMaxQueuedCommands; });
     if (data && size)
     {
         command.args[0] = static_cast<uint32_t>(m_producing.bytes.size());
@@ -127,6 +129,19 @@ void GSAsyncBackend::execute(const Command &command, const Chunk &chunk)
     case Kind::Clear:
         m_inner->ClearFramebuffer(*command.context, command.args[0]);
         break;
+    case Kind::Present:
+    {
+        PresentationFrame frame = m_inner->Present(*command.present);
+        std::lock_guard<std::mutex> lock(m_presentMutex);
+        if (frame)
+        {
+            m_latestFrame = std::move(frame);
+            m_hasLatestFrame = true;
+            ps2_stats::presentedFrames.fetch_add(1, std::memory_order_relaxed);
+        }
+        --m_presentsQueued;
+        break;
+    }
     }
 }
 
@@ -200,7 +215,8 @@ void GSAsyncBackend::TextureFlush()
 void GSAsyncBackend::Sync(GSSyncReason reason)
 {
     // FINISH only signals completion to the EE; nothing reads local memory.
-    if (reason == GSSyncReason::Finish)
+    // Presentation is captured on the raster thread (see Present).
+    if (reason == GSSyncReason::Finish || reason == GSSyncReason::Presentation)
         return;
     drain();
     m_inner->Sync(reason);
@@ -208,8 +224,28 @@ void GSAsyncBackend::Sync(GSSyncReason reason)
 
 PresentationFrame GSAsyncBackend::Present(const GSPresentationRequest &request)
 {
+    {
+        std::lock_guard<std::mutex> lock(m_presentMutex);
+        if (m_hasLatestFrame)
+            return m_latestFrame;
+    }
+    // Nothing captured yet (start-up): render one synchronously.
     drain();
     return m_inner->Present(request);
+}
+
+void GSAsyncBackend::QueuePresent(const GSPresentationRequest &request)
+{
+    {
+        std::lock_guard<std::mutex> lock(m_presentMutex);
+        if (m_presentsQueued >= 8)
+            return; // the raster thread is far behind; skip this frame
+        ++m_presentsQueued;
+    }
+    Command command;
+    command.kind = Kind::Present;
+    command.present = std::make_shared<GSPresentationRequest>(request);
+    enqueue(std::move(command), nullptr, 0, false); // never block the guest on presentation
 }
 
 bool GSAsyncBackend::ClearFramebuffer(const GSContext &context, uint32_t rgba)

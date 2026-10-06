@@ -2619,13 +2619,17 @@ void PS2Runtime::run()
 
         static const bool statsEnabled = std::getenv("PS2X_STATS") != nullptr;
         static double nextStats = 5.0;
+        static uint64_t hostFrames = 0;
+        ++hostFrames; // host loop iterations: frames actually shown in the window
         if (statsEnabled && GetTime() >= nextStats)
         {
             nextStats += 5.0;
             static uint64_t lastStatChains = 0;
+            static uint64_t lastHostFrames = 0;
             const uint64_t statChains = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
             std::cerr << "[stats] t=" << static_cast<int>(GetTime())
                       << " gameFps=" << (statChains - lastStatChains) / 5.0
+                      << " shownFps=" << ps2_stats::presentedFrames.exchange(0) / 5.0
                       << " mscal=" << ps2_stats::vu1Mscal.exchange(0)
                       << " vu1Instr=" << ps2_stats::vu1Instr.exchange(0)
                       << " vu1Stall=" << ps2_stats::vu1StallCycles.exchange(0)
@@ -2639,6 +2643,7 @@ void PS2Runtime::run()
             for (int i = 0; i < 7; ++i)
                 std::cerr << ps2_stats::gsPrims[i].exchange(0) << (i < 6 ? "," : "");
             lastStatChains = statChains;
+            lastHostFrames = hostFrames;
             dumpDispatchProfile();
             std::cerr << " vif:";
             for (int op = 0; op < 128; ++op)

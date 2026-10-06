@@ -1977,6 +1977,10 @@ void EeScheduler::processEvent(const EeEvent &event)
     case EeEventType::VBlankStart:
         ++m_vsyncTick;
         m_runtime.memory().gs().vsyncTick.store(m_vsyncTick, std::memory_order_release);
+        // The frame the game shows now: queue its capture after every GS
+        // packet the VU1 thread still holds for it.
+        m_runtime.memory().syncVu1();
+        m_runtime.gs().queuePresentation();
         if ((m_vsyncTick & 1u) != 0u)
         {
             m_runtime.memory().gs().csr.fetch_or(0x2000ull, std::memory_order_acq_rel);

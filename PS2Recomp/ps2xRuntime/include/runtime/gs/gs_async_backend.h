@@ -30,6 +30,7 @@ public:
     void TextureFlush() override;
     void Sync(GSSyncReason reason) override;
     PresentationFrame Present(const GSPresentationRequest &request) override;
+    void QueuePresent(const GSPresentationRequest &request) override;
 
     bool ClearFramebuffer(const GSContext &context, uint32_t rgba) override;
     uint32_t ConsumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes) override;
@@ -49,6 +50,7 @@ private:
         TextureFlush,
         WriteVram,
         Clear,
+        Present,
     };
 
     struct Command
@@ -60,6 +62,7 @@ private:
         GSTransferCommand transfer{};
         uint32_t args[6]{};
         std::shared_ptr<GSContext> context;
+        std::shared_ptr<GSPresentationRequest> present;
     };
 
     struct Chunk
@@ -68,10 +71,18 @@ private:
         std::vector<uint8_t> bytes;
     };
 
-    void enqueue(Command &&command, const uint8_t *data = nullptr, uint32_t size = 0);
+    void enqueue(Command &&command, const uint8_t *data = nullptr, uint32_t size = 0, bool waitForSpace = true);
     void drain() const;
     void workerLoop();
     void execute(const Command &command, const Chunk &chunk);
+
+    // Presentation never waits for the queue: the raster thread captures the
+    // display when it reaches the point a frame was requested, and the host
+    // shows the most recent capture.
+    std::mutex m_presentMutex;
+    PresentationFrame m_latestFrame;
+    bool m_hasLatestFrame = false;
+    int m_presentsQueued = 0; // captures requested and not yet taken (bounded)
 
     std::unique_ptr<GSRasterBackend> m_inner;
     std::thread m_worker;

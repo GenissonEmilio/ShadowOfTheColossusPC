@@ -542,6 +542,30 @@ GSPresentationRequest GS::buildPresentationRequestUnlocked() const
     return request;
 }
 
+void GS::queuePresentation()
+{
+    GSPresentationRequest request{};
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+        if (!m_backend || !m_privRegs)
+            return;
+        request = buildPresentationRequestUnlocked();
+    }
+    // A capture per displayed frame: when the display registers change, or
+    // every few vsyncs for games that redraw into the same buffer.
+    static uint64_t lastPmode = ~0ull, lastDispfb1 = ~0ull, lastDispfb2 = ~0ull, lastTick = 0;
+    const bool changed = request.pmode != lastPmode || request.dispfb1 != lastDispfb1 || request.dispfb2 != lastDispfb2;
+    if (!changed && request.vsyncTick - lastTick < 4)
+        return;
+    lastPmode = request.pmode;
+    lastDispfb1 = request.dispfb1;
+    lastDispfb2 = request.dispfb2;
+    lastTick = request.vsyncTick;
+    std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
+    if (m_backend)
+        m_backend->QueuePresent(request);
+}
+
 void GS::latchHostPresentationFrame()
 {
     GSPresentationRequest request{};
