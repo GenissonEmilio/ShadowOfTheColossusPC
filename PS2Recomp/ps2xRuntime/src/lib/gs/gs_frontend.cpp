@@ -552,10 +552,11 @@ void GS::queuePresentation()
         request = buildPresentationRequestUnlocked();
     }
     // A capture per displayed frame: when the display registers change, or
-    // every few vsyncs for games that redraw into the same buffer.
+    // every other vsync (games run at most 30 fps on NTSC) for games that
+    // copy each frame into the same display buffer, like SotC.
     static uint64_t lastPmode = ~0ull, lastDispfb1 = ~0ull, lastDispfb2 = ~0ull, lastTick = 0;
     const bool changed = request.pmode != lastPmode || request.dispfb1 != lastDispfb1 || request.dispfb2 != lastDispfb2;
-    if (!changed && request.vsyncTick - lastTick < 4)
+    if (!changed && request.vsyncTick - lastTick < 2)
         return;
     lastPmode = request.pmode;
     lastDispfb1 = request.dispfb1;
