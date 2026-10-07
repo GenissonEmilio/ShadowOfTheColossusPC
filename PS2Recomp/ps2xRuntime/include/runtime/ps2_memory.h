@@ -274,6 +274,9 @@ public:
         if (m_mtvuOutstanding.load(std::memory_order_acquire) != 0u && !onVu1Worker())
             mtvuSyncSlow();
     }
+    // Runs fn after the VIF1/GIF work queued so far, on the VU1 worker
+    // (inline when the worker is not in use), without waiting for it.
+    void runInVu1Order(std::function<void()> fn);
     static bool onVu1Worker();
     static const std::align_val_t kGsVramAlignment;
     // VU0 FBRST (D/T bit enables) for the VU1 run in progress on the worker.
@@ -449,6 +452,7 @@ public:
         bool gif = false;
         uint32_t fbrst = 0;
         std::vector<uint8_t> data;
+        std::function<void()> marker; // runs instead of data when set
     };
     bool m_mtvuEnabled = false;
     std::thread m_mtvuThread;

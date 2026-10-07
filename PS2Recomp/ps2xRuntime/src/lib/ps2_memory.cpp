@@ -5,6 +5,7 @@
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_address.h"
 #include "runtime/gs/gs_frontend.h"
+#include "runtime/gs/gs_async_backend.h"
 #include "ps2_log.h"
 #include <atomic>
 #include <cstring>
@@ -281,6 +282,8 @@ void PS2Memory::mtvuWorkerLoop()
     ThreadNaming::SetCurrentThreadName("VU1");
     // VU1 float math rounds toward zero, like the game thread's.
     ps2SetEeFloatingPointMode();
+    // GS draws from VIF1/GIF reach the GS worker in bulk, once per job.
+    GSAsyncBackend::SetThreadStaging(true);
     std::unique_lock<std::mutex> lock(m_mtvuMutex);
     for (;;)
     {
@@ -292,16 +295,32 @@ void PS2Memory::mtvuWorkerLoop()
         m_mtvuQueue.pop_front();
         lock.unlock();
         m_mtvuFbrst = job.fbrst;
-        if (job.gif)
+        if (job.marker)
+            job.marker();
+        else if (job.gif)
             submitGifPacket(GifPathId::Path3, job.data.data(), static_cast<uint32_t>(job.data.size()), false);
         else
             processVIF1Data(job.data.data(), static_cast<uint32_t>(job.data.size()));
         if (m_gifArbiter)
             m_gifArbiter->drain();
+        GSAsyncBackend::PublishThreadStaged();
         lock.lock();
         if (m_mtvuOutstanding.fetch_sub(1, std::memory_order_acq_rel) == 1u)
             m_mtvuIdle.notify_all();
     }
+}
+
+void PS2Memory::runInVu1Order(std::function<void()> fn)
+{
+    if (!m_mtvuEnabled || onVu1Worker() || m_mtvuOutstanding.load(std::memory_order_acquire) == 0u)
+    {
+        fn();
+        return;
+    }
+    MtvuJob job;
+    job.marker = std::move(fn);
+    job.fbrst = m_mtvuFbrst;
+    mtvuEnqueue(std::move(job));
 }
 
 void PS2Memory::mtvuSyncSlow()

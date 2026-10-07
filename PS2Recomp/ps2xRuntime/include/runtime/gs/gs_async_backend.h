@@ -40,6 +40,12 @@ public:
     void SnapshotVram(std::vector<uint8_t> &out) const override;
     GSTransferSnapshot GetTransferSnapshot() const override;
 
+    // Draws and CLUT loads submitted from a staging thread (the VU1 worker)
+    // collect without locking and reach the worker in bulk at the next
+    // non-draw command, drain, or PublishThreadStaged().
+    static void SetThreadStaging(bool enabled);
+    static void PublishThreadStaged();
+
 private:
     enum class Kind : uint8_t
     {
@@ -72,6 +78,7 @@ private:
     };
 
     void enqueue(Command &&command, const uint8_t *data = nullptr, uint32_t size = 0, bool waitForSpace = true);
+    void publishStaged();
     void drain() const;
     void workerLoop();
     void execute(const Command &command, const Chunk &chunk);
@@ -87,9 +94,11 @@ private:
     std::unique_ptr<GSRasterBackend> m_inner;
     std::thread m_worker;
     mutable std::mutex m_queueMutex;
+    bool m_workerSleeping = false; // guarded by m_queueMutex
     mutable std::condition_variable m_workCv;
     mutable std::condition_variable m_doneCv;
     mutable std::condition_variable m_spaceCv;
+    std::vector<Command> m_staged; // owned by the staging thread
     Chunk m_producing;
     Chunk m_consuming;
     uint64_t m_enqueued = 0;

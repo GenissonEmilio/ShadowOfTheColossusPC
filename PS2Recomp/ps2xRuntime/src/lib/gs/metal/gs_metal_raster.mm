@@ -37,6 +37,28 @@ struct GSMetalRaster::Impl
     id<MTLBuffer> vram = nil;
     id<MTLBuffer> swizzle = nil;
     std::unordered_map<uint64_t, id<MTLRenderPipelineState>> pipelines;
+    id<MTLComputePipelineState> uploadPipeline = nil;
+    // Work encoded but not committed yet (uploads ride along with the next draw).
+    id<MTLCommandBuffer> open = nil;
+    // Pre-draw copy of the texture memory feedback draws sample.
+    id<MTLBuffer> snapshot = nil;
+
+    id<MTLCommandBuffer> openCommands()
+    {
+        if (!open)
+            open = [[queue commandBuffer] retain];
+        return open;
+    }
+
+    void commitOpen()
+    {
+        if (!open)
+            return;
+        [open commit];
+        [last release];
+        last = open; // keeps the reference
+        open = nil;
+    }
 
     // Per-submission inputs. A slot is reused only once the GPU is done with it.
     struct Slot
@@ -111,6 +133,14 @@ struct GSMetalRaster::Impl
         [last release];
         for (auto &[key, pipeline] : pipelines)
             [pipeline release];
+        if (open)
+        {
+            [open commit];
+            [open waitUntilCompleted];
+            [open release];
+        }
+        [snapshot release];
+        [uploadPipeline release];
         [library release];
         [queue release];
         [vram release];
@@ -213,7 +243,8 @@ uint64_t GSMetalRaster::pipelineKey(uint32_t kind, const GSGpuState &st)
 
 void GSMetalRaster::draw(const GSGpuPrim *prims, const uint64_t *keys, size_t primCount,
                          const GSGpuState *states, size_t stateCount,
-                         const uint16_t *cluts, size_t clutCount)
+                         const uint16_t *cluts, size_t clutCount,
+                         uint64_t feedbackBegin, uint64_t feedbackEnd)
 {
     if (primCount == 0)
         return;
@@ -241,7 +272,24 @@ void GSMetalRaster::draw(const GSGpuPrim *prims, const uint64_t *keys, size_t pr
         pass.renderTargetHeight = kTargetSize;
         pass.defaultRasterSampleCount = 1;
 
-        id<MTLCommandBuffer> commands = [impl.queue commandBuffer];
+        id<MTLCommandBuffer> commands = impl.openCommands();
+        id<MTLBuffer> textureSource = impl.vram;
+        if (feedbackEnd > feedbackBegin)
+        {
+            // Feedback draw: sample a copy of the texture taken before it.
+            const NSUInteger size = impl.vram.length;
+            if (!impl.snapshot)
+                impl.snapshot = [impl.device newBufferWithLength:size options:MTLResourceStorageModePrivate];
+            const NSUInteger length = static_cast<NSUInteger>(std::min<uint64_t>(feedbackEnd - feedbackBegin, size));
+            const NSUInteger first = static_cast<NSUInteger>(feedbackBegin % size);
+            const NSUInteger head = std::min(length, size - first);
+            id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+            [blit copyFromBuffer:impl.vram sourceOffset:first toBuffer:impl.snapshot destinationOffset:first size:head];
+            if (head < length)
+                [blit copyFromBuffer:impl.vram sourceOffset:0 toBuffer:impl.snapshot destinationOffset:0 size:length - head];
+            [blit endEncoding];
+            textureSource = impl.snapshot;
+        }
         id<MTLRenderCommandEncoder> encoder = [commands renderCommandEncoderWithDescriptor:pass];
         [encoder setViewport:MTLViewport{0, 0, double(kTargetSize), double(kTargetSize), 0, 1}];
         [encoder setVertexBuffer:slot.prims offset:0 atIndex:1];
@@ -252,7 +300,7 @@ void GSMetalRaster::draw(const GSGpuPrim *prims, const uint64_t *keys, size_t pr
         [encoder setFragmentBuffer:slot.states offset:0 atIndex:2];
         [encoder setFragmentBuffer:impl.swizzle offset:0 atIndex:3];
         [encoder setFragmentBuffer:slot.cluts offset:0 atIndex:4];
-        [encoder setFragmentBuffer:impl.vram offset:0 atIndex:7];
+        [encoder setFragmentBuffer:textureSource offset:0 atIndex:7];
         // One bounding quad per primitive, in runs sharing a specialized
         // pipeline; raster order groups keep overlapping pixels in order.
         for (size_t start = 0; start < primCount;)
@@ -293,16 +341,49 @@ void GSMetalRaster::draw(const GSGpuPrim *prims, const uint64_t *keys, size_t pr
                 }
             }];
         }
-        [commands commit];
         slot.commands = [commands retain];
-        [impl.last release];
-        impl.last = [commands retain];
+        impl.commitOpen();
+    }
+}
+
+void GSMetalRaster::upload(const GSGpuUpload &params, const uint8_t *data, size_t bytes)
+{
+    if (params.count == 0 || bytes == 0)
+        return;
+    Impl &impl = *m_impl;
+    @autoreleasepool
+    {
+        if (!impl.uploadPipeline)
+        {
+            NSError *error = nil;
+            id<MTLFunction> function = [[impl.library newFunctionWithName:@"gsUpload"] autorelease];
+            impl.uploadPipeline = [impl.device newComputePipelineStateWithFunction:function error:&error];
+            if (!impl.uploadPipeline)
+            {
+                std::cerr << "[gs:metal] upload pipeline failed: "
+                          << (error ? [[error localizedDescription] UTF8String] : "?") << std::endl;
+                std::abort();
+            }
+        }
+        // The command buffer keeps the staging buffer alive until it has run.
+        id<MTLBuffer> staging = [[impl.device newBufferWithBytes:data length:bytes options:MTLResourceStorageModeShared] autorelease];
+        id<MTLCommandBuffer> commands = impl.openCommands();
+        id<MTLComputeCommandEncoder> encoder = [commands computeCommandEncoder];
+        [encoder setComputePipelineState:impl.uploadPipeline];
+        [encoder setBuffer:impl.vram offset:0 atIndex:0];
+        [encoder setBuffer:staging offset:0 atIndex:1];
+        [encoder setBytes:&params length:sizeof(params) atIndex:2];
+        [encoder setBuffer:impl.swizzle offset:0 atIndex:3];
+        const NSUInteger width = std::min<NSUInteger>(256, impl.uploadPipeline.maxTotalThreadsPerThreadgroup);
+        [encoder dispatchThreads:MTLSizeMake(params.count, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+        [encoder endEncoding];
     }
 }
 
 void GSMetalRaster::waitIdle()
 {
     Impl &impl = *m_impl;
+    impl.commitOpen();
     if (!impl.last)
         return;
     [impl.last waitUntilCompleted];

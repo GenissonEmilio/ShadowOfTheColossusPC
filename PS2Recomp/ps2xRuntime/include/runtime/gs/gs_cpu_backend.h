@@ -144,6 +144,10 @@ private:
     std::pair<uint64_t, uint64_t> m_uploadRange{0u, 0u}; // destination of the host->local transfer
     // True when queued draws read or write VRAM bytes in [begin, end).
     void addInflightRange(const std::pair<uint64_t, uint64_t> &range);
+    void gpuWaitIdle();
+    bool gpuUploads() const;
+    bool uploadImageOnGpu(const uint8_t *data, uint32_t sizeBytes);
+    void uploadImageCpuUnlocked(const uint8_t *data, uint32_t sizeBytes);
     bool pendingTouches(uint64_t begin, uint64_t end) const;
     bool uploadTouchesPending(const GSTransferCommand &command) const;
     std::vector<std::vector<uint32_t>> m_bandBins;
@@ -154,6 +158,8 @@ private:
     // GS memory touched by draws handed to the GPU without waiting for them
     // (ordering-only flushes); cleared when the GPU is idle.
     std::vector<std::pair<uint64_t, uint64_t>> m_gpuInflight;
+    // Texture memory the GPU draw being submitted samples from a pre-draw copy.
+    std::pair<uint64_t, uint64_t> m_gpuFeedbackRange{0u, 0u};
     std::pair<uint64_t, uint64_t> m_lastTexRange{0u, 0u};
     std::pair<uint64_t, uint64_t> m_lastFrameRange{0u, 0u};
     std::pair<uint64_t, uint64_t> m_lastZRange{0u, 0u};

@@ -246,18 +246,15 @@ inline bool g_ps2WatchWriteEnabled = std::getenv("PS2X_WATCH_WRITE") != nullptr;
 // Set by debugging hooks to log every guest store while true.
 inline bool g_ps2LogAllWrites = false;
 
-inline void ps2TraceGuestWrite(uint8_t *rdram,
-                               uint32_t guestAddr,
-                               uint32_t size,
-                               uint64_t valueLo,
-                               uint64_t valueHi,
-                               const char *op,
-                               const R5900Context *ctx)
+[[gnu::noinline]] inline void ps2TraceGuestWriteSlow(uint8_t *rdram,
+                                                     uint32_t guestAddr,
+                                                     uint32_t size,
+                                                     uint64_t valueLo,
+                                                     uint64_t valueHi,
+                                                     const char *op,
+                                                     const R5900Context *ctx)
 {
     (void)rdram;
-    // PS2X_WATCH_WRITE=<start>:<end> logs guest stores that touch the range.
-    if (__builtin_expect(!g_ps2WatchWriteEnabled, 1))
-        return;
     if (g_ps2LogAllWrites)
     {
         static int logged = 0;
@@ -284,6 +281,14 @@ inline void ps2TraceGuestWrite(uint8_t *rdram,
         std::fprintf(stderr, "[watch] %s addr=0x%08x lo=0x%016llx hi=0x%016llx pc=0x%08x ra=0x%08x\n", op, guestAddr,
                      static_cast<unsigned long long>(valueLo), static_cast<unsigned long long>(valueHi),
                      ctx ? ctx->pc : 0u, ctx ? static_cast<uint32_t>(_mm_cvtsi128_si32(ctx->r[31])) : 0u);
+}
+
+// PS2X_WATCH_WRITE=<start>:<end> logs guest stores that touch the range.
+inline void ps2TraceGuestWrite(uint8_t *rdram, uint32_t guestAddr, uint32_t size, uint64_t valueLo,
+                               uint64_t valueHi, const char *op, const R5900Context *ctx)
+{
+    if (__builtin_expect(g_ps2WatchWriteEnabled, 0))
+        ps2TraceGuestWriteSlow(rdram, guestAddr, size, valueLo, valueHi, op, ctx);
 }
 
 inline void ps2TraceGuestRangeWrite(uint8_t *rdram,

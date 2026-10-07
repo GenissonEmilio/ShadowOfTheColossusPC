@@ -680,6 +680,13 @@ namespace
     } g_gsProfile;
 }
 
+#ifdef PS2X_HAVE_METAL
+namespace
+{
+    bool gpuCanDraw(const GSPrimitiveBatch &batch);
+}
+#endif
+
 void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -743,7 +750,20 @@ void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
 
     static const bool immediate = std::getenv("PS2X_GS_IMMEDIATE") != nullptr;
     UpdateTextureReadMode(batch);
-    if (immediate || !m_textureDirectRead)
+    bool gpuFeedback = false;
+#ifdef PS2X_HAVE_METAL
+    if (!immediate && !m_textureDirectRead && gpuUploads() && batch.state.prim.tme && gpuCanDraw(batch))
+    {
+        // Feedback draw on the GPU: it samples a copy of the texture memory
+        // taken right before it, like the CPU path below.
+        flushPendingUnlocked("GpuFeedback");
+        const auto &tex = batch.state.context.tex0;
+        bufferRange(tex.tbp0 * 256u, std::max<uint32_t>(batch.state.textureWidth, tex.tbw * 64u),
+                    batch.state.textureHeight, tex.psm, m_gpuFeedbackRange.first, m_gpuFeedbackRange.second);
+        gpuFeedback = true;
+    }
+#endif
+    if (!gpuFeedback && (immediate || !m_textureDirectRead))
     {
         // Feedback draws read what earlier draws wrote: keep them serial.
         flushPendingUnlocked("Feedback");
@@ -838,7 +858,12 @@ void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
     }
     m_pendingClut.push_back(static_cast<uint32_t>(m_clutVersions.size() - 1u));
     m_pending.push_back(batch);
-    if (m_pending.size() >= 4096u)
+    if (gpuFeedback)
+    {
+        flushPendingUnlocked("GpuFeedback");
+        m_gpuFeedbackRange = {0u, 0u};
+    }
+    else if (m_pending.size() >= 4096u)
         flushPendingUnlocked("Full");
 }
 
@@ -851,7 +876,8 @@ void GSCpuBackend::flushPendingUnlocked(const char *reason)
         // passes that touch the same memory); the CPU waits for it only when
         // it is about to read or write GS memory itself.
         const bool orderingOnly = std::strcmp(reason, "Hazard") == 0 || std::strcmp(reason, "Full") == 0 ||
-                                  std::strcmp(reason, "Flush") == 0;
+                                  std::strcmp(reason, "Flush") == 0 || std::strcmp(reason, "GpuUpload") == 0 ||
+                                  std::strcmp(reason, "GpuFeedback") == 0;
         if (!m_pending.empty())
         {
             if (g_gsProfile.on)
@@ -869,8 +895,7 @@ void GSCpuBackend::flushPendingUnlocked(const char *reason)
         if (!orderingOnly)
         {
             const auto w0 = std::chrono::steady_clock::now();
-            m_gpu->waitIdle();
-            m_gpuInflight.clear();
+            gpuWaitIdle();
             if (g_gsProfile.on)
             {
                 const double waited = std::chrono::duration<double>(std::chrono::steady_clock::now() - w0).count();
@@ -1222,7 +1247,8 @@ void GSCpuBackend::rasterizePendingGpu()
     auto submit = [&]
     {
         if (!prims.empty())
-            m_gpu->draw(prims.data(), keys.data(), prims.size(), states.data(), states.size(), cluts.data(), m_clutVersions.size());
+            m_gpu->draw(prims.data(), keys.data(), prims.size(), states.data(), states.size(), cluts.data(), m_clutVersions.size(),
+                        m_gpuFeedbackRange.first, m_gpuFeedbackRange.second);
         prims.clear();
         keys.clear();
         states.clear();
@@ -1235,7 +1261,7 @@ void GSCpuBackend::rasterizePendingGpu()
         {
             // Lines, points and unusual formats: CPU, in order.
             submit();
-            m_gpu->waitIdle();
+            gpuWaitIdle();
             t_clut = m_clutVersions[m_pendingClut[index]].data();
             DrawPrimitive(batch);
             t_clut = nullptr;
@@ -1256,7 +1282,7 @@ void GSCpuBackend::rasterizePendingGpu()
 
     if (verify)
     {
-        m_gpu->waitIdle();
+        gpuWaitIdle();
         // PS2X_GS_GPU_VERIFY=1: redo the batch on the CPU from the same memory
         // and report the bytes that differ. The CPU result is kept.
         gpuResult.assign(m_vram, m_vram + m_vramSize);
@@ -1446,6 +1472,15 @@ void GSCpuBackend::addInflightRange(const std::pair<uint64_t, uint64_t> &range)
         }
     }
     m_gpuInflight.push_back(range);
+}
+
+void GSCpuBackend::gpuWaitIdle()
+{
+#ifdef PS2X_HAVE_METAL
+    if (m_gpu)
+        m_gpu->waitIdle();
+#endif
+    m_gpuInflight.clear();
 }
 
 bool GSCpuBackend::pendingTouches(uint64_t begin, uint64_t end) const
@@ -2682,7 +2717,7 @@ void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
         // dsax can push the rectangle one page column further.
         m_uploadRange.second += 8192u;
         if (uploadTouchesPending(command))
-            flushPendingUnlocked("BeginTransfer");
+            flushPendingUnlocked(gpuUploads() ? "GpuUpload" : "BeginTransfer");
     }
     else
     {
@@ -2708,12 +2743,122 @@ void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
         PerformLocalToHostTransfer();
 }
 
+bool GSCpuBackend::gpuUploads() const
+{
+#ifdef PS2X_HAVE_METAL
+    static const bool disabled = std::getenv("PS2X_GS_GPU_UPLOAD") && std::atoi(std::getenv("PS2X_GS_GPU_UPLOAD")) == 0;
+    return m_gpu && !disabled && !std::getenv("PS2X_GS_GPU_VERIFY");
+#else
+    return false;
+#endif
+}
+
+#ifdef PS2X_HAVE_METAL
+// An IMAGE piece over memory the GPU still uses: write it on the GPU, after
+// the queued work, instead of waiting for the GPU and writing it here.
+bool GSCpuBackend::uploadImageOnGpu(const uint8_t *data, uint32_t sizeBytes)
+{
+    if (!gpuUploads() || !data || sizeBytes == 0u || m_transferState.direction != 0u ||
+        m_transfer.trxreg.rrw == 0u || m_transfer.trxreg.rrh == 0u || m_transferState.totalPixels == 0u)
+        return false;
+    uint32_t pixels = 0u;
+    switch (m_transfer.bitbltbuf.dpsm)
+    {
+    case GS_PSM_CT32: case GS_PSM_Z32:
+        if (sizeBytes % 4u)
+            return false;
+        pixels = sizeBytes / 4u;
+        break;
+    case GS_PSM_CT24: case GS_PSM_Z24:
+        if (sizeBytes % 3u)
+            return false;
+        pixels = sizeBytes / 3u;
+        break;
+    case GS_PSM_CT16: case GS_PSM_CT16S: case GS_PSM_Z16: case GS_PSM_Z16S:
+        if (sizeBytes % 2u)
+            return false;
+        pixels = sizeBytes / 2u;
+        break;
+    case GS_PSM_T8: case GS_PSM_T8H:
+        pixels = sizeBytes;
+        break;
+    case GS_PSM_T4: case GS_PSM_T4HL: case GS_PSM_T4HH:
+        if (m_transferState.copiedPixels % 2u)
+            return false;
+        pixels = sizeBytes * 2u;
+        break;
+    default:
+        return false;
+    }
+    if (!uploadTouchesPending(m_transfer))
+        return false; // nothing to order against: the CPU writes it directly
+    pixels = std::min(pixels, m_transferState.totalPixels - m_transferState.copiedPixels);
+    flushPendingUnlocked("GpuUpload");
+    const GSGpuUpload upload{m_transfer.bitbltbuf.dbp, std::max<uint32_t>(m_transfer.bitbltbuf.dbw, 1u),
+                             m_transfer.bitbltbuf.dpsm, m_transfer.trxpos.dsax, m_transfer.trxpos.dsay,
+                             m_transfer.trxreg.rrw, m_transferState.copiedPixels, pixels};
+    m_gpu->upload(upload, data, sizeBytes);
+    // PS2X_GS_GPU_UPLOAD_VERIFY=1: redo the piece on the CPU and compare.
+    static const bool verify = std::getenv("PS2X_GS_GPU_UPLOAD_VERIFY") != nullptr;
+    if (verify)
+    {
+        static uint64_t checked = 0, bad = 0;
+        gpuWaitIdle();
+        std::vector<uint8_t> gpuResult(m_vram, m_vram + m_vramSize);
+        const GSTransferSnapshot saved = m_transferState;
+        // Undo the GPU write by replaying the CPU writer over a copy taken
+        // before it is not possible here; compare against a CPU write into
+        // the GPU result instead (idempotent when both agree).
+        uploadImageCpuUnlocked(data, sizeBytes);
+        m_transferState = saved;
+        ++checked;
+        size_t diff = 0, first = SIZE_MAX;
+        for (size_t i = 0; i < m_vramSize; ++i)
+            if (gpuResult[i] != m_vram[i])
+            {
+                if (first == SIZE_MAX)
+                    first = i;
+                ++diff;
+            }
+        if (diff && ++bad <= 20)
+            std::fprintf(stderr, "[gs:upload-verify] psm=0x%x dbp=%u dbw=%u xy=(%u,%u) rrw=%u first=%u count=%u: %zu bytes differ, first at 0x%zx (cpu %02x gpu %02x)\n",
+                         upload.dpsm, upload.dbp, upload.dbw, upload.dsax, upload.dsay, upload.rrw, upload.firstPixel, upload.count,
+                         diff, first, m_vram[first], gpuResult[first]);
+        if ((checked & 1023u) == 0u)
+            std::fprintf(stderr, "[gs:upload-verify] %llu pieces, %llu differ\n", (unsigned long long)checked, (unsigned long long)bad);
+    }
+    addInflightRange(m_uploadRange);
+    markVramWritten(m_uploadRange.first, m_uploadRange.second);
+    m_transferState.copiedPixels += pixels;
+    if (m_transferState.copiedPixels >= m_transferState.totalPixels)
+    {
+        m_transferState.direction = 3u;
+        m_transferState.totalPixels = 0u;
+    }
+    else
+    {
+        m_transferState.x = m_transfer.trxpos.dsax + (m_transferState.copiedPixels % m_transfer.trxreg.rrw);
+        m_transferState.y = m_transfer.trxpos.dsay + (m_transferState.copiedPixels / m_transfer.trxreg.rrw);
+    }
+    return true;
+}
+#endif
+
 void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+#ifdef PS2X_HAVE_METAL
+    if (uploadImageOnGpu(data, sizeBytes))
+        return;
+#endif
     // Draws can be queued between the pieces of an IMAGE transfer.
     if (uploadTouchesPending(m_transfer))
         flushPendingUnlocked("UploadImage");
+    uploadImageCpuUnlocked(data, sizeBytes);
+}
+
+void GSCpuBackend::uploadImageCpuUnlocked(const uint8_t *data, uint32_t sizeBytes)
+{
     markVramWritten(m_uploadRange.first, m_uploadRange.second);
     if (!data || sizeBytes == 0u || !m_vram || m_transferState.direction != 0u)
         return;

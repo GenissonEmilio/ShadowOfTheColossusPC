@@ -1889,7 +1889,6 @@ void EeScheduler::processDueDeadlines()
         std::chrono::steady_clock::time_point pacingDeadline{};
         {
             std::unique_lock lock(m_eventMutex);
-            const auto now = std::chrono::steady_clock::now();
             for (const ScheduledEvent &item : m_deadlines)
             {
                 if (item.deadlineCycle <= m_eeCycle &&
@@ -1906,6 +1905,9 @@ void EeScheduler::processDueDeadlines()
                 return;
             }
 
+            // Read the host clock only once a deadline is due by cycles: this
+            // runs at every scheduler checkpoint.
+            const auto now = std::chrono::steady_clock::now();
             if (now < pacingDeadline)
             {
                 m_eventCv.wait_until(lock, pacingDeadline, [this]()
@@ -1978,9 +1980,9 @@ void EeScheduler::processEvent(const EeEvent &event)
         ++m_vsyncTick;
         m_runtime.memory().gs().vsyncTick.store(m_vsyncTick, std::memory_order_release);
         // The frame the game shows now: queue its capture after every GS
-        // packet the VU1 thread still holds for it.
-        m_runtime.memory().syncVu1();
-        m_runtime.gs().queuePresentation();
+        // packet the VU1 thread still holds for it, without waiting for them.
+        m_runtime.memory().runInVu1Order([gs = &m_runtime.gs()]
+                                         { gs->queuePresentation(); });
         if ((m_vsyncTick & 1u) != 0u)
         {
             m_runtime.memory().gs().csr.fetch_or(0x2000ull, std::memory_order_acq_rel);

@@ -207,6 +207,78 @@ inline void writeTarget(device uchar *vram, constant SwizzleInfo &sw,
     }
 }
 
+// ---- IMAGE transfers ----------------------------------------------------------
+
+struct GpuUpload
+{
+    uint dbp, dbw, dpsm, dsax, dsay, rrw, firstPixel, count;
+};
+
+// Replaces `bits` bits at bit `shift` of the 32-bit word holding byte `byteAddr`.
+// Neighbouring sub-word pixels belong to other threads, so this is atomic.
+inline void writeBits(device uchar *vram, uint byteAddr, uint shift, uint bits, uint value)
+{
+    device atomic_uint *word = (device atomic_uint *)(vram + (byteAddr & (kVramMask & ~3u)));
+    const uint at = (byteAddr & 3u) * 8u + shift;
+    const uint mask = ((bits == 32u) ? 0xFFFFFFFFu : ((1u << bits) - 1u)) << at;
+    atomic_fetch_and_explicit(word, ~mask, memory_order_relaxed);
+    atomic_fetch_or_explicit(word, (value << at) & mask, memory_order_relaxed);
+}
+
+kernel void gsUpload(device uchar *vram [[buffer(0)]],
+                     device const uchar *src [[buffer(1)]],
+                     constant GpuUpload &up [[buffer(2)]],
+                     constant SwizzleInfo &sw [[buffer(3)]],
+                     uint tid [[thread_position_in_grid]])
+{
+    if (tid >= up.count)
+        return;
+    const uint p = up.firstPixel + tid;
+    const uint x = up.dsax + p % up.rrw;
+    const uint y = up.dsay + p / up.rrw;
+    const int table = tableFor(up.dpsm);
+    if (table < 0)
+        return;
+    const uint pixel = pixelAddress(sw, table, up.dbp, up.dbw, x, y);
+    switch (up.dpsm)
+    {
+    case 0: case 48:
+    {
+        const uint i = tid * 4u;
+        *(device uint *)(vram + ((pixel * 4u) & (kVramMask & ~3u))) =
+            uint(src[i]) | (uint(src[i + 1u]) << 8) | (uint(src[i + 2u]) << 16) | (uint(src[i + 3u]) << 24);
+        break;
+    }
+    case 1: case 49:
+    {
+        const uint i = tid * 3u;
+        writeBits(vram, pixel * 4u, 0u, 24u, uint(src[i]) | (uint(src[i + 1u]) << 8) | (uint(src[i + 2u]) << 16));
+        break;
+    }
+    case 2: case 10: case 50: case 58:
+        writeBits(vram, pixel * 2u, 0u, 16u, uint(src[tid * 2u]) | (uint(src[tid * 2u + 1u]) << 8));
+        break;
+    case 19:
+        writeBits(vram, pixel, 0u, 8u, src[tid]);
+        break;
+    case 27:
+        writeBits(vram, pixel * 4u + 3u, 0u, 8u, src[tid]);
+        break;
+    case 20:
+    case 36:
+    case 44:
+    {
+        // Two pixels per byte, low nibble first (firstPixel is even).
+        const uint nibble = (uint(src[tid / 2u]) >> ((tid & 1u) * 4u)) & 0xFu;
+        if (up.dpsm == 20u)
+            writeBits(vram, (pixel * 4u) / 8u, (pixel * 4u) % 8u, 4u, nibble);
+        else
+            writeBits(vram, pixel * 4u + 3u, up.dpsm == 44u ? 4u : 0u, 4u, nibble);
+        break;
+    }
+    }
+}
+
 // ---- Colour helpers (same as the CPU backend) ------------------------------
 
 inline uint clampU8(int v) { return uint(clamp(v, 0, 255)); }

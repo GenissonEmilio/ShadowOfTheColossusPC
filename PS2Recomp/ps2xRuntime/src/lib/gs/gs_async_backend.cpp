@@ -32,8 +32,62 @@ GSAsyncBackend::~GSAsyncBackend()
         m_worker.join();
 }
 
+namespace
+{
+    thread_local bool t_staging = false;
+    thread_local GSAsyncBackend *t_stagedBackend = nullptr;
+    constexpr size_t kMaxStaged = 256;
+}
+
+void GSAsyncBackend::SetThreadStaging(bool enabled)
+{
+    if (!enabled)
+        PublishThreadStaged();
+    t_staging = enabled;
+}
+
+void GSAsyncBackend::PublishThreadStaged()
+{
+    if (GSAsyncBackend *backend = t_stagedBackend)
+    {
+        t_stagedBackend = nullptr;
+        backend->publishStaged();
+    }
+}
+
+void GSAsyncBackend::publishStaged()
+{
+    if (m_staged.empty())
+        return;
+    std::unique_lock<std::mutex> lock(m_queueMutex);
+    m_spaceCv.wait(lock, [this]
+                   { return m_producing.commands.size() < kMaxQueuedCommands; });
+    for (Command &command : m_staged)
+        m_producing.commands.push_back(std::move(command));
+    m_enqueued += m_staged.size();
+    m_staged.clear();
+    const bool wake = m_workerSleeping;
+    lock.unlock();
+    if (wake)
+        m_workCv.notify_one();
+}
+
 void GSAsyncBackend::enqueue(Command &&command, const uint8_t *data, uint32_t size, bool waitForSpace)
 {
+    if (t_staging)
+    {
+        if ((command.kind == Kind::Draw || command.kind == Kind::Clut) && !data && waitForSpace)
+        {
+            if (t_stagedBackend && t_stagedBackend != this)
+                PublishThreadStaged();
+            t_stagedBackend = this;
+            m_staged.push_back(std::move(command));
+            if (m_staged.size() >= kMaxStaged)
+                PublishThreadStaged();
+            return;
+        }
+        PublishThreadStaged(); // keep submission order
+    }
     std::unique_lock<std::mutex> lock(m_queueMutex);
     if (waitForSpace)
         m_spaceCv.wait(lock, [this]
@@ -44,16 +98,19 @@ void GSAsyncBackend::enqueue(Command &&command, const uint8_t *data, uint32_t si
         command.args[1] = size;
         m_producing.bytes.insert(m_producing.bytes.end(), data, data + size);
     }
-    const bool wasEmpty = m_producing.commands.empty();
     m_producing.commands.push_back(std::move(command));
     ++m_enqueued;
+    // Signal only a sleeping worker; a busy one picks the command up when it
+    // swaps the queue (a signal per primitive cost a system call each).
+    const bool wake = m_workerSleeping;
     lock.unlock();
-    if (wasEmpty)
+    if (wake)
         m_workCv.notify_one();
 }
 
 void GSAsyncBackend::drain() const
 {
+    PublishThreadStaged();
     std::unique_lock<std::mutex> lock(m_queueMutex);
     const uint64_t target = m_enqueued;
     m_doneCv.wait(lock, [this, target]
@@ -74,16 +131,20 @@ void GSAsyncBackend::workerLoop()
         // across the raster threads.
         if (!unflushed)
         {
+            m_workerSleeping = true;
             m_workCv.wait(lock, ready);
+            m_workerSleeping = false;
         }
-        else if (!m_workCv.wait_for(lock, std::chrono::microseconds(500), ready))
+        else if (m_workerSleeping = true, !m_workCv.wait_for(lock, std::chrono::microseconds(500), ready))
         {
+            m_workerSleeping = false;
             lock.unlock();
             m_inner->Flush();
             unflushed = false;
             lock.lock();
             continue;
         }
+        m_workerSleeping = false;
         if (m_producing.commands.empty() && m_stop)
             return;
         std::swap(m_producing, m_consuming);

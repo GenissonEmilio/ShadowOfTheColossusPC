@@ -41,6 +41,14 @@ struct GSGpuState
 };
 static_assert(sizeof(GSGpuState) == 44 * 4, "GSGpuState layout must match the shader");
 
+// An IMAGE (host to local) transfer piece: pixels firstPixel .. firstPixel +
+// count - 1 of the rrw-wide rectangle at (dsax, dsay), packed as the GS
+// receives them.
+struct GSGpuUpload
+{
+    uint32_t dbp, dbw, dpsm, dsax, dsay, rrw, firstPixel, count;
+};
+
 class GSMetalRaster
 {
 public:
@@ -50,11 +58,17 @@ public:
     ~GSMetalRaster();
 
     // Queues the primitives for rasterization (in submission order) without
-    // waiting. cluts holds clutCount CLUTs of 512 entries.
+    // waiting. With a feedback range, textures are sampled from a copy of
+    // that GS memory taken before the draws. cluts holds clutCount CLUTs of 512 entries.
     // keys[i] selects the specialized pipeline of prims[i] (see pipelineKey).
     void draw(const GSGpuPrim *prims, const uint64_t *keys, size_t primCount,
               const GSGpuState *states, size_t stateCount,
-              const uint16_t *cluts, size_t clutCount);
+              const uint16_t *cluts, size_t clutCount,
+              uint64_t feedbackBegin = 0, uint64_t feedbackEnd = 0);
+
+    // Writes transfer data into GS memory after the work queued so far,
+    // without waiting.
+    void upload(const GSGpuUpload &upload, const uint8_t *data, size_t bytes);
 
     // Specialization key of a primitive: kind plus the state's switches.
     static uint64_t pipelineKey(uint32_t kind, const GSGpuState &state);
