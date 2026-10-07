@@ -140,6 +140,8 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
     setStick(6, 7, keyAxis(KEY_A, KEY_D), keyAxis(KEY_W, KEY_S));
 
     // PS2X_INPUT_SCRIPT="<sec>:<BUTTON>:<duration>;..." scripted presses for testing.
+    // Besides buttons, LS_UP/LS_DOWN/LS_LEFT/LS_RIGHT push the left stick.
+    static constexpr uint16_t kStickUp = 0xF001u, kStickDown = 0xF002u, kStickLeft = 0xF003u, kStickRight = 0xF004u;
     static const std::vector<std::tuple<double, uint16_t, double>> script = []
     {
         std::vector<std::tuple<double, uint16_t, double>> out;
@@ -150,7 +152,8 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
             {"UP", PAD_UP}, {"DOWN", PAD_DOWN}, {"LEFT", PAD_LEFT}, {"RIGHT", PAD_RIGHT},
             {"CROSS", PAD_CROSS}, {"CIRCLE", PAD_CIRCLE}, {"SQUARE", PAD_SQUARE}, {"TRIANGLE", PAD_TRIANGLE},
             {"L1", PAD_L1}, {"L2", PAD_L2}, {"R1", PAD_R1}, {"R2", PAD_R2},
-            {"START", PAD_START}, {"SELECT", PAD_SELECT}};
+            {"START", PAD_START}, {"SELECT", PAD_SELECT},
+            {"LS_UP", kStickUp}, {"LS_DOWN", kStickDown}, {"LS_LEFT", kStickLeft}, {"LS_RIGHT", kStickRight}};
         std::stringstream all(env);
         std::string item;
         while (std::getline(all, item, ';'))
@@ -172,8 +175,16 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
         const double now = GetTime();
         for (const auto &[at, mask, duration] : script)
         {
-            if (now >= at && now < at + duration)
-                clearBit(mask);
+            if (!(now >= at && now < at + duration))
+                continue;
+            switch (mask)
+            {
+            case kStickUp: setStick(6, 7, 0, -1); break;
+            case kStickDown: setStick(6, 7, 0, 1); break;
+            case kStickLeft: setStick(6, 7, -1, 0); break;
+            case kStickRight: setStick(6, 7, 1, 0); break;
+            default: clearBit(mask); break;
+            }
         }
     }
 

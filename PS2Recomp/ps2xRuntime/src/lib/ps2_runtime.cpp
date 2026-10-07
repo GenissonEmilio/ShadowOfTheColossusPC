@@ -1478,6 +1478,12 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
     }
 }
 
+namespace
+{
+    // Guest jumps dispatched on this host thread (see dispatchGuestBranch).
+    thread_local uint64_t t_guestJumpSerial = 0;
+}
+
 bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                                      R5900Context *ctx,
                                      uint32_t targetPc,
@@ -1499,6 +1505,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
 
     if (!isCall)
     {
+        ++t_guestJumpSerial;
         if (!hasFunction(targetPc))
         {
             reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
@@ -1532,6 +1539,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
 
     RecompiledFunction targetFn = lookupFunction(targetPc);
     const uint32_t entryPc = ctx->pc;
+    const uint64_t jumpSerial = t_guestJumpSerial;
     targetFn(rdram, ctx, this);
 
     // While unwinding to the scheduler, ctx->pc is where the deepest pending
@@ -1541,7 +1549,11 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         return false;
     }
 
-    if (ctx->pc == entryPc)
+    // A callee that returns with its own entry PC returned without setting
+    // pc -- unless a guest jump ran inside it: a tail jump back to that entry
+    // (SotC's script system: SCRFuncSubFunc -> j execSCRBaseFunc) must be
+    // dispatched, not taken as a return (found by LightVelox/sotc-pc).
+    if (ctx->pc == entryPc && jumpSerial == t_guestJumpSerial)
     {
         ctx->pc = fallthroughPc;
     }
@@ -1577,10 +1589,18 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
 
     m_vu0.reset();
     copyVu0ContextToState(ctx, m_vu0.state());
+    // The real VU0 runs a microprogram to its end bit while the EE continues;
+    // here it runs to completion right away. The budget only guards against
+    // runaway programs: a short one (4096 cycles) cut skinning and cloth
+    // loops off midway, leaving half-transformed vertices.
+    constexpr uint32_t kVu0MicroBudget = 1u << 22;
+    const uint64_t before = m_vu0.cycles();
     m_vu0.execute(vu0Code, PS2_VU0_CODE_SIZE,
                   vu0Data, PS2_VU0_DATA_SIZE,
                   m_gs, &m_memory,
-                  startPC, 0u, ctx->vu0_itop, 4096);
+                  startPC, 0u, ctx->vu0_itop, kVu0MicroBudget);
+    if (m_vu0.cycles() - before >= kVu0MicroBudget)
+        std::cerr << "[vu0] microprogram at 0x" << std::hex << startPC << std::dec << " hit the cycle budget" << std::endl;
     copyVu0StateToContext(m_vu0.state(), ctx);
 }
 
@@ -2695,22 +2715,33 @@ void PS2Runtime::run()
             std::cerr << "[dump] GS buffers written at t=" << GetTime() << std::endl;
         }
 
-        // PS2X_DUMP_RAM_AT_SECONDS=<s> [PS2X_DUMP_RAM_PATH=<file>]: one-shot guest RAM dump.
-        static const double ramDumpAt = []
+        // PS2X_DUMP_RAM_AT_SECONDS=<s>[,<s>...] [PS2X_DUMP_RAM_PATH=<file>]: guest RAM
+        // dumps at those times (with several times, <file>.0, <file>.1, ...).
+        static const std::vector<double> ramDumpTimes = []
         {
-            const char *env = std::getenv("PS2X_DUMP_RAM_AT_SECONDS");
-            return env ? std::atof(env) : 0.0;
+            std::vector<double> times;
+            if (const char *env = std::getenv("PS2X_DUMP_RAM_AT_SECONDS"))
+            {
+                std::stringstream list(env);
+                std::string item;
+                while (std::getline(list, item, ','))
+                    times.push_back(std::atof(item.c_str()));
+            }
+            return times;
         }();
-        static bool ramDumped = false;
-        if (ramDumpAt > 0.0 && !ramDumped && GetTime() >= ramDumpAt)
+        static size_t ramDumpsDone = 0;
+        if (ramDumpsDone < ramDumpTimes.size() && GetTime() >= ramDumpTimes[ramDumpsDone])
         {
-            ramDumped = true;
             const char *dumpPath = std::getenv("PS2X_DUMP_RAM_PATH");
-            if (FILE *dump = std::fopen(dumpPath ? dumpPath : "ram_dump.bin", "wb"))
+            std::string path = dumpPath ? dumpPath : "ram_dump.bin";
+            if (ramDumpTimes.size() > 1)
+                path += "." + std::to_string(ramDumpsDone);
+            ++ramDumpsDone;
+            if (FILE *dump = std::fopen(path.c_str(), "wb"))
             {
                 std::fwrite(m_memory.getRDRAM(), 1, PS2_RAM_SIZE, dump);
                 std::fclose(dump);
-                std::cerr << "[dump] guest RAM written at t=" << GetTime() << std::endl;
+                std::cerr << "[dump] guest RAM written to " << path << " at t=" << GetTime() << std::endl;
             }
             if (const char *vramPath = std::getenv("PS2X_DUMP_GSVRAM_PATH"))
             {

@@ -343,6 +343,7 @@ public:
     // of whether the kick is still active, or the end of run()).
     uint64_t m_xgkickDue = 0;
     void progressXgkick() { m_xgkickDue = m_cycle; }
+    uint64_t cycles() const { return m_cycle; }
     void catchUpXgkick()
     {
         if (m_xgkick.active && m_xgkick.progressedCycle < m_xgkickDue)
