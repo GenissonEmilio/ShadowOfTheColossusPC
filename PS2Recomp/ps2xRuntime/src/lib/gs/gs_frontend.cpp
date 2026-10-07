@@ -6,6 +6,8 @@
 #include "runtime/gs/gs_async_backend.h"
 #include "ps2_log.h"
 #include "runtime/ps2_memory.h"
+#include "ThreadNaming.h"
+#include "ps2_runtime_macros.h"
 #include <atomic>
 #include <algorithm>
 #include <cmath>
@@ -681,7 +683,119 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
     return true;
 }
 
+GS::~GS()
+{
+    if (m_gifThread.joinable())
+    {
+        {
+            std::lock_guard<std::mutex> lock(m_gifMutex);
+            m_gifStop = true;
+        }
+        m_gifCv.notify_all();
+        m_gifThread.join();
+    }
+}
+
+void GS::enableGifWorker(std::function<void()> added, std::function<void()> done)
+{
+    if (m_gifWorkerEnabled)
+        return;
+    m_gifAdded = std::move(added);
+    m_gifDone = std::move(done);
+    m_gifWorkerEnabled = true;
+    m_gifThread = std::thread([this]
+                              { gifWorkerLoop(); });
+}
+
+void GS::enqueueGifWork(GifWork &&work)
+{
+    m_gifAdded();
+    m_gifLocal.push_back(std::move(work));
+    if (m_gifLocal.size() >= 32u)
+        flushGifWork();
+}
+
+void GS::flushGifWork()
+{
+    if (m_gifLocal.empty())
+        return;
+    bool wake = false;
+    {
+        std::lock_guard<std::mutex> lock(m_gifMutex);
+        for (GifWork &work : m_gifLocal)
+            m_gifQueue.push_back(std::move(work));
+        wake = m_gifSleeping;
+    }
+    m_gifLocal.clear();
+    if (wake)
+        m_gifCv.notify_one();
+}
+
+void GS::gifWorkerLoop()
+{
+    ThreadNaming::SetCurrentThreadName("GIF");
+    // Same float environment as the VU1 worker these packets come from.
+    ps2SetEeFloatingPointMode();
+    GSAsyncBackend::SetThreadStaging(true);
+    std::unique_lock<std::mutex> lock(m_gifMutex);
+    for (;;)
+    {
+        if (m_gifQueue.empty())
+        {
+            m_gifSleeping = true;
+            m_gifCv.wait(lock, [this]
+                         { return m_gifStop || !m_gifQueue.empty(); });
+            m_gifSleeping = false;
+        }
+        if (m_gifQueue.empty())
+            return;
+        std::deque<GifWork> batch;
+        batch.swap(m_gifQueue);
+        lock.unlock();
+        for (size_t i = 0; i < batch.size(); ++i)
+        {
+            GifWork &work = batch[i];
+            if (work.fn)
+                work.fn();
+            else
+                processGIFPacketNow(work.data.data(), static_cast<uint32_t>(work.data.size()));
+            if (i + 1u < batch.size())
+                m_gifDone(); // more of the batch follows: the count stays above zero
+        }
+        GSAsyncBackend::PublishThreadStaged(); // before the last done(): syncVu1 callers see it all
+        m_gifDone();
+        lock.lock();
+    }
+}
+
+void GS::runInGifOrder(std::function<void()> fn)
+{
+    if (m_gifWorkerEnabled && PS2Memory::onVu1Worker())
+    {
+        GifWork work;
+        work.fn = std::move(fn);
+        enqueueGifWork(std::move(work));
+        flushGifWork();
+        return;
+    }
+    fn();
+}
+
 void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+{
+    if (m_gifWorkerEnabled && PS2Memory::onVu1Worker())
+    {
+        if (!data || sizeBytes < 16)
+            return;
+        GifWork work;
+        work.data.assign(data, data + sizeBytes);
+        enqueueGifWork(std::move(work));
+        return;
+    }
+    processGIFPacketNow(data, sizeBytes);
+}
+
+void GS::processGIFPacketNow(const uint8_t *data, uint32_t sizeBytes)
 {
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     if (!data || sizeBytes < 16 || !m_backend)

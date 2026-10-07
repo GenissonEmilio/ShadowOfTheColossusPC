@@ -304,6 +304,8 @@ void PS2Memory::mtvuWorkerLoop()
         if (m_gifArbiter)
             m_gifArbiter->drain();
         GSAsyncBackend::PublishThreadStaged();
+        if (m_mtvuJobEndHook)
+            m_mtvuJobEndHook();
         lock.lock();
         if (m_mtvuOutstanding.fetch_sub(1, std::memory_order_acq_rel) == 1u)
             m_mtvuIdle.notify_all();
@@ -321,6 +323,13 @@ void PS2Memory::runInVu1Order(std::function<void()> fn)
     job.marker = std::move(fn);
     job.fbrst = m_mtvuFbrst;
     mtvuEnqueue(std::move(job));
+}
+
+void PS2Memory::mtvuWorkDone()
+{
+    std::lock_guard<std::mutex> lock(m_mtvuMutex);
+    if (m_mtvuOutstanding.fetch_sub(1, std::memory_order_acq_rel) == 1u)
+        m_mtvuIdle.notify_all();
 }
 
 void PS2Memory::mtvuSyncSlow()
@@ -530,7 +539,27 @@ void PS2Memory::resetEeTimers() noexcept
     m_eeTimers = {};
 }
 
-uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
+uint32_t PS2Memory::flushEeTimers() noexcept
+{
+    const uint64_t cycles = m_timerDeferred;
+    m_timerDeferred = 0u;
+    uint32_t mask = m_timerIrqLatched;
+    m_timerIrqLatched = 0u;
+    if (cycles != 0u)
+        mask |= advanceEeTimersNow(cycles);
+    m_timerBudget = cyclesUntilNextEeTimerInterruptNow();
+    return mask;
+}
+
+uint64_t PS2Memory::cyclesUntilNextEeTimerInterrupt() const noexcept
+{
+    const uint64_t next = cyclesUntilNextEeTimerInterruptNow();
+    if (next == std::numeric_limits<uint64_t>::max())
+        return next;
+    return next > m_timerDeferred ? next - m_timerDeferred : 1u;
+}
+
+uint32_t PS2Memory::advanceEeTimersNow(uint64_t eeCycles) noexcept
 {
     if (eeCycles == 0u)
     {
@@ -606,7 +635,7 @@ uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
     return interruptMask;
 }
 
-uint64_t PS2Memory::cyclesUntilNextEeTimerInterrupt() const noexcept
+uint64_t PS2Memory::cyclesUntilNextEeTimerInterruptNow() const noexcept
 {
     uint64_t nearest = std::numeric_limits<uint64_t>::max();
     for (const EeTimer &timer : m_eeTimers)
@@ -1263,6 +1292,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
     uint32_t timerOffset = 0u;
     if (decodeEeTimerRegister(address, timerIndex, timerOffset))
     {
+        m_timerIrqLatched |= flushEeTimers();
+        m_timerBudget = 0u; // the timer changes: re-evaluate at the next cycles
         EeTimer &timer = m_eeTimers[timerIndex];
         switch (timerOffset)
         {
@@ -2486,6 +2517,8 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
 {
     if ((address >= 0x10003000u && address < 0x10003100u) || (address >= 0x10003C00u && address < 0x10003E00u))
         syncVu1(); // GIF / VIF1 registers
+    if (address == 0x10003020u || address < 0x10002000u)
+        m_timerIrqLatched |= flushEeTimers(); // timers and GIF_STAT.FQC see the elapsed cycles
     size_t timerIndex = 0u;
     uint32_t timerOffset = 0u;
     if (decodeEeTimerRegister(address, timerIndex, timerOffset))

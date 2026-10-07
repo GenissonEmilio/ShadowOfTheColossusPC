@@ -673,6 +673,16 @@ bool PS2Runtime::syncCoreSubsystems()
     m_gs.init(gsVram, static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &m_memory.gs());
     m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)
                                     { m_gs.processGIFPacket(data, size); });
+    // PS2X_GIF_THREAD=0: process GIF packets on the VU1 worker itself.
+    static const bool gifThread = !std::getenv("PS2X_GIF_THREAD") || std::atoi(std::getenv("PS2X_GIF_THREAD")) != 0;
+    if (gifThread && m_memory.mtvuEnabled())
+        m_gs.enableGifWorker([this]
+                             { m_memory.mtvuWorkAdded(); },
+                             [this]
+                             { m_memory.mtvuWorkDone(); });
+    if (gifThread && m_memory.mtvuEnabled())
+        m_memory.setMtvuJobEndHook([this]
+                                   { m_gs.flushGifWork(); });
     m_memory.setGifArbiter(&m_gifArbiter);
     m_memory.setVu0FbrstProvider([this]
                                  {

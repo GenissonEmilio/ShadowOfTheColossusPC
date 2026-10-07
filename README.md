@@ -21,7 +21,8 @@ DMA, IOP, SPU2) is reimplemented in the runtime.
 | Title screen, menus | ✅ |
 | Memory card (libmc2, PCSX2-compatible `memcards/Mcd001.ps2`) | ✅ detection, formatting/saving under test |
 | New Game, intro, riding Agro | ✅ |
-| Performance (M-series) | ~30 fps in the intro and title, ~25-32 fps riding to the shrine |
+| Gameplay (Wander under control) | ✅ |
+| Performance (M-series) | ~28-30 fps in gameplay (Metal renderer) |
 
 ## Requirements
 
@@ -116,7 +117,9 @@ Everything generated (recompiled code, captures, build files) goes to
 | `PS2X_STATS=1` | frame, VU1 and GS statistics |
 | `PS2X_GS_BOB=1` | bob deinterlacing instead of weave |
 | `PS2X_GS_THREADS=n` | raster threads |
+| `PS2X_GS_GPU=0` | rasterize on the CPU instead of the GPU (Metal) |
 | `PS2X_MTVU=0` | run VIF1/VU1/GIF on the game thread instead of their own thread |
+| `PS2X_GIF_THREAD=0` | process GIF packets on the VU1 thread instead of their own |
 | `PS2X_GS_PROFILE=1` | where GS raster time goes, and what flushes the draw queue |
 | `PS2X_VU1_NOREC=1` / `PS2X_VU1_REC_VERIFY=1` | interpret VU1 / cross-check the recompiled VU1 against the interpreter |
 | `PS2X_WATCH_WRITE=start:end` | log guest stores to an address range |

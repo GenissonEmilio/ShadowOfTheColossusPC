@@ -619,9 +619,10 @@ void GSCpuBackend::Initialize(uint8_t *vram, uint32_t vramSize)
     m_vramSize = vramSize;
     ResetUnlocked();
 #ifdef PS2X_HAVE_METAL
-    // PS2X_GS_GPU=1: rasterize on the GPU (only the backend of the live GS
-    // memory; scratch backends used for presentation stay on the CPU).
-    static const bool wantGpu = std::getenv("PS2X_GS_GPU") && std::atoi(std::getenv("PS2X_GS_GPU")) != 0;
+    // Rasterize on the GPU by default (only the backend of the live GS memory;
+    // scratch backends used for presentation stay on the CPU).
+    // PS2X_GS_GPU=0 keeps everything on the CPU.
+    static const bool wantGpu = !std::getenv("PS2X_GS_GPU") || std::atoi(std::getenv("PS2X_GS_GPU")) != 0;
     m_gpu.reset();
     if (wantGpu && m_gpuAllowed && vram)
         m_gpu = GSMetalRaster::create(vram, vramSize);

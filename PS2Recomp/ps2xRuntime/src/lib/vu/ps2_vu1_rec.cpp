@@ -33,6 +33,28 @@ namespace
         return hash;
     }
 
+    // Cheap 128-bit fingerprint of a code image (8-byte words, two lanes),
+    // used to skip the byte-wise hash for images seen before.
+    std::pair<uint64_t, uint64_t> fingerprint(const uint8_t *code, uint32_t size)
+    {
+        uint64_t a = 0x9E3779B97F4A7C15ull, b = 0xC2B2AE3D27D4EB4Full;
+        for (uint32_t i = 0; i + 8u <= size; i += 8u)
+        {
+            uint64_t w;
+            std::memcpy(&w, code + i, sizeof(w));
+            a = (a ^ w) * 0xFF51AFD7ED558CCDull;
+            a ^= a >> 29;
+            b = (b + w) * 0xC4CEB9FE1A85EC53ull;
+            b ^= b >> 31;
+        }
+        return {a, b};
+    }
+
+    struct FingerprintHash
+    {
+        size_t operator()(const std::pair<uint64_t, uint64_t> &key) const { return key.first ^ (key.second * 31u); }
+    };
+
     uint8_t laneBit(uint32_t component) { return static_cast<uint8_t>(0x8u >> component); }
 }
 
@@ -74,7 +96,14 @@ VU1Interpreter::RecompiledFn VU1Interpreter::findRecompiled(const uint8_t *vuCod
     static uint64_t imageHash = 0;
     if (generation != m_recGeneration || vuCode != m_recCode)
     {
-        imageHash = hashImage(vuCode, codeSize);
+        // Code changes with every microprogram upload; most images recur.
+        static std::unordered_map<std::pair<uint64_t, uint64_t>, uint64_t, FingerprintHash> known;
+        const auto print = fingerprint(vuCode, codeSize);
+        const auto cached = known.find(print);
+        if (cached != known.end())
+            imageHash = cached->second;
+        else
+            imageHash = known.emplace(print, hashImage(vuCode, codeSize)).first->second;
         m_recHash = imageHash;
         const auto it = registry().find(imageHash);
         m_recFn = it != registry().end() ? it->second : nullptr;

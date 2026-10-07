@@ -2,6 +2,10 @@
 #define PS2_GS_FRONTEND_H
 
 #include <array>
+#include <condition_variable>
+#include <deque>
+#include <functional>
+#include <thread>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -100,13 +104,23 @@ class GS
 {
 public:
     GS();
-    ~GS() = default;
+    ~GS();
 
     void init(uint8_t *vram, uint32_t vramSize, struct GSRegisters *privRegs = nullptr);
     void reset();
     void setRasterBackend(std::unique_ptr<GSRasterBackend> backend);
 
+    // From the VU1 worker with the GIF worker enabled, packets are copied and
+    // processed on the GIF worker, in order; otherwise they run inline.
     void processGIFPacket(const uint8_t *data, uint32_t sizeBytes);
+    // Runs GIF packets handed over by the VU1 worker on a thread of their own.
+    // added/done track that work in the VU1 worker's pending count, which
+    // syncVu1() waits on.
+    void enableGifWorker(std::function<void()> added, std::function<void()> done);
+    // Runs fn after the packets queued so far (inline without the worker).
+    void runInGifOrder(std::function<void()> fn);
+    // Hands the packets the VU1 worker collected to the GIF worker.
+    void flushGifWork();
     bool processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes);
     void uploadImageNative(uint64_t bitbltbuf,
                            uint64_t trxpos,
@@ -184,6 +198,24 @@ private:
     uint32_t m_localMemorySize = 0u;
     struct GSRegisters *m_privRegs = nullptr;
     mutable std::recursive_mutex m_stateMutex;
+
+    struct GifWork
+    {
+        std::vector<uint8_t> data;
+        std::function<void()> fn;
+    };
+    void processGIFPacketNow(const uint8_t *data, uint32_t sizeBytes);
+    void enqueueGifWork(GifWork &&work);
+    void gifWorkerLoop();
+    bool m_gifWorkerEnabled = false;
+    std::function<void()> m_gifAdded, m_gifDone;
+    std::thread m_gifThread;
+    std::mutex m_gifMutex;
+    std::condition_variable m_gifCv;
+    std::deque<GifWork> m_gifQueue;
+    std::vector<GifWork> m_gifLocal; // collected by the VU1 worker, unlocked
+    bool m_gifSleeping = false;
+    bool m_gifStop = false;
     mutable std::mutex m_backendLifetimeMutex;
     mutable std::mutex m_presentationMutex;
 

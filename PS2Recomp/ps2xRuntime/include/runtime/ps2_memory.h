@@ -277,6 +277,13 @@ public:
     // Runs fn after the VIF1/GIF work queued so far, on the VU1 worker
     // (inline when the worker is not in use), without waiting for it.
     void runInVu1Order(std::function<void()> fn);
+    // Work another thread does for the VU1 worker (GIF packets): syncVu1()
+    // also waits for it.
+    void mtvuWorkAdded() { m_mtvuOutstanding.fetch_add(1, std::memory_order_acq_rel); }
+    void mtvuWorkDone();
+    bool mtvuEnabled() const { return m_mtvuEnabled; }
+    // Runs on the VU1 worker after each job, before it counts as done.
+    void setMtvuJobEndHook(std::function<void()> hook) { m_mtvuJobEndHook = std::move(hook); }
     static bool onVu1Worker();
     static const std::align_val_t kGsVramAlignment;
     // VU0 FBRST (D/T bit enables) for the VU1 run in progress on the worker.
@@ -328,7 +335,17 @@ public:
 
     // EE timers advance from the scheduler's emulated EE-cycle clock. The
     // returned mask uses bits 0..3 for newly raised TIM0..TIM3 interrupts.
-    uint32_t advanceEeTimers(uint64_t eeCycles) noexcept;
+    // EE cycles reach the timers lazily: they are applied once the next timer
+    // interrupt can be due, or before the timer / GIF_STAT registers are
+    // accessed. Returns the timers that raised an interrupt.
+    uint32_t advanceEeTimers(uint64_t eeCycles) noexcept
+    {
+        m_timerDeferred += eeCycles;
+        if (m_timerDeferred < m_timerBudget && m_timerIrqLatched == 0u)
+            return 0u;
+        return flushEeTimers();
+    }
+    uint32_t flushEeTimers() noexcept;
     [[nodiscard]] uint64_t cyclesUntilNextEeTimerInterrupt() const noexcept;
     void resetEeTimers() noexcept;
 
@@ -397,6 +414,11 @@ public:
     std::atomic<uint64_t> m_vu1CodeGeneration{0};
     // I/O registers
     std::unordered_map<uint32_t, uint32_t> m_ioRegisters;
+    uint64_t m_timerDeferred = 0;  // EE cycles not applied to the timers yet
+    uint64_t m_timerBudget = 0;    // apply them once this many have collected
+    uint32_t m_timerIrqLatched = 0; // raised by a flush outside advanceEeTimers
+    uint32_t advanceEeTimersNow(uint64_t eeCycles) noexcept;
+    uint64_t cyclesUntilNextEeTimerInterruptNow() const noexcept;
 
     // Registers
     GSRegisters gs_regs;
@@ -460,6 +482,7 @@ public:
     std::condition_variable m_mtvuWork;
     std::condition_variable m_mtvuIdle;
     std::deque<MtvuJob> m_mtvuQueue;
+    std::function<void()> m_mtvuJobEndHook;
     std::atomic<uint32_t> m_mtvuOutstanding{0};
     bool m_mtvuStop = false;
     uint32_t m_mtvuFbrst = 0;

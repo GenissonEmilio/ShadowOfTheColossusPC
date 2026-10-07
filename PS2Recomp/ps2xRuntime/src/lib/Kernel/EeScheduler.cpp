@@ -1851,6 +1851,15 @@ void EeScheduler::applyPendingPreemption()
 void EeScheduler::processPendingEvents()
 {
     assertExecutor();
+    // Runs at every dispatch: skip the locks when nothing is posted or due.
+    // Posting an event sets m_checkpointPending.
+    const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
+    if (!m_checkpointPending.load(std::memory_order_acquire) && m_pendingEeTimerInterrupts == 0u &&
+        (nextEventCycle == 0u || m_eeCycle < nextEventCycle))
+    {
+        applyPendingPreemption();
+        return;
+    }
     processDueDeadlines();
     const uint32_t timerInterrupts = m_pendingEeTimerInterrupts;
     m_pendingEeTimerInterrupts = 0u;
@@ -1982,7 +1991,8 @@ void EeScheduler::processEvent(const EeEvent &event)
         // The frame the game shows now: queue its capture after every GS
         // packet the VU1 thread still holds for it, without waiting for them.
         m_runtime.memory().runInVu1Order([gs = &m_runtime.gs()]
-                                         { gs->queuePresentation(); });
+                                         { gs->runInGifOrder([gs]
+                                                             { gs->queuePresentation(); }); });
         if ((m_vsyncTick & 1u) != 0u)
         {
             m_runtime.memory().gs().csr.fetch_or(0x2000ull, std::memory_order_acq_rel);
