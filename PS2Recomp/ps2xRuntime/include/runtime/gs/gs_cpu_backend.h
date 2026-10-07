@@ -143,6 +143,7 @@ private:
     void markVramWritten(uint64_t begin, uint64_t end);
     std::pair<uint64_t, uint64_t> m_uploadRange{0u, 0u}; // destination of the host->local transfer
     // True when queued draws read or write VRAM bytes in [begin, end).
+    void addInflightRange(const std::pair<uint64_t, uint64_t> &range);
     bool pendingTouches(uint64_t begin, uint64_t end) const;
     bool uploadTouchesPending(const GSTransferCommand &command) const;
     std::vector<std::vector<uint32_t>> m_bandBins;
@@ -150,6 +151,9 @@ private:
     // being submitted (set by UpdateTextureReadMode).
     std::vector<std::pair<uint64_t, uint64_t>> m_pendingWrites;
     std::vector<std::pair<uint64_t, uint64_t>> m_pendingReads;
+    // GS memory touched by draws handed to the GPU without waiting for them
+    // (ordering-only flushes); cleared when the GPU is idle.
+    std::vector<std::pair<uint64_t, uint64_t>> m_gpuInflight;
     std::pair<uint64_t, uint64_t> m_lastTexRange{0u, 0u};
     std::pair<uint64_t, uint64_t> m_lastFrameRange{0u, 0u};
     std::pair<uint64_t, uint64_t> m_lastZRange{0u, 0u};

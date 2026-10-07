@@ -850,19 +850,27 @@ void GSCpuBackend::flushPendingUnlocked(const char *reason)
         // GPU work only has to be committed to keep draw order (Metal orders
         // passes that touch the same memory); the CPU waits for it only when
         // it is about to read or write GS memory itself.
+        const bool orderingOnly = std::strcmp(reason, "Hazard") == 0 || std::strcmp(reason, "Full") == 0 ||
+                                  std::strcmp(reason, "Flush") == 0;
         if (!m_pending.empty())
         {
             if (g_gsProfile.on)
                 ++g_gsProfile.reasons[reason];
+            if (orderingOnly)
+            {
+                // The CPU must not touch this memory until the GPU is done.
+                for (const auto *list : {&m_pendingWrites, &m_pendingReads})
+                    for (const auto &range : *list)
+                        addInflightRange(range);
+            }
             rasterizePendingGpu();
             finishPendingUnlocked();
         }
-        const bool orderingOnly = std::strcmp(reason, "Hazard") == 0 || std::strcmp(reason, "Full") == 0 ||
-                                  std::strcmp(reason, "Flush") == 0;
         if (!orderingOnly)
         {
             const auto w0 = std::chrono::steady_clock::now();
             m_gpu->waitIdle();
+            m_gpuInflight.clear();
             if (g_gsProfile.on)
             {
                 const double waited = std::chrono::duration<double>(std::chrono::steady_clock::now() - w0).count();
@@ -1424,9 +1432,30 @@ const GSCpuBackend::DecodedTexture *GSCpuBackend::decodedTexture(const GSDrawSta
     return &entry;
 }
 
+void GSCpuBackend::addInflightRange(const std::pair<uint64_t, uint64_t> &range)
+{
+    if (range.second <= range.first)
+        return;
+    for (auto &existing : m_gpuInflight)
+    {
+        if (range.first <= existing.second && existing.first <= range.second)
+        {
+            existing.first = std::min(existing.first, range.first);
+            existing.second = std::max(existing.second, range.second);
+            return;
+        }
+    }
+    m_gpuInflight.push_back(range);
+}
+
 bool GSCpuBackend::pendingTouches(uint64_t begin, uint64_t end) const
 {
-    if (m_pending.empty() || end <= begin)
+    if (end <= begin)
+        return false;
+    for (const auto &range : m_gpuInflight)
+        if (begin < range.second && range.first < end)
+            return true;
+    if (m_pending.empty())
         return false;
     for (const auto &range : m_pendingWrites)
         if (begin < range.second && range.first < end)
@@ -1474,9 +1503,11 @@ void GSCpuBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
     // The CLUT is read from VRAM now: queued draws must not still be writing it.
     uint64_t cb = 0, ce = 0;
     bufferRange(tex0.cbp * 256u, 64u * std::max<uint32_t>(1u, texclut.cbw), 16u + texclut.cov, tex0.cpsm, cb, ce);
-    for (const auto &range : m_pendingWrites)
+    for (const auto *list : {&m_pendingWrites, &m_gpuInflight})
     {
-        if (cb < range.second && range.first < ce)
+        const bool touched = std::any_of(list->begin(), list->end(), [&](const auto &range)
+                                         { return cb < range.second && range.first < ce; });
+        if (touched)
         {
             flushPendingUnlocked("LoadClut");
             break;
@@ -2618,7 +2649,7 @@ void GSCpuBackend::DrawLine(const GSPrimitiveBatch &batch)
 
 bool GSCpuBackend::uploadTouchesPending(const GSTransferCommand &command) const
 {
-    if (m_pending.empty())
+    if (m_pending.empty() && m_gpuInflight.empty())
         return false;
     // Only the pages under the destination rectangle matter.
     uint32_t pw = 0, ph = 0;

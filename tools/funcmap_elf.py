@@ -64,7 +64,8 @@ def find_starts(words, in_text, data_blobs):
             if padded and p % 8 == 0 and words.get(p) is not None:
                 starts.add(p)
             # the frame setup may be scheduled a few slots into the function
-            for k in range(4):
+            # (GCC hoists address loads above it: lui, lui, lw, lui, addiu sp)
+            for k in range(8):
                 wk = words.get(p + 4 * k)
                 if wk is None or (wk >> 26) in (1, 2, 3, 4, 5, 6, 7) or is_terminal(wk):
                     break
