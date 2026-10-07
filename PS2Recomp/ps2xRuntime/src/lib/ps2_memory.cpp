@@ -1,4 +1,5 @@
 #include "ThreadNaming.h"
+#include "ps2_runtime_macros.h"
 #include "runtime/ps2_stats.h"
 #include <cstdlib>
 #include "runtime/ps2_memory.h"
@@ -278,6 +279,8 @@ void PS2Memory::mtvuWorkerLoop()
 {
     t_onVu1Worker = true;
     ThreadNaming::SetCurrentThreadName("VU1");
+    // VU1 float math rounds toward zero, like the game thread's.
+    ps2SetEeFloatingPointMode();
     std::unique_lock<std::mutex> lock(m_mtvuMutex);
     for (;;)
     {

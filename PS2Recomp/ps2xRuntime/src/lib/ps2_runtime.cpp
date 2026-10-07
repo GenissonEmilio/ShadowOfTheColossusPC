@@ -7,6 +7,7 @@
 #include "ps2_syscalls.h"
 #include "game_overrides.h"
 #include "ps2_runtime_macros.h"
+#include "Kernel/GuestKernelMemory.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ee_scheduler.h"
 #include "ThreadNaming.h"
@@ -508,8 +509,8 @@ PS2Runtime::PS2Runtime()
     m_guestHeapLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
     m_guestHeapSuggestedBase = kGuestHeapDefaultBase;
     m_guestHeapConfigured = false;
-    m_asyncCallbackStackFloor = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
-    m_asyncCallbackStackTop = PS2_RAM_SIZE;
+    m_asyncCallbackStackFloor = ps2x::kernel_memory::kCallbackStackFloor;
+    m_asyncCallbackStackTop = ps2x::kernel_memory::kCallbackStackTop;
 }
 
 void PS2Runtime::setDebugUiCallbacks(DebugUiCallback initCallback,
@@ -1057,9 +1058,8 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     }
     {
         std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
-        const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
-        m_asyncCallbackStackFloor = std::min(std::max(hardLimit, suggestedHeapBase), PS2_RAM_SIZE);
-        m_asyncCallbackStackTop = PS2_RAM_SIZE;
+        m_asyncCallbackStackFloor = ps2x::kernel_memory::kCallbackStackFloor;
+        m_asyncCallbackStackTop = ps2x::kernel_memory::kCallbackStackTop;
     }
 
     LoadedModule module;
@@ -2189,6 +2189,8 @@ uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment
     base &= ~(normalizedAlignment - 1u);
     if (base < m_asyncCallbackStackFloor || base >= top)
     {
+        std::cerr << "[runtime] callback stack space exhausted (floor 0x" << std::hex << m_asyncCallbackStackFloor
+                  << ", top 0x" << top << std::dec << ")" << std::endl;
         return 0u;
     }
 
@@ -2550,6 +2552,8 @@ void PS2Runtime::run()
     std::thread gameThread([&]()
                            {
         ThreadNaming::SetCurrentThreadName("GameThread");
+        // Guest float code runs like the EE: round toward zero, no denormals.
+        ps2SetEeFloatingPointMode();
         try
         {
             m_eeScheduler->reset(m_memory.getRDRAM(), m_cpuContext);
@@ -2787,9 +2791,24 @@ void PS2Runtime::run()
             }();
             static double nextSnapshot = snapshotPeriod;
             static int snapshotIndex = 0;
-            if (GetTime() >= nextSnapshot)
+            // PS2X_SNAPSHOT_BURST=<start>:<count>: also save every host frame
+            // from <start> seconds on, <count> frames.
+            static const std::pair<double, int> burst = []
             {
-                nextSnapshot += snapshotPeriod;
+                const char *env = std::getenv("PS2X_SNAPSHOT_BURST");
+                if (!env)
+                    return std::pair<double, int>{0.0, 0};
+                const char *colon = std::strchr(env, ':');
+                return std::pair<double, int>{std::atof(env), colon ? std::atoi(colon + 1) : 60};
+            }();
+            static int burstLeft = burst.second;
+            const bool burstShot = burstLeft > 0 && GetTime() >= burst.first;
+            if (burstShot)
+                --burstLeft;
+            if (burstShot || GetTime() >= nextSnapshot)
+            {
+                if (!burstShot)
+                    nextSnapshot += snapshotPeriod;
                 Image shot = LoadImageFromTexture(frameTex);
                 ImageCrop(&shot, Rectangle{0.0f, 0.0f, static_cast<float>(presentWidth), static_cast<float>(presentHeight)});
                 const std::string path = std::string(snapshotDir) + "/frame_" + std::to_string(snapshotIndex++) + ".png";

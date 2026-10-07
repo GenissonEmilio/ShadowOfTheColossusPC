@@ -160,6 +160,38 @@ static inline float ps2VuNormalizeScalar(float v)
 {
     return _mm_cvtss_f32(ps2VuNormalize(_mm_set1_ps(v)));
 }
+// VU CLIP judgement (same as the VU1 interpreter's CLIP): x, y, z of fs against
+// +|w| and -|w| of ft, compared as ordered integers so denormals behave like
+// the VU. Bits: +x 0, -x 1, +y 2, -y 3, +z 4, -z 5.
+static inline uint32_t ps2VuClipFlags(__m128 fsv, __m128 ftv)
+{
+    alignas(16) float fs[4];
+    alignas(16) float ft[4];
+    _mm_store_ps(fs, fsv);
+    _mm_store_ps(ft, ftv);
+    uint32_t wBits = 0u;
+    std::memcpy(&wBits, &ft[3], sizeof(wBits));
+    const int32_t limit = (wBits & 0x7F800000u) != 0u ? static_cast<int32_t>(wBits & 0x7FFFFFFFu) : 0x007FFFFF;
+    auto exceeds = [limit](float value, uint32_t signMask)
+    {
+        uint32_t bits = 0u;
+        std::memcpy(&bits, &value, sizeof(bits));
+        bits ^= signMask;
+        int32_t ordered = 0;
+        std::memcpy(&ordered, &bits, sizeof(ordered));
+        return ordered > limit;
+    };
+    uint32_t flags = 0u;
+    for (int c = 0; c < 3; ++c)
+    {
+        if (exceeds(fs[c], 0x00000000u))
+            flags |= 1u << (2 * c);
+        if (exceeds(fs[c], 0x80000000u))
+            flags |= 2u << (2 * c);
+    }
+    return flags;
+}
+
 #define PS2_VADD(a, b) ps2VuNormalize(_mm_add_ps(ps2VuNormalize((__m128)(a)), ps2VuNormalize((__m128)(b))))
 #define PS2_VSUB(a, b) ps2VuNormalize(_mm_sub_ps(ps2VuNormalize((__m128)(a)), ps2VuNormalize((__m128)(b))))
 #define PS2_VMUL(a, b) ps2VuNormalize(_mm_mul_ps(ps2VuNormalize((__m128)(a)), ps2VuNormalize((__m128)(b))))
@@ -367,7 +399,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         : FAST_READ64(_addr); }())
 
 #define READ128(addr) ([&]() -> __m128i {                     \
-    uint32_t _addr = (uint32_t)(addr);                        \
+    uint32_t _addr = (uint32_t)(addr) & ~0xFu;                \
     return PS2Runtime::isSpecialAddress(_addr)                \
         ? runtime->Load128(rdram, ctx, _addr)                 \
         : FAST_READ128(_addr); }())
@@ -427,7 +459,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
 #define WRITE128(addr, val)                                                          \
     do                                                                               \
     {                                                                                \
-        uint32_t _addr = (addr);                                                     \
+        uint32_t _addr = (uint32_t)(addr) & ~0xFu;                                   \
         __m128i _value = (val);                                                      \
         if (PS2Runtime::isSpecialAddress(_addr))                                     \
             runtime->Store128(rdram, ctx, _addr, _value);                            \
@@ -622,13 +654,202 @@ inline __m128i ps2_u64_to_epi64_pair(uint64_t value)
 #define PS2_PMFHL_LH(hi, lo) _mm_shuffle_epi32(_mm_packs_epi32(ps2_u64_to_epi64_pair(lo), ps2_u64_to_epi64_pair(hi)), _MM_SHUFFLE(3, 1, 2, 0))
 #define PS2_PMFHL_SH(hi, lo) _mm_shufflehi_epi16(_mm_shufflelo_epi16(_mm_packs_epi32(ps2_u64_to_epi64_pair(lo), ps2_u64_to_epi64_pair(hi)), _MM_SHUFFLE(3, 1, 2, 0)), _MM_SHUFFLE(3, 1, 2, 0))
 
+// EE FPU semantics (ported from the sotc-pc fork of PS2Recomp,
+// github.com/TaylorNAlbarnaz/PS2Recomp, GPL-3.0): no Inf/NaN (results clamp to
+// +-max), operand alignment like the PS2 adder, sqrt(|x|), saturating
+// conversion. The game thread runs with round-toward-zero and denormals
+// flushed (ps2SetEeFloatingPointMode); DIV/SQRT/RSQRT round to nearest.
+static inline float ps2FpuClamp(float value)
+{
+    uint32_t bits;
+    std::memcpy(&bits, &value, sizeof(bits));
+    if ((bits & 0x7F800000u) == 0x7F800000u)
+    {
+        bits = (bits & 0x80000000u) | 0x7F7FFFFFu;
+        std::memcpy(&value, &bits, sizeof(value));
+    }
+    return value;
+}
+
+static inline void ps2FpuAlignOperands(float &a, float &b)
+{
+    uint32_t ua;
+    uint32_t ub;
+    std::memcpy(&ua, &a, sizeof(ua));
+    std::memcpy(&ub, &b, sizeof(ub));
+    const int32_t diff = static_cast<int32_t>((ua >> 23) & 0xFFu) - static_cast<int32_t>((ub >> 23) & 0xFFu);
+    if (diff >= 25)
+        ub &= 0x80000000u;
+    else if (diff > 0)
+        ub &= 0xFFFFFFFFu << (diff - 1);
+    else if (diff <= -25)
+        ua &= 0x80000000u;
+    else if (diff < 0)
+        ua &= 0xFFFFFFFFu << (-diff - 1);
+    std::memcpy(&a, &ua, sizeof(a));
+    std::memcpy(&b, &ub, sizeof(b));
+}
+
+static inline float ps2FpuAdd(float a, float b)
+{
+    ps2FpuAlignOperands(a, b);
+    return ps2FpuClamp(a + b);
+}
+
+static inline float ps2FpuSub(float a, float b)
+{
+    ps2FpuAlignOperands(a, b);
+    return ps2FpuClamp(a - b);
+}
+
+static inline float ps2SignedFloatMax(uint32_t signSource)
+{
+    const uint32_t bits = (signSource & 0x80000000u) | 0x7F7FFFFFu;
+    float out;
+    std::memcpy(&out, &bits, sizeof(out));
+    return out;
+}
+
+static inline uint32_t ps2FloatBits(float value)
+{
+    uint32_t bits;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+static inline uint32_t ps2FpuCompareKey(float value)
+{
+    uint32_t bits = ps2FloatBits(value);
+    if ((bits & 0x7F800000u) == 0u)
+        bits = 0u;
+    return (bits & 0x80000000u) != 0u ? ~bits : bits ^ 0x80000000u;
+}
+
+static inline bool ps2FloatIsZero(float value)
+{
+    return (ps2FloatBits(value) & 0x7F800000u) == 0u;
+}
+
+static constexpr uint32_t PS2_FCR31_I = 0x00020000u;
+static constexpr uint32_t PS2_FCR31_D = 0x00010000u;
+static constexpr uint32_t PS2_FCR31_SI = 0x00000040u;
+static constexpr uint32_t PS2_FCR31_SD = 0x00000020u;
+
+static inline float ps2FpuDivideNearest(float dividend, float divisor)
+{
+    const uint32_t csr = _mm_getcsr();
+    _mm_setcsr(csr & ~0x6000u);
+    const float result = _mm_cvtss_f32(_mm_div_ss(_mm_set_ss(dividend), _mm_set_ss(divisor)));
+    _mm_setcsr(csr);
+    return result;
+}
+
+static inline float ps2FpuSqrtNearest(float value)
+{
+    const uint32_t csr = _mm_getcsr();
+    _mm_setcsr(csr & ~0x6000u);
+    const float result = _mm_cvtss_f32(_mm_sqrt_ss(_mm_set_ss(value)));
+    _mm_setcsr(csr);
+    return result;
+}
+
+static inline float ps2FpuDivide(uint32_t &fcr31, float dividend, float divisor)
+{
+    if (ps2FloatIsZero(divisor))
+    {
+        if (ps2FloatIsZero(dividend))
+            fcr31 |= PS2_FCR31_I | PS2_FCR31_SI;
+        else
+            fcr31 |= PS2_FCR31_D | PS2_FCR31_SD;
+        return ps2SignedFloatMax(ps2FloatBits(dividend) ^ ps2FloatBits(divisor));
+    }
+    return ps2FpuClamp(ps2FpuDivideNearest(dividend, divisor));
+}
+
+static inline float ps2FpuSqrt(uint32_t &fcr31, float value)
+{
+    if ((ps2FloatBits(value) & 0x80000000u) != 0u && !ps2FloatIsZero(value))
+        fcr31 |= PS2_FCR31_I | PS2_FCR31_SI;
+    return ps2FpuClamp(ps2FpuSqrtNearest(std::fabs(value)));
+}
+
+static inline float ps2FpuRsqrt(uint32_t &fcr31, float numerator, float value)
+{
+    if (ps2FloatIsZero(value))
+    {
+        fcr31 |= PS2_FCR31_D | PS2_FCR31_SD;
+        return ps2SignedFloatMax(ps2FloatBits(numerator) ^ ps2FloatBits(value));
+    }
+    if ((ps2FloatBits(value) & 0x80000000u) != 0u)
+        fcr31 |= PS2_FCR31_I | PS2_FCR31_SI;
+    return ps2FpuClamp(ps2FpuDivideNearest(numerator, ps2FpuSqrtNearest(std::fabs(value))));
+}
+
+static inline int32_t ps2FpuConvertToWord(float value)
+{
+    const uint32_t bits = ps2FloatBits(value);
+    if ((bits & 0x7F800000u) >= 0x4F000000u)
+        return (bits & 0x80000000u) ? INT32_MIN : INT32_MAX;
+    return static_cast<int32_t>(value);
+}
+
+static constexpr uint16_t PS2_VU_STATUS_I = 0x0010u;
+static constexpr uint16_t PS2_VU_STATUS_D = 0x0020u;
+static constexpr uint16_t PS2_VU_STATUS_IS = 0x0400u;
+static constexpr uint16_t PS2_VU_STATUS_DS = 0x0800u;
+
+static inline float ps2VuDivide(uint16_t &status, float dividend, float divisor)
+{
+    status &= static_cast<uint16_t>(~(PS2_VU_STATUS_I | PS2_VU_STATUS_D));
+    if (ps2FloatIsZero(divisor))
+    {
+        if (ps2FloatIsZero(dividend))
+            status |= PS2_VU_STATUS_I | PS2_VU_STATUS_IS;
+        else
+            status |= PS2_VU_STATUS_D | PS2_VU_STATUS_DS;
+        return ps2SignedFloatMax(ps2FloatBits(dividend) ^ ps2FloatBits(divisor));
+    }
+    return ps2FpuClamp(dividend / divisor);
+}
+
+static inline float ps2VuSqrt(uint16_t &status, float value)
+{
+    status &= static_cast<uint16_t>(~(PS2_VU_STATUS_I | PS2_VU_STATUS_D));
+    if ((ps2FloatBits(value) & 0x80000000u) != 0u && !ps2FloatIsZero(value))
+        status |= PS2_VU_STATUS_I | PS2_VU_STATUS_IS;
+    return ps2FpuClamp(std::sqrt(std::fabs(value)));
+}
+
+static inline float ps2VuRsqrt(uint16_t &status, float numerator, float value)
+{
+    status &= static_cast<uint16_t>(~(PS2_VU_STATUS_I | PS2_VU_STATUS_D));
+    if (ps2FloatIsZero(value))
+    {
+        if (ps2FloatIsZero(numerator))
+            status |= PS2_VU_STATUS_I | PS2_VU_STATUS_IS;
+        else
+            status |= PS2_VU_STATUS_D | PS2_VU_STATUS_DS;
+        return ps2SignedFloatMax(ps2FloatBits(numerator) ^ ps2FloatBits(value));
+    }
+    if ((ps2FloatBits(value) & 0x80000000u) != 0u)
+        status |= PS2_VU_STATUS_I | PS2_VU_STATUS_IS;
+    return ps2FpuClamp(numerator / std::sqrt(std::fabs(value)));
+}
+
+static inline void ps2SetEeFloatingPointMode()
+{
+    _MM_SET_ROUNDING_MODE(_MM_ROUND_TOWARD_ZERO);
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+}
+
 // FPU (COP1) operations
 #define FPU_SET_ACC(ctx, res) (ctx->f_acc = res)
-#define FPU_ADD_S(a, b) ((float)(a) + (float)(b))
-#define FPU_SUB_S(a, b) ((float)(a) - (float)(b))
-#define FPU_MUL_S(a, b) ((float)(a) * (float)(b))
-#define FPU_DIV_S(a, b) ((float)(a) / (float)(b))
-#define FPU_SQRT_S(a) sqrtf((float)(a))
+#define FPU_ADD_S(a, b) ps2FpuAdd((float)(a), (float)(b))
+#define FPU_SUB_S(a, b) ps2FpuSub((float)(a), (float)(b))
+#define FPU_MUL_S(a, b) ps2FpuClamp((float)(a) * (float)(b))
+#define FPU_DIV_S(a, b) ps2FpuClamp((float)(a) / (float)(b))
+#define FPU_SQRT_S(a) ps2FpuClamp(std::sqrt(std::fabs((float)(a))))
 #define FPU_ABS_S(a) fabsf((float)(a))
 #define FPU_MOV_S(a) ((float)(a))
 #define FPU_NEG_S(a) (-(float)(a))
@@ -642,24 +863,24 @@ inline __m128i ps2_u64_to_epi64_pair(uint64_t value)
 #define FPU_FLOOR_W_S(a) ((int32_t)floorf((float)(a)))
 #define FPU_CVT_S_W(a) ((float)(int32_t)(a))
 #define FPU_CVT_S_L(a) ((float)(int64_t)(a))
-#define FPU_CVT_W_S(a) ((int32_t)nearbyintf((float)(a)))
+#define FPU_CVT_W_S(a) ps2FpuConvertToWord((float)(a))
 #define FPU_CVT_L_S(a) ((int64_t)(float)(a))
 #define FPU_C_F_S(a, b) (0)
-#define FPU_C_UN_S(a, b) (isnan((float)(a)) || isnan((float)(b)))
-#define FPU_C_EQ_S(a, b) ((float)(a) == (float)(b))
-#define FPU_C_UEQ_S(a, b) ((float)(a) == (float)(b) || isnan((float)(a)) || isnan((float)(b)))
-#define FPU_C_OLT_S(a, b) ((float)(a) < (float)(b))
-#define FPU_C_ULT_S(a, b) ((float)(a) < (float)(b) || isnan((float)(a)) || isnan((float)(b)))
-#define FPU_C_OLE_S(a, b) ((float)(a) <= (float)(b))
-#define FPU_C_ULE_S(a, b) ((float)(a) <= (float)(b) || isnan((float)(a)) || isnan((float)(b)))
+#define FPU_C_UN_S(a, b) (0)
+#define FPU_C_EQ_S(a, b) (ps2FpuCompareKey((float)(a)) == ps2FpuCompareKey((float)(b)))
+#define FPU_C_UEQ_S(a, b) FPU_C_EQ_S(a, b)
+#define FPU_C_OLT_S(a, b) (ps2FpuCompareKey((float)(a)) < ps2FpuCompareKey((float)(b)))
+#define FPU_C_ULT_S(a, b) FPU_C_OLT_S(a, b)
+#define FPU_C_OLE_S(a, b) (ps2FpuCompareKey((float)(a)) <= ps2FpuCompareKey((float)(b)))
+#define FPU_C_ULE_S(a, b) FPU_C_OLE_S(a, b)
 #define FPU_C_SF_S(a, b) (0)
-#define FPU_C_NGLE_S(a, b) (isnan((float)(a)) || isnan((float)(b)))
-#define FPU_C_SEQ_S(a, b) ((float)(a) == (float)(b))
-#define FPU_C_NGL_S(a, b) ((float)(a) == (float)(b) || isnan((float)(a)) || isnan((float)(b)))
-#define FPU_C_LT_S(a, b) ((float)(a) < (float)(b))
-#define FPU_C_NGE_S(a, b) ((float)(a) < (float)(b) || isnan((float)(a)) || isnan((float)(b)))
-#define FPU_C_LE_S(a, b) ((float)(a) <= (float)(b))
-#define FPU_C_NGT_S(a, b) ((float)(a) <= (float)(b) || isnan((float)(a)) || isnan((float)(b)))
+#define FPU_C_NGLE_S(a, b) (0)
+#define FPU_C_SEQ_S(a, b) FPU_C_EQ_S(a, b)
+#define FPU_C_NGL_S(a, b) FPU_C_EQ_S(a, b)
+#define FPU_C_LT_S(a, b) FPU_C_OLT_S(a, b)
+#define FPU_C_NGE_S(a, b) FPU_C_OLT_S(a, b)
+#define FPU_C_LE_S(a, b) FPU_C_OLE_S(a, b)
+#define FPU_C_NGT_S(a, b) FPU_C_OLE_S(a, b)
 
 // QFSRV: Quadword Funnel Shift Right Variable
 // Concatenates rs || rt (256 bits) and right-shifts by SA bits, taking lower 128 bits.
