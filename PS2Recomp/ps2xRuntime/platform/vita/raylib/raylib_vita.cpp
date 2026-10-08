@@ -1,9 +1,10 @@
-// raylib subset for the PS Vita on SDL2 (video through GXM, audio callback)
-// and the Vita system libraries (controls). See raylib.h.
+// raylib subset for the PS Vita: video on vitaGL (GXM), audio through SDL2,
+// controls from the Vita system libraries. See raylib.h.
 
 #include "raylib.h"
 
 #include <SDL2/SDL.h>
+#include <vitaGL.h>
 #include <psp2/ctrl.h>
 #include <psp2/touch.h>
 
@@ -12,20 +13,20 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <malloc.h>
 #include <map>
 #include <vector>
 
 namespace
 {
-    SDL_Window *g_window = nullptr;
-    SDL_Renderer *g_renderer = nullptr;
+    bool g_glReady = false;
     bool g_quit = false;
     int g_width = 960, g_height = 544;
     uint64_t g_startCounter = 0;
 
     struct TextureSlot
     {
-        SDL_Texture *texture = nullptr;
+        GLuint texture = 0;
         std::vector<uint8_t> pixels; // last upload, for LoadImageFromTexture
     };
     std::map<unsigned int, TextureSlot> g_textures;
@@ -92,20 +93,33 @@ namespace
     }
 }
 
-void InitWindow(int width, int height, const char *title)
+void InitWindow(int, int, const char *)
 {
+    // The Vita screen, whatever size the host asked for.
+    const int width = 960, height = 544;
     g_width = width;
     g_height = height;
-    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0)
-    {
+    if (SDL_Init(SDL_INIT_AUDIO) != 0)
         std::fprintf(stderr, "[vita] SDL_Init failed: %s\n", SDL_GetError());
-        return;
-    }
-    g_window = SDL_CreateWindow(title ? title : "", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, width, height, 0);
-    g_renderer = g_window ? SDL_CreateRenderer(g_window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC) : nullptr;
-    if (!g_renderer)
-        std::fprintf(stderr, "[vita] SDL renderer failed: %s\n", SDL_GetError());
+    // Shaders are compiled at run time (libshacccg); fast math is fine here.
+    vglSetupRuntimeShaderCompiler(SHARK_OPT_FAST, 1, 1, 1);
+    // vitaGL takes the free main RAM minus the threshold; the runtime's
+    // threads (game, VU1, GS, GIF, audio) get their stacks from that RAM too,
+    // so leave it plenty. GPU memory (CDRAM) is all vitaGL's.
+    // Returns whether it had to fall back to a smaller resolution, not success.
+    vglInitWithCustomThreshold(4 * 1024 * 1024, width, height, 96 * 1024 * 1024, 0, 0, 0x8C6000 /* the common dialog share, as vglInitExtended */,
+                               SCE_GXM_MULTISAMPLE_NONE);
+    g_glReady = true;
+    glViewport(0, 0, width, height);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(0, width, height, 0, -1, 1);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     sceCtrlSetSamplingModeExt(SCE_CTRL_MODE_ANALOG_WIDE);
     sceTouchSetSamplingState(SCE_TOUCH_PORT_BACK, SCE_TOUCH_SAMPLING_STATE_START);
     g_startCounter = SDL_GetPerformanceCounter();
@@ -115,19 +129,14 @@ void CloseWindow(void)
 {
     for (auto &[id, slot] : g_textures)
         if (slot.texture)
-            SDL_DestroyTexture(slot.texture);
+            glDeleteTextures(1, &slot.texture);
     g_textures.clear();
-    if (g_renderer)
-        SDL_DestroyRenderer(g_renderer);
-    if (g_window)
-        SDL_DestroyWindow(g_window);
-    g_renderer = nullptr;
-    g_window = nullptr;
+    g_glReady = false; // vitaGL has no shutdown: the process ends next
     SDL_Quit();
 }
 
 bool WindowShouldClose(void) { return g_quit; }
-bool IsWindowReady(void) { return g_renderer != nullptr; }
+bool IsWindowReady(void) { return g_glReady; }
 void SetConfigFlags(unsigned int) {}
 void SetTargetFPS(int) {} // presentation follows the display's vsync
 int GetFPS(void) { return g_fps; }
@@ -145,22 +154,38 @@ int GetScreenHeight(void) { return g_height; }
 
 void BeginDrawing(void)
 {
-    SDL_Event event;
-    while (SDL_PollEvent(&event))
-        if (event.type == SDL_QUIT)
-            g_quit = true;
     pollInput();
+    // The GS renderer may have changed the GL state on this thread.
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glUseProgram(0);
+    glViewport(0, 0, g_width, g_height);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 }
 
 void EndDrawing(void)
 {
-    if (g_renderer)
-        SDL_RenderPresent(g_renderer);
+    if (g_glReady)
+        vglSwapBuffers(GL_FALSE);
     // Logs go to files on ux0: keep them current in case the app is killed.
     std::fflush(stdout);
     std::fflush(stderr);
     ++g_framesThisSecond;
     const double now = GetTime();
+    static double nextMemLog = 0.0;
+    if (now >= nextMemLog)
+    {
+        nextMemLog = now + 5.0;
+        const struct mallinfo mi = mallinfo();
+        std::fprintf(stderr, "[vita:mem] t=%.0f heap used=%.1f MB arena=%.1f MB | vgl vram=%.1f/%.1f ram=%.1f/%.1f slow=%.1f/%.1f MB\n", now,
+                     mi.uordblks / 1048576.0, mi.arena / 1048576.0, vglMemFree(VGL_MEM_VRAM) / 1048576.0, vglMemTotal(VGL_MEM_VRAM) / 1048576.0,
+                     vglMemFree(VGL_MEM_RAM) / 1048576.0, vglMemTotal(VGL_MEM_RAM) / 1048576.0, vglMemFree(VGL_MEM_SLOW) / 1048576.0,
+                     vglMemTotal(VGL_MEM_SLOW) / 1048576.0);
+    }
     if (now - g_fpsWindowStart >= 1.0)
     {
         g_fps = g_framesThisSecond;
@@ -169,34 +194,83 @@ void EndDrawing(void)
     }
 }
 
-void ClearBackground(Color color)
+namespace
 {
-    if (!g_renderer)
-        return;
-    SDL_SetRenderDrawColor(g_renderer, color.r, color.g, color.b, color.a);
-    SDL_RenderClear(g_renderer);
+    // Immediate quads with client arrays (vitaGL's fixed-function path).
+    void drawQuads(GLuint texture, const float *xy, const float *uv, int quads, Color color)
+    {
+        if (!g_glReady || quads <= 0)
+            return;
+        std::vector<float> pos, tex;
+        pos.reserve(quads * 12);
+        tex.reserve(quads * 12);
+        for (int q = 0; q < quads; ++q)
+        {
+            static const int order[6] = {0, 1, 2, 0, 2, 3};
+            for (int k : order)
+            {
+                pos.push_back(xy[q * 8 + k * 2]);
+                pos.push_back(xy[q * 8 + k * 2 + 1]);
+                if (uv)
+                {
+                    tex.push_back(uv[q * 8 + k * 2]);
+                    tex.push_back(uv[q * 8 + k * 2 + 1]);
+                }
+            }
+        }
+        if (texture)
+        {
+            glEnable(GL_TEXTURE_2D);
+            glBindTexture(GL_TEXTURE_2D, texture);
+        }
+        else
+            glDisable(GL_TEXTURE_2D);
+        glColor4ub(color.r, color.g, color.b, color.a);
+        glEnableClientState(GL_VERTEX_ARRAY);
+        glVertexPointer(2, GL_FLOAT, 0, pos.data());
+        if (texture)
+        {
+            glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+            glTexCoordPointer(2, GL_FLOAT, 0, tex.data());
+        }
+        glDrawArrays(GL_TRIANGLES, 0, quads * 6);
+        glDisableClientState(GL_VERTEX_ARRAY);
+        glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+        if (texture)
+            glDisable(GL_TEXTURE_2D);
+    }
+
+    void rectQuad(float *xy, float x, float y, float w, float h)
+    {
+        const float v[8] = {x, y, x + w, y, x + w, y + h, x, y + h};
+        std::memcpy(xy, v, sizeof(v));
+    }
 }
 
-void DrawTexturePro(Texture2D texture, Rectangle source, Rectangle dest, Vector2, float, Color)
+void ClearBackground(Color color)
+{
+    if (!g_glReady)
+        return;
+    glClearColor(color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+}
+
+void DrawTexturePro(Texture2D texture, Rectangle source, Rectangle dest, Vector2, float, Color tint)
 {
     const auto it = g_textures.find(texture.id);
-    if (!g_renderer || it == g_textures.end() || !it->second.texture)
+    if (it == g_textures.end() || !it->second.texture || texture.width <= 0 || texture.height <= 0)
         return;
-    const SDL_Rect src{static_cast<int>(source.x), static_cast<int>(source.y),
-                       static_cast<int>(source.width), static_cast<int>(source.height)};
-    const SDL_Rect dst{static_cast<int>(dest.x), static_cast<int>(dest.y),
-                       static_cast<int>(dest.width), static_cast<int>(dest.height)};
-    SDL_RenderCopy(g_renderer, it->second.texture, &src, &dst);
+    float xy[8], uv[8];
+    rectQuad(xy, dest.x, dest.y, dest.width, dest.height);
+    rectQuad(uv, source.x / texture.width, source.y / texture.height, source.width / texture.width, source.height / texture.height);
+    drawQuads(it->second.texture, xy, uv, 1, tint);
 }
 
 void DrawRectangle(int posX, int posY, int width, int height, Color color)
 {
-    if (!g_renderer)
-        return;
-    SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
-    SDL_SetRenderDrawColor(g_renderer, color.r, color.g, color.b, color.a);
-    const SDL_Rect rect{posX, posY, width, height};
-    SDL_RenderFillRect(g_renderer, &rect);
+    float xy[8];
+    rectQuad(xy, static_cast<float>(posX), static_cast<float>(posY), static_cast<float>(width), static_cast<float>(height));
+    drawQuads(0, xy, nullptr, 1, color);
 }
 
 namespace
@@ -204,30 +278,34 @@ namespace
 #include "default_font.inc"
 
     // raylib's default font as a 128x128 atlas, laid out the way LoadFontDefault does.
-    SDL_Texture *g_fontTexture = nullptr;
-    SDL_Rect g_glyphs[224];
+    struct GlyphRect
+    {
+        int x, y, w, h;
+    };
+    GLuint g_fontTexture = 0;
+    GlyphRect g_glyphs[224];
 
     bool ensureFont()
     {
         if (g_fontTexture)
             return true;
-        if (!g_renderer)
+        if (!g_glReady)
             return false;
         std::vector<uint32_t> pixels(128 * 128);
         for (int i = 0, counter = 0; i < 128 * 128; i += 32, ++counter)
             for (int j = 31; j >= 0; --j)
                 pixels[i + j] = (kDefaultFontBits[counter] & (1u << j)) ? 0xFFFFFFFFu : 0x00FFFFFFu;
-        g_fontTexture = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STATIC, 128, 128);
-        if (!g_fontTexture)
-            return false;
-        SDL_UpdateTexture(g_fontTexture, nullptr, pixels.data(), 128 * 4);
-        SDL_SetTextureBlendMode(g_fontTexture, SDL_BLENDMODE_BLEND);
+        glGenTextures(1, &g_fontTexture);
+        glBindTexture(GL_TEXTURE_2D, g_fontTexture);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 128, 128, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         constexpr int kHeight = 10, kDivisor = 1;
         int line = 0, posX = kDivisor, testX = kDivisor;
         for (int i = 0; i < 224; ++i)
         {
             const int w = kDefaultFontWidths[i];
-            g_glyphs[i] = SDL_Rect{posX, kDivisor + line * (kHeight + kDivisor), w, kHeight};
+            g_glyphs[i] = GlyphRect{posX, kDivisor + line * (kHeight + kDivisor), w, kHeight};
             testX += w + kDivisor;
             if (testX >= 128)
             {
@@ -270,8 +348,7 @@ void DrawText(const char *text, int posX, int posY, int fontSize, Color color)
     fontSize = std::max(fontSize, 10);
     const float scale = fontSize / 10.0f;
     const int spacing = fontSize / 10;
-    SDL_SetTextureColorMod(g_fontTexture, color.r, color.g, color.b);
-    SDL_SetTextureAlphaMod(g_fontTexture, color.a);
+    std::vector<float> xy, uv;
     float x = static_cast<float>(posX);
     int y = posY;
     for (const char *p = text; *p;)
@@ -283,12 +360,18 @@ void DrawText(const char *text, int posX, int posY, int fontSize, Color color)
             y += fontSize + fontSize / 2;
             continue;
         }
-        const SDL_Rect &src = g_glyphs[glyphIndex(cp)];
-        const SDL_Rect dst{static_cast<int>(x), y, static_cast<int>(src.w * scale + 0.5f), fontSize};
+        const GlyphRect &src = g_glyphs[glyphIndex(cp)];
         if (cp != ' ')
-            SDL_RenderCopy(g_renderer, g_fontTexture, &src, &dst);
+        {
+            float q[8], t[8];
+            rectQuad(q, x, static_cast<float>(y), src.w * scale, static_cast<float>(fontSize));
+            rectQuad(t, src.x / 128.0f, src.y / 128.0f, src.w / 128.0f, src.h / 128.0f);
+            xy.insert(xy.end(), q, q + 8);
+            uv.insert(uv.end(), t, t + 8);
+        }
         x += src.w * scale + spacing;
     }
+    drawQuads(g_fontTexture, xy.data(), uv.data(), static_cast<int>(xy.size() / 8), color);
 }
 
 int MeasureText(const char *text, int fontSize)
@@ -354,12 +437,16 @@ bool ExportImage(Image, const char *) { return false; }
 Texture2D LoadTextureFromImage(Image image)
 {
     Texture2D texture{};
-    if (!g_renderer)
+    if (!g_glReady)
         return texture;
     TextureSlot slot;
-    slot.texture = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, image.width, image.height);
-    if (!slot.texture)
-        return texture;
+    glGenTextures(1, &slot.texture);
+    glBindTexture(GL_TEXTURE_2D, slot.texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image.width, image.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     texture.id = g_nextTexture++;
     texture.width = image.width;
     texture.height = image.height;
@@ -385,7 +472,8 @@ void UpdateTexture(Texture2D texture, const void *pixels)
     const auto it = g_textures.find(texture.id);
     if (it == g_textures.end() || !it->second.texture || !pixels)
         return;
-    SDL_UpdateTexture(it->second.texture, nullptr, pixels, texture.width * 4);
+    glBindTexture(GL_TEXTURE_2D, it->second.texture);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, texture.width, texture.height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
 }
 
 void UnloadTexture(Texture2D texture)
@@ -394,7 +482,7 @@ void UnloadTexture(Texture2D texture)
     if (it == g_textures.end())
         return;
     if (it->second.texture)
-        SDL_DestroyTexture(it->second.texture);
+        glDeleteTextures(1, &it->second.texture);
     g_textures.erase(it);
 }
 

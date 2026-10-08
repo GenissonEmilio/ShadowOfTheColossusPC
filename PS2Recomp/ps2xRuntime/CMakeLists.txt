@@ -159,7 +159,8 @@ endif()
 option(PS2X_VITA_SDL2_SHIM "Vita: implement the raylib subset on SDL2/GXM (platform/vita/raylib) instead of raylib-vita + PVR GLES" ON)
 
 if(PS2X_IS_VITA AND PS2X_VITA_SDL2_SHIM)
-    # SDL2 draws through GXM: no PowerVR GLES modules (which Vita3K cannot run).
+    # Video through vitaGL (GXM), audio through SDL2: no PowerVR GLES modules
+    # (which Vita3K cannot run).
     set(PS2X_VITA_PREFIX "${PS2X_VITASDK}/arm-vita-eabi")
     add_library(ps2x_vita_raylib STATIC "${CMAKE_CURRENT_SOURCE_DIR}/platform/vita/raylib/raylib_vita.cpp")
     target_include_directories(ps2x_vita_raylib PUBLIC
@@ -167,6 +168,8 @@ if(PS2X_IS_VITA AND PS2X_VITA_SDL2_SHIM)
         "${PS2X_VITA_PREFIX}/include")
     target_link_libraries(ps2x_vita_raylib PUBLIC
         SDL2
+        # Video: vitaGL on GXM, shaders compiled at run time (libshacccg).
+        vitaGL vitashark SceShaccCgExt mathneon SceShaccCg_stub taihen_stub
         SceDisplay_stub SceCtrl_stub SceTouch_stub SceGxm_stub SceAudio_stub SceAudioIn_stub
         SceSysmodule_stub SceHid_stub SceMotion_stub SceAppMgr_stub SceAppUtil_stub
         SceCommonDialog_stub SceIme_stub ScePower_stub SceLibKernel_stub SceProcessmgr_stub

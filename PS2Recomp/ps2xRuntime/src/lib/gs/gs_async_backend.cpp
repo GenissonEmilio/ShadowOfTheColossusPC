@@ -7,8 +7,14 @@
 
 namespace
 {
-    // Upper bound on queued commands before the producer waits.
+    // Upper bound on queued commands before the producer waits. A command is
+    // ~850 bytes and there are two queues (filling, drained): on the Vita's
+    // 160 MB heap 64K of them alone would take ~110 MB.
+#if defined(PLATFORM_VITA)
+    constexpr size_t kMaxQueuedCommands = 8192u;
+#else
     constexpr size_t kMaxQueuedCommands = 65536u;
+#endif
 }
 
 GSAsyncBackend::GSAsyncBackend(std::unique_ptr<GSRasterBackend> inner)
