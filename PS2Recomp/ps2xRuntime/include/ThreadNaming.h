@@ -24,6 +24,9 @@ extern "C"
 }
 #elif defined(__APPLE__) || defined(__linux__)
 #include <pthread.h>
+#if defined(__APPLE__)
+#include <pthread/qos.h>
+#endif
 #endif
 
 namespace ThreadNaming
@@ -45,6 +48,10 @@ namespace ThreadNaming
 
 #elif defined(__APPLE__)
         pthread_setname_np(name.data());
+        // The emulation threads (game, VU1, GIF, GS) are the game itself: keep
+        // them ahead of background work (builds), which otherwise slows the
+        // frame-paced loading screens to a crawl.
+        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
 
 #elif defined(__linux__)
         pthread_setname_np(pthread_self(), name.data());

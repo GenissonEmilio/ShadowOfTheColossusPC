@@ -741,4 +741,16 @@ namespace ps2x::iop::detail
                 thread.state = IopThreadState::Dead;
         }
     }
+
+    void IopKernel::describe(std::ostream &out) const
+    {
+        for (const auto &[id, thread] : m_threads)
+            out << "[iop:dump] thread " << id << " state=" << static_cast<int>(thread.state) << std::hex << " entry=0x" << thread.entry
+                << " pc=0x" << thread.cpu.pc << " ra=0x" << thread.cpu.gpr[31] << std::dec << " prio=" << thread.priority
+                << " wait=" << thread.waitId << std::hex << " bits=0x" << thread.waitBits << std::dec << " wakeCycle=" << thread.wakeCycle << "\n";
+        for (const auto &[id, flag] : m_eventFlags)
+            out << "[iop:dump] eventflag " << id << std::hex << " bits=0x" << flag.bits << std::dec << "\n";
+        for (const auto &[id, sema] : m_semaphores)
+            out << "[iop:dump] sema " << id << " count=" << sema.current << "/" << sema.maximum << "\n";
+    }
 }

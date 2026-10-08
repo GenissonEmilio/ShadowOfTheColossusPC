@@ -1,5 +1,7 @@
 #pragma once
 
+#include <ostream>
+
 #include "iop_cpu.h"
 
 #include <cstddef>
@@ -67,6 +69,8 @@ namespace ps2x::iop::detail
         void terminateThreadsInRange(uint32_t base, uint32_t size);
 
         [[nodiscard]] size_t threadCount() const noexcept { return m_threads.size(); }
+        // Diagnostics: threads (state, pc, what they wait on), event flags, semaphores.
+        void describe(std::ostream &out) const;
 
     private:
         struct Semaphore

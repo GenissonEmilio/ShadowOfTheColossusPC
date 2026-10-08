@@ -1799,7 +1799,13 @@ void EeScheduler::makeReady(GuestThread &item, int result, bool interruptSafe)
     if (traceScheduler())
     {
         std::cerr << "[sched] ready thread=" << item.id << " by=" << m_currentThreadId
-                  << " irq=" << (m_insideInterrupt ? 1 : 0) << std::endl;
+                  << " irq=" << (m_insideInterrupt ? 1 : 0);
+        if (GuestThread *waker = currentThread())
+        {
+            R5900Context *wakerCtx = &waker->activeContext();
+            std::cerr << std::hex << " waker_ra=0x" << GPR_U32(wakerCtx, 31) << " waker_pc=0x" << wakerCtx->pc << std::dec;
+        }
+        std::cerr << std::endl;
     }
     auto completion = std::move(item.wait.completion);
     item.wait = {};
@@ -2255,6 +2261,8 @@ void EeScheduler::syncCyclesToHostClock()
 
 void EeScheduler::enableHostClockSync()
 {
+    if (std::getenv("PS2X_NO_HOST_SYNC")) // diagnostics: time from executed cycles only
+        return;
     // Start counting real time from the current emulated time.
     m_hostClockBase = std::chrono::steady_clock::now() -
                       std::chrono::microseconds(m_eeCycle * 1000000ull / kEeClockHz);

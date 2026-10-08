@@ -1,3 +1,5 @@
+#include <iostream>
+#include <cstdlib>
 #include "iop_emulator.h"
 #include <cstring>
 #include "imports/iop_cdvd.h"
@@ -581,6 +583,16 @@ namespace ps2x::iop::detail
 
         void runCycles(uint64_t cycles) noexcept
         {
+            // PS2X_IOP_DUMP=1: the IOP kernel's state every ~5 s of IOP time.
+            static const bool dump = std::getenv("PS2X_IOP_DUMP") != nullptr;
+            static uint64_t nextDump = 0;
+            if (dump && totalCycles >= nextDump)
+            {
+                nextDump = totalCycles + 5ull * 36864000ull;
+                std::cerr << "[iop:dump] ---- cycle " << totalCycles << std::endl;
+                kernel.describe(std::cerr);
+                std::cerr.flush();
+            }
             try
             {
                 const uint64_t target = totalCycles + cycles;

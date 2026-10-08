@@ -153,6 +153,27 @@ void main()
 }
 )";
 
+    // COLCLAMP off: the GS wraps colors modulo 256 (SotC's shadow volumes add
+    // +1 and 255 per face). Such draws add into a float target; this writes
+    // the sums back as 8-bit values.
+    const char *kWrapVertexShader = R"(#version 330 core
+void main()
+{
+    vec2 p = vec2((gl_VertexID & 1) != 0 ? 3.0 : -1.0, (gl_VertexID & 2) != 0 ? 3.0 : -1.0);
+    gl_Position = vec4(p, 0.0, 1.0);
+}
+)";
+    const char *kWrapFragmentShader = R"(#version 330 core
+uniform sampler2D uSums;
+out vec4 oColor;
+void main()
+{
+    vec4 v = texelFetch(uSums, ivec2(gl_FragCoord.xy), 0);
+    vec3 c = mod(floor(v.rgb * 255.0 + 0.5), 256.0) / 255.0;
+    oColor = vec4(c, v.a);
+}
+)";
+
     GLuint compile(GLenum type, const char *source)
     {
         GLuint shader = glCreateShader(type);
@@ -260,6 +281,13 @@ struct GSHwBackend::Impl
     bool glFailed = false;
     std::thread::id glThread;
     GLuint program = 0, vao = 0, vbo = 0;
+    GLuint wrapProgram = 0; // float sums -> 8-bit values modulo 256
+    struct WrapTarget
+    {
+        GLuint texture = 0;
+        uint32_t width = 0, height = 0;
+    } wrapTarget;
+    std::unordered_map<uint64_t, GLuint> wrapFramebuffers; // (depth zbp + 1) -> FBO
     std::unordered_map<std::string, GLint> uniforms;
     std::unordered_map<uint32_t, RenderTarget> targets;  // by fbp
     // The one target whose GPU copy of each GS page is newer (-1: none).
@@ -279,6 +307,7 @@ struct GSHwBackend::Impl
         uint32_t width = 0, height = 0;
     };
     std::unordered_map<const void *, CachedTexture> textures;
+    std::unordered_map<GLuint, uint32_t> textureMaxAlpha; // decoded textures: largest texel alpha
 
     std::vector<HwVertex> pending;
     DrawKey pendingKey{};
@@ -289,7 +318,7 @@ struct GSHwBackend::Impl
     {
         uint64_t writeBacks = 0, writeBackPixels = 0, reloads = 0, textureUploads = 0, rtTextures = 0;
         double writeBackMs = 0, reloadMs = 0;
-        uint64_t presentWb = 0, textureWb = 0, transferWb = 0, clutWb = 0, discards = 0, memoryClears = 0, directPresents = 0;
+        uint64_t presentWb = 0, textureWb = 0, transferWb = 0, clutWb = 0, discards = 0, memoryClears = 0, directPresents = 0, wrapDraws = 0;
     } stats;
     const char *wbReason = "other";
     // PS2X_GS_HW_TRACE=N: list the draw calls between presents N and N+1.
@@ -314,12 +343,13 @@ struct GSHwBackend::Impl
         if (std::chrono::duration<double>(now - last).count() < 1.0)
             return;
         last = now;
-        std::fprintf(stderr, "[gs:hw] draws=%llu prims=%llu wb=%llu (%.0f ms, %llu px; present %llu texture %llu transfer %llu clut %llu) reloads=%llu (%.0f ms) texUploads=%llu rtTex=%llu discards=%llu memClears=%llu direct=%llu\n",
+        std::fprintf(stderr, "[gs:hw] draws=%llu prims=%llu wb=%llu (%.0f ms, %llu px; present %llu texture %llu transfer %llu clut %llu) reloads=%llu (%.0f ms) texUploads=%llu rtTex=%llu discards=%llu memClears=%llu direct=%llu wrap=%llu\n",
                      (unsigned long long)drawCalls, (unsigned long long)primitives, (unsigned long long)stats.writeBacks, stats.writeBackMs,
                      (unsigned long long)stats.writeBackPixels, (unsigned long long)stats.presentWb, (unsigned long long)stats.textureWb,
                      (unsigned long long)stats.transferWb, (unsigned long long)stats.clutWb, (unsigned long long)stats.reloads, stats.reloadMs,
                      (unsigned long long)stats.textureUploads, (unsigned long long)stats.rtTextures, (unsigned long long)stats.discards,
-                     (unsigned long long)stats.memoryClears, (unsigned long long)stats.directPresents);
+                     (unsigned long long)stats.memoryClears, (unsigned long long)stats.directPresents,
+                     (unsigned long long)stats.wrapDraws);
         std::fprintf(stderr, "[gs:hw] textures: decodes=%llu hashHits=%llu cacheClears=%llu\n", (unsigned long long)shadow->textureDecodes,
                      (unsigned long long)shadow->textureHashHits, (unsigned long long)shadow->textureCacheClears);
         shadow->textureDecodes = shadow->textureHashHits = 0;
@@ -365,6 +395,13 @@ struct GSHwBackend::Impl
         glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(HwVertex), reinterpret_cast<void *>(offsetof(HwVertex, fog)));
         glUseProgram(program);
         glUniform1i(uniform("uTexture"), 0);
+        {
+            GLuint wvs = compile(GL_VERTEX_SHADER, kWrapVertexShader), wfs = compile(GL_FRAGMENT_SHADER, kWrapFragmentShader);
+            wrapProgram = glCreateProgram();
+            glAttachShader(wrapProgram, wvs);
+            glAttachShader(wrapProgram, wfs);
+            glLinkProgram(wrapProgram);
+        }
         glReady = true;
         std::cerr << "[gs:hw] OpenGL renderer: " << reinterpret_cast<const char *>(glGetString(GL_RENDERER)) << std::endl;
         return true;
@@ -820,6 +857,10 @@ struct GSHwBackend::Impl
             else
                 glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels->data());
             ++stats.textureUploads;
+            uint32_t maxAlpha = 0;
+            for (uint32_t t : *texels)
+                maxAlpha = std::max(maxAlpha, t >> 24);
+            textureMaxAlpha[cached.texture] = maxAlpha;
             cached.epoch = epoch;
             cached.width = w;
             cached.height = h;
@@ -939,6 +980,125 @@ struct GSHwBackend::Impl
                      dRgb / n / 3.0, maxD, dA / n, gpuSum / n / 3.0, cpuSum / n / 3.0, dRgb / n / 3.0 > 2.0 ? "  <<<" : "");
     }
 
+    // Whether (A - B) * C + D can leave 0..255 for the queued primitives: an
+    // interpolation (D == B) with C <= 1 cannot; sums and C > 1 can.
+    bool blendCanOverflow(const DrawKey &key)
+    {
+        static const bool always = std::getenv("PS2X_GS_HW_WRAP_ALL") != nullptr;
+        if (always)
+            return true;
+        const uint32_t a = key.alpha & 3u, b = (key.alpha >> 2) & 3u, c = (key.alpha >> 4) & 3u, d = (key.alpha >> 6) & 3u;
+        if (a == b)
+            return false; // just D
+        uint32_t factor = 0x80u;
+        if (c == 2u)
+            factor = static_cast<uint32_t>((key.alpha >> 32) & 0xFFu);
+        else if (c == 0u)
+        {
+            uint32_t vertexAlpha = 0;
+            for (const auto &v : pending)
+                vertexAlpha = std::max<uint32_t>(vertexAlpha, v.a);
+            uint32_t as = vertexAlpha;
+            if (key.tme && key.texture && key.tcc)
+            {
+                uint32_t texAlpha = 0x80u; // render targets keep alpha <= 0x80
+                if (key.alphaFix >= 0)
+                    texAlpha = static_cast<uint32_t>(key.alphaFix & 0xFF);
+                else if (auto it = textureMaxAlpha.find(static_cast<GLuint>(key.texture)); it != textureMaxAlpha.end())
+                    texAlpha = it->second;
+                as = key.tfx == 0u ? texAlpha * vertexAlpha / 128u : key.tfx == 2u ? texAlpha + vertexAlpha : texAlpha;
+            }
+            factor = as;
+        }
+        // c == 1 (destination alpha) is stored <= 0x80.
+        const bool interpolation = d == b && d != 2u; // (A - D) * C + D
+        if (interpolation && factor <= 0x80u)
+            return false;
+        if (d == 2u && b == 2u && factor <= 0x80u)
+            return false; // A * C
+        return true;
+    }
+
+    GLint wrapX0 = 0, wrapY0 = 0, wrapX1 = 0, wrapY1 = 0;
+    void wrapArea(const DrawKey &key, const RenderTarget &rt)
+    {
+        float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+        for (const auto &v : pending)
+        {
+            x0 = std::min(x0, v.x); y0 = std::min(y0, v.y); x1 = std::max(x1, v.x); y1 = std::max(y1, v.y);
+        }
+        wrapX0 = std::max<GLint>(static_cast<GLint>(key.sx0), static_cast<GLint>(std::floor(x0)) - 1);
+        wrapY0 = std::max<GLint>(static_cast<GLint>(key.sy0), static_cast<GLint>(std::floor(y0)) - 1);
+        wrapX1 = std::min<GLint>(std::min<GLint>(static_cast<GLint>(key.sx1) + 1, static_cast<GLint>(rt.width)), static_cast<GLint>(std::ceil(x1)) + 1);
+        wrapY1 = std::min<GLint>(std::min<GLint>(static_cast<GLint>(key.sy1) + 1, static_cast<GLint>(rt.height)), static_cast<GLint>(std::ceil(y1)) + 1);
+    }
+
+    // Copies the scissored area of rt into a float target (sharing rt's depth
+    // buffer) and returns its framebuffer for an additive draw.
+    GLuint beginWrapAdd(RenderTarget &rt, DepthTarget *d, const DrawKey &key)
+    {
+        if (!wrapProgram)
+            return 0;
+        if (wrapTarget.texture == 0 || wrapTarget.width < rt.width || wrapTarget.height < rt.height)
+        {
+            if (wrapTarget.texture)
+                glDeleteTextures(1, &wrapTarget.texture);
+            for (auto &[k, fbo] : wrapFramebuffers)
+                glDeleteFramebuffers(1, &fbo);
+            wrapFramebuffers.clear();
+            wrapTarget.width = std::max(wrapTarget.width, rt.width);
+            wrapTarget.height = std::max(wrapTarget.height, rt.height);
+            glGenTextures(1, &wrapTarget.texture);
+            glBindTexture(GL_TEXTURE_2D, wrapTarget.texture);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, wrapTarget.width, wrapTarget.height, 0, GL_RGBA, GL_FLOAT, nullptr);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        }
+        if (d && (d->width < rt.width || d->height < rt.height))
+            return 0;
+        const uint64_t fkey = d ? d->zbp + 1u : 0u;
+        GLuint &fbo = wrapFramebuffers[fkey];
+        if (!fbo)
+        {
+            glGenFramebuffers(1, &fbo);
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, wrapTarget.texture, 0);
+            if (d)
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, d->texture, 0);
+        }
+        // The queued primitives' area of rt as the starting values.
+        wrapArea(key, rt);
+        const GLint x0 = wrapX0, y0 = wrapY0, x1 = wrapX1, y1 = wrapY1;
+        if (x1 <= x0 || y1 <= y0)
+            return 0;
+        glDisable(GL_SCISSOR_TEST);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer(rt, nullptr));
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
+        glBlitFramebuffer(x0, y0, x1, y1, x0, y0, x1, y1, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        ++stats.wrapDraws;
+        return fbo;
+    }
+
+    // The sums, modulo 256, back into rt's scissored area.
+    void endWrapAdd(RenderTarget &rt, const DrawKey &key, bool writeR, bool writeG, bool writeB, bool writeA)
+    {
+        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer(rt, nullptr));
+        glViewport(0, 0, rt.width, rt.height);
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(wrapX0, wrapY0, wrapX1 - wrapX0, wrapY1 - wrapY0);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_BLEND);
+        glColorMask(writeR, writeG, writeB, writeA);
+        glUseProgram(wrapProgram);
+        glUniform1i(glGetUniformLocation(wrapProgram, "uSums"), 0);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, wrapTarget.texture);
+        glBindVertexArray(vao);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glUseProgram(program);
+    }
+
     void flushPending()
     {
         if (!hasPending || pending.empty())
@@ -953,7 +1113,12 @@ struct GSHwBackend::Impl
         const bool zte = ((key.test >> 16) & 1u) != 0u;
         const bool useDepth = zte && ztst != 1u ? true : (zte && !key.zmask);
         DepthTarget *d = useDepth ? &depth(key.zbp, rt.width, rt.height) : nullptr;
-        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer(rt, d));
+        // COLCLAMP off and a blend that can leave 0..255: the GS wraps.
+        const bool wrapAdd = !key.colclamp && key.abe && (rt.psm == GS_PSM_CT32 || rt.psm == GS_PSM_CT24) && blendCanOverflow(key);
+        GLuint wrapFbo = 0;
+        if (wrapAdd)
+            wrapFbo = beginWrapAdd(rt, d, key);
+        glBindFramebuffer(GL_FRAMEBUFFER, wrapFbo ? wrapFbo : framebuffer(rt, d));
         glViewport(0, 0, rt.width, rt.height);
         glEnable(GL_SCISSOR_TEST);
         glScissor(key.sx0, key.sy0, key.sx1 >= key.sx0 ? key.sx1 - key.sx0 + 1 : 0, key.sy1 >= key.sy0 ? key.sy1 - key.sy0 + 1 : 0);
@@ -1053,6 +1218,8 @@ struct GSHwBackend::Impl
         }
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glDepthMask(GL_TRUE);
+        if (wrapFbo)
+            endWrapAdd(rt, key, writeR, writeG, writeB, writeA);
         ++rt.version;
         if (verify && tracing())
             compareWithCpu(rt);
@@ -1096,6 +1263,7 @@ struct GSHwBackend::Impl
         key.sy1 = std::min<uint32_t>(ctx.scissor.y1, rt.height - 1u);
         key.fogColor = state.fogR | (state.fogG << 8) | (state.fogB << 16);
         key.linear = state.linearFilter;
+        key.colclamp = static_cast<uint32_t>(state.colclamp & 1u);
         key.texAlphaScale = 1.0f;
         if (!verify && clearInMemory(batch, rt, key, ofx, ofy))
             return;
