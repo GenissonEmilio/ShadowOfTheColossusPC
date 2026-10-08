@@ -42,13 +42,18 @@ public:
     // For the hardware renderer, which keeps this backend as its GS memory
     // (uploads, CLUTs, transfers) and draws on the GPU itself.
     // The draw's texture as RGBA8 (CLUT and TEXA applied), any size. epoch
-    // changes whenever the texture's memory is written.
+    // changes whenever the texels do (not when the same bytes are rewritten).
     const std::vector<uint32_t> *textureForHw(const GSDrawState &state, uint32_t &width, uint32_t &height, uint64_t &epoch);
     // Newest write epoch of the GS memory range [begin, end) (bytes).
     uint64_t newestWrite(uint64_t begin, uint64_t end) const;
     // Records that the GPU wrote this range (texture cache invalidation).
     void noteExternalWrite(uint64_t begin, uint64_t end);
     std::mutex &vramMutex() { return m_mutex; }
+    // Decoded-texture cache counters (statistics).
+    uint64_t textureDecodes = 0, textureHashHits = 0, textureCacheClears = 0;
+    // Fills one 8 KiB page of a CT32/CT24/CT16 buffer with a solid color
+    // (CT24 keeps the alpha byte), as a clear drawn over the whole page would.
+    void fillPage(uint32_t page, uint32_t psm, uint32_t color);
     // Pixel access with vramMutex() held (bulk GPU <-> GS memory copies).
     uint32_t ReadVramUnlocked(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const;
     void WriteVramUnlocked(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value);
@@ -144,6 +149,8 @@ private:
         std::vector<uint32_t> texels;
         uint32_t width = 0, height = 0;
         uint64_t epoch = 0;
+        uint64_t sourceHash = 0; // GS memory bytes it was decoded from
+        uint64_t version = 0;    // bumped when the texels change
     };
     std::unordered_map<TextureKey, DecodedTexture, TextureKeyHash> m_textureCache;
     size_t m_textureCacheBytes = 0;
@@ -161,6 +168,7 @@ private:
     bool gpuUploads() const;
     bool uploadImageOnGpu(const uint8_t *data, uint32_t sizeBytes);
     void uploadImageCpuUnlocked(const uint8_t *data, uint32_t sizeBytes);
+    void uploadImageCpuWrite(const uint8_t *data, uint32_t sizeBytes);
     bool pendingTouches(uint64_t begin, uint64_t end) const;
     bool uploadTouchesPending(const GSTransferCommand &command) const;
     std::vector<std::vector<uint32_t>> m_bandBins;
@@ -182,6 +190,7 @@ private:
     void finishPendingUnlocked();
     std::unique_ptr<GSMetalRaster> m_gpu; // PS2X_GS_GPU=1 (macOS)
     bool m_gpuAllowed = false;
+    std::vector<uint8_t> m_uploadBefore; // pages an upload touches, before it
     void UpdateTextureReadMode(const GSPrimitiveBatch &batch);
     void drawRowsParallel(int y0, int y1, int rowWidth, const std::function<void(int)> &drawRow);
 

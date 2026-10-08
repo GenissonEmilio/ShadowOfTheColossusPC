@@ -965,6 +965,7 @@ void GSCpuBackend::rasterizePendingCpu()
     // Entries are never evicted while queued draws hold pointers to them.
     if (m_textureCacheBytes > (256u << 20))
     {
+        ++textureCacheClears;
         m_textureCache.clear();
         m_textureCacheBytes = 0;
     }
@@ -1377,7 +1378,7 @@ const std::vector<uint32_t> *GSCpuBackend::textureForHw(const GSDrawState &state
         return nullptr;
     width = texture->width;
     height = texture->height;
-    epoch = texture->epoch;
+    epoch = texture->version; // changes only when the texels do
     return &texture->texels;
 }
 
@@ -1391,6 +1392,34 @@ uint64_t GSCpuBackend::newestWrite(uint64_t begin, uint64_t end) const
     for (uint64_t page = firstPage; page <= lastPage; ++page)
         newest = std::max(newest, m_pageEpoch[page % m_pageEpoch.size()]);
     return newest;
+}
+
+void GSCpuBackend::fillPage(uint32_t page, uint32_t psm, uint32_t color)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_vram)
+        return;
+    flushPendingUnlocked("FillPage");
+    const uint64_t base = (page % 512u) * 8192ull;
+    if (base + 8192u > m_vramSize)
+        return;
+    // Swizzling only moves pixels within a page: a solid page is the same
+    // value in every slot.
+    if (psm == GS_PSM_CT16 || psm == GS_PSM_CT16S)
+    {
+        auto *p = reinterpret_cast<uint16_t *>(m_vram + base);
+        std::fill(p, p + 4096, static_cast<uint16_t>(color));
+    }
+    else
+    {
+        auto *p = reinterpret_cast<uint32_t *>(m_vram + base);
+        if (psm == GS_PSM_CT24)
+            for (int i = 0; i < 2048; ++i)
+                p[i] = (p[i] & 0xFF000000u) | (color & 0x00FFFFFFu);
+        else
+            std::fill(p, p + 2048, color);
+    }
+    markVramWritten(base, base + 8192u);
 }
 
 void GSCpuBackend::noteExternalWrite(uint64_t begin, uint64_t end)
@@ -1435,6 +1464,54 @@ const GSCpuBackend::DecodedTexture *GSCpuBackend::decodedTexture(const GSDrawSta
     DecodedTexture &entry = m_textureCache[key];
     if (!entry.texels.empty() && entry.epoch >= newestWrite)
         return &entry;
+    // Its pages were written: the same bytes again (games re-upload textures
+    // every frame) keep the decoded texels.
+    // Hash the 256-byte blocks the texture's rectangle lies in: games share
+    // pages between textures and render targets, so whole pages change more
+    // often than the texture does.
+    uint64_t sourceHash = 1469598103934665603ull;
+    {
+        uint32_t bw = 8, bh = 8;  // block size in pixels
+        bool nibbles = false;
+        uint32_t (*addr)(uint32_t, uint32_t, uint32_t, uint32_t) = GSPSMCT32::addrPSMCT32;
+        switch (tex.psm)
+        {
+        case GS_PSM_T8: bw = 16; bh = 16; addr = GSPSMT8::addrPSMT8; break;
+        case GS_PSM_T4: bw = 32; bh = 16; addr = GSPSMT4::addrPSMT4; nibbles = true; break;
+        case GS_PSM_CT16: case GS_PSM_CT16S: bw = 16; bh = 8; addr = GSPSMCT16::addrPSMCT16; break;
+        default: break; // CT32, CT24 and the T8H/T4HL/T4HH forms use CT32 blocks
+        }
+        if (tex.psm == GS_PSM_CT16S)
+            addr = GSPSMCT16::addrPSMCT16S;
+        uint64_t word = 0;
+        for (uint32_t by = 0; by < (height + bh - 1u) / bh; ++by)
+            for (uint32_t bx = 0; bx < (width + bw - 1u) / bw; ++bx)
+            {
+                uint64_t at = addr(tex.tbp0, tex.tbw, bx * bw, by * bh);
+                if (nibbles)
+                    at >>= 1;
+                at = (at & ~255ull) % m_vramSize;
+                for (uint32_t o = 0; o < 256u; o += 8u)
+                {
+                    std::memcpy(&word, m_vram + at + o, 8u);
+                    sourceHash = (sourceHash ^ word) * 1099511628211ull;
+                }
+            }
+        sourceHash ^= clutHash;
+    }
+    if (!entry.texels.empty() && entry.sourceHash == sourceHash && entry.width == width && entry.height == height)
+    {
+        entry.epoch = m_epochCounter;
+        ++textureHashHits;
+        return &entry;
+    }
+    ++textureDecodes;
+    static const bool logDecodes = std::getenv("PS2X_GS_TEXLOG") != nullptr;
+    if (logDecodes)
+        std::fprintf(stderr, "[gs:tex] decode tbp=%x tbw=%u psm=%x %ux%u cbp=%x %s\n", tex.tbp0, tex.tbw, tex.psm, width, height, tex.cbp,
+                     entry.texels.empty() ? "new" : "changed");
+    entry.sourceHash = sourceHash;
+    ++entry.version;
 
     if (entry.texels.size() != static_cast<size_t>(width) * height)
     {
@@ -2897,7 +2974,25 @@ void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
 
 void GSCpuBackend::uploadImageCpuUnlocked(const uint8_t *data, uint32_t sizeBytes)
 {
-    markVramWritten(m_uploadRange.first, m_uploadRange.second);
+    // Games re-upload the same textures every frame: only pages whose bytes
+    // change count as written, so textures decoded from the rest stay valid.
+    const uint64_t begin = std::min<uint64_t>(m_uploadRange.first / 8192u * 8192u, m_vramSize);
+    const uint64_t end = std::min<uint64_t>((m_uploadRange.second + 8191u) / 8192u * 8192u, m_vramSize);
+    if (!m_vram || end <= begin)
+    {
+        markVramWritten(m_uploadRange.first, m_uploadRange.second);
+        uploadImageCpuWrite(data, sizeBytes);
+        return;
+    }
+    m_uploadBefore.assign(m_vram + begin, m_vram + end);
+    uploadImageCpuWrite(data, sizeBytes);
+    for (uint64_t page = begin; page < end; page += 8192u)
+        if (std::memcmp(m_uploadBefore.data() + (page - begin), m_vram + page, 8192u) != 0)
+            markVramWritten(page, page + 8192u);
+}
+
+void GSCpuBackend::uploadImageCpuWrite(const uint8_t *data, uint32_t sizeBytes)
+{
     if (!data || sizeBytes == 0u || !m_vram || m_transferState.direction != 0u)
         return;
     if (m_transfer.trxreg.rrw == 0u || m_transfer.trxreg.rrh == 0u || m_transferState.totalPixels == 0u)

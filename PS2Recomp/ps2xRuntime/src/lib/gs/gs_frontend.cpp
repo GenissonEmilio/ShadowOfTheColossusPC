@@ -1,3 +1,4 @@
+#include "runtime/gs/gs_direct_frame.h"
 #include <chrono>
 #include <set>
 #include <cstdlib>
@@ -651,6 +652,13 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
     if (outUsedPreferred)
         *outUsedPreferred = m_hostPresentationUsedPreferred;
 
+    // A GPU renderer frame (a texture record, see gs_direct_frame.h) passes as is.
+    GSDirectFrame direct;
+    if (GSDirectFrame::load(m_hostPresentationFrame, direct))
+    {
+        outPixels = m_hostPresentationFrame;
+        return true;
+    }
     const size_t packedRowBytes = static_cast<size_t>(outWidth) * 4u;
     outPixels.resize(packedRowBytes * static_cast<size_t>(outHeight));
     if (outWidth != 0u && outHeight != 0u)

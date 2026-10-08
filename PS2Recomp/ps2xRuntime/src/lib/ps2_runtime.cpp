@@ -7,6 +7,7 @@
 #include "runtime/ps2_stats.h"
 #include "ps2_runtime.h"
 #include "runtime/host_menu.h"
+#include "runtime/gs/gs_direct_frame.h"
 #include "ps2_log.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
@@ -384,6 +385,23 @@ namespace
     }
 }
 
+// The GPU GS renderer's frames are textures shared with this context: drawn
+// as they are (id 0: the frame is in the uploaded texture).
+static Texture2D g_directFrame{};
+
+static void waitDirectFrame(uint64_t fence)
+{
+#if defined(__APPLE__)
+    // glWaitSync without pulling GL headers in here (GLFW owns them).
+    using WaitSync = void (*)(void *, unsigned int, uint64_t);
+    static WaitSync waitSync = reinterpret_cast<WaitSync>(glfwGetProcAddress("glWaitSync"));
+    if (waitSync && fence)
+        waitSync(reinterpret_cast<void *>(fence), 0u, 0xFFFFFFFFFFFFFFFFull /* GL_TIMEOUT_IGNORED */);
+#else
+    (void)fence;
+#endif
+}
+
 static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight)
 {
 
@@ -493,6 +511,18 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     s_lastPreferred = usedPreferredDisplaySource;
     s_lastWidth = width;
     s_lastHeight = height;
+
+    GSDirectFrame direct;
+    if (GSDirectFrame::load(s_scratch, direct))
+    {
+        waitDirectFrame(direct.fence);
+        g_directFrame = Texture2D{direct.texture, static_cast<int>(width), static_cast<int>(height), 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+        outWidth = width;
+        outHeight = height;
+        s_hasUploadedFrame = true;
+        return;
+    }
+    g_directFrame.id = 0;
 
     std::fill(s_uploadBuffer.begin(), s_uploadBuffer.end(), 0u);
     if (!s_scratch.empty() && width != 0u && height != 0u)
@@ -2907,7 +2937,7 @@ void PS2Runtime::run()
             {
                 if (!burstShot)
                     nextSnapshot += snapshotPeriod;
-                Image shot = LoadImageFromTexture(frameTex);
+                Image shot = LoadImageFromTexture(g_directFrame.id ? g_directFrame : frameTex);
                 ImageCrop(&shot, Rectangle{0.0f, 0.0f, static_cast<float>(presentWidth), static_cast<float>(presentHeight)});
                 const std::string path = std::string(snapshotDir) + "/frame_" + std::to_string(snapshotIndex++) + ".png";
                 ExportImage(shot, path.c_str());
@@ -2943,7 +2973,7 @@ void PS2Runtime::run()
             (screenHeight - dstHeight) * 0.5f,
             dstWidth,
             dstHeight};
-        DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+        DrawTexturePro(g_directFrame.id ? g_directFrame : frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
         if (hostmenu::settings().showFps.load(std::memory_order_relaxed))
         {
             // FPS overlay: game frames = display lists sent to VIF1 per second.
