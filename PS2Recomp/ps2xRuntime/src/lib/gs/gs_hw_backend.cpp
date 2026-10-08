@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -156,7 +157,32 @@ void main()
         GLuint texture = 0;
         bool gpuDirty = false;       // GPU content newer than GS memory
         uint64_t syncedEpoch = 0;    // GS memory epoch when last synced
+        uint32_t usedRows = 0;       // rows ever drawn (extent in GS memory)
+        uint32_t loadedRows = 0;     // rows loaded from GS memory into the texture
+        uint32_t dirtyY0 = ~0u, dirtyY1 = 0; // rows drawn since the last write-back
     };
+
+    // GS memory pages (8 KiB) a buffer rectangle's rows [y0, y1] cover, as bytes.
+    void pageDims(uint32_t psm, uint32_t &pw, uint32_t &ph)
+    {
+        switch (psm)
+        {
+        case GS_PSM_CT16: case GS_PSM_CT16S: case GS_PSM_Z16: case GS_PSM_Z16S: pw = 64; ph = 64; break;
+        case GS_PSM_T8: pw = 128; ph = 64; break;
+        case GS_PSM_T4: pw = 128; ph = 128; break;
+        default: pw = 64; ph = 32; break;
+        }
+    }
+
+    void rowPages(uint32_t baseBytes, uint32_t bufferWidth, uint32_t y0, uint32_t y1, uint32_t psm, uint64_t &begin, uint64_t &end)
+    {
+        uint32_t pw = 64, ph = 32;
+        pageDims(psm, pw, ph);
+        const uint64_t perRow = std::max<uint32_t>(1u, (std::max<uint32_t>(1u, bufferWidth) + pw - 1u) / pw);
+        const uint64_t basePage = baseBytes / 8192u;
+        begin = (basePage + (y0 / ph) * perRow) * 8192u;
+        end = (basePage + (y1 / ph + 1u) * perRow + ((baseBytes % 8192u) ? 1u : 0u)) * 8192u;
+    }
 
     struct DepthTarget
     {
@@ -192,6 +218,32 @@ struct GSHwBackend::Impl
     DrawKey pendingKey{};
     bool hasPending = false;
     uint64_t drawCalls = 0, primitives = 0;
+    // PS2X_GS_HW_STATS=1: per-second counters.
+    struct Stats
+    {
+        uint64_t writeBacks = 0, writeBackPixels = 0, reloads = 0, textureUploads = 0, rtTextures = 0;
+        double writeBackMs = 0, reloadMs = 0;
+        uint64_t presentWb = 0, textureWb = 0, transferWb = 0, clutWb = 0, discards = 0;
+    } stats;
+    const char *wbReason = "other";
+    void reportStats()
+    {
+        static const bool on = std::getenv("PS2X_GS_HW_STATS") != nullptr;
+        static auto last = std::chrono::steady_clock::now();
+        if (!on)
+            return;
+        const auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration<double>(now - last).count() < 1.0)
+            return;
+        last = now;
+        std::fprintf(stderr, "[gs:hw] draws=%llu prims=%llu wb=%llu (%.0f ms, %llu px; present %llu texture %llu transfer %llu clut %llu) reloads=%llu (%.0f ms) texUploads=%llu rtTex=%llu discards=%llu\n",
+                     (unsigned long long)drawCalls, (unsigned long long)primitives, (unsigned long long)stats.writeBacks, stats.writeBackMs,
+                     (unsigned long long)stats.writeBackPixels, (unsigned long long)stats.presentWb, (unsigned long long)stats.textureWb,
+                     (unsigned long long)stats.transferWb, (unsigned long long)stats.clutWb, (unsigned long long)stats.reloads, stats.reloadMs,
+                     (unsigned long long)stats.textureUploads, (unsigned long long)stats.rtTextures, (unsigned long long)stats.discards);
+        stats = {};
+        drawCalls = primitives = 0;
+    }
 
     bool onGlThread() const { return glReady && std::this_thread::get_id() == glThread; }
 
@@ -254,9 +306,9 @@ struct GSHwBackend::Impl
 
     // ---- GS memory <-> GPU ------------------------------------------------
 
-    void targetRange(const RenderTarget &rt, uint64_t &begin, uint64_t &end) const
+    void targetRange(const RenderTarget &rt, uint64_t &begin, uint64_t &end)
     {
-        bufferRange(rt.fbp * 8192u, rt.width, rt.height, rt.psm, begin, end);
+        rowPages(rt.fbp * 8192u, rt.width, 0u, std::max(rt.usedRows, 1u) - 1u, rt.psm, begin, end);
     }
 
     void writeBack(RenderTarget &rt)
@@ -264,12 +316,25 @@ struct GSHwBackend::Impl
         if (!rt.gpuDirty || !vram)
             return;
         flushPending();
-        std::vector<uint8_t> pixels(static_cast<size_t>(rt.width) * rt.height * 4u);
-        glBindTexture(GL_TEXTURE_2D, rt.texture);
-        glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-        for (uint32_t y = 0; y < rt.height; ++y)
+        const auto t0 = std::chrono::steady_clock::now();
+        ++stats.writeBacks;
+        if (!std::strcmp(wbReason, "present")) ++stats.presentWb;
+        else if (!std::strcmp(wbReason, "texture")) ++stats.textureWb;
+        else if (!std::strcmp(wbReason, "transfer")) ++stats.transferWb;
+        else if (!std::strcmp(wbReason, "clut")) ++stats.clutWb;
+        const uint32_t y0 = std::min(rt.dirtyY0, rt.height - 1u);
+        const uint32_t y1 = std::min(rt.dirtyY1, rt.height - 1u);
+        const uint32_t rows = y1 >= y0 ? y1 - y0 + 1u : 0u;
+        stats.writeBackPixels += static_cast<uint64_t>(rt.width) * rows;
+        std::vector<uint8_t> pixels(static_cast<size_t>(rt.width) * std::max(rows, 1u) * 4u);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer(rt, nullptr));
+        glReadPixels(0, static_cast<GLint>(y0), static_cast<GLsizei>(rt.width), static_cast<GLsizei>(rows), GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
         {
-            const uint8_t *row = pixels.data() + static_cast<size_t>(y) * rt.width * 4u;
+        std::lock_guard<std::mutex> lock(shadow->vramMutex());
+        for (uint32_t r = 0; r < rows; ++r)
+        {
+            const uint32_t y = y0 + r;
+            const uint8_t *row = pixels.data() + static_cast<size_t>(r) * rt.width * 4u;
             for (uint32_t x = 0; x < rt.width; ++x)
             {
                 const uint8_t *p = row + x * 4u;
@@ -277,24 +342,38 @@ struct GSHwBackend::Impl
                 uint32_t value = p[0] | (p[1] << 8) | (p[2] << 16) | (alpha << 24);
                 if (rt.psm == GS_PSM_CT16 || rt.psm == GS_PSM_CT16S)
                     value = (p[0] >> 3) | ((p[1] >> 3) << 5) | ((p[2] >> 3) << 10) | (alpha >= 0x40 ? 0x8000u : 0u);
-                shadow->WriteVram(rt.psm, rt.fbp * 32u, rt.fbw, x, y, value);
+                shadow->WriteVramUnlocked(rt.psm, rt.fbp * 32u, rt.fbw, x, y, value);
             }
         }
+        }
+        rt.dirtyY0 = ~0u;
+        rt.dirtyY1 = 0;
         uint64_t begin = 0, end = 0;
         targetRange(rt, begin, end);
         shadow->noteExternalWrite(begin, end);
         rt.syncedEpoch = shadow->newestWrite(begin, end);
         rt.gpuDirty = false;
+        stats.writeBackMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     }
 
-    void reloadFromVram(RenderTarget &rt)
+    void reloadFromVram(RenderTarget &rt, uint32_t firstRow = 0, uint32_t endRow = ~0u)
     {
-        std::vector<uint8_t> pixels(static_cast<size_t>(rt.width) * rt.height * 4u);
-        for (uint32_t y = 0; y < rt.height; ++y)
+        const auto t0 = std::chrono::steady_clock::now();
+        ++stats.reloads;
+        if (endRow == ~0u)
+            endRow = std::max(rt.loadedRows, rt.usedRows);
+        endRow = std::min(endRow, rt.height);
+        if (endRow <= firstRow)
+            return;
+        const uint32_t rows = endRow - firstRow;
+        std::vector<uint8_t> pixels(static_cast<size_t>(rt.width) * rows * 4u);
+        std::unique_lock<std::mutex> lock(shadow->vramMutex());
+        for (uint32_t r = 0; r < rows; ++r)
             for (uint32_t x = 0; x < rt.width; ++x)
             {
-                uint32_t v = shadow->ReadVram(rt.psm, rt.fbp * 32u, rt.fbw, x, y);
-                uint8_t *p = pixels.data() + (static_cast<size_t>(y) * rt.width + x) * 4u;
+                const uint32_t y = firstRow + r;
+                uint32_t v = shadow->ReadVramUnlocked(rt.psm, rt.fbp * 32u, rt.fbw, x, y);
+                uint8_t *p = pixels.data() + (static_cast<size_t>(r) * rt.width + x) * 4u;
                 if (rt.psm == GS_PSM_CT16 || rt.psm == GS_PSM_CT16S)
                 {
                     p[0] = static_cast<uint8_t>((v & 0x1Fu) << 3);
@@ -311,22 +390,56 @@ struct GSHwBackend::Impl
                 const uint32_t raw = rt.psm == GS_PSM_CT24 ? 0x80u : (v >> 24);
                 p[3] = static_cast<uint8_t>(std::min(255u, raw * 255u / 128u));
             }
+        lock.unlock();
         glBindTexture(GL_TEXTURE_2D, rt.texture);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, rt.width, rt.height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, static_cast<GLint>(firstRow), rt.width, rows, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        rt.loadedRows = std::max(rt.loadedRows, endRow);
         uint64_t begin = 0, end = 0;
         targetRange(rt, begin, end);
         rt.syncedEpoch = shadow->newestWrite(begin, end);
+        stats.reloadMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     }
 
     // CPU-side users of [begin, end): bring GPU results into GS memory first.
+    // GS memory the GPU drew and the CPU has not seen yet.
+    bool dirtyOverlaps(RenderTarget &rt, uint64_t begin, uint64_t end)
+    {
+        if (!rt.gpuDirty || rt.dirtyY1 < rt.dirtyY0 || rt.dirtyY0 == ~0u)
+            return false;
+        uint64_t b = 0, e = 0;
+        rowPages(rt.fbp * 8192u, rt.width, rt.dirtyY0, rt.dirtyY1, rt.psm, b, e);
+        return begin < e && b < end;
+    }
+
     void writeBackOverlapping(uint64_t begin, uint64_t end)
     {
         for (auto &[fbp, rt] : targets)
-        {
-            uint64_t b = 0, e = 0;
-            targetRange(rt, b, e);
-            if (rt.gpuDirty && begin < e && b < end)
+            if (dirtyOverlaps(rt, begin, end))
                 writeBack(rt);
+    }
+
+    // The CPU overwrites [begin, end) (an upload): drawn targets there are
+    // replaced, not merged; their rows reload from GS memory when drawn again.
+    void discardOverlapping(uint64_t begin, uint64_t end, const GSTransferCommand &command)
+    {
+        const auto &b = command.bitbltbuf;
+        for (auto &[fbp, rt] : targets)
+        {
+            if (!dirtyOverlaps(rt, begin, end))
+                continue;
+            const bool covers = b.dbp == rt.fbp * 32u && b.dpsm == rt.psm && b.dbw == rt.fbw &&
+                                command.trxpos.dsax == 0u && command.trxreg.rrw >= rt.width &&
+                                command.trxpos.dsay <= rt.dirtyY0 && command.trxpos.dsay + command.trxreg.rrh > rt.dirtyY1;
+            if (!covers)
+            {
+                writeBack(rt); // a partial overwrite keeps the rest of the drawing
+                continue;
+            }
+            ++stats.discards;
+            rt.gpuDirty = false;
+            rt.dirtyY0 = ~0u;
+            rt.dirtyY1 = 0;
+            rt.loadedRows = 0;
         }
     }
 
@@ -362,7 +475,8 @@ struct GSHwBackend::Impl
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, rt.width, rt.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-            reloadFromVram(rt);
+            rt.usedRows = rt.loadedRows = 0; // rows load from GS memory as draws reach them
+            rt.gpuDirty = false;
         }
         else
         {
@@ -433,14 +547,16 @@ struct GSHwBackend::Impl
             if (tex.tbp0 == fbp * 32u && isColorPsm(tex.psm) && rt.texture && tex.tbw * 64u == rt.width && rt.gpuDirty)
             {
                 alphaScale = 1.0f;
+                ++stats.rtTextures;
                 return rt.texture;
             }
         }
         // Otherwise decode from GS memory, after the GPU's results reach it.
         uint64_t begin = 0, end = 0;
-        bufferRange(tex.tbp0 * 256u, std::max<uint32_t>(state.textureWidth, tex.tbw * 64u), state.textureHeight,
-                    isColorPsm(tex.psm) ? tex.psm : GS_PSM_CT32, begin, end);
+        rowPages(tex.tbp0 * 256u, std::max<uint32_t>(state.textureWidth, tex.tbw * 64u), 0u, state.textureHeight - 1u, tex.psm, begin, end);
+        wbReason = "texture";
         writeBackOverlapping(begin, end);
+        wbReason = "other";
         uint32_t w = 0, h = 0;
         uint64_t epoch = 0;
         const std::vector<uint32_t> *texels = shadow->textureForHw(state, w, h, epoch);
@@ -453,6 +569,7 @@ struct GSHwBackend::Impl
         if (cached.epoch != epoch || cached.width != w || cached.height != h)
         {
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels->data());
+            ++stats.textureUploads;
             cached.epoch = epoch;
             cached.width = w;
             cached.height = h;
@@ -654,6 +771,30 @@ struct GSHwBackend::Impl
             return v;
         };
         const GSVertex *vs = batch.vertices.data();
+        {
+            // Rows this primitive can touch: load them from GS memory the first
+            // time, and remember them for write-back.
+            float ymin = 1e30f, ymax = -1e30f;
+            for (int i = 0; i < std::max<int>(1, batch.vertexCount); ++i)
+            {
+                ymin = std::min(ymin, vs[i].y - ofy);
+                ymax = std::max(ymax, vs[i].y - ofy);
+            }
+            const int lo = std::max<int>(static_cast<int>(key.sy0), static_cast<int>(std::floor(ymin)) - 1);
+            const int hi = std::min<int>(static_cast<int>(key.sy1), static_cast<int>(std::ceil(ymax)) + 1);
+            if (hi < lo)
+                return;
+            if (static_cast<uint32_t>(hi) + 1u > rt.loadedRows)
+            {
+                flushPending();
+                reloadFromVram(rt, rt.loadedRows, static_cast<uint32_t>(hi) + 1u);
+                pendingKey = key;
+                hasPending = true;
+            }
+            rt.usedRows = std::max(rt.usedRows, static_cast<uint32_t>(hi) + 1u);
+            rt.dirtyY0 = std::min(rt.dirtyY0, static_cast<uint32_t>(lo));
+            rt.dirtyY1 = std::max(rt.dirtyY1, static_cast<uint32_t>(hi));
+        }
         if ((type == GS_PRIM_TRIANGLE || type == GS_PRIM_TRISTRIP || type == GS_PRIM_TRIFAN) && batch.vertexCount >= 3)
         {
             for (int i = 0; i < 3; ++i)
@@ -722,7 +863,9 @@ void GSHwBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
     {
         // The CLUT comes from GS memory, which the GPU may have drawn.
         m_impl->flushPending();
+        m_impl->wbReason = "clut";
         m_impl->writeBackOverlapping(tex0.cbp * 256u, tex0.cbp * 256u + 1024u);
+        m_impl->wbReason = "other";
     }
     m_impl->shadow->LoadClut(tex0, texclut);
 }
@@ -736,15 +879,19 @@ void GSHwBackend::BeginTransfer(const GSTransferCommand &command)
         // there first so partial overwrites keep the rest.
         uint64_t begin = 0, end = 0;
         const auto &b = command.bitbltbuf;
-        Impl::bufferRange(b.dbp * 256u, std::max<uint32_t>(1u, b.dbw) * 64u, command.trxpos.dsay + command.trxreg.rrh + 1u,
-                          isColorPsm(b.dpsm) ? b.dpsm : GS_PSM_CT32, begin, end);
-        m_impl->writeBackOverlapping(begin, end + 8192u);
+        const uint32_t rows = std::max<uint32_t>(1u, command.trxreg.rrh);
+        rowPages(b.dbp * 256u, std::max<uint32_t>(1u, b.dbw) * 64u, command.trxpos.dsay, command.trxpos.dsay + rows - 1u, b.dpsm, begin, end);
+        m_impl->wbReason = "transfer";
+        if (command.direction == 0u)
+            m_impl->discardOverlapping(begin, end, command); // host -> GS upload
+        else
+            m_impl->writeBackOverlapping(begin, end);
         if (command.direction != 0u)
         {
-            Impl::bufferRange(b.sbp * 256u, std::max<uint32_t>(1u, b.sbw) * 64u, command.trxpos.ssay + command.trxreg.rrh + 1u,
-                              isColorPsm(b.spsm) ? b.spsm : GS_PSM_CT32, begin, end);
-            m_impl->writeBackOverlapping(begin, end + 8192u);
+            rowPages(b.sbp * 256u, std::max<uint32_t>(1u, b.sbw) * 64u, command.trxpos.ssay, command.trxpos.ssay + rows - 1u, b.spsm, begin, end);
+            m_impl->writeBackOverlapping(begin, end);
         }
+        m_impl->wbReason = "other";
     }
     m_impl->shadow->BeginTransfer(command);
 }
@@ -779,9 +926,12 @@ PresentationFrame GSHwBackend::Present(const GSPresentationRequest &request)
         {
             const uint32_t fbp = static_cast<uint32_t>(dispfb & 0x1FFu);
             auto it = m_impl->targets.find(fbp);
+            m_impl->wbReason = "present";
             if (it != m_impl->targets.end())
                 m_impl->writeBack(it->second);
+            m_impl->wbReason = "other";
         }
+        m_impl->reportStats();
     }
     return m_impl->shadow->Present(request);
 }
