@@ -74,21 +74,53 @@ in float vDepth;
 uniform sampler2D uTexture;
 uniform int uTme, uTfx, uTcc, uFst, uFge, uAtest, uAref, uAtestFailed;
 uniform vec2 uTexSize;       // texels of the bound texture
-uniform vec2 uUvScale;       // GS texture size / bound texture size
-uniform float uAlphaFix;     // >= 0: texture alpha
+uniform vec2 uGsSize;        // GS texture size (2^TW, 2^TH)
+uniform ivec2 uWrap;         // CLAMP.WMS/WMT: repeat, clamp, region clamp, region repeat
+uniform ivec4 uRegion;       // MINU, MINV, MAXU, MAXV
+uniform int uLinear;
+uniform float uAlphaFix;     // >= 0: texture alpha (TA0; + 256: AEM)
 uniform float uTexAlphaScale; // texture alpha read / scale -> PS2 alpha units of 128
 uniform vec3 uFogColor;
 out vec4 oColor;
+
+// GS texel addressing (CLAMP register) in GS texture space, then a fetch from
+// the bound texture: render targets are larger than the GS texture they hold.
+int wrapCoord(int v, int size, int mode, int lo, int hi)
+{
+    if (mode == 0) return v & (size - 1);
+    if (mode == 1) return clamp(v, 0, size - 1);
+    if (mode == 2) return clamp(v, lo, hi);
+    return (v & lo) | hi;
+}
+vec4 fetchTexel(ivec2 p)
+{
+    ivec2 size = ivec2(uGsSize);
+    p = ivec2(wrapCoord(p.x, size.x, uWrap.x, uRegion.x, uRegion.z), wrapCoord(p.y, size.y, uWrap.y, uRegion.y, uRegion.w));
+    return texelFetch(uTexture, clamp(p, ivec2(0), ivec2(uTexSize) - 1), 0);
+}
+vec4 sampleGs(vec2 tc)
+{
+    if (uLinear == 0)
+        return fetchTexel(ivec2(floor(tc)));
+    vec2 b = tc - 0.5;
+    ivec2 i = ivec2(floor(b));
+    vec2 f = b - floor(b);
+    vec4 t00 = fetchTexel(i), t10 = fetchTexel(i + ivec2(1, 0)), t01 = fetchTexel(i + ivec2(0, 1)), t11 = fetchTexel(i + ivec2(1, 1));
+    return mix(mix(t00, t10, f.x), mix(t01, t11, f.x), f.y);
+}
+
 void main()
 {
     vec4 c = vColor;              // 0..255, 0x80 = 1.0 for modulation
     if (uTme != 0)
     {
-        vec2 uv = (uFst != 0) ? vTex.xy / uTexSize : vTex.xy / vTex.z * uUvScale;
-        vec4 t = texture(uTexture, uv);
+        vec2 tc = (uFst != 0) ? vTex.xy : vTex.xy / vTex.z * uGsSize;
+        vec4 t = sampleGs(tc);
         t.rgb *= 255.0;
         t.a *= 255.0 * uTexAlphaScale;
-        if (uAlphaFix >= 0.0)
+        if (uAlphaFix >= 256.0)
+            t.a = all(lessThan(t.rgb, vec3(0.5))) ? 0.0 : uAlphaFix - 256.0;
+        else if (uAlphaFix >= 0.0)
             t.a = uAlphaFix;
         vec3 rgb;
         float a;
@@ -241,6 +273,10 @@ struct GSHwBackend::Impl
     } stats;
     const char *wbReason = "other";
     // PS2X_GS_HW_TRACE=N: list the draw calls between presents N and N+1.
+    // PS2X_GS_HW_VERIFY=1 (with PS2X_GS_HW_TRACE): the CPU renderer draws too
+    // and owns GS memory; in the traced frame each draw call starts from its
+    // result and the GPU's output is compared with it (mean |diff| per draw).
+    const bool verify = std::getenv("PS2X_GS_HW_VERIFY") != nullptr;
     uint64_t presents = 0, tracedDraws = 0;
     bool traceDone = false;
     bool tracing() const
@@ -335,6 +371,13 @@ struct GSHwBackend::Impl
 
     void writeBack(RenderTarget &rt)
     {
+        if (verify)
+        {
+            rt.gpuDirty = false;
+            rt.dirtyY0 = ~0u;
+            rt.dirtyY1 = 0;
+            return;
+        }
         if (!rt.gpuDirty || !vram)
             return;
         flushPending();
@@ -570,9 +613,19 @@ struct GSHwBackend::Impl
             const bool sameFormat = tex.psm == rt.psm || (tex.psm == GS_PSM_CT24 && rt.psm == GS_PSM_CT32);
             if (tex.tbp0 == fbp * 32u && sameFormat && rt.texture && tex.tbw * 64u == rt.width && rt.gpuDirty)
             {
+                // Rows never drawn or loaded hold nothing yet: load what the
+                // texture can reach from GS memory first.
+                const uint32_t reach = std::min(rt.height, std::max<uint32_t>(state.textureHeight, 1u));
+                if (rt.loadedRows < reach)
+                {
+                    flushPending();
+                    reloadFromVram(rt, rt.loadedRows, reach);
+                }
+                if (tracing())
+                    checkRtTexture(rt, state);
                 alphaScale = kAlphaOne / 255.0f; // targets keep alpha as A / 0x80
                 if (tex.psm == GS_PSM_CT24)
-                    alphaFix = state.texa.ta0; // (AEM's black-is-transparent not applied)
+                    alphaFix = state.texa.ta0 + (state.texa.aem ? 256 : 0);
                 texW = rt.width;
                 texH = rt.height;
                 ++stats.rtTextures;
@@ -642,6 +695,81 @@ struct GSHwBackend::Impl
         glBlendFuncSeparate(src, dst, GL_ONE, GL_ZERO);
     }
 
+    // Trace: a render target about to be sampled, against the texture decoded
+    // from GS memory after a write-back (what the CPU path would sample).
+    void checkRtTexture(RenderTarget &rt, const GSDrawState &state)
+    {
+        flushPending();
+        const uint32_t w = std::min<uint32_t>(rt.width, state.textureWidth), h = std::min<uint32_t>(rt.height, state.textureHeight);
+        std::vector<uint8_t> px(static_cast<size_t>(rt.width) * h * 4u);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer(rt, nullptr));
+        glReadPixels(0, 0, rt.width, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        writeBack(rt);
+        uint32_t tw = 0, th = 0;
+        uint64_t epoch = 0;
+        const std::vector<uint32_t> *texels = shadow->textureForHw(state, tw, th, epoch);
+        if (!texels)
+            return;
+        double dRgb = 0, dA = 0;
+        uint64_t n = 0;
+        for (uint32_t y = 0; y < std::min(h, th); ++y)
+            for (uint32_t x = 0; x < std::min(w, tw); ++x)
+            {
+                const uint8_t *p = px.data() + (static_cast<size_t>(y) * rt.width + x) * 4u;
+                const uint32_t t = (*texels)[static_cast<size_t>(y) * tw + x];
+                dRgb += std::abs(int(p[0]) - int(t & 0xFF)) + std::abs(int(p[1]) - int((t >> 8) & 0xFF)) + std::abs(int(p[2]) - int((t >> 16) & 0xFF));
+                const int ga = state.context.tex0.psm == GS_PSM_CT24 ? state.texa.ta0 : int((p[3] * 128u + 127u) / 255u);
+                dA += std::abs(ga - int(t >> 24));
+                ++n;
+            }
+        std::fprintf(stderr, "[gs:rtcheck] fbp=%u %ux%u (rt %ux%u loaded=%u) tpsm=%u dRGB=%.2f dA=%.2f\n", rt.fbp, w, h, rt.width, rt.height, rt.loadedRows,
+                     state.context.tex0.psm, n ? dRgb / n / 3.0 : 0.0, n ? dA / n : 0.0);
+    }
+
+    void compareWithCpu(RenderTarget &rt)
+    {
+        const DrawKey &key = pendingKey;
+        float fx0 = 1e9f, fy0 = 1e9f, fx1 = -1e9f, fy1 = -1e9f;
+        for (const auto &v : pending)
+        {
+            fx0 = std::min(fx0, v.x); fy0 = std::min(fy0, v.y); fx1 = std::max(fx1, v.x); fy1 = std::max(fy1, v.y);
+        }
+        const int x0 = std::max<int>(key.sx0, static_cast<int>(fx0)), x1 = std::min<int>(key.sx1, static_cast<int>(fx1));
+        const int y0 = std::max<int>(key.sy0, static_cast<int>(fy0)), y1 = std::min<int>(key.sy1, static_cast<int>(fy1));
+        if (x1 < x0 || y1 < y0)
+            return;
+        const int w = x1 - x0 + 1, h = y1 - y0 + 1;
+        std::vector<uint8_t> px(static_cast<size_t>(w) * h * 4u);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer(rt, nullptr));
+        glReadPixels(x0, y0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        (void)shadow->ReadVram(GS_PSM_CT32, 0, 1, 0, 0);
+        double dRgb = 0, dA = 0, gpuSum = 0, cpuSum = 0;
+        uint32_t maxD = 0;
+        std::lock_guard<std::mutex> lock(shadow->vramMutex());
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+            {
+                const uint8_t *p = px.data() + (static_cast<size_t>(y) * w + x) * 4u;
+                uint32_t v = shadow->ReadVramUnlocked(rt.psm, rt.fbp * 32u, rt.fbw, x0 + x, y0 + y);
+                uint32_t cr = v & 0xFF, cg = (v >> 8) & 0xFF, cb = (v >> 16) & 0xFF, ca = v >> 24;
+                if (rt.psm == GS_PSM_CT16 || rt.psm == GS_PSM_CT16S)
+                {
+                    cr = (v & 0x1F) << 3; cg = ((v >> 5) & 0x1F) << 3; cb = ((v >> 10) & 0x1F) << 3; ca = (v & 0x8000) ? 0x80 : 0;
+                }
+                const uint32_t ga = std::min(255u, (static_cast<uint32_t>(p[3]) * 128u + 127u) / 255u);
+                const uint32_t d = static_cast<uint32_t>(std::abs(int(p[0]) - int(cr)) + std::abs(int(p[1]) - int(cg)) + std::abs(int(p[2]) - int(cb)));
+                dRgb += d;
+                maxD = std::max(maxD, d);
+                if (rt.psm == GS_PSM_CT32)
+                    dA += std::abs(int(ga) - int(ca));
+                gpuSum += p[0] + p[1] + p[2];
+                cpuSum += cr + cg + cb;
+            }
+        const double n = static_cast<double>(w) * h;
+        std::fprintf(stderr, "[gs:verify] fbp=%u area=%dx%d@%d,%d dRGB=%.2f max=%u dA=%.2f gpuMean=%.1f cpuMean=%.1f%s\n", rt.fbp, w, h, x0, y0,
+                     dRgb / n / 3.0, maxD, dA / n, gpuSum / n / 3.0, cpuSum / n / 3.0, dRgb / n / 3.0 > 2.0 ? "  <<<" : "");
+    }
+
     void flushPending()
     {
         if (!hasPending || pending.empty())
@@ -688,8 +816,11 @@ struct GSHwBackend::Impl
         glUniform2f(uniform("uTexSize"), static_cast<float>(key.texW), static_cast<float>(key.texH));
         glUniform1f(uniform("uTexAlphaScale"), key.texAlphaScale);
         glUniform1f(uniform("uAlphaFix"), key.tme ? static_cast<float>(key.alphaFix) : -1.0f);
-        glUniform2f(uniform("uUvScale"), key.texW ? static_cast<float>(key.gsW) / key.texW : 1.0f,
-                    key.texH ? static_cast<float>(key.gsH) / key.texH : 1.0f);
+        glUniform2f(uniform("uGsSize"), static_cast<float>(std::max<uint32_t>(key.gsW, 1u)), static_cast<float>(std::max<uint32_t>(key.gsH, 1u)));
+        glUniform2i(uniform("uWrap"), static_cast<GLint>(key.clamp & 3u), static_cast<GLint>((key.clamp >> 2) & 3u));
+        glUniform4i(uniform("uRegion"), static_cast<GLint>((key.clamp >> 4) & 0x3FFu), static_cast<GLint>((key.clamp >> 24) & 0x3FFu),
+                    static_cast<GLint>((key.clamp >> 14) & 0x3FFu), static_cast<GLint>((key.clamp >> 34) & 0x3FFu));
+        glUniform1i(uniform("uLinear"), key.linear ? 1 : 0);
         glUniform3f(uniform("uFogColor"), static_cast<float>(key.fogColor & 0xFFu), static_cast<float>((key.fogColor >> 8) & 0xFFu),
                     static_cast<float>((key.fogColor >> 16) & 0xFFu));
         if (key.tme && key.texture)
@@ -719,6 +850,9 @@ struct GSHwBackend::Impl
                          key.fbp, key.fbw, key.fpsm, key.fbmsk, key.zbp, key.zmask, (unsigned long long)key.test, key.abe, (unsigned long long)key.alpha,
                          key.tme, (unsigned long long)key.tex0, key.tfx, key.tcc, key.fst, key.fge, key.gsW, key.gsH, key.texW, key.texH, key.alphaFix,
                          pending.size(), x0, y0, x1, y1, key.sx0, key.sy0, key.sx1, key.sy1, pending[0].r, pending[0].g, pending[0].b, pending[0].a, pending[0].z, key.zpsm);
+            if (pending.size() <= 12)
+                for (const auto &v : pending)
+                    std::fprintf(stderr, "[gs:trace]   v (%.1f,%.1f) z=%.9g st=(%g,%g,%g) rgba=%02x%02x%02x%02x fog=%g\n", v.x, v.y, v.z, v.s, v.t, v.q, v.r, v.g, v.b, v.a, v.fog);
         }
         // Pass 1: pixels that pass the alpha test write everything enabled.
         // Pass 2 (AFAIL != KEEP): failing pixels write FB only, Z only, or RGB only.
@@ -732,7 +866,8 @@ struct GSHwBackend::Impl
             glDrawArrays(GL_TRIANGLES, 0, count);
             ++drawCalls;
         }
-        if (atst != 1u && afail != 0u)
+        static const bool noAfailPass = std::getenv("PS2X_GS_HW_NOAFAIL") != nullptr;
+        if (atst != 1u && afail != 0u && !(noAfailPass && atst != 0u))
         {
             const bool failColor = afail != 2u, failZ = afail == 2u && writeZ;
             if (failColor || failZ)
@@ -747,7 +882,9 @@ struct GSHwBackend::Impl
         }
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glDepthMask(GL_TRUE);
-        rt.gpuDirty = true;
+        if (verify && tracing())
+            compareWithCpu(rt);
+        rt.gpuDirty = !verify;
         pending.clear();
         hasPending = false;
     }
@@ -807,6 +944,11 @@ struct GSHwBackend::Impl
         }
         if (hasPending && !(key == pendingKey))
             flushPending();
+        if (verify && !hasPending && tracing())
+        {
+            (void)shadow->ReadVram(GS_PSM_CT32, 0, 1, 0, 0); // the CPU renderer's pending work lands
+            reloadFromVram(rt, 0, rt.height);
+        }
         pendingKey = key;
         hasPending = true;
 
@@ -933,7 +1075,12 @@ void GSHwBackend::Initialize(uint8_t *vram, uint32_t vramSize)
 
 void GSHwBackend::Reset() { m_impl->shadow->Reset(); }
 
-void GSHwBackend::Submit(const GSPrimitiveBatch &batch) { m_impl->submit(batch); }
+void GSHwBackend::Submit(const GSPrimitiveBatch &batch)
+{
+    m_impl->submit(batch);
+    if (m_impl->verify)
+        m_impl->shadow->Submit(batch);
+}
 
 void GSHwBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
 {
