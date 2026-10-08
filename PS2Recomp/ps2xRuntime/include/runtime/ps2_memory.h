@@ -516,6 +516,11 @@ public:
         uint32_t compare = 0;
         uint32_t hold = 0;
         uint64_t clockRemainder = 0;
+        // Overflow / compare events that happened while their flag was still
+        // set: each is raised again once the guest clears the flag, so the
+        // handler runs once per event (SotC's game clock counts overflows).
+        uint32_t overflowBacklog = 0;
+        uint32_t compareBacklog = 0;
     };
 
     std::array<EeTimer, 4> m_eeTimers{};

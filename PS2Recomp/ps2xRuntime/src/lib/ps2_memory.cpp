@@ -599,6 +599,13 @@ uint32_t PS2Memory::advanceEeTimersNow(uint64_t eeCycles) noexcept
         const bool zeroReturn = (timer.mode & kEeTimerModeZret) != 0u;
         const bool compareReached = ticks >= compareDistance;
         bool overflowReached = false;
+        // How many times each event happened in this batch.
+        uint64_t compareEvents = 0, overflowEvents = 0;
+        if (compareReached)
+        {
+            const uint64_t period = zeroReturn ? std::max<uint64_t>(compare, 1u) : 0x10000ull;
+            compareEvents = 1u + (ticks - compareDistance) / period;
+        }
 
         if (zeroReturn)
         {
@@ -618,18 +625,32 @@ uint32_t PS2Memory::advanceEeTimersNow(uint64_t eeCycles) noexcept
         else
         {
             overflowReached = ticks >= overflowDistance;
+            overflowEvents = (static_cast<uint64_t>(oldCount) + ticks) >> 16;
             timer.count = static_cast<uint32_t>((oldCount + ticks) & 0xFFFFu);
         }
+        if (overflowReached && overflowEvents == 0u)
+            overflowEvents = 1u;
 
-        if (compareReached && (timer.mode & kEeTimerModeCmpe) != 0u && (timer.mode & kEeTimerModeEquf) == 0u)
+        constexpr uint64_t kMaxBacklog = 256u;
+        if (compareEvents != 0u && (timer.mode & kEeTimerModeCmpe) != 0u)
         {
-            timer.mode |= kEeTimerModeEquf;
-            interruptMask |= 1u << index;
+            if ((timer.mode & kEeTimerModeEquf) == 0u)
+            {
+                timer.mode |= kEeTimerModeEquf;
+                interruptMask |= 1u << index;
+                --compareEvents;
+            }
+            timer.compareBacklog = static_cast<uint32_t>(std::min<uint64_t>(kMaxBacklog, timer.compareBacklog + compareEvents));
         }
-        if (overflowReached && (timer.mode & kEeTimerModeOvfe) != 0u && (timer.mode & kEeTimerModeOvff) == 0u)
+        if (overflowEvents != 0u && (timer.mode & kEeTimerModeOvfe) != 0u)
         {
-            timer.mode |= kEeTimerModeOvff;
-            interruptMask |= 1u << index;
+            if ((timer.mode & kEeTimerModeOvff) == 0u)
+            {
+                timer.mode |= kEeTimerModeOvff;
+                interruptMask |= 1u << index;
+                --overflowEvents;
+            }
+            timer.overflowBacklog = static_cast<uint32_t>(std::min<uint64_t>(kMaxBacklog, timer.overflowBacklog + overflowEvents));
         }
     }
     return interruptMask;
@@ -1309,6 +1330,21 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             if (((previousMode ^ timer.mode) & (kEeTimerModeClksMask | kEeTimerModeCue)) != 0u)
             {
                 timer.clockRemainder = 0u;
+                timer.overflowBacklog = timer.compareBacklog = 0u;
+            }
+            // The guest acknowledged an event: raise the next one it missed.
+            const uint32_t cleared = previousMode & ~timer.mode;
+            if ((cleared & kEeTimerModeOvff) && timer.overflowBacklog != 0u && (timer.mode & kEeTimerModeOvfe))
+            {
+                --timer.overflowBacklog;
+                timer.mode |= kEeTimerModeOvff;
+                m_timerIrqLatched |= 1u << timerIndex;
+            }
+            if ((cleared & kEeTimerModeEquf) && timer.compareBacklog != 0u && (timer.mode & kEeTimerModeCmpe))
+            {
+                --timer.compareBacklog;
+                timer.mode |= kEeTimerModeEquf;
+                m_timerIrqLatched |= 1u << timerIndex;
             }
             break;
         }

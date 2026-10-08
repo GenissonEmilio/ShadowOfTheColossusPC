@@ -2697,6 +2697,23 @@ void PS2Runtime::run()
             std::cerr << "[stats] t=" << static_cast<int>(GetTime())
                       << " gameFps=" << (statChains - lastStatChains) / 5.0
                       << " shownFps=" << ps2_stats::presentedFrames.exchange(0) / 5.0
+                      << [this]
+                      {
+                          // PS2X_STATS_CLOCK=<addr>:<ticks per second>: speed of a guest
+                          // 64-bit clock against real time (SotC: 0x1F8A98:147456000).
+                          static const char *spec = std::getenv("PS2X_STATS_CLOCK");
+                          if (!spec)
+                              return std::string();
+                          static uint64_t last = 0;
+                          const uint32_t addr = static_cast<uint32_t>(std::strtoul(spec, nullptr, 0));
+                          const char *colon = std::strchr(spec, ':');
+                          const double rate = colon ? std::atof(colon + 1) : 1.0;
+                          uint64_t now = 0;
+                          std::memcpy(&now, m_memory.getRDRAM() + (addr & 0x1FFFFFFu), sizeof(now));
+                          const double speed = last ? (now - last) / rate / 5.0 : 0.0;
+                          last = now;
+                          return " clock=" + std::to_string(speed).substr(0, 5) + "x";
+                      }()
                       << " holds(1/2/3/4+)=" << ps2_stats::frameHolds[0].exchange(0) << "/" << ps2_stats::frameHolds[1].exchange(0)
                       << "/" << ps2_stats::frameHolds[2].exchange(0) << "/" << ps2_stats::frameHolds[3].exchange(0)
                       << " mscal=" << ps2_stats::vu1Mscal.exchange(0)
