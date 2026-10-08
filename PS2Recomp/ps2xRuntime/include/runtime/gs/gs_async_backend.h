@@ -3,6 +3,7 @@
 #include "runtime/gs/gs_backend.h"
 
 #include <condition_variable>
+#include <deque>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -87,8 +88,7 @@ private:
     // display when it reaches the point a frame was requested, and the host
     // shows the most recent capture.
     std::mutex m_presentMutex;
-    PresentationFrame m_latestFrame;
-    bool m_hasLatestFrame = false;
+    std::deque<PresentationFrame> m_frames; // recent captures, oldest first
     int m_presentsQueued = 0; // captures requested and not yet taken (bounded)
 
     std::unique_ptr<GSRasterBackend> m_inner;

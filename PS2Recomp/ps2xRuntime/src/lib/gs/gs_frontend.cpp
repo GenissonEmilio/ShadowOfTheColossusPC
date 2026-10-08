@@ -553,23 +553,15 @@ void GS::queuePresentation()
             return;
         request = buildPresentationRequestUnlocked();
     }
-    // A capture per displayed frame: when the display registers change, or
-    // every other vsync (games run at most 30 fps on NTSC) for games that
-    // copy each frame into the same display buffer, like SotC.
-    static uint64_t lastPmode = ~0ull, lastDispfb1 = ~0ull, lastDispfb2 = ~0ull, lastTick = 0;
-    const bool changed = request.pmode != lastPmode || request.dispfb1 != lastDispfb1 || request.dispfb2 != lastDispfb2;
-    if (!changed && request.vsyncTick - lastTick < 2)
-        return;
-    lastPmode = request.pmode;
-    lastDispfb1 = request.dispfb1;
-    lastDispfb2 = request.dispfb2;
-    lastTick = request.vsyncTick;
+    // Like the TV, look at the display at every vsync; the backend keeps a
+    // capture only when the game has drawn a new frame.
+    request.skipIfUnchanged = true;
     std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
     if (m_backend)
         m_backend->QueuePresent(request);
 }
 
-void GS::latchHostPresentationFrame()
+void GS::latchHostPresentationFrame(uint64_t targetTick)
 {
     GSPresentationRequest request{};
     {
@@ -584,6 +576,8 @@ void GS::latchHostPresentationFrame()
         }
         request = buildPresentationRequestUnlocked();
     }
+    if (targetTick != UINT64_MAX)
+        request.vsyncTick = targetTick; // the newest capture at or before this vsync
 
     PresentationFrame frame{};
     {
@@ -602,6 +596,7 @@ void GS::latchHostPresentationFrame()
     const uint32_t width = frame.width;
     const uint32_t height = frame.height;
     const bool usedPreferred = frame.usedPreferred;
+    m_hostPresentationTick.store(frame.vsyncTick, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> presentationLock(m_presentationMutex);
         m_hostPresentationFrame = std::move(frame.pixels);

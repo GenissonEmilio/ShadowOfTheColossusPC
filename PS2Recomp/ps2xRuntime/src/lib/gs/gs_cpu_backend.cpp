@@ -3233,6 +3233,34 @@ bool GSCpuBackend::CopyFrameToHostRgba(const GSFrameReg &frame,
 
 PresentationFrame GSCpuBackend::Present(const GSPresentationRequest &request)
 {
+    if (request.skipIfUnchanged)
+    {
+        // The display memory's last write plus the display setup identify
+        // the frame: unchanged means the game has not finished a new one.
+        std::lock_guard<std::mutex> lock(m_mutex);
+        uint64_t newest = 0;
+        const std::pair<uint64_t, uint64_t> outputs[2] = {{request.dispfb1, request.display1}, {request.dispfb2, request.display2}};
+        for (const auto &[dispfb, display] : outputs)
+        {
+            const GSFrameReg frame = decodeDisplayFrame(dispfb);
+            const GSDisplayReadOrigin origin = decodeDisplayReadOrigin(dispfb);
+            uint32_t width = 0, height = 0;
+            decodeDisplaySize(display, width, height);
+            if (height == 0u)
+                continue;
+            uint64_t begin = 0, end = 0;
+            bufferRange(frame.fbp * 8192u, std::max<uint32_t>(1u, frame.fbw) * 64u, origin.y + height, frame.psm, begin, end);
+            const uint64_t firstPage = begin / 8192u;
+            const uint64_t lastPage = std::min<uint64_t>((end + 8191u) / 8192u, firstPage + m_pageEpoch.size());
+            for (uint64_t page = firstPage; page < lastPage; ++page)
+                newest = std::max(newest, m_pageEpoch[page % m_pageEpoch.size()]);
+        }
+        const std::array<uint64_t, 6> key{request.pmode, request.dispfb1, request.display1,
+                                          request.dispfb2, request.display2, newest};
+        if (key == m_lastPresentKey)
+            return {};
+        m_lastPresentKey = key;
+    }
     // Snapshot local memory under the backend lock, then perform the expensive
     // display conversion without holding the producer-side raster lock.
     thread_local std::vector<uint8_t> snapshot;

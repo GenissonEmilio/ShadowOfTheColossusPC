@@ -2,6 +2,7 @@
 #define PS2_GS_FRONTEND_H
 
 #include <array>
+#include <atomic>
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -143,7 +144,9 @@ public:
     bool isDebugHistoryPaused() const;
     void setDebugHistoryPaused(bool paused);
     bool getPreferredDisplaySource(GSFrameReg &outSource, uint32_t &outDestFbp) const;
-    void latchHostPresentationFrame();
+    // Latches the newest captured frame at or before targetTick (default: newest).
+    void latchHostPresentationFrame(uint64_t targetTick = UINT64_MAX);
+    uint64_t hostPresentationTick() const { return m_hostPresentationTick.load(std::memory_order_relaxed); }
     // Called at guest vsync: asks the raster backend to capture the display
     // at this point of the command stream (only when the shown frame changed).
     void queuePresentation();
@@ -264,6 +267,7 @@ private:
     uint32_t m_hostPresentationSourceFbp = 0;
     bool m_hostPresentationUsedPreferred = false;
     bool m_hasHostPresentationFrame = false;
+    std::atomic<uint64_t> m_hostPresentationTick{0};
     uint64_t m_nativeImageUploadCount = 0;
     uint64_t m_nativePackedGIFPacketCount = 0;
 

@@ -196,9 +196,34 @@ void GSAsyncBackend::execute(const Command &command, const Chunk &chunk)
         std::lock_guard<std::mutex> lock(m_presentMutex);
         if (frame)
         {
-            m_latestFrame = std::move(frame);
-            m_hasLatestFrame = true;
+            frame.vsyncTick = command.present->vsyncTick;
+            // PS2X_CAPTURE_DUMP=<dir>:<first tick>: save 24 captures as PPM.
+            static const char *dump = std::getenv("PS2X_CAPTURE_DUMP");
+            static int dumped = 0;
+            if (dump && dumped < 24)
+            {
+                const char *colon = std::strrchr(dump, ':');
+                const uint64_t first = colon ? std::strtoull(colon + 1, nullptr, 10) : 0;
+                if (frame.vsyncTick >= first)
+                {
+                    char path[512];
+                    std::snprintf(path, sizeof(path), "%.*s/cap_%06llu.ppm", colon ? int(colon - dump) : int(std::strlen(dump)), dump,
+                                  (unsigned long long)frame.vsyncTick);
+                    if (FILE *f = std::fopen(path, "wb"))
+                    {
+                        std::fprintf(f, "P6\n%u %u\n255\n", frame.width, frame.height);
+                        for (size_t i = 0; i + 3 < frame.pixels.size(); i += 4)
+                            std::fwrite(&frame.pixels[i], 1, 3, f);
+                        std::fclose(f);
+                        ++dumped;
+                    }
+                }
+            }
+            m_frames.push_back(std::move(frame));
+            if (m_frames.size() > 8u)
+                m_frames.pop_front();
             ps2_stats::presentedFrames.fetch_add(1, std::memory_order_relaxed);
+            ps2_stats::frameSequence.fetch_add(1, std::memory_order_relaxed);
         }
         --m_presentsQueued;
         break;
@@ -286,9 +311,16 @@ void GSAsyncBackend::Sync(GSSyncReason reason)
 PresentationFrame GSAsyncBackend::Present(const GSPresentationRequest &request)
 {
     {
+        // The newest capture taken at or before the requested vsync (the
+        // window paces frames by their guest vsync).
         std::lock_guard<std::mutex> lock(m_presentMutex);
-        if (m_hasLatestFrame)
-            return m_latestFrame;
+        if (!m_frames.empty())
+        {
+            for (auto it = m_frames.rbegin(); it != m_frames.rend(); ++it)
+                if (it->vsyncTick <= request.vsyncTick)
+                    return *it;
+            return m_frames.front();
+        }
     }
     // Nothing captured yet (start-up): render one synchronously.
     drain();

@@ -2515,6 +2515,21 @@ int PS2Memory::pollDmaRegisters()
 
 uint32_t PS2Memory::readIORegister(uint32_t address)
 {
+    // VIF1_STAT / GIF_STAT while the VU1 worker still has work: report the
+    // paths as busy instead of waiting, like the hardware. Games poll these
+    // once per vsync to decide whether to flip (SotC's iosCheckDrawFinish);
+    // blocking here held the vsync thread and bunched frames.
+    constexpr uint32_t kVif1Stat = 0x10003C00u, kGifStat = 0x10003020u;
+    if ((address == kVif1Stat || address == kGifStat) &&
+        m_mtvuOutstanding.load(std::memory_order_acquire) != 0u && !onVu1Worker())
+    {
+        const auto it = m_ioRegisters.find(address);
+        const uint32_t value = it != m_ioRegisters.end() ? it->second : 0u;
+        if (address == kVif1Stat)
+            return value | 0x01000000u; // FQC: data still queued
+        m_timerIrqLatched |= flushEeTimers();
+        return value | 0x00000C00u; // APATH: PATH3 transferring
+    }
     if ((address >= 0x10003000u && address < 0x10003100u) || (address >= 0x10003C00u && address < 0x10003E00u))
         syncVu1(); // GIF / VIF1 registers
     if (address == 0x10003020u || address < 0x10002000u)

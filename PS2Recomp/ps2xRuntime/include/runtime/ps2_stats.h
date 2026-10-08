@@ -19,6 +19,9 @@ namespace ps2_stats
     inline std::atomic<uint64_t> gsPixels{0};
     inline std::atomic<uint64_t> vif1Chains{0};
     inline std::atomic<uint64_t> presentedFrames{0};
+    inline std::atomic<uint64_t> frameSequence{0}; // captured game frames, ever
+    // Host refreshes each new game frame stayed in the window: [1], [2], [3], [4+].
+    inline std::atomic<uint64_t> frameHolds[4]{};
     inline std::atomic<uint64_t> vu1RecRuns{0};
     inline std::atomic<uint64_t> vu1RecBails{0};
     inline std::atomic<uint64_t> vu1InterpRuns{0}; // one display list per game frame

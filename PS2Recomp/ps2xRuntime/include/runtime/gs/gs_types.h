@@ -288,6 +288,9 @@ struct GSPresentationRequest
     GSFrameReg preferredSource{};
     uint32_t preferredDestFbp = 0;
     bool hasPreferredSource = false;
+    // Capture only if the displayed memory or display setup changed since
+    // the previous capture (a new game frame).
+    bool skipIfUnchanged = false;
 };
 
 struct PresentationFrame
@@ -298,6 +301,7 @@ struct PresentationFrame
     uint32_t displayFbp = 0;
     uint32_t sourceFbp = 0;
     bool usedPreferred = false;
+    uint64_t vsyncTick = 0; // guest vsync the frame was captured at
 
     explicit operator bool() const
     {

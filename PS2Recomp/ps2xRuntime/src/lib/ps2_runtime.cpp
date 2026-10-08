@@ -381,6 +381,7 @@ namespace
 
 static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight)
 {
+
     static uint64_t s_lastPresentationTick = std::numeric_limits<uint64_t>::max();
     static bool s_hasLatchedInitialFrame = false;
     static uint32_t s_lastDisplayFbp = std::numeric_limits<uint32_t>::max();
@@ -392,15 +393,47 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     static std::vector<uint8_t> s_scratch;
     static std::vector<uint8_t> s_uploadBuffer(DEFAULT_FB_SIZE, 0u);
 
-    const uint64_t currentTick = rt->eeScheduler().currentVSyncTick();
+    // Frame pacing: show each game frame from the guest vsync it was captured
+    // at, on a steady clock that follows the guest vsync count a little
+    // behind (guest vsyncs arrive in bursts when the game thread is busy).
+    // A frame drawn over three vsyncs stays three refreshes, like on a TV.
+    static double s_clock = -1.0;
+    static double s_clockTime = 0.0;
+    constexpr double kVsyncRate = 59.94;
+    constexpr double kLatencyVsyncs = 2.0;
+    const double now = GetTime();
+    const double goal = static_cast<double>(rt->eeScheduler().currentVSyncTick()) - kLatencyVsyncs;
+    if (s_clock < 0.0 || std::fabs(goal - s_clock) > 8.0)
+        s_clock = goal;
+    else
+    {
+        s_clock += (now - s_clockTime) * kVsyncRate;
+        s_clock += (goal - s_clock) * 0.05;
+        s_clock = std::min(s_clock, goal + 1.0);
+    }
+    s_clockTime = now;
+    const uint64_t currentTick = s_clock > 0.0 ? static_cast<uint64_t>(s_clock) : 0u;
     const bool needsLatch = !s_hasLatchedInitialFrame || currentTick != s_lastPresentationTick;
     if (needsLatch)
     {
-        rt->gs().latchHostPresentationFrame();
+        rt->gs().latchHostPresentationFrame(currentTick);
         s_lastPresentationTick = currentTick;
         s_hasLatchedInitialFrame = true;
     }
-    else if (s_hasUploadedFrame)
+    {
+        // How many host refreshes each game frame is shown for (PS2X_STATS).
+        static uint64_t s_shownTick = UINT64_MAX, s_refreshes = 0;
+        ++s_refreshes;
+        const uint64_t shown = rt->gs().hostPresentationTick();
+        if (shown != s_shownTick)
+        {
+            if (s_shownTick != UINT64_MAX)
+                ps2_stats::frameHolds[std::min<uint64_t>(s_refreshes, 4u) - 1u].fetch_add(1, std::memory_order_relaxed);
+            s_shownTick = shown;
+            s_refreshes = 0;
+        }
+    }
+    if (!needsLatch && s_hasUploadedFrame)
     {
         outWidth = (s_lastWidth != 0u) ? s_lastWidth : FB_WIDTH;
         outHeight = (s_lastHeight != 0u) ? s_lastHeight : DEFAULT_DISPLAY_HEIGHT;
@@ -2664,6 +2697,8 @@ void PS2Runtime::run()
             std::cerr << "[stats] t=" << static_cast<int>(GetTime())
                       << " gameFps=" << (statChains - lastStatChains) / 5.0
                       << " shownFps=" << ps2_stats::presentedFrames.exchange(0) / 5.0
+                      << " holds(1/2/3/4+)=" << ps2_stats::frameHolds[0].exchange(0) << "/" << ps2_stats::frameHolds[1].exchange(0)
+                      << "/" << ps2_stats::frameHolds[2].exchange(0) << "/" << ps2_stats::frameHolds[3].exchange(0)
                       << " mscal=" << ps2_stats::vu1Mscal.exchange(0)
                       << " vu1Instr=" << ps2_stats::vu1Instr.exchange(0)
                       << " vu1Stall=" << ps2_stats::vu1StallCycles.exchange(0)
