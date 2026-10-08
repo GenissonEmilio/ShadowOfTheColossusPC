@@ -9,6 +9,10 @@
 #include <cassert>
 #include <cstring>
 #include <limits>
+#include <map>
+#include <tuple>
+#include <chrono>
+#include <iostream>
 #include <stdexcept>
 
 namespace
@@ -186,16 +190,17 @@ void EeScheduler::run()
             else
             {
                 GuestThread *owner = &acquireInvocationThread();
-                GuestInvocation invocation = std::move(m_pendingInvocations.front());
-                m_pendingInvocations.pop_front();
                 owner->status = EeThreadStatus::Running;
                 m_currentThreadId = owner->id;
                 renewTimeSlice();
-                if (getRegU32(&invocation.context, 29) == 0u)
-                {
-                    SET_GPR_U32(&invocation.context, 29, invocationStackTop());
-                }
-                owner->invocations.push_back(std::move(invocation));
+                // Moved once, straight into place (a whole guest context). The
+                // stack top depends on the depth before it.
+                const bool needsStack = getRegU32(&m_pendingInvocations.front().context, 29) == 0u;
+                const uint32_t stackTop = needsStack ? invocationStackTop() : 0u;
+                GuestInvocation &invocation = owner->invocations.emplace_back(std::move(m_pendingInvocations.front()));
+                m_pendingInvocations.pop_front();
+                if (needsStack)
+                    SET_GPR_U32(&invocation.context, 29, stackTop);
             }
         }
 
@@ -262,13 +267,12 @@ void EeScheduler::run()
 
         if (!m_pendingInvocations.empty() && running->invocations.empty())
         {
-            GuestInvocation invocation = std::move(m_pendingInvocations.front());
+            const bool needsStack = getRegU32(&m_pendingInvocations.front().context, 29) == 0u;
+            const uint32_t stackTop = needsStack ? invocationStackTop() : 0u;
+            GuestInvocation &invocation = running->invocations.emplace_back(std::move(m_pendingInvocations.front()));
             m_pendingInvocations.pop_front();
-            if (getRegU32(&invocation.context, 29) == 0u)
-            {
-                SET_GPR_U32(&invocation.context, 29, invocationStackTop());
-            }
-            running->invocations.push_back(std::move(invocation));
+            if (needsStack)
+                SET_GPR_U32(&invocation.context, 29, stackTop);
             continue;
         }
 
@@ -309,6 +313,38 @@ void EeScheduler::run()
                                   running->invocations.empty() ? 0u : running->invocations.back().sequence};
             if (!m_vu0OwnerValid || !(key == m_vu0Owner))
             {
+                // PS2X_SCHED_STATS=1: what changes the VU0 owner (thread or
+                // invocation switches), per second, by thread and guest PC.
+#if defined(PLATFORM_VITA)
+                static const bool schedStats = true;
+#else
+                static const bool schedStats = std::getenv("PS2X_SCHED_STATS") != nullptr;
+#endif
+                if (schedStats)
+                {
+                    static std::map<std::tuple<int, size_t, uint32_t>, uint64_t> switches;
+                    static auto last = std::chrono::steady_clock::now();
+                    ++switches[{key.threadId, key.depth, context.pc}];
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now - last >= std::chrono::seconds(5))
+                    {
+                        last = now;
+                        std::vector<std::pair<uint64_t, std::tuple<int, size_t, uint32_t>>> top;
+                        uint64_t total = 0;
+                        for (const auto &[k, n] : switches)
+                        {
+                            top.push_back({n, k});
+                            total += n;
+                        }
+                        std::sort(top.rbegin(), top.rend());
+                        std::cerr << "[sched] vu0 owner changes/s=" << total / 5 << " top:";
+                        for (size_t i = 0; i < top.size() && i < 8; ++i)
+                            std::cerr << " t" << std::get<0>(top[i].second) << "/d" << std::get<1>(top[i].second) << "@0x" << std::hex
+                                      << std::get<2>(top[i].second) << std::dec << "=" << top[i].first / 5;
+                        std::cerr << std::endl;
+                        switches.clear();
+                    }
+                }
                 flushVu0Owner();
                 loadGlobalVu0(context);
                 m_vu0Owner = key;
@@ -1312,15 +1348,18 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
               { return left.order < right.order; });
     for (const EeIrqHandler &handler : matching)
     {
-        GuestInvocation invocation{};
+        // Built in place: an invocation carries a whole guest context, and
+        // timer interrupts come in thousands per second (SotC's TIM0).
+        GuestInvocation &invocation = m_pendingInvocations.emplace_back();
         invocation.kind = GuestInvocationKind::Interrupt;
+        invocation.sequence = ++m_invocationSequence;
         invocation.context.pc = handler.handler;
         SET_GPR_U32(&invocation.context, 4, cause);
         SET_GPR_U32(&invocation.context, 5, handler.argument);
         SET_GPR_U32(&invocation.context, 28, handler.gp);
         SET_GPR_U32(&invocation.context, 29, 0u);
         SET_GPR_U32(&invocation.context, 31, 0u);
-        queueInvocation(std::move(invocation));
+        m_checkpointPending.store(true, std::memory_order_release);
     }
 }
 

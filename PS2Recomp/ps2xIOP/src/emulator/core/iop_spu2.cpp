@@ -496,11 +496,29 @@ namespace ps2x::iop::detail
         }
         const auto &A = core.revAddr;
         const auto &V = core.revVol;
+        // Wrap into the work area. Offsets land within one wrap of it in
+        // practice: a compare instead of a division (the Cortex-A9 has no
+        // integer divide; this runs ~40 times per sample).
+        const int32_t isize = static_cast<int32_t>(size);
         auto index = [&](int64_t offset) -> uint32_t
         {
-            int64_t position = (static_cast<int64_t>(core.reverbX) + offset) % static_cast<int64_t>(size);
-            if (position < 0)
-                position += size;
+            int32_t position = static_cast<int32_t>(core.reverbX) + static_cast<int32_t>(offset);
+            if (position >= isize)
+            {
+                position -= isize;
+                if (position >= isize)
+                    position %= isize;
+            }
+            else if (position < 0)
+            {
+                position += isize;
+                if (position < 0)
+                {
+                    position %= isize;
+                    if (position < 0)
+                        position += isize;
+                }
+            }
             return esa + static_cast<uint32_t>(position);
         };
         auto rd = [&](int64_t offset) -> int32_t { return static_cast<int16_t>(m_ram[index(offset)]); };
@@ -537,7 +555,7 @@ namespace ps2x::iop::detail
         wr(mRAPF2, Rout);
         Rout = clamp16(mul(Rout, vAPF2) + rd(mRAPF2 - dAPF2));
 
-        core.reverbX = (core.reverbX + 1u) % size;
+        core.reverbX = core.reverbX + 1u >= size ? 0u : core.reverbX + 1u;
         core.revOutL = Lout;
         core.revOutR = Rout;
         outL = core.revPrevL;

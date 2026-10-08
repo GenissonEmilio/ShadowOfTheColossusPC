@@ -284,7 +284,7 @@ inline bool g_ps2LogAllWrites = false;
 }
 
 // PS2X_WATCH_WRITE=<start>:<end> logs guest stores that touch the range.
-inline void ps2TraceGuestWrite(uint8_t *rdram, uint32_t guestAddr, uint32_t size, uint64_t valueLo,
+PS2_FORCE_INLINE void ps2TraceGuestWrite(uint8_t *rdram, uint32_t guestAddr, uint32_t size, uint64_t valueLo,
                                uint64_t valueHi, const char *op, const R5900Context *ctx)
 {
     if (__builtin_expect(g_ps2WatchWriteEnabled, 0))
@@ -462,7 +462,7 @@ public:
                                  uint32_t tadr,
                                  uint32_t chcr);
 
-    static inline bool isSpecialAddress(uint32_t addr)
+    static PS2_FORCE_INLINE bool isSpecialAddress(uint32_t addr)
     {
         return Ps2IsSpecialAddress(addr);
     }

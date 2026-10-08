@@ -1,5 +1,14 @@
 #ifndef PS2_ADDRESS_H
 #define PS2_ADDRESS_H
+#ifndef PS2_FORCE_INLINE
+// The recompiled game is built for size (-Os), which turns these one-line
+// helpers (every guest load/store goes through them) into calls.
+#if defined(_MSC_VER)
+#define PS2_FORCE_INLINE __forceinline
+#else
+#define PS2_FORCE_INLINE __attribute__((always_inline)) inline
+#endif
+#endif
 
 #include <cstdint>
 
@@ -11,37 +20,37 @@ static inline constexpr uint32_t PS2_KSEG0_BASE = 0x80000000u;
 static inline constexpr uint32_t PS2_KSEG0_KSEG1_SIZE = 0x40000000u;
 static inline constexpr uint32_t PS2_KSEG2_BASE = 0xC0000000u;
 
-static inline constexpr bool Ps2AddressInRange(uint32_t value, uint32_t base, uint32_t size)
+static PS2_FORCE_INLINE constexpr bool Ps2AddressInRange(uint32_t value, uint32_t base, uint32_t size)
 {
     return (value - base) < size;
 }
 
-static inline constexpr bool Ps2IsUncachedRamMirrorAddress(uint32_t addr)
+static PS2_FORCE_INLINE constexpr bool Ps2IsUncachedRamMirrorAddress(uint32_t addr)
 {
     return Ps2AddressInRange(addr, PS2_EE_UNCACHED_RAM_MIRROR_BASE, PS2_EE_UNCACHED_RAM_MIRROR_SIZE);
 }
 
-static inline constexpr bool Ps2IsKseg01Address(uint32_t addr)
+static PS2_FORCE_INLINE constexpr bool Ps2IsKseg01Address(uint32_t addr)
 {
     return Ps2AddressInRange(addr, PS2_KSEG0_BASE, PS2_KSEG0_KSEG1_SIZE);
 }
 
-static inline constexpr bool Ps2IsKseg23Address(uint32_t addr)
+static PS2_FORCE_INLINE constexpr bool Ps2IsKseg23Address(uint32_t addr)
 {
     return addr >= PS2_KSEG2_BASE;
 }
 
-static inline constexpr uint32_t Ps2DirectMappedPhysicalAddress(uint32_t addr)
+static PS2_FORCE_INLINE constexpr uint32_t Ps2DirectMappedPhysicalAddress(uint32_t addr)
 {
     return addr & 0x1FFFFFFFu;
 }
 
-static inline constexpr uint32_t Ps2PhysicalAddress(uint32_t addr)
+static PS2_FORCE_INLINE constexpr uint32_t Ps2PhysicalAddress(uint32_t addr)
 {
     return (addr >= PS2_KSEG0_BASE) ? Ps2DirectMappedPhysicalAddress(addr) : addr;
 }
 
-static inline constexpr bool Ps2IsPhysicalSpecialAddress(uint32_t physAddr)
+static PS2_FORCE_INLINE constexpr bool Ps2IsPhysicalSpecialAddress(uint32_t physAddr)
 {
     return Ps2AddressInRange(physAddr, PS2_BIOS_BASE, PS2_BIOS_SIZE) ||
            Ps2AddressInRange(physAddr, PS2_SCRATCHPAD_BASE, PS2_SCRATCHPAD_SIZE) ||
@@ -50,8 +59,11 @@ static inline constexpr bool Ps2IsPhysicalSpecialAddress(uint32_t physAddr)
            (physAddr >= PS2_VU0_DATA_BASE && physAddr < (PS2_VU1_CODE_BASE + PS2_VU1_CODE_SIZE));
 }
 
-static inline constexpr bool Ps2IsSpecialAddress(uint32_t addr)
+static PS2_FORCE_INLINE constexpr bool Ps2IsSpecialAddress(uint32_t addr)
 {
+    // Almost every guest access: main RAM (KUSEG, below every special range).
+    if (addr < PS2_RAM_SIZE)
+        return false;
     if (Ps2IsKseg23Address(addr))
         return true;
 
