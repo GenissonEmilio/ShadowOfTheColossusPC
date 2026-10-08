@@ -329,7 +329,7 @@ struct GSHwBackend::Impl
         uint64_t presentWb = 0, textureWb = 0, transferWb = 0, clutWb = 0, discards = 0, aliasWb = 0, otherWb = 0, memoryClears = 0, directPresents = 0, wrapDraws = 0, gpuPageMoves = 0;
     } stats;
     const char *wbReason = "other";
-    // PS2X_GS_HW_TRACE=N: list the draw calls between presents N and N+1.
+    // PS2X_GS_HW_TRACE=N: list the draw calls of the first frame after guest vsync N.
     // PS2X_GS_HW_VERIFY=1 (with PS2X_GS_HW_TRACE): the CPU renderer draws too
     // and owns GS memory; in the traced frame each draw call starts from its
     // result and the GPU's output is compared with it (mean |diff| per draw).
@@ -996,6 +996,63 @@ struct GSHwBackend::Impl
                      state.context.tex0.psm, n ? dRgb / n / 3.0 : 0.0, n ? dA / n : 0.0);
     }
 
+    // Verify mode: the CPU renderer's Z buffer into the GPU depth target, so
+    // depth-tested draws start from the same state.
+    GLuint depthLoadProgram = 0, depthLoadTexture = 0;
+    void loadDepthFromCpu(RenderTarget &rt, const DrawKey &key)
+    {
+        DepthTarget &d = depth(key.zbp, rt.width, rt.height);
+        if (!depthLoadProgram)
+        {
+            static const char *vs = R"(#version 330 core
+void main() { vec2 p = vec2((gl_VertexID & 1) != 0 ? 3.0 : -1.0, (gl_VertexID & 2) != 0 ? 3.0 : -1.0); gl_Position = vec4(p, 0.0, 1.0); }
+)";
+            static const char *fs = R"(#version 330 core
+uniform sampler2D uZ;
+out vec4 oColor;
+void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor = vec4(0.0); }
+)";
+            depthLoadProgram = glCreateProgram();
+            glAttachShader(depthLoadProgram, compile(GL_VERTEX_SHADER, vs));
+            glAttachShader(depthLoadProgram, compile(GL_FRAGMENT_SHADER, fs));
+            glLinkProgram(depthLoadProgram);
+            glGenTextures(1, &depthLoadTexture);
+        }
+        const float scale = (key.zpsm == GS_PSM_Z16 || key.zpsm == GS_PSM_Z16S) ? 65536.0f : key.zpsm == GS_PSM_Z24 ? 16777216.0f : 4294967296.0f;
+        std::vector<float> z(static_cast<size_t>(rt.width) * rt.height);
+        {
+            std::lock_guard<std::mutex> lock(shadow->vramMutex());
+            for (uint32_t y = 0; y < rt.height; ++y)
+                for (uint32_t x = 0; x < rt.width; ++x)
+                {
+                    uint32_t v = shadow->ReadVramUnlocked(key.zpsm, key.zbp * 32u, rt.fbw, x, y);
+                    if (key.zpsm == GS_PSM_Z24)
+                        v &= 0xFFFFFFu;
+                    z[static_cast<size_t>(y) * rt.width + x] = static_cast<float>(std::min(1.0, v / static_cast<double>(scale)));
+                }
+        }
+        glBindTexture(GL_TEXTURE_2D, depthLoadTexture);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, rt.width, rt.height, 0, GL_RED, GL_FLOAT, z.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer(rt, &d));
+        glViewport(0, 0, rt.width, rt.height);
+        glDisable(GL_SCISSOR_TEST);
+        glDisable(GL_BLEND);
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_ALWAYS);
+        glDepthMask(GL_TRUE);
+        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        glUseProgram(depthLoadProgram);
+        glActiveTexture(GL_TEXTURE0);
+        glUniform1i(glGetUniformLocation(depthLoadProgram, "uZ"), 0);
+        glBindVertexArray(vao);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glUseProgram(program);
+    }
+
+    std::vector<uint8_t> verifyBefore; // traced verify frame: target before the draw
     void compareWithCpu(RenderTarget &rt)
     {
         const DrawKey &key = pendingKey;
@@ -1015,6 +1072,9 @@ struct GSHwBackend::Impl
         (void)shadow->ReadVram(GS_PSM_CT32, 0, 1, 0, 0);
         double dRgb = 0, dA = 0, gpuSum = 0, cpuSum = 0;
         uint32_t maxD = 0;
+        int worstX = 0, worstY = 0;
+        uint32_t worstCpu = 0;
+        uint32_t onlyGpu = 0, onlyCpu = 0, both = 0; // pixels changed by the draw on one side only
         std::lock_guard<std::mutex> lock(shadow->vramMutex());
         for (int y = 0; y < h; ++y)
             for (int x = 0; x < w; ++x)
@@ -1029,7 +1089,22 @@ struct GSHwBackend::Impl
                 const uint32_t ga = std::min(255u, (static_cast<uint32_t>(p[3]) * 128u + 127u) / 255u);
                 const uint32_t d = static_cast<uint32_t>(std::abs(int(p[0]) - int(cr)) + std::abs(int(p[1]) - int(cg)) + std::abs(int(p[2]) - int(cb)));
                 dRgb += d;
+                if (d > maxD)
+                {
+                    worstX = x0 + x;
+                    worstY = y0 + y;
+                    worstCpu = cr | (cg << 8) | (cb << 16) | (ca << 24);
+                }
                 maxD = std::max(maxD, d);
+                if (!verifyBefore.empty() && d > 24u)
+                {
+                    const uint8_t *b = verifyBefore.data() + (static_cast<size_t>(y0 + y) * rt.width + (x0 + x)) * 4u;
+                    const bool gpuChanged = std::abs(int(p[0]) - int(b[0])) + std::abs(int(p[1]) - int(b[1])) + std::abs(int(p[2]) - int(b[2])) > 6;
+                    const bool cpuChanged = std::abs(int(cr) - int(b[0])) + std::abs(int(cg) - int(b[1])) + std::abs(int(cb) - int(b[2])) > 6;
+                    if (gpuChanged && !cpuChanged) ++onlyGpu;
+                    else if (cpuChanged && !gpuChanged) ++onlyCpu;
+                    else ++both;
+                }
                 if (rt.psm == GS_PSM_CT32)
                     dA += std::abs(int(ga) - int(ca));
                 gpuSum += p[0] + p[1] + p[2];
@@ -1038,6 +1113,13 @@ struct GSHwBackend::Impl
         const double n = static_cast<double>(w) * h;
         std::fprintf(stderr, "[gs:verify] fbp=%u area=%dx%d@%d,%d dRGB=%.2f max=%u dA=%.2f gpuMean=%.1f cpuMean=%.1f%s\n", rt.fbp, w, h, x0, y0,
                      dRgb / n / 3.0, maxD, dA / n, gpuSum / n / 3.0, cpuSum / n / 3.0, dRgb / n / 3.0 > 2.0 ? "  <<<" : "");
+        if (maxD > 60u && !verifyBefore.empty())
+        {
+            const uint8_t *b = verifyBefore.data() + (static_cast<size_t>(worstY) * rt.width + worstX) * 4u;
+            const uint8_t *g = px.data() + (static_cast<size_t>(worstY - y0) * w + (worstX - x0)) * 4u;
+            std::fprintf(stderr, "[gs:verify]   bad pixels: only GPU drew %u, only CPU drew %u, both %u; worst (%d,%d) before=%02x%02x%02x gpu=%02x%02x%02x cpu=%06x\n",
+                         onlyGpu, onlyCpu, both, worstX, worstY, b[0], b[1], b[2], g[0], g[1], g[2], worstCpu & 0xFFFFFFu);
+        }
     }
 
     // Whether (A - B) * C + D can leave 0..255 for the queued primitives: an
@@ -1248,33 +1330,58 @@ struct GSHwBackend::Impl
                 for (const auto &v : pending)
                     std::fprintf(stderr, "[gs:trace]   v (%.1f,%.1f) z=%.9g st=(%g,%g,%g) rgba=%02x%02x%02x%02x fog=%g\n", v.x, v.y, v.z, v.s, v.t, v.q, v.r, v.g, v.b, v.a, v.fog);
         }
+        if (verify && tracing())
+        {
+            verifyBefore.resize(static_cast<size_t>(rt.width) * rt.height * 4u);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer(rt, nullptr));
+            glReadPixels(0, 0, rt.width, rt.height, GL_RGBA, GL_UNSIGNED_BYTE, verifyBefore.data());
+            glBindFramebuffer(GL_FRAMEBUFFER, wrapFbo ? wrapFbo : framebuffer(rt, d));
+        }
         // Pass 1: pixels that pass the alpha test write everything enabled.
         // Pass 2 (AFAIL != KEEP): failing pixels write FB only, Z only, or RGB only.
         const GLsizei count = static_cast<GLsizei>(pending.size());
-        if (atst != 0u)
-        {
-            glUniform1i(uniform("uAtestFailed"), 0);
-            glColorMask(writeR, writeG, writeB, writeA);
-            if (d)
-                glDepthMask(writeZ ? GL_TRUE : GL_FALSE);
-            glDrawArrays(GL_TRIANGLES, 0, count);
-            ++drawCalls;
-        }
-        // Settings menu "Exact transparency" off: pixels that fail a real
-        // comparison are dropped (one pass); ATST=NEVER draws still need it.
         const bool exactAlpha = hostmenu::settings().exactAlpha.load(std::memory_order_relaxed);
-        if (atst != 1u && afail != 0u && (exactAlpha || atst == 0u))
+        const bool failPass = atst != 1u && afail != 0u && (exactAlpha || atst == 0u);
+        const bool failColor = afail != 2u, failZ = afail == 2u && writeZ;
+        auto drawPass = [&](bool failing, GLint first, GLsizei n)
         {
-            const bool failColor = afail != 2u, failZ = afail == 2u && writeZ;
-            if (failColor || failZ)
+            glUniform1i(uniform("uAtestFailed"), failing ? 1 : 0);
+            if (!failing)
             {
-                glUniform1i(uniform("uAtestFailed"), 1);
+                glColorMask(writeR, writeG, writeB, writeA);
+                if (d)
+                    glDepthMask(writeZ ? GL_TRUE : GL_FALSE);
+            }
+            else
+            {
                 glColorMask(failColor && writeR, failColor && writeG, failColor && writeB, afail == 1u && writeA);
                 if (d)
                     glDepthMask(failZ ? GL_TRUE : GL_FALSE);
-                glDrawArrays(GL_TRIANGLES, 0, count);
-                ++drawCalls;
             }
+            glDrawArrays(GL_TRIANGLES, first, n);
+            ++drawCalls;
+        };
+        // PS2X_GS_HW_AFAIL_ORDERED=1 (diagnostics): both passes triangle by
+        // triangle, in the GS's order.
+        static const bool ordered = std::getenv("PS2X_GS_HW_AFAIL_ORDERED") != nullptr;
+        if (ordered && atst != 0u && failPass && (failColor || failZ))
+        {
+            for (GLint t = 0; t < count; t += 3)
+            {
+                drawPass(false, t, 3);
+                drawPass(true, t, 3);
+            }
+        }
+        else
+        {
+            // Pass 1: pixels that pass the alpha test write everything enabled.
+            if (atst != 0u)
+                drawPass(false, 0, count);
+            // Pass 2 (AFAIL != KEEP): failing pixels write FB only, Z only or RGB
+            // only. Settings menu "Exact transparency" off: pixels that fail a
+            // real comparison are dropped (ATST=NEVER draws still need it).
+            if (failPass && (failColor || failZ))
+                drawPass(true, 0, count);
         }
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glDepthMask(GL_TRUE);
@@ -1394,6 +1501,9 @@ struct GSHwBackend::Impl
             (void)shadow->ReadVram(GS_PSM_CT32, 0, 1, 0, 0); // the CPU renderer's pending work lands
             std::fill(rt.synced.begin(), rt.synced.end(), kNeverLoaded);
             loadStalePages(rt, 0, 0, rt.width, rt.height);
+            const uint32_t ztst = (key.test >> 17) & 3u;
+            if (((key.test >> 16) & 1u) && (ztst != 1u || !key.zmask))
+                loadDepthFromCpu(rt, key);
         }
         pendingKey = key;
         hasPending = true;
@@ -1796,7 +1906,8 @@ PresentationFrame GSHwBackend::Present(const GSPresentationRequest &request)
             std::fprintf(stderr, "[gs:trace] present pmode=%llx dispfb1=%llx display1=%llx dispfb2=%llx display2=%llx\n", (unsigned long long)request.pmode, (unsigned long long)request.dispfb1, (unsigned long long)request.display1, (unsigned long long)request.dispfb2, (unsigned long long)request.display2);
         if (m_impl->tracing() && m_impl->tracedDraws > 0)
             m_impl->traceDone = true; // one whole frame with draws
-        ++m_impl->presents;
+        // PS2X_GS_HW_TRACE counts guest vsyncs: the same moment at any speed.
+        m_impl->presents = request.vsyncTick;
         if (directOk)
             return direct;
     }
