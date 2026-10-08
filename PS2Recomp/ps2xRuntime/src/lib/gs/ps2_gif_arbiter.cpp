@@ -23,6 +23,15 @@ void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeByte
     if (!data || sizeBytes < 16 || !m_processFn)
         return;
 
+    // PATH1 has the highest priority: with nothing queued, drain() would put
+    // it first anyway. Pass it on now instead of copying it into the queue
+    // (VU1 XGKICKs, thousands per frame; processFn copies what it keeps).
+    if (pathId == GifPathId::Path1 && m_queue.empty())
+    {
+        m_processFn(data, sizeBytes);
+        return;
+    }
+
     GifArbiterPacket pkt;
     pkt.pathId = pathId;
     pkt.path2DirectHl = (pathId == GifPathId::Path2) && path2DirectHl;

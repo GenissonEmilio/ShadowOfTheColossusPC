@@ -1,5 +1,6 @@
 #include "runtime/gs/gs_async_backend.h"
 #include "ThreadNaming.h"
+#include "runtime/ps2_thread_load.h"
 #include "runtime/ps2_stats.h"
 
 #include <chrono>
@@ -24,6 +25,7 @@ GSAsyncBackend::GSAsyncBackend(std::unique_ptr<GSRasterBackend> inner)
     m_worker = std::thread([this]
                            {
                                ThreadNaming::SetCurrentThreadName("GSRaster");
+                               ps2_load::setThreadSlot(ps2_load::kGs);
                                workerLoop(); });
 }
 
@@ -65,12 +67,22 @@ void GSAsyncBackend::publishStaged()
 {
     if (m_staged.empty())
         return;
+    ps2_load::Wait waiting;
     std::unique_lock<std::mutex> lock(m_queueMutex);
     m_spaceCv.wait(lock, [this]
                    { return m_producing.commands.size() < kMaxQueuedCommands; });
-    for (Command &command : m_staged)
-        m_producing.commands.push_back(std::move(command));
     m_enqueued += m_staged.size();
+    if (m_producing.commands.empty())
+    {
+        // The worker took everything: hand the batch over whole (a command
+        // carries a full draw state; moving them one by one is a copy each).
+        m_producing.commands.swap(m_staged);
+    }
+    else
+    {
+        for (Command &command : m_staged)
+            m_producing.commands.push_back(std::move(command));
+    }
     m_staged.clear();
     const bool wake = m_workerSleeping;
     lock.unlock();
@@ -95,9 +107,12 @@ void GSAsyncBackend::enqueue(Command &&command, const uint8_t *data, uint32_t si
         PublishThreadStaged(); // keep submission order
     }
     std::unique_lock<std::mutex> lock(m_queueMutex);
-    if (waitForSpace)
+    if (waitForSpace && m_producing.commands.size() >= kMaxQueuedCommands)
+    {
+        ps2_load::Wait waiting;
         m_spaceCv.wait(lock, [this]
                        { return m_producing.commands.size() < kMaxQueuedCommands; });
+    }
     if (data && size)
     {
         command.args[0] = static_cast<uint32_t>(m_producing.bytes.size());
@@ -119,6 +134,7 @@ void GSAsyncBackend::drain() const
     PublishThreadStaged();
     std::unique_lock<std::mutex> lock(m_queueMutex);
     const uint64_t target = m_enqueued;
+    ps2_load::Wait waiting;
     m_doneCv.wait(lock, [this, target]
                   { return m_completed >= target; });
 }
@@ -138,10 +154,15 @@ void GSAsyncBackend::workerLoop()
         if (!unflushed)
         {
             m_workerSleeping = true;
+            ps2_load::Wait idle;
             m_workCv.wait(lock, ready);
             m_workerSleeping = false;
         }
-        else if (m_workerSleeping = true, !m_workCv.wait_for(lock, std::chrono::microseconds(500), ready))
+        else if (m_workerSleeping = true, ![&]
+                 {
+                     ps2_load::Wait idle;
+                     return m_workCv.wait_for(lock, std::chrono::microseconds(500), ready);
+                 }())
         {
             m_workerSleeping = false;
             lock.unlock();

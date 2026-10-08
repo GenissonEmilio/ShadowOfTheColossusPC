@@ -30,7 +30,7 @@ namespace
     constexpr uint32_t kWorldEntry = 0x05b0;
     constexpr uint32_t kWorldResume = 0x13b8;
 
-    inline float norm(float value)
+    __attribute__((always_inline)) inline float norm(float value)
     {
         uint32_t bits;
         std::memcpy(&bits, &value, sizeof(bits));

@@ -36,7 +36,7 @@ namespace vu1rec
 
     // VU1Interpreter::normalizeOperand / the value part of normalizeResult:
     // denormals flush to signed zero, Inf/NaN clamp to signed FLT_MAX.
-    inline float norm(float value)
+    __attribute__((always_inline)) inline float norm(float value)
     {
         uint32_t bits;
         std::memcpy(&bits, &value, sizeof(bits));

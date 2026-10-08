@@ -1,0 +1,35 @@
+diff --git a/source/gxm.c b/source/gxm.c
+index 4cbb40b..9350aa6 100644
+--- a/source/gxm.c
++++ b/source/gxm.c
+@@ -975,13 +975,12 @@ void vglSwapBuffers(GLboolean has_commondialog) {
+ void glFinish(void) {
+ 	THREAD_SAFE()
+ 
+-	// Waiting for GPU to finish drawing jobs
+-	if (scene_not_flushed) {
+-		dirty_framebuffer = GL_TRUE;
+-		scene_reset();
+-		sceGxmFinish(gxm_context);
+-		scene_not_flushed = GL_FALSE;
+-	}
++	// Waiting for GPU to finish drawing jobs. Always: draws after a previous
++	// glFinish go into the scene it opened without flagging it unflushed.
++	dirty_framebuffer = GL_TRUE;
++	scene_reset();
++	sceGxmFinish(gxm_context);
++	scene_not_flushed = GL_FALSE;
+ }
+ 
+ void glReleaseShaderCompiler(void) {
+diff --git a/source/vgl.c b/source/vgl.c
+index 014e790..b427b31 100644
+--- a/source/vgl.c
++++ b/source/vgl.c
+@@ -786,5 +786,5 @@ void vglSetShaderCachePath(const char *path) {
+ }
+ 
+ void vglSetShaderAssociationPath(const char *path) {
+-	shark_set_shader_association_path(path);
++	(void)path; // needs a newer vitaShaRK than the SDK has
+ }

@@ -17,6 +17,7 @@
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ee_scheduler.h"
 #include "ThreadNaming.h"
+#include "runtime/ps2_thread_load.h"
 #include "Kernel/Stubs/Audio.h"
 #include "Kernel/Stubs/GS.h"
 #include "Kernel/Stubs/MPEG.h"
@@ -516,7 +517,13 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     if (GSDirectFrame::load(s_scratch, direct))
     {
         waitDirectFrame(direct.fence);
-        g_directFrame = Texture2D{direct.texture, static_cast<int>(width), static_cast<int>(height), 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+        // The shim draws a GL texture name as is when bit 31 is set.
+        const unsigned int id = direct.texture | 0x80000000u;
+#else
+        const unsigned int id = direct.texture;
+#endif
+        g_directFrame = Texture2D{id, static_cast<int>(width), static_cast<int>(height), 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
         outWidth = width;
         outHeight = height;
         s_hasUploadedFrame = true;
@@ -917,6 +924,11 @@ bool PS2Runtime::initialize(const char *title)
             else
                 std::cerr << "[gs:hw] could not create the GS GL context" << std::endl;
         }
+#endif
+#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+        // vitaGL is one GL for every thread (the shim's lock takes turns):
+        // nothing to make current, the GPU GS renderer can start.
+        GSHwBackend::setContextProvider([] {});
 #endif
         hostmenu::load();
         InitAudioDevice();
@@ -2656,11 +2668,82 @@ void PS2Runtime::run()
     Texture2D frameTex = LoadTextureFromImage(blank);
     UnloadImage(blank);
 
+    // One host frame: the game picture (4:3 / stretch / integer), the FPS
+    // overlay, the debug UI and the settings menu.
+    std::function<void(const Texture2D &, uint32_t, uint32_t)> drawHostFrame = [&](const Texture2D &shown, uint32_t presentWidth, uint32_t presentHeight)
+    {
+            BeginDrawing();
+            ClearBackground(BLACK);
+            const float srcWidth = static_cast<float>(std::max<uint32_t>(1u, presentWidth));
+            const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight));
+            const float screenWidth = static_cast<float>(GetScreenWidth());
+            const float screenHeight = static_cast<float>(GetScreenHeight());
+            // The PS2 picture is 4:3 whatever its pixel size (512x448, 640x448...).
+            const float aspect = 4.0f / 3.0f;
+            const int screenMode = hostmenu::settings().screenMode.load(std::memory_order_relaxed);
+            float dstWidth = std::min(screenWidth, screenHeight * aspect);
+            float dstHeight = dstWidth / aspect;
+            if (screenMode == hostmenu::kScreenStretch)
+            {
+                dstWidth = screenWidth;
+                dstHeight = screenHeight;
+            }
+            else if (screenMode == hostmenu::kScreenInteger)
+            {
+                const float whole = std::max(1.0f, std::floor(std::min(screenWidth / srcWidth, screenHeight / srcHeight)));
+                dstWidth = srcWidth * whole;
+                dstHeight = srcHeight * whole;
+            }
+            const Rectangle srcRect{0.0f, 0.0f, srcWidth, srcHeight};
+            const Rectangle dstRect{
+                (screenWidth - dstWidth) * 0.5f,
+                (screenHeight - dstHeight) * 0.5f,
+                dstWidth,
+                dstHeight};
+            DrawTexturePro(shown, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+            if (hostmenu::settings().showFps.load(std::memory_order_relaxed))
+            {
+                // FPS overlay: game frames = display lists sent to VIF1 per second.
+                static double windowStart = GetTime();
+                static uint64_t lastChains = 0;
+                static int gameFps = 0;
+                const double now = GetTime();
+                if (now - windowStart >= 1.0)
+                {
+                    const uint64_t chains = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
+                    gameFps = static_cast<int>((chains - lastChains) / (now - windowStart) + 0.5);
+                    lastChains = chains;
+                    windowStart = now;
+                }
+                const std::string fpsText = "game " + std::to_string(gameFps) + " fps | host " + std::to_string(GetFPS()) + " fps";
+                DrawRectangle(8, GetScreenHeight() - 30, MeasureText(fpsText.c_str(), 20) + 12, 26, Color{0, 0, 0, 160});
+                DrawText(fpsText.c_str(), 14, GetScreenHeight() - 27, 20, Color{120, 255, 120, 255});
+            }
+            if (m_debugUiInitialized && m_debugUiDrawCallback)
+            {
+                m_debugUiDrawCallback(*this, m_debugUiUserData);
+            }
+            hostmenu::draw(GetScreenWidth(), GetScreenHeight());
+            EndDrawing();
+    };
+#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+    // The GS thread puts its frames on screen as soon as they are ready (one
+    // GL for every thread: drawing here would hold it through every vsync).
+    static std::atomic<double> lastGsPresent{-1.0};
+    GSHwBackend::setPresentHook([&](uint32_t texture, uint32_t width, uint32_t height)
+                                {
+                                    lastGsPresent.store(GetTime(), std::memory_order_relaxed);
+                                    drawHostFrame(Texture2D{texture | 0x80000000u, static_cast<int>(width), static_cast<int>(height), 1,
+                                                            PIXELFORMAT_UNCOMPRESSED_R8G8B8A8},
+                                                  width, height); });
+#endif
+
     std::atomic<bool> gameThreadFinished{false};
 
     std::thread gameThread([&]()
                            {
         ThreadNaming::SetCurrentThreadName("GameThread");
+        ps2_load::setThreadSlot(ps2_load::kGame);
         // Guest float code runs like the EE: round toward zero, no denormals.
         ps2SetEeFloatingPointMode();
         try
@@ -2750,13 +2833,39 @@ void PS2Runtime::run()
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
         UploadFrame(frameTex, this, presentWidth, presentHeight);
 
+#if defined(PLATFORM_VITA)
+        static const bool statsEnabled = true; // to the log file: the Vita has no environment
+#else
         static const bool statsEnabled = std::getenv("PS2X_STATS") != nullptr;
+#endif
         static double nextStats = 5.0;
         static uint64_t hostFrames = 0;
         ++hostFrames; // host loop iterations: frames actually shown in the window
         if (statsEnabled && GetTime() >= nextStats)
         {
             nextStats += 5.0;
+            {
+                // Busy share of each emulation thread over the window (wall time
+                // minus the time spent at its waits).
+                static auto lastLoad = std::chrono::steady_clock::now();
+                static uint64_t lastWait[ps2_load::kSlots] = {};
+                static uint64_t lastGlWait = 0;
+                const auto now = std::chrono::steady_clock::now();
+                const double windowUs = std::max(1.0, static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(now - lastLoad).count()));
+                lastLoad = now;
+                std::string line = "[load]";
+                for (int i = 0; i < ps2_load::kSlots; ++i)
+                {
+                    const uint64_t wait = ps2_load::waitUs[i].load(std::memory_order_relaxed);
+                    const double busy = std::clamp(100.0 * (1.0 - (wait - lastWait[i]) / windowUs), 0.0, 100.0);
+                    lastWait[i] = wait;
+                    line += std::string(" ") + ps2_load::kNames[i] + "=" + std::to_string(static_cast<int>(busy + 0.5)) + "%";
+                }
+                const uint64_t glWait = ps2_load::gsGlLockWaitUs.load(std::memory_order_relaxed);
+                line += " gsWaitsHostGl=" + std::to_string(static_cast<int>(100.0 * (glWait - lastGlWait) / windowUs + 0.5)) + "%";
+                lastGlWait = glWait;
+                std::cerr << line << std::endl;
+            }
             static uint64_t lastStatChains = 0;
             static uint64_t lastHostFrames = 0;
             const uint64_t statChains = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
@@ -2945,59 +3054,21 @@ void PS2Runtime::run()
             }
         }
 
-        BeginDrawing();
-        ClearBackground(BLACK);
-        const float srcWidth = static_cast<float>(std::max<uint32_t>(1u, presentWidth));
-        const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight));
-        const float screenWidth = static_cast<float>(GetScreenWidth());
-        const float screenHeight = static_cast<float>(GetScreenHeight());
-        // The PS2 picture is 4:3 whatever its pixel size (512x448, 640x448...).
-        const float aspect = 4.0f / 3.0f;
-        const int screenMode = hostmenu::settings().screenMode.load(std::memory_order_relaxed);
-        float dstWidth = std::min(screenWidth, screenHeight * aspect);
-        float dstHeight = dstWidth / aspect;
-        if (screenMode == hostmenu::kScreenStretch)
+#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+        // Draw here only before the GS thread's first frame, or when it has
+        // stopped presenting: a slow game frame must not bring the host back
+        // (it holds the one GL through every vsync and starves the GS).
+        const double gsPresent = lastGsPresent.load(std::memory_order_relaxed);
+        if (gsPresent < 0.0 || GetTime() - gsPresent > 3.0)
+            drawHostFrame(g_directFrame.id ? g_directFrame : frameTex, presentWidth, presentHeight);
+        else
         {
-            dstWidth = screenWidth;
-            dstHeight = screenHeight;
+            PollInputEvents();
+            std::this_thread::sleep_for(std::chrono::milliseconds(4));
         }
-        else if (screenMode == hostmenu::kScreenInteger)
-        {
-            const float whole = std::max(1.0f, std::floor(std::min(screenWidth / srcWidth, screenHeight / srcHeight)));
-            dstWidth = srcWidth * whole;
-            dstHeight = srcHeight * whole;
-        }
-        const Rectangle srcRect{0.0f, 0.0f, srcWidth, srcHeight};
-        const Rectangle dstRect{
-            (screenWidth - dstWidth) * 0.5f,
-            (screenHeight - dstHeight) * 0.5f,
-            dstWidth,
-            dstHeight};
-        DrawTexturePro(g_directFrame.id ? g_directFrame : frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
-        if (hostmenu::settings().showFps.load(std::memory_order_relaxed))
-        {
-            // FPS overlay: game frames = display lists sent to VIF1 per second.
-            static double windowStart = GetTime();
-            static uint64_t lastChains = 0;
-            static int gameFps = 0;
-            const double now = GetTime();
-            if (now - windowStart >= 1.0)
-            {
-                const uint64_t chains = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
-                gameFps = static_cast<int>((chains - lastChains) / (now - windowStart) + 0.5);
-                lastChains = chains;
-                windowStart = now;
-            }
-            const std::string fpsText = "game " + std::to_string(gameFps) + " fps | host " + std::to_string(GetFPS()) + " fps";
-            DrawRectangle(8, GetScreenHeight() - 30, MeasureText(fpsText.c_str(), 20) + 12, 26, Color{0, 0, 0, 160});
-            DrawText(fpsText.c_str(), 14, GetScreenHeight() - 27, 20, Color{120, 255, 120, 255});
-        }
-        if (m_debugUiInitialized && m_debugUiDrawCallback)
-        {
-            m_debugUiDrawCallback(*this, m_debugUiUserData);
-        }
-        hostmenu::draw(GetScreenWidth(), GetScreenHeight());
-        EndDrawing();
+#else
+        drawHostFrame(g_directFrame.id ? g_directFrame : frameTex, presentWidth, presentHeight);
+#endif
         hostmenu::update();
 
         if (WindowShouldClose() || hostmenu::quitRequested())
@@ -3008,6 +3079,9 @@ void PS2Runtime::run()
         }
     }
 
+#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+    GSHwBackend::setPresentHook(nullptr); // drawHostFrame goes out of scope
+#endif
     requestStop();
     if (gameThread.joinable())
     {

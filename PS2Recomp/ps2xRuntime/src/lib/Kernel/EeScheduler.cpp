@@ -3,6 +3,7 @@
 
 #include "ps2_log.h"
 #include "ps2_runtime_macros.h"
+#include "runtime/ps2_thread_load.h"
 
 #include <algorithm>
 #include <cassert>
@@ -1925,6 +1926,7 @@ void EeScheduler::processDueDeadlines()
             const auto now = std::chrono::steady_clock::now();
             if (now < pacingDeadline)
             {
+                ps2_load::Wait pacing;
                 m_eventCv.wait_until(lock, pacingDeadline, [this]()
                                      { return !m_events.empty() ||
                                               m_stopRequested.load(std::memory_order_acquire); });
@@ -2135,6 +2137,7 @@ void EeScheduler::waitForEvent()
     const bool hasTimerDeadline = timerCycles != std::numeric_limits<uint64_t>::max();
     if (m_deadlines.empty() && !hasTimerDeadline)
     {
+        ps2_load::Wait idle;
         m_eventCv.wait(lock, [this]()
                        { return !m_events.empty() || m_stopRequested.load(std::memory_order_acquire); });
         return;
@@ -2166,9 +2169,13 @@ void EeScheduler::waitForEvent()
         }
     }
 
-    const bool signaled = m_eventCv.wait_until(lock, hostDeadline, [this]()
-                                               { return !m_events.empty() ||
-                                                        m_stopRequested.load(std::memory_order_acquire); });
+    const bool signaled = [&]
+    {
+        ps2_load::Wait idle;
+        return m_eventCv.wait_until(lock, hostDeadline, [this]()
+                                    { return !m_events.empty() ||
+                                             m_stopRequested.load(std::memory_order_acquire); });
+    }();
     if (!signaled)
     {
         const uint64_t elapsed = deadlineCycle > m_eeCycle ? deadlineCycle - m_eeCycle : 0u;

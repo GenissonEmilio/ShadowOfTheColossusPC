@@ -1,4 +1,5 @@
 #include "ThreadNaming.h"
+#include "runtime/ps2_thread_load.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_stats.h"
 #include <cstdlib>
@@ -280,6 +281,7 @@ void PS2Memory::mtvuWorkerLoop()
 {
     t_onVu1Worker = true;
     ThreadNaming::SetCurrentThreadName("VU1");
+    ps2_load::setThreadSlot(ps2_load::kVu1);
     // VU1 float math rounds toward zero, like the game thread's.
     ps2SetEeFloatingPointMode();
     // GS draws from VIF1/GIF reach the GS worker in bulk, once per job.
@@ -287,8 +289,11 @@ void PS2Memory::mtvuWorkerLoop()
     std::unique_lock<std::mutex> lock(m_mtvuMutex);
     for (;;)
     {
-        m_mtvuWork.wait(lock, [this]
-                        { return m_mtvuStop || !m_mtvuQueue.empty(); });
+        {
+            ps2_load::Wait idle;
+            m_mtvuWork.wait(lock, [this]
+                            { return m_mtvuStop || !m_mtvuQueue.empty(); });
+        }
         if (m_mtvuQueue.empty())
             return;
         MtvuJob job = std::move(m_mtvuQueue.front());
@@ -334,6 +339,7 @@ void PS2Memory::mtvuWorkDone()
 
 void PS2Memory::mtvuSyncSlow()
 {
+    ps2_load::Wait waiting;
     std::unique_lock<std::mutex> lock(m_mtvuMutex);
     m_mtvuIdle.wait(lock, [this]
                     { return m_mtvuOutstanding.load(std::memory_order_acquire) == 0u; });

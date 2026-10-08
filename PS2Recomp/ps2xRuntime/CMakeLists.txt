@@ -162,14 +162,23 @@ if(PS2X_IS_VITA AND PS2X_VITA_SDL2_SHIM)
     # Video through vitaGL (GXM), audio through SDL2: no PowerVR GLES modules
     # (which Vita3K cannot run).
     set(PS2X_VITA_PREFIX "${PS2X_VITASDK}/arm-vita-eabi")
+    # A vitaGL build of our own (headers and library), or the SDK's.
+    set(PS2X_VITA_VITAGL_DIR "" CACHE PATH "vitaGL source tree with libvitaGL.a built (empty: the SDK's)")
+    set(PS2X_VITA_VITAGL vitaGL)
+    if(PS2X_VITA_VITAGL_DIR)
+        set(PS2X_VITA_VITAGL "${PS2X_VITA_VITAGL_DIR}/libvitaGL.a")
+    endif()
     add_library(ps2x_vita_raylib STATIC "${CMAKE_CURRENT_SOURCE_DIR}/platform/vita/raylib/raylib_vita.cpp")
+    if(PS2X_VITA_VITAGL_DIR)
+        target_include_directories(ps2x_vita_raylib BEFORE PUBLIC "${PS2X_VITA_VITAGL_DIR}/source")
+    endif()
     target_include_directories(ps2x_vita_raylib PUBLIC
         "${CMAKE_CURRENT_SOURCE_DIR}/platform/vita/raylib"
         "${PS2X_VITA_PREFIX}/include")
     target_link_libraries(ps2x_vita_raylib PUBLIC
         SDL2
         # Video: vitaGL on GXM, shaders compiled at run time (libshacccg).
-        vitaGL vitashark SceShaccCgExt mathneon SceShaccCg_stub taihen_stub
+        ${PS2X_VITA_VITAGL} vitashark SceShaccCgExt mathneon SceShaccCg_stub taihen_stub
         SceDisplay_stub SceCtrl_stub SceTouch_stub SceGxm_stub SceAudio_stub SceAudioIn_stub
         SceSysmodule_stub SceHid_stub SceMotion_stub SceAppMgr_stub SceAppUtil_stub
         SceCommonDialog_stub SceIme_stub ScePower_stub SceLibKernel_stub SceProcessmgr_stub
@@ -651,6 +660,14 @@ if(PS2X_IS_VITA)
     endforeach()
     target_compile_options(ps2_runtime PRIVATE -O2)
     target_compile_options(ps2EntryRunner PRIVATE -Os)
+    # Except the hot few: recompiled VU1 microcode and native replacements
+    # (game overrides) run every vertex.
+    get_target_property(PS2X_RUNNER_SOURCES ps2EntryRunner SOURCES)
+    foreach(PS2X_SOURCE IN LISTS PS2X_RUNNER_SOURCES)
+        if(PS2X_SOURCE MATCHES "vu1rec_[^/]*\\.cpp$" OR PS2X_SOURCE MATCHES "/overrides/[^/]*\\.cpp$")
+            set_source_files_properties(${PS2X_SOURCE} PROPERTIES COMPILE_OPTIONS "-O2")
+        endif()
+    endforeach()
     target_link_options(ps2EntryRunner PRIVATE "-Wl,--allow-multiple-definition")
     target_sources(ps2EntryRunner PRIVATE src/lib/ps2_vita_runtime.cpp)
     set_source_files_properties(src/lib/ps2_vita_runtime.cpp PROPERTIES

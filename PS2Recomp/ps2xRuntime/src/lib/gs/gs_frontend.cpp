@@ -9,6 +9,7 @@
 #include "ps2_log.h"
 #include "runtime/ps2_memory.h"
 #include "ThreadNaming.h"
+#include "runtime/ps2_thread_load.h"
 #include "ps2_runtime_macros.h"
 #include <atomic>
 #include <algorithm>
@@ -120,7 +121,11 @@ namespace
     {
         static const bool synchronous = std::getenv("PS2X_GS_SYNC") != nullptr;
         // PS2X_GS_HW=1: hardware renderer (GPU render targets, OpenGL).
+#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+        static const bool hardware = true; // the Vita's CPU cannot rasterize the GS
+#else
         static const bool hardware = std::getenv("PS2X_GS_HW") && std::atoi(std::getenv("PS2X_GS_HW")) != 0;
+#endif
         if (hardware)
             return std::make_unique<GSAsyncBackend>(std::make_unique<GSHwBackend>());
         auto backend = std::make_unique<GSCpuBackend>();
@@ -742,6 +747,7 @@ void GS::flushGifWork()
 void GS::gifWorkerLoop()
 {
     ThreadNaming::SetCurrentThreadName("GIF");
+    ps2_load::setThreadSlot(ps2_load::kGif);
     // Same float environment as the VU1 worker these packets come from.
     ps2SetEeFloatingPointMode();
     GSAsyncBackend::SetThreadStaging(true);
@@ -751,6 +757,7 @@ void GS::gifWorkerLoop()
         if (m_gifQueue.empty())
         {
             m_gifSleeping = true;
+            ps2_load::Wait idle;
             m_gifCv.wait(lock, [this]
                          { return m_gifStop || !m_gifQueue.empty(); });
             m_gifSleeping = false;

@@ -2,6 +2,7 @@
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/gs/gs_direct_frame.h"
 #include "runtime/host_menu.h"
+#include "runtime/ps2_thread_load.h"
 
 #include <algorithm>
 #include <array>
@@ -19,14 +20,61 @@
 #define GL_SILENCE_DEPRECATION
 #include <OpenGL/gl3.h>
 #define PS2X_GS_HW_GL 1
+#elif defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+// vitaGL (GXM): one GL state for every thread, so the host and the GS thread
+// take turns under the raylib shim's lock. CG shaders, no depth textures, no
+// fences, no constant blend color: see the PS2X_GS_HW_VITA paths.
+#include <vitaGL.h>
+#include <mutex>
+#define PS2X_GS_HW_GL 1
+#define PS2X_GS_HW_VITA 1
+std::recursive_mutex &ps2xVitaGlMutex();
+uint32_t ps2xVitaHostFrames();
+#endif
+
+#if !defined(GL_CG_FRAGMENT_SHADER_EXT)
+#define GL_CG_FRAGMENT_SHADER_EXT_OR_ZERO 0
+#else
+#define GL_CG_FRAGMENT_SHADER_EXT_OR_ZERO GL_CG_FRAGMENT_SHADER_EXT
+#endif
+
+#if defined(PS2X_GS_HW_VITA)
+// Waiting for the host's turn counts as the GS thread waiting (and on its own).
+#define PS2X_GS_GL_LOCK()                                                                                                   \
+    std::unique_lock<std::recursive_mutex> glLock(ps2xVitaGlMutex(), std::try_to_lock);                                     \
+    if (!glLock.owns_lock())                                                                                                \
+    {                                                                                                                       \
+        const auto glWaitStart = std::chrono::steady_clock::now();                                                          \
+        {                                                                                                                   \
+            ps2_load::Wait glWait;                                                                                          \
+            glLock.lock();                                                                                                  \
+        }                                                                                                                   \
+        ps2_load::gsGlLockWaitUs.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(     \
+                                               std::chrono::steady_clock::now() - glWaitStart)                              \
+                                               .count()),                                                                   \
+                                           std::memory_order_relaxed);                                                      \
+    }
+#else
+#define PS2X_GS_GL_LOCK() ((void)0)
 #endif
 
 namespace
 {
     std::function<void()> g_makeCurrent;
+    std::function<void(uint32_t, uint32_t, uint32_t)> g_presentHook;
 }
 
+void GSHwBackend::setPresentHook(std::function<void(uint32_t texture, uint32_t width, uint32_t height)> hook)
+{
+#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+    std::lock_guard<std::recursive_mutex> lock(ps2xVitaGlMutex()); // not while the GS thread runs it
+#endif
+    g_presentHook = std::move(hook);
+}
+
+#if !(defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
 void GSHwBackend::setContextProvider(std::function<void()> makeCurrent) { g_makeCurrent = std::move(makeCurrent); }
+#endif
 bool GSHwBackend::available()
 {
 #if defined(PS2X_GS_HW_GL)
@@ -174,8 +222,113 @@ void main()
 }
 )";
 
+#if defined(PS2X_GS_HW_VITA)
+    // The same renderer in CG (vitaGL compiles it with libshacccg). Depth is
+    // the position's z (glDepthRange(-1, 1) keeps it as is): no gl_FragDepth.
+    // Integer state comes as floats; texelFetch is a point-sampled tex2D.
+    const char *kVertexShaderCg = R"(
+void main(float3 aPos, float3 aTex, float4 aColor, float aFog,
+          uniform float2 uTarget,
+          uniform float uFlipY,
+          float4 out oPosition : POSITION,
+          float4 out vTex : TEXCOORD0,
+          float4 out vColor : TEXCOORD1)
+{
+    // Varyings are all float4 (Vita3K pairs them by size). vTex.w: fog.
+    float2 p = aPos.xy / uTarget * 2.0 - 1.0;
+    oPosition = float4(p.x, p.y * uFlipY, aPos.z, 1.0);
+    vTex = float4(aTex, aFog);
+    vColor = aColor;
+}
+)";
+
+    const char *kFragmentShaderCg = R"(
+uniform sampler2D uTexture;
+uniform float uTme, uTfx, uTcc, uFst, uFge, uAtest, uAref, uAtestFailed;
+uniform float2 uTexSize;
+uniform float2 uGsSize;
+uniform float2 uWrap;
+uniform float4 uRegion;
+uniform float uLinear;
+uniform float uHwSample;     // 1: the bound texture is the GS texture, GL filtering and wrapping do
+uniform float uAlphaFix;
+uniform float uTexAlphaScale;
+uniform float3 uFogColor;
+uniform float uBlendFix;     // >= 0: output alpha is FIX (blend factor C = FIX)
+
+float wrapCoord(float v, float size, float mode, float lo, float hi)
+{
+    if (mode < 0.5) return v - size * floor(v / size);
+    if (mode < 1.5) return clamp(v, 0.0, size - 1.0);
+    if (mode < 2.5) return clamp(v, lo, hi);
+    float m = lo + 1.0; // region repeat: UMSK is 2^n - 1 in practice
+    return v - m * floor(v / m) + hi;
+}
+float4 fetchTexel(float2 p)
+{
+    p = float2(wrapCoord(p.x, uGsSize.x, uWrap.x, uRegion.x, uRegion.z), wrapCoord(p.y, uGsSize.y, uWrap.y, uRegion.y, uRegion.w));
+    p = clamp(p, float2(0.0, 0.0), uTexSize - 1.0);
+    return tex2D(uTexture, (p + 0.5) / uTexSize);
+}
+float4 sampleGs(float2 tc)
+{
+    if (uHwSample > 0.5)
+        return tex2D(uTexture, tc / uTexSize);
+    if (uLinear < 0.5)
+        return fetchTexel(floor(tc));
+    float2 b = tc - 0.5;
+    float2 i = floor(b);
+    float2 f = b - i;
+    float4 t00 = fetchTexel(i), t10 = fetchTexel(i + float2(1.0, 0.0)), t01 = fetchTexel(i + float2(0.0, 1.0)), t11 = fetchTexel(i + float2(1.0, 1.0));
+    return lerp(lerp(t00, t10, f.x), lerp(t01, t11, f.x), f.y);
+}
+
+float4 main(float4 vTex : TEXCOORD0, float4 vColor : TEXCOORD1) : COLOR
+{
+    float vFog = vTex.w;
+    float4 c = vColor;
+    if (uTme > 0.5)
+    {
+        float2 tc = (uFst > 0.5) ? vTex.xy : vTex.xy / vTex.z * uGsSize;
+        float4 t = sampleGs(tc);
+        t.rgb *= 255.0;
+        t.a *= 255.0 * uTexAlphaScale;
+        if (uAlphaFix >= 256.0)
+            t.a = all(t.rgb < float3(0.5, 0.5, 0.5)) ? 0.0 : uAlphaFix - 256.0;
+        else if (uAlphaFix >= 0.0)
+            t.a = uAlphaFix;
+        float3 rgb;
+        float a;
+        if (uTfx < 0.5)      { rgb = t.rgb * c.rgb / 128.0; a = (uTcc > 0.5) ? t.a * c.a / 128.0 : c.a; }
+        else if (uTfx < 1.5) { rgb = t.rgb;                  a = (uTcc > 0.5) ? t.a : c.a; }
+        else if (uTfx < 2.5) { rgb = t.rgb * c.rgb / 128.0 + c.a; a = (uTcc > 0.5) ? t.a + c.a : c.a; }
+        else                 { rgb = t.rgb * c.rgb / 128.0 + c.a; a = (uTcc > 0.5) ? t.a : c.a; }
+        c = float4(min(rgb, float3(255.0, 255.0, 255.0)), min(a, 255.0));
+    }
+    if (uFge > 0.5)
+        c.rgb = lerp(uFogColor, c.rgb, vFog / 255.0);
+    if (uAtest < 0.5 || uAtest > 1.5)
+    {
+        float a = floor(c.a + 0.5);
+        bool passes = uAtest < 0.5 ? false :
+                    uAtest < 2.5 ? a < uAref :
+                    uAtest < 3.5 ? a <= uAref :
+                    uAtest < 4.5 ? a == uAref :
+                    uAtest < 5.5 ? a >= uAref :
+                    uAtest < 6.5 ? a > uAref : a != uAref;
+        if (passes == (uAtestFailed > 0.5))
+            discard;
+    }
+    return float4(c.rgb / 255.0, (uBlendFix >= 0.0 ? uBlendFix : c.a) / 128.0);
+}
+)";
+#endif
+
     GLuint compile(GLenum type, const char *source)
     {
+#if defined(PS2X_GS_HW_VITA)
+        type = type == GL_VERTEX_SHADER ? GL_CG_VERTEX_SHADER_EXT : GL_CG_FRAGMENT_SHADER_EXT;
+#endif
         GLuint shader = glCreateShader(type);
         glShaderSource(shader, 1, &source, nullptr);
         glCompileShader(shader);
@@ -183,12 +336,35 @@ void main()
         glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
         if (!ok)
         {
-            char log[2048];
-            glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
-            std::cerr << "[gs:hw] shader error: " << log << std::endl;
+            char log[2048] = {};
+            GLsizei length = 0;
+            glGetShaderInfoLog(shader, sizeof(log), &length, log);
+            std::cerr << "[gs:hw] " << (type == GL_FRAGMENT_SHADER || type == GL_CG_FRAGMENT_SHADER_EXT_OR_ZERO ? "fragment" : "vertex")
+                      << " shader error: " << std::string(log, std::min<size_t>(length, sizeof(log))) << std::endl;
         }
         return shader;
     }
+
+    GLuint buildProgram(const char *vertexSource, const char *fragmentSource)
+    {
+        GLuint vs = compile(GL_VERTEX_SHADER, vertexSource);
+        GLuint fs = compile(GL_FRAGMENT_SHADER, fragmentSource);
+        GLuint program = glCreateProgram();
+        glAttachShader(program, vs);
+        glAttachShader(program, fs);
+        glBindAttribLocation(program, 0, "aPos");
+        glBindAttribLocation(program, 1, "aTex");
+        glBindAttribLocation(program, 2, "aColor");
+        glBindAttribLocation(program, 3, "aFog");
+        glLinkProgram(program);
+        return program;
+    }
+
+#if defined(PS2X_GS_HW_VITA)
+    // libshacccg needs more stack than the GS thread has: the program is
+    // compiled on the main thread, when the host has vitaGL up.
+    GLuint g_vitaProgram = 0;
+#endif
 
     struct HwVertex
     {
@@ -276,8 +452,25 @@ void main()
         uint32_t zbp = 0;
         uint32_t width = 0, height = 0;
         GLuint texture = 0;
+#if defined(PS2X_GS_HW_VITA)
+        // vitaGL: a framebuffer's depth buffer is its own (hidden). One per
+        // Z buffer, its color attachment switched to the target drawn.
+        GLuint fbo = 0;
+        GLuint attached = 0;
+        uint32_t fboWidth = 0, fboHeight = 0;
+#endif
     };
 }
+
+#if defined(PS2X_GS_HW_VITA)
+void GSHwBackend::setContextProvider(std::function<void()> makeCurrent)
+{
+    std::lock_guard<std::recursive_mutex> lock(ps2xVitaGlMutex());
+    if (!g_vitaProgram)
+        g_vitaProgram = buildProgram(kVertexShaderCg, kFragmentShaderCg);
+    g_makeCurrent = std::move(makeCurrent);
+}
+#endif
 
 struct GSHwBackend::Impl
 {
@@ -343,7 +536,11 @@ struct GSHwBackend::Impl
     }
     void reportStats()
     {
+#if defined(PS2X_GS_HW_VITA)
+        static const bool on = true; // to the log file, once a second
+#else
         static const bool on = std::getenv("PS2X_GS_HW_STATS") != nullptr;
+#endif
         static auto last = std::chrono::steady_clock::now();
         if (!on)
             return;
@@ -376,12 +573,11 @@ struct GSHwBackend::Impl
             return false;
         g_makeCurrent();
         glThread = std::this_thread::get_id();
-        GLuint vs = compile(GL_VERTEX_SHADER, kVertexShader);
-        GLuint fs = compile(GL_FRAGMENT_SHADER, kFragmentShader);
-        program = glCreateProgram();
-        glAttachShader(program, vs);
-        glAttachShader(program, fs);
-        glLinkProgram(program);
+#if defined(PS2X_GS_HW_VITA)
+        program = g_vitaProgram; // built on the main thread (setContextProvider)
+#else
+        program = buildProgram(kVertexShader, kFragmentShader);
+#endif
         GLint ok = 0;
         glGetProgramiv(program, GL_LINK_STATUS, &ok);
         if (!ok)
@@ -404,6 +600,10 @@ struct GSHwBackend::Impl
         glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(HwVertex), reinterpret_cast<void *>(offsetof(HwVertex, fog)));
         glUseProgram(program);
         glUniform1i(uniform("uTexture"), 0);
+#if defined(PS2X_GS_HW_VITA)
+        // No COLCLAMP wrap path yet (it needs a float target): wrapProgram 0.
+        measureOrientation();
+#else
         {
             GLuint wvs = compile(GL_VERTEX_SHADER, kWrapVertexShader), wfs = compile(GL_FRAGMENT_SHADER, kWrapFragmentShader);
             wrapProgram = glCreateProgram();
@@ -411,10 +611,129 @@ struct GSHwBackend::Impl
             glAttachShader(wrapProgram, wfs);
             glLinkProgram(wrapProgram);
         }
+#endif
         glReady = true;
         std::cerr << "[gs:hw] OpenGL renderer: " << reinterpret_cast<const char *>(glGetString(GL_RENDERER)) << std::endl;
         return true;
     }
+
+#if defined(PS2X_GS_HW_VITA)
+    // Which way vitaGL puts rows into a framebuffer's memory for a draw, a
+    // scissor and a blit's source and destination (it depends on how it was
+    // built): each works on GS rows [0, 16) of a 64x64 target and the memory
+    // rows reached say. GS row y must end up in texture memory row y.
+    void measureOrientation()
+    {
+        GLuint tex[2] = {0, 0}, fbo[2] = {0, 0};
+        glGenTextures(2, tex);
+        glGenFramebuffers(2, fbo);
+        for (int i = 0; i < 2; ++i)
+        {
+            glBindTexture(GL_TEXTURE_2D, tex[i]);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 64, 64, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo[i]);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[i], 0);
+        }
+        // Texture memory: rows [0, redRows) red, the rest black.
+        auto fill = [&](int i, uint32_t redRows)
+        {
+            std::vector<uint8_t> px(64u * 64u * 4u);
+            for (uint32_t y = 0; y < 64; ++y)
+                for (uint32_t x = 0; x < 64; ++x)
+                {
+                    uint8_t *p = px.data() + (y * 64u + x) * 4u;
+                    p[0] = y < redRows ? 255 : 0;
+                    p[1] = p[2] = 0;
+                    p[3] = 255;
+                }
+            gpuIdle();
+            glBindTexture(GL_TEXTURE_2D, tex[i]);
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 64, 64, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        };
+        // 0: the top band (memory rows 0..15) is red, 1: the bottom band, -1: neither.
+        auto band = [&](int i) -> int
+        {
+            gpuIdle();
+            const uint8_t *m = textureMemory(tex[i]);
+            if (!m)
+                return -1;
+            const bool top = m[4 * textureStride(64) + 32 * 4] > 128, bottom = m[60 * textureStride(64) + 32 * 4] > 128;
+            return top && !bottom ? 0 : bottom && !top ? 1 : -1;
+        };
+        const char *names[3] = {"unknown", "top-down", "flipped"};
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_BLEND);
+        glDisable(GL_SCISSOR_TEST);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        // 1. A draw over rows 0..15 with the y axis as is.
+        fill(0, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo[0]);
+        glViewport(0, 0, 64, 64);
+        glUseProgram(program);
+        glUniform2f(uniform("uTarget"), 64.0f, 64.0f);
+        glUniform1f(uniform("uFlipY"), 1.0f);
+        glUniform1f(uniform("uBlendFix"), -1.0f);
+        setInt("uTme", 0);
+        setInt("uFge", 0);
+        setInt("uAtest", 1);
+        setInt("uAtestFailed", 0);
+        HwVertex quad[6]{};
+        const float xy[6][2] = {{0, 0}, {64, 0}, {64, 16}, {0, 0}, {64, 16}, {0, 16}};
+        for (int k = 0; k < 6; ++k)
+        {
+            quad[k].x = xy[k][0];
+            quad[k].y = xy[k][1];
+            quad[k].r = 255;
+            quad[k].a = 128;
+        }
+        bindVertices();
+        glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STREAM_DRAW);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        const int draw = band(0);
+        drawFlipY = draw == 1 ? -1.0f : 1.0f;
+        // 2. A scissored clear of rows 0..15.
+        fill(1, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo[1]);
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(0, 0, 64, 16);
+        glClearColor(1, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDisable(GL_SCISSOR_TEST);
+        const int scissor = band(1);
+        scissorFlip = scissor == 1;
+        // 3. Blit rows 0..15 to rows 0..15, the source red in its top band:
+        // nothing arrives if the source rows count from the bottom.
+        fill(0, 16);
+        fill(1, 0);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo[0]);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo[1]);
+        glBlitFramebuffer(0, 0, 64, 16, 0, 0, 64, 16, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        int blitSrc = 0, blitDst = band(1);
+        if (blitDst < 0)
+        {
+            blitSrc = 1;
+            fill(1, 0);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo[0]);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo[1]);
+            glBlitFramebuffer(0, 48, 64, 64, 0, 0, 64, 16, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+            blitDst = band(1);
+        }
+        if (blitDst < 0)
+            blitSrc = -1;
+        // blitRect flips both ends together.
+        blitFlip = blitDst == 1;
+        if (blitSrc >= 0 && blitDst >= 0 && blitSrc != blitDst)
+            std::fprintf(stderr, "[gs:hw] vitaGL blits flip one end only: page moves will be wrong\n");
+        std::fprintf(stderr, "[gs:hw] vitaGL rows: draw %s, scissor %s, blit source %s, blit target %s\n", names[draw + 1], names[scissor + 1],
+                     names[blitSrc + 1], names[blitDst + 1]);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDeleteFramebuffers(2, fbo);
+        glDeleteTextures(2, tex);
+        scissorState.valid = false;
+    }
+#endif
 
     GLint uniform(const char *name)
     {
@@ -426,10 +745,155 @@ struct GSHwBackend::Impl
         return location;
     }
 
+    // Integer state: ints in GLSL, floats in the CG shader.
+    void setInt(const char *name, GLint value)
+    {
+#if defined(PS2X_GS_HW_VITA)
+        glUniform1f(uniform(name), static_cast<float>(value));
+#else
+        glUniform1i(uniform(name), value);
+#endif
+    }
+
+    void bindVertices()
+    {
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+#if defined(PS2X_GS_HW_VITA)
+        // The host draws with client arrays in between: state from scratch.
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(HwVertex), reinterpret_cast<void *>(offsetof(HwVertex, x)));
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(HwVertex), reinterpret_cast<void *>(offsetof(HwVertex, s)));
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(HwVertex), reinterpret_cast<void *>(offsetof(HwVertex, r)));
+        glEnableVertexAttribArray(3);
+        glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(HwVertex), reinterpret_cast<void *>(offsetof(HwVertex, fog)));
+#endif
+    }
+
     static void bufferRange(uint32_t baseBytes, uint32_t widthPixels, uint32_t heightPixels, uint32_t psm, uint64_t &begin, uint64_t &end)
     {
         begin = baseBytes;
         end = static_cast<uint64_t>(baseBytes) + static_cast<uint64_t>(widthPixels) * heightPixels * bytesPerPixel(psm);
+    }
+
+    // ---- GL helpers ----------------------------------------------------------
+
+    // vitaGL redraws its scissor mask on every scissor change: keep the last
+    // one (forgotten when the host drew a frame in between).
+    struct ScissorState
+    {
+        bool valid = false, on = false;
+        GLint x = 0, y = 0, w = 0, h = 0;
+    } scissorState;
+    uint32_t hostFramesSeen = ~0u;
+    // How this GL draws, scissors and blits rows (vitaGL: measured at start;
+    // GS row y is always texture memory row y).
+    float drawFlipY = 1.0f;
+    bool scissorFlip = false, blitFlip = false;
+
+    void setScissor(const RenderTarget *rt, bool on, GLint x = 0, GLint y = 0, GLint w = 0, GLint h = 0)
+    {
+        if (on && scissorFlip && rt)
+            y = static_cast<GLint>(rt->height) - y - h;
+#if defined(PS2X_GS_HW_VITA)
+        const uint32_t frames = ps2xVitaHostFrames();
+        if (frames != hostFramesSeen)
+        {
+            hostFramesSeen = frames;
+            scissorState.valid = false;
+        }
+#endif
+        if (scissorState.valid && scissorState.on == on && (!on || (scissorState.x == x && scissorState.y == y && scissorState.w == w && scissorState.h == h)))
+            return;
+        if (on)
+        {
+            if (!scissorState.valid || !scissorState.on)
+                glEnable(GL_SCISSOR_TEST);
+            glScissor(x, y, w, h);
+        }
+        else
+            glDisable(GL_SCISSOR_TEST);
+        scissorState = {true, on, x, y, w, h};
+    }
+
+    // Copies [sx, sx + w) x [sy, sy + h) of one target's framebuffer to (dx, dy) of another's.
+    void blitRect(GLuint from, GLuint to, uint32_t fromHeight, uint32_t toHeight, GLint sx, GLint sy, GLint dx, GLint dy, GLint w, GLint h)
+    {
+        setScissor(nullptr, false);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, from);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, to);
+        if (blitFlip)
+        {
+            sy = static_cast<GLint>(fromHeight) - sy - h;
+            dy = static_cast<GLint>(toHeight) - dy - h;
+        }
+        glBlitFramebuffer(sx, sy, sx + w, sy + h, dx, dy, dx + w, dy + h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    }
+
+#if defined(PS2X_GS_HW_VITA)
+    // Waits for every queued GPU job. vitaGL then opens a scene on the bound
+    // framebuffer: a small one keeps that cheap.
+    GLuint idleFbo = 0, idleTexture = 0;
+    void gpuIdle()
+    {
+        if (!idleFbo)
+        {
+            glGenTextures(1, &idleTexture);
+            glBindTexture(GL_TEXTURE_2D, idleTexture);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 16, 16, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+            glGenFramebuffers(1, &idleFbo);
+            glBindFramebuffer(GL_FRAMEBUFFER, idleFbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, idleTexture, 0);
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, idleFbo);
+        glFinish();
+    }
+    uint8_t *textureMemory(GLuint texture)
+    {
+        glBindTexture(GL_TEXTURE_2D, texture);
+        return static_cast<uint8_t *>(vglGetTexDataPointer(GL_TEXTURE_2D));
+    }
+    static uint32_t textureStride(uint32_t width) { return ((width + 7u) & ~7u) * 4u; }
+#endif
+
+    // RGBA8 pixels of rt's [x0, x0 + w) x [y0, y0 + h), GS row y0 first.
+    void readTarget(RenderTarget &rt, uint32_t x0, uint32_t y0, uint32_t w, uint32_t h, uint8_t *out)
+    {
+#if defined(PS2X_GS_HW_VITA)
+        // vitaGL's glReadPixels takes rows from the wrong end of a framebuffer
+        // for partial reads, and does not wait for other framebuffers' jobs.
+        gpuIdle();
+        const uint8_t *memory = textureMemory(rt.texture);
+        const uint32_t stride = textureStride(rt.width);
+        if (!memory)
+            return;
+        for (uint32_t y = 0; y < h; ++y)
+            std::memcpy(out + static_cast<size_t>(y) * w * 4u, memory + static_cast<size_t>(y0 + y) * stride + x0 * 4u, static_cast<size_t>(w) * 4u);
+#else
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer(rt, nullptr));
+        glReadPixels(static_cast<GLint>(x0), static_cast<GLint>(y0), static_cast<GLsizei>(w), static_cast<GLsizei>(h), GL_RGBA, GL_UNSIGNED_BYTE, out);
+#endif
+    }
+
+    // RGBA8 pixels into rt's [x0, x0 + w) x [y0, y0 + h).
+    void writeTarget(RenderTarget &rt, uint32_t x0, uint32_t y0, uint32_t w, uint32_t h, const uint8_t *in)
+    {
+#if defined(PS2X_GS_HW_VITA)
+        // Once the GPU is done with it: vitaGL's glTexSubImage2D copies a
+        // recently used texture first, which would race the jobs still
+        // drawing it. (Not straight into its memory: Vita3K faults on CPU
+        // writes to render target memory.)
+        gpuIdle();
+        glBindTexture(GL_TEXTURE_2D, rt.texture);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, static_cast<GLint>(x0), static_cast<GLint>(y0), static_cast<GLsizei>(w), static_cast<GLsizei>(h), GL_RGBA,
+                        GL_UNSIGNED_BYTE, in);
+#else
+        glBindTexture(GL_TEXTURE_2D, rt.texture);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, static_cast<GLint>(x0), static_cast<GLint>(y0), static_cast<GLsizei>(w), static_cast<GLsizei>(h), GL_RGBA,
+                        GL_UNSIGNED_BYTE, in);
+#endif
     }
 
     // ---- GS memory <-> GPU ------------------------------------------------
@@ -476,9 +940,7 @@ struct GSHwBackend::Impl
             }
             const uint32_t x0 = c0 * rt.pw, w = (c1 - c0 + 1) * rt.pw, y0 = row * rt.ph, h = std::min(rt.ph, rt.height - y0);
             pixels.resize(static_cast<size_t>(w) * h * 4u);
-            glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer(rt, nullptr));
-            glReadPixels(static_cast<GLint>(x0), static_cast<GLint>(y0), static_cast<GLsizei>(w), static_cast<GLsizei>(h), GL_RGBA, GL_UNSIGNED_BYTE,
-                         pixels.data());
+            readTarget(rt, x0, y0, w, h, pixels.data());
             {
                 std::lock_guard<std::mutex> lock(shadow->vramMutex());
                 for (uint32_t col = c0; col <= c1; ++col)
@@ -583,9 +1045,7 @@ struct GSHwBackend::Impl
             // Pages in [c0, c1] that were not stale are reloaded too: they are
             // clean, so GS memory holds what the GPU has.
             ++rt.version;
-            glBindTexture(GL_TEXTURE_2D, rt.texture);
-            glTexSubImage2D(GL_TEXTURE_2D, 0, static_cast<GLint>(px0), static_cast<GLint>(py0), static_cast<GLsizei>(w), static_cast<GLsizei>(h), GL_RGBA,
-                            GL_UNSIGNED_BYTE, pixels.data());
+            writeTarget(rt, px0, py0, w, h, pixels.data());
             for (uint32_t col = c0; col <= c1; ++col)
             {
                 const uint32_t i = row * rt.cols + col;
@@ -648,10 +1108,7 @@ struct GSHwBackend::Impl
         if (fy + from.ph > from.height || ty + to.ph > to.height)
             return false;
         flushPending();
-        glDisable(GL_SCISSOR_TEST);
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer(from, nullptr));
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer(to, nullptr));
-        glBlitFramebuffer(fx, fy, fx + from.pw, fy + from.ph, tx, ty, tx + to.pw, ty + to.ph, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        blitRect(framebuffer(from, nullptr), framebuffer(to, nullptr), from.height, to.height, fx, fy, tx, ty, from.pw, from.ph);
         clearDirty(from, fromIndex);
         const uint32_t toIndex = toRow * to.cols + toCol;
         if (!to.dirty[toIndex])
@@ -785,6 +1242,11 @@ struct GSHwBackend::Impl
             if (rt.texture != 0)
             {
                 writeBackPages(rt);
+#if defined(PS2X_GS_HW_VITA)
+                for (auto &[zbp, d] : depths)
+                    if (d.attached == rt.texture)
+                        d.attached = 0;
+#endif
                 glDeleteTextures(1, &rt.texture);
                 for (auto it = framebuffers.begin(); it != framebuffers.end();)
                 {
@@ -821,6 +1283,16 @@ struct GSHwBackend::Impl
 
     DepthTarget &depth(uint32_t zbp, uint32_t width, uint32_t height)
     {
+#if defined(PS2X_GS_HW_VITA)
+        // One depth buffer per Z buffer and size: vitaGL drops it when the
+        // attached size changes (SotC draws its shadow maps with the scene's
+        // ZBP at 256x256 and 128x128).
+        DepthTarget &v = depths[zbp | ((width >> 6) << 9) | ((height >> 6) << 20)];
+        v.zbp = zbp;
+        v.width = std::max(v.width, width);
+        v.height = std::max(v.height, height);
+        return v;
+#endif
         DepthTarget &d = depths[zbp];
         if (d.texture == 0 || d.width < width || d.height < height)
         {
@@ -848,6 +1320,27 @@ struct GSHwBackend::Impl
 
     GLuint framebuffer(RenderTarget &rt, DepthTarget *d)
     {
+#if defined(PS2X_GS_HW_VITA)
+        if (d)
+        {
+            // The Z buffer's framebuffer with rt as its color. vitaGL keeps the
+            // depth buffer while the attached size stays the same.
+            if (!d->fbo)
+                glGenFramebuffers(1, &d->fbo);
+            if (d->attached != rt.texture)
+            {
+                glBindFramebuffer(GL_FRAMEBUFFER, d->fbo);
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt.texture, 0);
+                if (d->fboWidth && (d->fboWidth != rt.width || d->fboHeight != rt.height))
+                    std::fprintf(stderr, "[gs:hw] Z buffer %u: %ux%u target fbp=%u after %ux%u, depth lost\n", d->zbp, rt.width, rt.height, rt.fbp, d->fboWidth,
+                                 d->fboHeight);
+                d->attached = rt.texture;
+                d->fboWidth = rt.width;
+                d->fboHeight = rt.height;
+            }
+            return d->fbo;
+        }
+#endif
         const uint64_t key = (static_cast<uint64_t>(rt.key) << 32) | (d ? d->zbp + 1u : 0u);
         auto it = framebuffers.find(key);
         if (it != framebuffers.end())
@@ -933,19 +1426,28 @@ struct GSHwBackend::Impl
 
     // ---- Drawing -------------------------------------------------------------
 
-    void applyBlend(const DrawKey &key)
+    // Returns FIX when the blend reads it from the source alpha instead of a
+    // constant (no glBlendColor): the shader then outputs FIX as alpha (-1: no).
+    int32_t applyBlend(const DrawKey &key)
     {
         if (!key.abe)
         {
             glDisable(GL_BLEND);
-            return;
+            return -1;
         }
         // (A - B) * C + D with A, B, D in {Cs, Cd, 0} and C in {As, Ad, FIX}.
         const uint32_t a = key.alpha & 3u, b = (key.alpha >> 2) & 3u, c = (key.alpha >> 4) & 3u, d = (key.alpha >> 6) & 3u;
+#if defined(PS2X_GS_HW_VITA)
+        const int32_t fix = c == 2 ? static_cast<int32_t>((key.alpha >> 32) & 0xFFu) : -1;
+        const GLenum cf = c == 1 ? GL_DST_ALPHA : GL_SRC_ALPHA;
+        const GLenum cinv = c == 1 ? GL_ONE_MINUS_DST_ALPHA : GL_ONE_MINUS_SRC_ALPHA;
+#else
+        const int32_t fix = -1;
         const GLenum cf = c == 0 ? GL_SRC_ALPHA : c == 1 ? GL_DST_ALPHA : GL_CONSTANT_ALPHA;
         const GLenum cinv = c == 0 ? GL_ONE_MINUS_SRC_ALPHA : c == 1 ? GL_ONE_MINUS_DST_ALPHA : GL_ONE_MINUS_CONSTANT_ALPHA;
         if (c == 2)
             glBlendColor(0, 0, 0, static_cast<float>((key.alpha >> 32) & 0xFFu) / kAlphaOne);
+#endif
         glEnable(GL_BLEND);
         GLenum eq = GL_FUNC_ADD, src = GL_ONE, dst = GL_ZERO;
         enum { CS = 0, CD = 1, ZERO = 2 };
@@ -963,6 +1465,7 @@ struct GSHwBackend::Impl
         glBlendEquationSeparate(eq, GL_FUNC_ADD);
         // The frame buffer keeps the source alpha (the GS does not blend alpha).
         glBlendFuncSeparate(src, dst, GL_ONE, GL_ZERO);
+        return fix;
     }
 
     // Trace: a render target about to be sampled, against the texture decoded
@@ -1001,6 +1504,11 @@ struct GSHwBackend::Impl
     GLuint depthLoadProgram = 0, depthLoadTexture = 0;
     void loadDepthFromCpu(RenderTarget &rt, const DrawKey &key)
     {
+#if defined(PS2X_GS_HW_VITA)
+        (void)rt;
+        (void)key;
+        return; // verify mode is desktop only
+#else
         DepthTarget &d = depth(key.zbp, rt.width, rt.height);
         if (!depthLoadProgram)
         {
@@ -1037,7 +1545,7 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glBindFramebuffer(GL_FRAMEBUFFER, framebuffer(rt, &d));
         glViewport(0, 0, rt.width, rt.height);
-        glDisable(GL_SCISSOR_TEST);
+        setScissor(&rt, false);
         glDisable(GL_BLEND);
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(GL_ALWAYS);
@@ -1050,6 +1558,7 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glUseProgram(program);
+#endif
     }
 
     std::vector<uint8_t> verifyBefore; // traced verify frame: target before the draw
@@ -1192,7 +1701,9 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
             wrapTarget.height = std::max(wrapTarget.height, rt.height);
             glGenTextures(1, &wrapTarget.texture);
             glBindTexture(GL_TEXTURE_2D, wrapTarget.texture);
+#if !defined(PS2X_GS_HW_VITA)
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, wrapTarget.width, wrapTarget.height, 0, GL_RGBA, GL_FLOAT, nullptr);
+#endif
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         }
@@ -1213,10 +1724,7 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
         const GLint x0 = wrapX0, y0 = wrapY0, x1 = wrapX1, y1 = wrapY1;
         if (x1 <= x0 || y1 <= y0)
             return 0;
-        glDisable(GL_SCISSOR_TEST);
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer(rt, nullptr));
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
-        glBlitFramebuffer(x0, y0, x1, y1, x0, y0, x1, y1, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        blitRect(framebuffer(rt, nullptr), fbo, rt.height, wrapTarget.height, x0, y0, x0, y0, x1 - x0, y1 - y0);
         ++stats.wrapDraws;
         return fbo;
     }
@@ -1226,8 +1734,7 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
     {
         glBindFramebuffer(GL_FRAMEBUFFER, framebuffer(rt, nullptr));
         glViewport(0, 0, rt.width, rt.height);
-        glEnable(GL_SCISSOR_TEST);
-        glScissor(wrapX0, wrapY0, wrapX1 - wrapX0, wrapY1 - wrapY0);
+        setScissor(&rt, true, wrapX0, wrapY0, wrapX1 - wrapX0, wrapY1 - wrapY0);
         glDisable(GL_DEPTH_TEST);
         glDisable(GL_BLEND);
         glColorMask(writeR, writeG, writeB, writeA);
@@ -1262,8 +1769,10 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
             wrapFbo = beginWrapAdd(rt, d, key);
         glBindFramebuffer(GL_FRAMEBUFFER, wrapFbo ? wrapFbo : framebuffer(rt, d));
         glViewport(0, 0, rt.width, rt.height);
-        glEnable(GL_SCISSOR_TEST);
-        glScissor(key.sx0, key.sy0, key.sx1 >= key.sx0 ? key.sx1 - key.sx0 + 1 : 0, key.sy1 >= key.sy0 ? key.sy1 - key.sy0 + 1 : 0);
+        setScissor(&rt, true, key.sx0, key.sy0, key.sx1 >= key.sx0 ? key.sx1 - key.sx0 + 1 : 0, key.sy1 >= key.sy0 ? key.sy1 - key.sy0 + 1 : 0);
+#if defined(PS2X_GS_HW_VITA)
+        glDepthRangef(-1.0f, 1.0f); // window z = the vertex's z (0..1)
+#endif
         if (d)
         {
             glEnable(GL_DEPTH_TEST);
@@ -1276,42 +1785,55 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
         const bool writeR = (m & 0xFFu) != 0xFFu, writeG = (m & 0xFF00u) != 0xFF00u, writeB = (m & 0xFF0000u) != 0xFF0000u;
         const bool writeA = key.fpsm != GS_PSM_CT24 && (m & 0xFF000000u) != 0xFF000000u;
         const bool writeZ = d && !key.zmask;
-        applyBlend(key);
+        const int32_t blendFix = applyBlend(key);
         glUseProgram(program);
         glUniform2f(uniform("uTarget"), static_cast<float>(rt.width), static_cast<float>(rt.height));
-        glUniform1i(uniform("uTme"), key.tme && key.texture ? 1 : 0);
-        glUniform1i(uniform("uTfx"), static_cast<GLint>(key.tfx));
-        glUniform1i(uniform("uTcc"), static_cast<GLint>(key.tcc));
-        glUniform1i(uniform("uFst"), static_cast<GLint>(key.fst));
-        glUniform1i(uniform("uFge"), static_cast<GLint>(key.fge));
+        setInt("uTme", key.tme && key.texture ? 1 : 0);
+        setInt("uTfx", static_cast<GLint>(key.tfx));
+        setInt("uTcc", static_cast<GLint>(key.tcc));
+        setInt("uFst", static_cast<GLint>(key.fst));
+        setInt("uFge", static_cast<GLint>(key.fge));
         const bool ate = (key.test & 1u) != 0u;
         const uint32_t atst = ate ? static_cast<uint32_t>((key.test >> 1) & 7u) : 1u;
         const uint32_t afail = static_cast<uint32_t>((key.test >> 12) & 3u);
-        glUniform1i(uniform("uAtest"), static_cast<GLint>(atst));
-        glUniform1i(uniform("uAref"), static_cast<GLint>((key.test >> 4) & 0xFFu));
+        setInt("uAtest", static_cast<GLint>(atst));
+        setInt("uAref", static_cast<GLint>((key.test >> 4) & 0xFFu));
         glUniform2f(uniform("uTexSize"), static_cast<float>(key.texW), static_cast<float>(key.texH));
         glUniform1f(uniform("uTexAlphaScale"), key.texAlphaScale);
         glUniform1f(uniform("uAlphaFix"), key.tme ? static_cast<float>(key.alphaFix) : -1.0f);
         glUniform2f(uniform("uGsSize"), static_cast<float>(std::max<uint32_t>(key.gsW, 1u)), static_cast<float>(std::max<uint32_t>(key.gsH, 1u)));
-        glUniform2i(uniform("uWrap"), static_cast<GLint>(key.clamp & 3u), static_cast<GLint>((key.clamp >> 2) & 3u));
+        const uint32_t wms = key.clamp & 3u, wmt = (key.clamp >> 2) & 3u;
+#if defined(PS2X_GS_HW_VITA)
+        glUniform2f(uniform("uWrap"), static_cast<float>(wms), static_cast<float>(wmt));
+        glUniform4f(uniform("uRegion"), static_cast<float>((key.clamp >> 4) & 0x3FFu), static_cast<float>((key.clamp >> 24) & 0x3FFu),
+                    static_cast<float>((key.clamp >> 14) & 0x3FFu), static_cast<float>((key.clamp >> 34) & 0x3FFu));
+        glUniform1f(uniform("uFlipY"), drawFlipY);
+        glUniform1f(uniform("uBlendFix"), static_cast<float>(blendFix));
+        // A texture that is the whole GS texture with plain repeat/clamp: the
+        // texture unit filters and wraps (one fetch instead of four).
+        const bool hwSample = key.texW == key.gsW && key.texH == key.gsH && wms < 2u && wmt < 2u;
+        setInt("uHwSample", hwSample ? 1 : 0);
+#else
+        const bool hwSample = true;
+        glUniform2i(uniform("uWrap"), static_cast<GLint>(wms), static_cast<GLint>(wmt));
         glUniform4i(uniform("uRegion"), static_cast<GLint>((key.clamp >> 4) & 0x3FFu), static_cast<GLint>((key.clamp >> 24) & 0x3FFu),
                     static_cast<GLint>((key.clamp >> 14) & 0x3FFu), static_cast<GLint>((key.clamp >> 34) & 0x3FFu));
-        glUniform1i(uniform("uLinear"), key.linear ? 1 : 0);
+#endif
+        setInt("uLinear", key.linear ? 1 : 0);
         glUniform3f(uniform("uFogColor"), static_cast<float>(key.fogColor & 0xFFu), static_cast<float>((key.fogColor >> 8) & 0xFFu),
                     static_cast<float>((key.fogColor >> 16) & 0xFFu));
         if (key.tme && key.texture)
         {
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(key.texture));
-            const GLint filter = key.linear ? GL_LINEAR : GL_NEAREST;
+            // texelFetch ignores the filter; a point-sampled tex2D needs NEAREST.
+            const GLint filter = key.linear && hwSample ? GL_LINEAR : GL_NEAREST;
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
-            const uint32_t wms = key.clamp & 3u, wmt = (key.clamp >> 2) & 3u;
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wms == 0 ? GL_REPEAT : GL_CLAMP_TO_EDGE);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wmt == 0 ? GL_REPEAT : GL_CLAMP_TO_EDGE);
         }
-        glBindVertexArray(vao);
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        bindVertices();
         glBufferData(GL_ARRAY_BUFFER, pending.size() * sizeof(HwVertex), pending.data(), GL_STREAM_DRAW);
         if (tracing())
         {
@@ -1345,19 +1867,29 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
         const bool failColor = afail != 2u, failZ = afail == 2u && writeZ;
         auto drawPass = [&](bool failing, GLint first, GLsizei n)
         {
-            glUniform1i(uniform("uAtestFailed"), failing ? 1 : 0);
-            if (!failing)
+            setInt("uAtestFailed", failing ? 1 : 0);
+            const bool r = failing ? failColor && writeR : writeR, g = failing ? failColor && writeG : writeG, b = failing ? failColor && writeB : writeB;
+            const bool a = failing ? afail == 1u && writeA : writeA;
+            const bool z = failing ? failZ : writeZ;
+            if (blendFix >= 0 && a)
             {
-                glColorMask(writeR, writeG, writeB, writeA);
+                // The blend reads FIX from the shader's alpha: the alpha the
+                // pixels keep goes in a pass of its own (no Z write, so the
+                // color pass's depth test sees the same buffer).
+                glDisable(GL_BLEND);
+                glUniform1f(uniform("uBlendFix"), -1.0f);
+                glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
                 if (d)
-                    glDepthMask(writeZ ? GL_TRUE : GL_FALSE);
+                    glDepthMask(GL_FALSE);
+                glDrawArrays(GL_TRIANGLES, first, n);
+                glEnable(GL_BLEND);
+                glUniform1f(uniform("uBlendFix"), static_cast<float>(blendFix));
+                glColorMask(r, g, b, GL_FALSE);
             }
             else
-            {
-                glColorMask(failColor && writeR, failColor && writeG, failColor && writeB, afail == 1u && writeA);
-                if (d)
-                    glDepthMask(failZ ? GL_TRUE : GL_FALSE);
-            }
+                glColorMask(r, g, b, a);
+            if (d)
+                glDepthMask(z ? GL_TRUE : GL_FALSE);
             glDrawArrays(GL_TRIANGLES, first, n);
             ++drawCalls;
         };
@@ -1654,8 +2186,7 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
         resolveAliases(rt, static_cast<uint32_t>(x0), static_cast<uint32_t>(y0), static_cast<uint32_t>(x1), static_cast<uint32_t>(y1), true);
         // The GPU's copy gets the same clear, so both stay in step.
         glBindFramebuffer(GL_FRAMEBUFFER, framebuffer(rt, nullptr));
-        glEnable(GL_SCISSOR_TEST);
-        glScissor(x0, y0, x1 - x0, y1 - y0);
+        setScissor(&rt, true, x0, y0, x1 - x0, y1 - y0);
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, rt.psm == GS_PSM_CT24 ? GL_FALSE : GL_TRUE);
         const float alpha = (rt.psm == GS_PSM_CT16 || rt.psm == GS_PSM_CT16S) ? ((color & 0x8000u) ? 1.0f : 0.0f) : std::min(1.0f, b.a / kAlphaOne);
         glClearColor(b.r / 255.0f, b.g / 255.0f, b.b / 255.0f, alpha);
@@ -1691,7 +2222,9 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
     {
         GLuint texture = 0, fbo = 0;
         uint32_t width = 0, height = 0;
+#if !defined(PS2X_GS_HW_VITA)
         GLsync fence = nullptr;
+#endif
     };
     std::array<PresentSlot, 12> presentRing{}; // more than the frames GSAsyncBackend keeps
     uint32_t presentNext = 0;
@@ -1739,11 +2272,13 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
         lastPresentKey = key;
 
         PresentSlot &slot = presentRing[presentNext++ % presentRing.size()];
+#if !defined(PS2X_GS_HW_VITA)
         if (slot.fence)
         {
             glDeleteSync(slot.fence);
             slot.fence = nullptr;
         }
+#endif
         if (slot.texture == 0 || slot.width != width || slot.height != height)
         {
             if (slot.texture == 0)
@@ -1762,10 +2297,19 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
             slot.width = width;
             slot.height = height;
         }
-        glDisable(GL_SCISSOR_TEST);
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer(rt, nullptr));
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, slot.fbo);
-        glBlitFramebuffer(dbx, dby, dbx + width, dby + height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        blitRect(framebuffer(rt, nullptr), slot.fbo, rt.height, slot.height, dbx, dby, 0, 0, width, height);
+        GSDirectFrame direct;
+        direct.texture = slot.texture;
+#if defined(PS2X_GS_HW_VITA)
+        // One GL for both threads: the host's draw comes after this in the
+        // GPU's queue. The host draws it without blending (alpha is not shown).
+        direct.fence = 0;
+        if (g_presentHook)
+        {
+            g_presentHook(slot.texture, width, height);
+            scissorState.valid = false; // the host's drawing changed the GL state
+        }
+#else
         // The display shows color only: opaque for the host's blending.
         glBindFramebuffer(GL_FRAMEBUFFER, slot.fbo);
         glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
@@ -1774,10 +2318,8 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         slot.fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
         glFlush();
-
-        GSDirectFrame direct;
-        direct.texture = slot.texture;
         direct.fence = reinterpret_cast<uint64_t>(slot.fence);
+#endif
         direct.store(frame.pixels);
         frame.width = width;
         frame.height = height;
@@ -1809,6 +2351,7 @@ void GSHwBackend::Reset() { m_impl->shadow->Reset(); }
 
 void GSHwBackend::Submit(const GSPrimitiveBatch &batch)
 {
+    PS2X_GS_GL_LOCK();
     m_impl->submit(batch);
     if (m_impl->verify)
         m_impl->shadow->Submit(batch);
@@ -1816,6 +2359,7 @@ void GSHwBackend::Submit(const GSPrimitiveBatch &batch)
 
 void GSHwBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
 {
+    PS2X_GS_GL_LOCK();
     // Only indexed textures with a loading CLD read a CLUT (as GSCpuBackend);
     // TEX0 writes with CBP=0 for plain textures are common.
     const bool indexed = tex0.psm == GS_PSM_T8 || tex0.psm == GS_PSM_T8H || tex0.psm == GS_PSM_T4 || tex0.psm == GS_PSM_T4HL ||
@@ -1839,6 +2383,7 @@ void GSHwBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
 
 void GSHwBackend::BeginTransfer(const GSTransferCommand &command)
 {
+    PS2X_GS_GL_LOCK();
     if (m_impl->onGlThread())
     {
         m_impl->flushPending();
@@ -1867,15 +2412,19 @@ void GSHwBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes) { m_impl-
 
 void GSHwBackend::Flush()
 {
+    PS2X_GS_GL_LOCK();
     if (m_impl->onGlThread())
     {
         m_impl->flushPending();
-        glFlush();
+#if !defined(PS2X_GS_HW_VITA)
+        glFlush(); // for the host's context (vitaGL: one GL, and a flush ends the scene)
+#endif
     }
 }
 
 void GSHwBackend::TextureFlush()
 {
+    PS2X_GS_GL_LOCK();
     if (m_impl->onGlThread())
         m_impl->flushPending();
     m_impl->shadow->TextureFlush();
@@ -1885,6 +2434,7 @@ void GSHwBackend::Sync(GSSyncReason reason) { m_impl->shadow->Sync(reason); }
 
 PresentationFrame GSHwBackend::Present(const GSPresentationRequest &request)
 {
+    PS2X_GS_GL_LOCK();
     if (m_impl->onGlThread())
     {
         m_impl->flushPending();

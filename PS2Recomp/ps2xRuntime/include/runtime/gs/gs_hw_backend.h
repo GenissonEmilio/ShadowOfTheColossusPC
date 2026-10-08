@@ -23,6 +23,10 @@ public:
     // (the GS worker): makeCurrent() is called there before the first GL call.
     static void setContextProvider(std::function<void()> makeCurrent);
     static bool available();
+    // Vita: the GS thread puts each new frame on screen itself (one GL for
+    // every thread; the host would otherwise hold it through every vsync).
+    // Called with the frame's GL texture right after it is ready.
+    static void setPresentHook(std::function<void(uint32_t texture, uint32_t width, uint32_t height)> hook);
 
     GSHwBackend();
     ~GSHwBackend() override;

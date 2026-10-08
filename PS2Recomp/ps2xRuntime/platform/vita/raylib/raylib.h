@@ -167,6 +167,7 @@ double GetTime(void);
 int GetScreenWidth(void);
 int GetScreenHeight(void);
 void BeginDrawing(void);
+void PollInputEvents(void);
 void EndDrawing(void);
 void ClearBackground(Color color);
 void DrawTexturePro(Texture2D texture, Rectangle source, Rectangle dest, Vector2 origin, float rotation, Color tint);

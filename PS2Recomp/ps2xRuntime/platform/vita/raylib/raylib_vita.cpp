@@ -15,7 +15,26 @@
 #include <cstring>
 #include <malloc.h>
 #include <map>
+#include <mutex>
 #include <vector>
+
+// vitaGL is one GL state for the whole process: the host (between
+// BeginDrawing and EndDrawing, and in texture calls) and the GPU GS renderer
+// on its own thread take turns under this lock.
+std::recursive_mutex &ps2xVitaGlMutex()
+{
+    static std::recursive_mutex mutex;
+    return mutex;
+}
+
+namespace
+{
+    std::atomic<uint32_t> g_hostFrames{0};
+}
+
+// Bumped when the host has drawn (and changed GL state): the GS renderer
+// then sets its state again.
+uint32_t ps2xVitaHostFrames() { return g_hostFrames.load(std::memory_order_relaxed); }
 
 namespace
 {
@@ -152,12 +171,21 @@ double GetTime(void)
 int GetScreenWidth(void) { return g_width; }
 int GetScreenHeight(void) { return g_height; }
 
+void PollInputEvents(void) { pollInput(); }
+
 void BeginDrawing(void)
 {
     pollInput();
-    // The GS renderer may have changed the GL state on this thread.
+    ps2xVitaGlMutex().lock(); // released by EndDrawing
+    g_hostFrames.fetch_add(1, std::memory_order_relaxed);
+    // The GS renderer has its own GL state set: back to the host's.
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glUseProgram(0);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glDepthRangef(0.0f, 1.0f);
+    glDepthMask(GL_TRUE);
     glViewport(0, 0, g_width, g_height);
     glDisable(GL_SCISSOR_TEST);
     glDisable(GL_DEPTH_TEST);
@@ -171,6 +199,7 @@ void EndDrawing(void)
 {
     if (g_glReady)
         vglSwapBuffers(GL_FALSE);
+    ps2xVitaGlMutex().unlock();
     // Logs go to files on ux0: keep them current in case the app is killed.
     std::fflush(stdout);
     std::fflush(stderr);
@@ -181,10 +210,9 @@ void EndDrawing(void)
     {
         nextMemLog = now + 5.0;
         const struct mallinfo mi = mallinfo();
-        std::fprintf(stderr, "[vita:mem] t=%.0f heap used=%.1f MB arena=%.1f MB | vgl vram=%.1f/%.1f ram=%.1f/%.1f slow=%.1f/%.1f MB\n", now,
+        std::fprintf(stderr, "[vita:mem] t=%.0f heap used=%.1f MB arena=%.1f MB | vgl vram=%.1f/%.1f ram=%.1f/%.1f MB\n", now,
                      mi.uordblks / 1048576.0, mi.arena / 1048576.0, vglMemFree(VGL_MEM_VRAM) / 1048576.0, vglMemTotal(VGL_MEM_VRAM) / 1048576.0,
-                     vglMemFree(VGL_MEM_RAM) / 1048576.0, vglMemTotal(VGL_MEM_RAM) / 1048576.0, vglMemFree(VGL_MEM_SLOW) / 1048576.0,
-                     vglMemTotal(VGL_MEM_SLOW) / 1048576.0);
+                     vglMemFree(VGL_MEM_RAM) / 1048576.0, vglMemTotal(VGL_MEM_RAM) / 1048576.0);
     }
     if (now - g_fpsWindowStart >= 1.0)
     {
@@ -257,6 +285,19 @@ void ClearBackground(Color color)
 
 void DrawTexturePro(Texture2D texture, Rectangle source, Rectangle dest, Vector2, float, Color tint)
 {
+    if (texture.id & 0x80000000u)
+    {
+        // A GL texture name (the GPU GS renderer's frame): opaque, drawn as is.
+        if (texture.width <= 0 || texture.height <= 0)
+            return;
+        float xy[8], uv[8];
+        rectQuad(xy, dest.x, dest.y, dest.width, dest.height);
+        rectQuad(uv, source.x / texture.width, source.y / texture.height, source.width / texture.width, source.height / texture.height);
+        glDisable(GL_BLEND);
+        drawQuads(texture.id & 0x7FFFFFFFu, xy, uv, 1, tint);
+        glEnable(GL_BLEND);
+        return;
+    }
     const auto it = g_textures.find(texture.id);
     if (it == g_textures.end() || !it->second.texture || texture.width <= 0 || texture.height <= 0)
         return;
@@ -439,6 +480,7 @@ Texture2D LoadTextureFromImage(Image image)
     Texture2D texture{};
     if (!g_glReady)
         return texture;
+    std::lock_guard<std::recursive_mutex> lock(ps2xVitaGlMutex());
     TextureSlot slot;
     glGenTextures(1, &slot.texture);
     glBindTexture(GL_TEXTURE_2D, slot.texture);
@@ -472,6 +514,7 @@ void UpdateTexture(Texture2D texture, const void *pixels)
     const auto it = g_textures.find(texture.id);
     if (it == g_textures.end() || !it->second.texture || !pixels)
         return;
+    std::lock_guard<std::recursive_mutex> lock(ps2xVitaGlMutex());
     glBindTexture(GL_TEXTURE_2D, it->second.texture);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, texture.width, texture.height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
 }
@@ -481,6 +524,7 @@ void UnloadTexture(Texture2D texture)
     const auto it = g_textures.find(texture.id);
     if (it == g_textures.end())
         return;
+    std::lock_guard<std::recursive_mutex> lock(ps2xVitaGlMutex());
     if (it->second.texture)
         glDeleteTextures(1, &it->second.texture);
     g_textures.erase(it);

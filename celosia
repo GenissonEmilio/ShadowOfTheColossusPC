@@ -255,10 +255,27 @@ cmd_clean() {
 # PS Vita build: ./celosia vita -> build/vita/ps2xRuntime/ps2EntryRunner.vpk
 # Install the VPK, then copy disc/ to ux0:data/celosia/disc/.
 cmd_vita() {
+    local VITAGL_REV=464876a
     export VITASDK=${VITASDK:-$HOME/vitasdk}
     [ -f "$VITASDK/share/vita.toolchain.cmake" ] || die "VitaSDK not found (set VITASDK)"
     [ -n "$(find "$RUNNER_DIR" -maxdepth 1 -name '*.cpp' -print -quit 2>/dev/null)" ] || die "no recompiled code yet (run: ./celosia setup)"
     local dir=$BUILD/vita
+    # vitaGL built for this port: Z buffers kept across scenes (the GPU GS
+    # renderer switches render targets mid-frame), at a pinned revision with
+    # our patches. Rebuilt when the revision or the patches change.
+    local vgl=$BUILD/vitagl-src
+    local vglPatch=$ROOT/PS2Recomp/ps2xRuntime/platform/vita/vitagl/celosia.patch
+    local vglStamp="$VITAGL_REV sharklog nosplash $(shasum "$vglPatch" | cut -d' ' -f1)"
+    if [ ! -f "$vgl/libvitaGL.a" ] || [ "$(cat "$vgl/.celosia-stamp" 2>/dev/null)" != "$vglStamp" ]; then
+        say "building vitaGL ($VITAGL_REV)"
+        [ -d "$vgl/.git" ] || git clone -q https://github.com/Rinnegatamante/vitaGL "$vgl" || die "could not clone vitaGL"
+        git -C "$vgl" checkout -q -f "$VITAGL_REV" || die "vitaGL revision $VITAGL_REV not found"
+        git -C "$vgl" apply "$vglPatch" || die "could not apply $vglPatch"
+        PATH="$VITASDK/bin:$PATH" make -C "$vgl" clean >/dev/null 2>&1
+        PATH="$VITASDK/bin:$PATH" make -C "$vgl" -j "$JOBS" NO_DEBUG=1 STORE_DEPTH_STENCIL=1 HAVE_SHARK_LOG=1 NO_SPLASHSCREEN=1 >"$LOGS/vitagl-build.log" 2>&1 ||
+            { tail -20 "$LOGS/vitagl-build.log"; die "vitaGL build failed (log: logs/vitagl-build.log)"; }
+        echo "$vglStamp" >"$vgl/.celosia-stamp"
+    fi
     say "configuring the Vita build in $dir"
     cmake -S "$ROOT/PS2Recomp" -B "$dir" -G Ninja \
         -DCMAKE_TOOLCHAIN_FILE="$VITASDK/share/vita.toolchain.cmake" \
@@ -269,6 +286,7 @@ cmd_vita() {
         "-DPS2X_RUNNER_DIRS=$RUNNER_DIR;$VU1REC_DIR;$ROOT/game/overrides" \
         "-DPS2X_VITA_APP_NAME=Shadow of the Colossus" -DPS2X_VITA_TITLEID=CELO00001 \
         -DPS2X_DEFAULT_BOOT_ELF=ux0:data/celosia/disc/$BOOT \
+        "-DPS2X_VITA_VITAGL_DIR=$vgl" \
         ${CELOSIA_VITA_CMAKE_ARGS:-} >"$LOGS/vita-configure.log" 2>&1 ||
         { tail -30 "$LOGS/vita-configure.log"; die "Vita configure failed (log: logs/vita-configure.log)"; }
     say "building the Vita VPK (this takes a while)"
