@@ -1180,9 +1180,26 @@ struct GSHwBackend::Impl
     // CPU-side users of GS memory [begin, end): GPU results land there first.
     void writeBackOverlapping(uint64_t begin, uint64_t end)
     {
-        for (auto &[targetKey, rt] : targets)
-            if (dirtyOverlaps(rt, begin, end))
-                writeBackPages(rt, begin, end);
+        // A GPU-newer page has one owner (dirtyOwner): look the range's pages
+        // up instead of scanning every target's pages (once per texture).
+        if (end <= begin)
+            return;
+        const uint64_t firstPage = begin / 8192u, lastPage = (end - 1u) / 8192u;
+        const uint64_t count = std::min<uint64_t>(lastPage - firstPage + 1u, 512u);
+        for (uint64_t i = 0; i < count; ++i)
+        {
+            const uint32_t page = static_cast<uint32_t>((firstPage + i) % 512u);
+            const int32_t owner = dirtyOwner[page];
+            if (owner < 0)
+                continue;
+            auto it = targets.find(static_cast<uint32_t>(owner));
+            if (it == targets.end())
+            {
+                dirtyOwner[page] = -1;
+                continue;
+            }
+            writeBackPages(it->second, begin, end); // all of its dirty pages in the range
+        }
     }
 
     // A host upload into the rectangle of a transfer: GPU pages it replaces
