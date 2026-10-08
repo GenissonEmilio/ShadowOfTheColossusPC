@@ -6,6 +6,7 @@
 #include "runtime/ps2_thread_load.h"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cstring>
 #include <limits>
@@ -1334,20 +1335,24 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
         }
     }
     const auto &handlers = dmac ? m_dmacHandlers : m_intcHandlers;
-    std::vector<EeIrqHandler> matching;
+    // No allocation per interrupt (SotC's TIM0 fires thousands of times a
+    // second; malloc is a TLS lookup and a lock on the Vita).
+    std::array<EeIrqHandler, 16> matching;
+    size_t matchCount = 0;
     for (const auto &[id, handler] : handlers)
     {
         (void)id;
         if (handler.enabled && handler.cause == cause && handler.handler != 0u &&
-            m_runtime.hasFunction(handler.handler))
+            m_runtime.hasFunction(handler.handler) && matchCount < matching.size())
         {
-            matching.push_back(handler);
+            matching[matchCount++] = handler;
         }
     }
-    std::sort(matching.begin(), matching.end(), [](const EeIrqHandler &left, const EeIrqHandler &right)
+    std::sort(matching.begin(), matching.begin() + matchCount, [](const EeIrqHandler &left, const EeIrqHandler &right)
               { return left.order < right.order; });
-    for (const EeIrqHandler &handler : matching)
+    for (size_t m = 0; m < matchCount; ++m)
     {
+        const EeIrqHandler &handler = matching[m];
         // Built in place: an invocation carries a whole guest context, and
         // timer interrupts come in thousands per second (SotC's TIM0).
         GuestInvocation &invocation = m_pendingInvocations.emplace_back();

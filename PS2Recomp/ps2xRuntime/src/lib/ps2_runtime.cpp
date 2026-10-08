@@ -120,7 +120,9 @@ namespace
         bool wrapped = false;
     };
 
-    thread_local DispatchHistory g_dispatchHistory;
+    // Guest code runs on the EE scheduler's one executor thread. Not
+    // thread_local: on the Vita every access would be an emutls call.
+    DispatchHistory g_dispatchHistory;
 
     bool computeFileCrc32(const std::string &path, uint32_t &crcOut)
     {
@@ -645,36 +647,63 @@ PS2Runtime::~PS2Runtime()
     }
 }
 
+namespace
+{
+    // The IOP runs behind the EE in batches: the scheduler accounts EE time
+    // every few cycles, and advancing the IOP (and SPU2) a cycle at a time
+    // was a third of the game thread on the Vita. Every EE -> IOP call below
+    // first brings the IOP up to date. ~7 us of EE time, under one SPU2
+    // sample, invisible to the game (the IOP is its own processor).
+    constexpr uint64_t kIopBatchEeCycles = 2048u;
+    uint64_t g_iopPendingEeCycles = 0;
+
+    void catchUpIop(ps2x::iop::IopSubsystem *iop) noexcept
+    {
+        if (iop && g_iopPendingEeCycles != 0u)
+        {
+            const uint64_t cycles = g_iopPendingEeCycles;
+            g_iopPendingEeCycles = 0u;
+            iop->runEeCycles(cycles);
+        }
+    }
+}
+
 ps2x::iop::ModuleLoadResult PS2Runtime::loadIopModule(std::string_view path, const void *arguments, uint32_t argumentSize)
 {
+    catchUpIop(m_iopSubsystem.get());
     auto scope = m_iopHost->enterCall(nullptr, m_memory.getRDRAM());
     return m_iopSubsystem->loadModule(path, arguments, argumentSize);
 }
 
 ps2x::iop::ModuleLoadResult PS2Runtime::loadIopModuleBuffer(uint32_t guestAddress, const void *arguments, uint32_t argumentSize)
 {
+    catchUpIop(m_iopSubsystem.get());
     auto scope = m_iopHost->enterCall(nullptr, m_memory.getRDRAM());
     return m_iopSubsystem->loadModuleBuffer(guestAddress, arguments, argumentSize);
 }
 
 bool PS2Runtime::stopIopModule(int32_t moduleId, int32_t *result)
 {
+    catchUpIop(m_iopSubsystem.get());
     auto scope = m_iopHost->enterCall(nullptr, m_memory.getRDRAM());
     return m_iopSubsystem->stopModule(moduleId, result);
 }
 
 ps2x::iop::RpcAbi PS2Runtime::selectIopRpcAbi(const ps2x::iop::RpcAbiRequest &request) const
 {
+    catchUpIop(m_iopSubsystem.get());
     return m_iopSubsystem->selectRpcAbi(request);
 }
 
 bool PS2Runtime::canBindIopRpc(uint32_t sid) const noexcept
 {
+    catchUpIop(m_iopSubsystem.get());
     return m_iopSubsystem->canBindRpc(sid);
 }
 
 ps2x::iop::RpcResult PS2Runtime::handleIopRpc(uint8_t *rdram, R5900Context *ctx, ps2x::iop::RpcRequest request)
 {
+    catchUpIop(m_iopSubsystem.get());
     auto scope = m_iopHost->enterCall(ctx, rdram);
     request.callToken = scope.token();
     return m_iopSubsystem->handleRpc(request);
@@ -682,17 +711,21 @@ ps2x::iop::RpcResult PS2Runtime::handleIopRpc(uint8_t *rdram, R5900Context *ctx,
 
 void PS2Runtime::notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransfer &transfer)
 {
+    catchUpIop(m_iopSubsystem.get());
     auto scope = m_iopHost->enterCall(nullptr, rdram);
     m_iopSubsystem->onSifTransfer(transfer);
 }
 
 void PS2Runtime::advanceIopEeCycles(uint64_t eeCycles) noexcept
 {
-    m_iopSubsystem->runEeCycles(eeCycles);
+    g_iopPendingEeCycles += eeCycles;
+    if (g_iopPendingEeCycles >= kIopBatchEeCycles)
+        catchUpIop(m_iopSubsystem.get());
 }
 
 void PS2Runtime::resetIop()
 {
+    g_iopPendingEeCycles = 0u;
     m_iopSubsystem->reset();
 }
 
@@ -713,16 +746,19 @@ bool PS2Runtime::freeIopMemory(uint32_t address)
 
 bool PS2Runtime::readIopMemory(uint32_t address, void *destination, size_t size) const
 {
+    catchUpIop(m_iopSubsystem.get());
     return m_iopSubsystem && m_iopSubsystem->readMemory(address, destination, size);
 }
 
 bool PS2Runtime::writeIopMemory(uint32_t address, const void *source, size_t size)
 {
+    catchUpIop(m_iopSubsystem.get());
     return m_iopSubsystem && m_iopSubsystem->writeMemory(address, source, size);
 }
 
 bool PS2Runtime::zeroIopMemory(uint32_t address, size_t size)
 {
+    catchUpIop(m_iopSubsystem.get());
     return m_iopSubsystem && m_iopSubsystem->zeroMemory(address, size);
 }
 
@@ -1601,8 +1637,10 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
 
 namespace
 {
-    // Guest jumps dispatched on this host thread (see dispatchGuestBranch).
-    thread_local uint64_t t_guestJumpSerial = 0;
+    // Guest jumps dispatched (see dispatchGuestBranch); guest code runs on
+    // the EE scheduler's executor thread only (not thread_local: emutls on
+    // the Vita).
+    uint64_t t_guestJumpSerial = 0;
 }
 
 bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
