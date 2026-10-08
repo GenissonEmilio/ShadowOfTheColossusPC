@@ -53,9 +53,13 @@ uniform vec2 uTarget;
 out vec3 vTex;
 out vec4 vColor;
 out float vFog;
+out float vDepth;
 void main()
 {
-    gl_Position = vec4(aPos.xy / uTarget * 2.0 - 1.0, aPos.z * 2.0 - 1.0, 1.0);
+    // Depth goes to gl_FragDepth as is: GS Z values are often tiny, and the
+    // NDC mapping (z * 2 - 1) would round them together near -1.
+    gl_Position = vec4(aPos.xy / uTarget * 2.0 - 1.0, 0.0, 1.0);
+    vDepth = aPos.z;
     vTex = aTex;
     vColor = aColor;
     vFog = aFog;
@@ -66,9 +70,12 @@ void main()
 in vec3 vTex;
 in vec4 vColor;
 in float vFog;
+in float vDepth;
 uniform sampler2D uTexture;
-uniform int uTme, uTfx, uTcc, uFst, uFge, uAtest, uAref, uAfail;
-uniform vec2 uTexSize;       // texels
+uniform int uTme, uTfx, uTcc, uFst, uFge, uAtest, uAref, uAtestFailed;
+uniform vec2 uTexSize;       // texels of the bound texture
+uniform vec2 uUvScale;       // GS texture size / bound texture size
+uniform float uAlphaFix;     // >= 0: texture alpha
 uniform float uTexAlphaScale; // texture alpha read / scale -> PS2 alpha units of 128
 uniform vec3 uFogColor;
 out vec4 oColor;
@@ -77,10 +84,12 @@ void main()
     vec4 c = vColor;              // 0..255, 0x80 = 1.0 for modulation
     if (uTme != 0)
     {
-        vec2 uv = (uFst != 0) ? vTex.xy / uTexSize : vTex.xy / vTex.z;
+        vec2 uv = (uFst != 0) ? vTex.xy / uTexSize : vTex.xy / vTex.z * uUvScale;
         vec4 t = texture(uTexture, uv);
         t.rgb *= 255.0;
         t.a *= 255.0 * uTexAlphaScale;
+        if (uAlphaFix >= 0.0)
+            t.a = uAlphaFix;
         vec3 rgb;
         float a;
         if (uTfx == 0)      { rgb = t.rgb * c.rgb / 128.0; a = (uTcc != 0) ? t.a * c.a / 128.0 : c.a; }   // MODULATE
@@ -91,7 +100,8 @@ void main()
     }
     if (uFge != 0)
         c.rgb = mix(uFogColor, c.rgb, vFog / 255.0);
-    // Alpha test (AFAIL other than KEEP is treated as KEEP).
+    // Alpha test. uAtestFailed: this pass draws the pixels that fail it
+    // (AFAIL modes other than KEEP still write part of the pixel).
     if (uAtest != 1)
     {
         float a = floor(c.a + 0.5);
@@ -101,10 +111,11 @@ void main()
                     uAtest == 4 ? a == float(uAref) :
                     uAtest == 5 ? a >= float(uAref) :
                     uAtest == 6 ? a > float(uAref) : a != float(uAref);
-        if (!pass)
+        if (pass == (uAtestFailed != 0))
             discard;
     }
     oColor = vec4(c.rgb / 255.0, c.a / 128.0);
+    gl_FragDepth = vDepth;
 }
 )";
 
@@ -143,10 +154,13 @@ void main()
         uint64_t texture; // GL texture name | (render target flag << 32)
         uint32_t texW, texH;
         float texAlphaScale;
+        uint32_t gsW, gsH;   // GS texture size (2^TW, 2^TH): STQ coordinates are relative to it
+        int32_t alphaFix;    // >= 0: texture alpha replaced by this (CT24 read of a drawn target)
         uint32_t sx0, sy0, sx1, sy1;
         uint32_t fogColor;
         uint32_t linear;
         uint32_t colclamp;
+        uint64_t tex0; // raw TEX0 (trace only; equal for equal draws)
         bool operator==(const DrawKey &o) const { return std::memcmp(this, &o, sizeof(DrawKey)) == 0; }
     };
 
@@ -226,6 +240,14 @@ struct GSHwBackend::Impl
         uint64_t presentWb = 0, textureWb = 0, transferWb = 0, clutWb = 0, discards = 0;
     } stats;
     const char *wbReason = "other";
+    // PS2X_GS_HW_TRACE=N: list the draw calls between presents N and N+1.
+    uint64_t presents = 0, tracedDraws = 0;
+    bool traceDone = false;
+    bool tracing() const
+    {
+        static const long frame = std::getenv("PS2X_GS_HW_TRACE") ? std::atol(std::getenv("PS2X_GS_HW_TRACE")) : -1;
+        return frame >= 0 && !traceDone && presents >= static_cast<uint64_t>(frame);
+    }
     void reportStats()
     {
         static const bool on = std::getenv("PS2X_GS_HW_STATS") != nullptr;
@@ -536,17 +558,23 @@ struct GSHwBackend::Impl
     // ---- Textures -----------------------------------------------------------
 
     // Returns the GL texture for the draw (0: none) and its alpha scale.
-    GLuint textureFor(const GSDrawState &state, float &alphaScale, uint32_t &texW, uint32_t &texH)
+    GLuint textureFor(const GSDrawState &state, float &alphaScale, uint32_t &texW, uint32_t &texH, int32_t &alphaFix)
     {
         const auto &tex = state.context.tex0;
         texW = state.textureWidth;
         texH = state.textureHeight;
+        alphaFix = -1;
         // A texture at the start of a render target the GPU drew: sample it there.
         for (auto &[fbp, rt] : targets)
         {
-            if (tex.tbp0 == fbp * 32u && isColorPsm(tex.psm) && rt.texture && tex.tbw * 64u == rt.width && rt.gpuDirty)
+            const bool sameFormat = tex.psm == rt.psm || (tex.psm == GS_PSM_CT24 && rt.psm == GS_PSM_CT32);
+            if (tex.tbp0 == fbp * 32u && sameFormat && rt.texture && tex.tbw * 64u == rt.width && rt.gpuDirty)
             {
-                alphaScale = 1.0f;
+                alphaScale = kAlphaOne / 255.0f; // targets keep alpha as A / 0x80
+                if (tex.psm == GS_PSM_CT24)
+                    alphaFix = state.texa.ta0; // (AEM's black-is-transparent not applied)
+                texW = rt.width;
+                texH = rt.height;
                 ++stats.rtTextures;
                 return rt.texture;
             }
@@ -574,7 +602,7 @@ struct GSHwBackend::Impl
             cached.width = w;
             cached.height = h;
         }
-        alphaScale = 255.0f / kAlphaOne;
+        alphaScale = 1.0f; // decoded texels carry the GS alpha as is
         texW = w;
         texH = h;
         return cached.texture;
@@ -637,13 +665,13 @@ struct GSHwBackend::Impl
             glEnable(GL_DEPTH_TEST);
             static const GLenum funcs[4] = {GL_NEVER, GL_ALWAYS, GL_GEQUAL, GL_GREATER};
             glDepthFunc(funcs[ztst]);
-            glDepthMask(key.zmask ? GL_FALSE : GL_TRUE);
         }
         else
             glDisable(GL_DEPTH_TEST);
         const uint32_t m = key.fbmsk;
-        glColorMask((m & 0xFFu) != 0xFFu, (m & 0xFF00u) != 0xFF00u, (m & 0xFF0000u) != 0xFF0000u,
-                    key.fpsm == GS_PSM_CT24 ? GL_FALSE : (m & 0xFF000000u) != 0xFF000000u);
+        const bool writeR = (m & 0xFFu) != 0xFFu, writeG = (m & 0xFF00u) != 0xFF00u, writeB = (m & 0xFF0000u) != 0xFF0000u;
+        const bool writeA = key.fpsm != GS_PSM_CT24 && (m & 0xFF000000u) != 0xFF000000u;
+        const bool writeZ = d && !key.zmask;
         applyBlend(key);
         glUseProgram(program);
         glUniform2f(uniform("uTarget"), static_cast<float>(rt.width), static_cast<float>(rt.height));
@@ -653,10 +681,15 @@ struct GSHwBackend::Impl
         glUniform1i(uniform("uFst"), static_cast<GLint>(key.fst));
         glUniform1i(uniform("uFge"), static_cast<GLint>(key.fge));
         const bool ate = (key.test & 1u) != 0u;
-        glUniform1i(uniform("uAtest"), ate ? static_cast<GLint>((key.test >> 1) & 7u) : 1);
+        const uint32_t atst = ate ? static_cast<uint32_t>((key.test >> 1) & 7u) : 1u;
+        const uint32_t afail = static_cast<uint32_t>((key.test >> 12) & 3u);
+        glUniform1i(uniform("uAtest"), static_cast<GLint>(atst));
         glUniform1i(uniform("uAref"), static_cast<GLint>((key.test >> 4) & 0xFFu));
         glUniform2f(uniform("uTexSize"), static_cast<float>(key.texW), static_cast<float>(key.texH));
         glUniform1f(uniform("uTexAlphaScale"), key.texAlphaScale);
+        glUniform1f(uniform("uAlphaFix"), key.tme ? static_cast<float>(key.alphaFix) : -1.0f);
+        glUniform2f(uniform("uUvScale"), key.texW ? static_cast<float>(key.gsW) / key.texW : 1.0f,
+                    key.texH ? static_cast<float>(key.gsH) / key.texH : 1.0f);
         glUniform3f(uniform("uFogColor"), static_cast<float>(key.fogColor & 0xFFu), static_cast<float>((key.fogColor >> 8) & 0xFFu),
                     static_cast<float>((key.fogColor >> 16) & 0xFFu));
         if (key.tme && key.texture)
@@ -673,8 +706,47 @@ struct GSHwBackend::Impl
         glBindVertexArray(vao);
         glBindBuffer(GL_ARRAY_BUFFER, vbo);
         glBufferData(GL_ARRAY_BUFFER, pending.size() * sizeof(HwVertex), pending.data(), GL_STREAM_DRAW);
-        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(pending.size()));
-        ++drawCalls;
+        if (tracing())
+        {
+            ++tracedDraws;
+            float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+            for (const auto &v : pending)
+            {
+                x0 = std::min(x0, v.x); y0 = std::min(y0, v.y); x1 = std::max(x1, v.x); y1 = std::max(y1, v.y);
+            }
+            std::fprintf(stderr, "[gs:trace] fbp=%u fbw=%u fpsm=%u fbmsk=%08x zbp=%u zmsk=%u test=%llx abe=%u alpha=%llx tme=%u tex=%llx tfx=%u tcc=%u fst=%u fge=%u gs=%ux%u bound=%ux%u afix=%d "
+                         "verts=%zu bbox=(%.0f,%.0f)-(%.0f,%.0f) scissor=(%u,%u)-(%u,%u) c0=%02x%02x%02x%02x z0=%.9g zpsm=%u\n",
+                         key.fbp, key.fbw, key.fpsm, key.fbmsk, key.zbp, key.zmask, (unsigned long long)key.test, key.abe, (unsigned long long)key.alpha,
+                         key.tme, (unsigned long long)key.tex0, key.tfx, key.tcc, key.fst, key.fge, key.gsW, key.gsH, key.texW, key.texH, key.alphaFix,
+                         pending.size(), x0, y0, x1, y1, key.sx0, key.sy0, key.sx1, key.sy1, pending[0].r, pending[0].g, pending[0].b, pending[0].a, pending[0].z, key.zpsm);
+        }
+        // Pass 1: pixels that pass the alpha test write everything enabled.
+        // Pass 2 (AFAIL != KEEP): failing pixels write FB only, Z only, or RGB only.
+        const GLsizei count = static_cast<GLsizei>(pending.size());
+        if (atst != 0u)
+        {
+            glUniform1i(uniform("uAtestFailed"), 0);
+            glColorMask(writeR, writeG, writeB, writeA);
+            if (d)
+                glDepthMask(writeZ ? GL_TRUE : GL_FALSE);
+            glDrawArrays(GL_TRIANGLES, 0, count);
+            ++drawCalls;
+        }
+        if (atst != 1u && afail != 0u)
+        {
+            const bool failColor = afail != 2u, failZ = afail == 2u && writeZ;
+            if (failColor || failZ)
+            {
+                glUniform1i(uniform("uAtestFailed"), 1);
+                glColorMask(failColor && writeR, failColor && writeG, failColor && writeB, afail == 1u && writeA);
+                if (d)
+                    glDepthMask(failZ ? GL_TRUE : GL_FALSE);
+                glDrawArrays(GL_TRIANGLES, 0, count);
+                ++drawCalls;
+            }
+        }
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glDepthMask(GL_TRUE);
         rt.gpuDirty = true;
         pending.clear();
         hasPending = false;
@@ -722,7 +794,13 @@ struct GSHwBackend::Impl
             flushPendingIfTextureChanges(state);
             float alphaScale = 1.0f;
             uint32_t tw = 0, th = 0;
-            key.texture = textureFor(state, alphaScale, tw, th);
+            int32_t alphaFix = -1;
+            key.texture = textureFor(state, alphaScale, tw, th, alphaFix);
+            key.alphaFix = alphaFix;
+            key.tex0 = (static_cast<uint64_t>(ctx.tex0.tbp0)) | (static_cast<uint64_t>(ctx.tex0.tbw) << 14) | (static_cast<uint64_t>(ctx.tex0.psm) << 20) |
+                       (static_cast<uint64_t>(ctx.tex0.cbp) << 37);
+            key.gsW = state.textureWidth;
+            key.gsH = state.textureHeight;
             key.texAlphaScale = alphaScale;
             key.texW = tw;
             key.texH = th;
@@ -932,6 +1010,11 @@ PresentationFrame GSHwBackend::Present(const GSPresentationRequest &request)
             m_impl->wbReason = "other";
         }
         m_impl->reportStats();
+        if (m_impl->tracing())
+            std::fprintf(stderr, "[gs:trace] present pmode=%llx dispfb1=%llx display1=%llx dispfb2=%llx display2=%llx\n", (unsigned long long)request.pmode, (unsigned long long)request.dispfb1, (unsigned long long)request.display1, (unsigned long long)request.dispfb2, (unsigned long long)request.display2);
+        if (m_impl->tracing() && m_impl->tracedDraws > 0)
+            m_impl->traceDone = true; // one whole frame with draws
+        ++m_impl->presents;
     }
     return m_impl->shadow->Present(request);
 }
