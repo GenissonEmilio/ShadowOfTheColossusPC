@@ -1,5 +1,6 @@
 // Shadow of the Colossus (SCUS-97472) runtime overrides.
 #include "ps2_runtime.h"
+#include "ps2_runtime_macros.h"
 #include "game_overrides.h"
 #include "runtime/ee_scheduler.h"
 

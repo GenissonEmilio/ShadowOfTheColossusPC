@@ -1,3 +1,9 @@
+#include <mutex>
+#include <vector>
+#if defined(PLATFORM_VITA)
+#include <psp2/io/fcntl.h>
+#include <psp2/io/stat.h>
+#endif
 #include <algorithm>
 #include <cctype>
 
@@ -322,6 +328,28 @@ namespace
         }
     }
 
+#if defined(PLATFORM_VITA)
+    // newlib's stat is 32-bit on the Vita: files over 2 GiB (SotC's NICO.DAT)
+    // need the system's 64-bit calls for their size and for reads.
+    inline bool hostFileSize(const std::filesystem::path &path, uint64_t &sizeOut)
+    {
+        SceIoStat stat{};
+        if (sceIoGetstat(path.string().c_str(), &stat) < 0 || SCE_S_ISDIR(stat.st_mode))
+            return false;
+        sizeOut = static_cast<uint64_t>(stat.st_size);
+        return true;
+    }
+#else
+    inline bool hostFileSize(const std::filesystem::path &path, uint64_t &sizeOut)
+    {
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(path, ec) || ec)
+            return false;
+        sizeOut = std::filesystem::file_size(path, ec);
+        return !ec;
+    }
+#endif
+
     bool registerCdFile(const std::string &ps2Path, CdFileEntry &entryOut)
     {
         const std::string key = cdPathKey(ps2Path);
@@ -342,7 +370,8 @@ namespace
         const std::filesystem::path root = getCdRootPath();
         std::filesystem::path path = cdHostPath(ps2Path);
         std::error_code ec;
-        if (!std::filesystem::exists(path, ec) || ec || !std::filesystem::is_regular_file(path, ec))
+        uint64_t probedSize = 0;
+        if (!hostFileSize(path, probedSize))
         {
             const std::filesystem::path relative(normalizeCdPathNoPrefix(ps2Path));
             std::filesystem::path resolvedCasePath;
@@ -379,8 +408,8 @@ namespace
             }
         }
 
-        const uint64_t sizeBytes = std::filesystem::file_size(path, ec);
-        if (ec)
+        uint64_t sizeBytes = 0;
+        if (!hostFileSize(path, sizeBytes))
         {
             g_lastCdError = -1;
             return false;
@@ -413,6 +442,41 @@ namespace
         }
 
         std::memset(dst, 0, byteCount);
+#if defined(PLATFORM_VITA)
+        {
+            // Keep the last few files open: the game streams from one big file.
+            static std::mutex fdMutex;
+            static std::vector<std::pair<std::string, SceUID>> openFiles;
+            std::lock_guard<std::mutex> lock(fdMutex);
+            const std::string key = path.string();
+            SceUID fd = -1;
+            for (const auto &[name, handle] : openFiles)
+                if (name == key)
+                    fd = handle;
+            if (fd < 0)
+            {
+                fd = sceIoOpen(key.c_str(), SCE_O_RDONLY, 0);
+                if (fd < 0)
+                {
+                    g_lastCdError = -1;
+                    return false;
+                }
+                if (openFiles.size() >= 8u)
+                {
+                    sceIoClose(openFiles.front().second);
+                    openFiles.erase(openFiles.begin());
+                }
+                openFiles.emplace_back(key, fd);
+            }
+            if (sceIoPread(fd, dst, static_cast<SceSize>(byteCount), static_cast<SceOff>(offsetBytes)) < 0)
+            {
+                g_lastCdError = -1;
+                return false;
+            }
+            g_lastCdError = 0;
+            return true;
+        }
+#endif
         std::ifstream file(path, std::ios::binary);
         if (!file.is_open())
         {
@@ -466,6 +530,12 @@ namespace
             return readHostRange(cdImage, offset, dst, byteCount);
         }
 
+        static uint32_t unresolvedLogs = 0;
+        if (++unresolvedLogs > 32u && (unresolvedLogs & 1023u) != 0u)
+        {
+            g_lastCdError = -1;
+            return false;
+        }
         std::cerr << "sceCdRead unresolved LBN 0x" << std::hex << lbn
                   << " sectors=" << std::dec << sectors
                   << " (no mapped file and no configured CD image)" << std::endl;

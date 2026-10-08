@@ -1,3 +1,8 @@
+#include <vector>
+#include <string>
+#include <chrono>
+#include <mutex>
+#include <map>
 #include <set>
 #include "runtime/ps2_stats.h"
 #include "runtime/ps2_vu1.h"
@@ -1183,6 +1188,162 @@ void VU1Interpreter::traceZeroXyzPacket()
                      static_cast<unsigned long long>(events));
 }
 
+namespace
+{
+    // PS2X_VU1_PROFILE=1: what each VU1 routine (microcode image + entry pc)
+    // sends to the GS, to plan native replacements.
+    struct Vu1RoutineStats
+    {
+        uint64_t calls = 0, kicks = 0, bytes = 0, vertices = 0, instructions = 0;
+        uint64_t prims[8]{};
+        uint64_t textured = 0, blended = 0, fogged = 0, gouraud = 0;
+        std::map<uint32_t, uint64_t> texPsm; // TEX0 PSM -> count
+        std::map<uint32_t, uint64_t> regs;   // PACKED register ids seen
+    };
+    std::mutex g_vu1ProfileMutex;
+    std::map<std::pair<uint64_t, uint32_t>, Vu1RoutineStats> g_vu1Profile;
+    thread_local std::pair<uint64_t, uint32_t> t_vu1Routine{0, 0};
+    thread_local bool t_vu1ProgramEnded = true;
+
+    // PS2X_VU1_SKIP=<image hash>@<entry pc>[,...]: drop what those routines
+    // send to the GS (shows what they draw).
+    const std::vector<std::pair<uint64_t, uint32_t>> &vu1SkipList()
+    {
+        static const std::vector<std::pair<uint64_t, uint32_t>> list = []
+        {
+            std::vector<std::pair<uint64_t, uint32_t>> out;
+            const char *env = std::getenv("PS2X_VU1_SKIP");
+            std::string spec = env ? env : "";
+            size_t pos = 0;
+            while (pos < spec.size())
+            {
+                const size_t comma = spec.find(',', pos);
+                const std::string item = spec.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+                const size_t at = item.find('@');
+                if (at != std::string::npos)
+                    out.emplace_back(std::strtoull(item.substr(0, at).c_str(), nullptr, 16),
+                                     static_cast<uint32_t>(std::strtoul(item.substr(at + 1).c_str(), nullptr, 16)));
+                if (comma == std::string::npos)
+                    break;
+                pos = comma + 1;
+            }
+            return out;
+        }();
+        return list;
+    }
+
+    bool vu1ProfileEnabled()
+    {
+        static const bool enabled = std::getenv("PS2X_VU1_PROFILE") != nullptr || !vu1SkipList().empty();
+        return enabled;
+    }
+
+    bool vu1SkipCurrent()
+    {
+        for (const auto &[hash, pc] : vu1SkipList())
+            if ((hash == t_vu1Routine.first || (t_vu1Routine.first & 0xFFFFFFFF00000000ull) == (hash << 32)) && pc == t_vu1Routine.second)
+                return true;
+        return false;
+    }
+
+    void vu1ProfilePrimitive(Vu1RoutineStats &st, uint64_t prim)
+    {
+        st.prims[prim & 7u]++;
+        if (prim & (1u << 3)) st.gouraud++;
+        if (prim & (1u << 4)) st.textured++;
+        if (prim & (1u << 5)) st.fogged++;
+        if (prim & (1u << 6)) st.blended++;
+    }
+
+    void vu1ProfileKick(const uint8_t *data, uint32_t size)
+    {
+        std::lock_guard<std::mutex> lock(g_vu1ProfileMutex);
+        Vu1RoutineStats &st = g_vu1Profile[t_vu1Routine];
+        st.kicks++;
+        st.bytes += size;
+        uint32_t off = 0;
+        while (off + 16u <= size)
+        {
+            uint64_t lo, hi;
+            std::memcpy(&lo, data + off, 8);
+            std::memcpy(&hi, data + off + 8, 8);
+            off += 16;
+            const uint32_t nloop = lo & 0x7FFFu;
+            const bool eop = (lo >> 15) & 1u;
+            const bool pre = (lo >> 46) & 1u;
+            const uint64_t prim = (lo >> 47) & 0x7FFu;
+            const uint32_t flg = (lo >> 58) & 3u;
+            uint32_t nreg = (lo >> 60) & 0xFu;
+            if (nreg == 0) nreg = 16;
+            if (pre)
+                vu1ProfilePrimitive(st, prim);
+            if (flg == 0) // PACKED
+            {
+                for (uint32_t l = 0; l < nloop; ++l)
+                    for (uint32_t r = 0; r < nreg && off + 16u <= size; ++r, off += 16)
+                    {
+                        const uint32_t reg = (hi >> (r * 4)) & 0xFu;
+                        st.regs[reg]++;
+                        if (reg == 0x4 || reg == 0x5)
+                            st.vertices++;
+                        else if (reg == 0xE)
+                        {
+                            uint64_t value, addr;
+                            std::memcpy(&value, data + off, 8);
+                            std::memcpy(&addr, data + off + 8, 8);
+                            const uint32_t a = addr & 0xFFu;
+                            if (a == 0x06 || a == 0x07)
+                                st.texPsm[(value >> 20) & 0x3Fu]++;
+                            else if (a == 0x00)
+                                vu1ProfilePrimitive(st, value);
+                        }
+                    }
+            }
+            else if (flg == 1) // REGLIST
+            {
+                const uint64_t words = static_cast<uint64_t>(nloop) * nreg;
+                off += static_cast<uint32_t>(((words + 1u) / 2u) * 16u);
+            }
+            else
+                off += nloop * 16u;
+            if (eop)
+                break;
+        }
+    }
+
+    void vu1ProfileReport()
+    {
+        static double last = 0;
+        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (now - last < 10.0)
+            return;
+        last = now;
+        std::lock_guard<std::mutex> lock(g_vu1ProfileMutex);
+        std::vector<std::pair<std::pair<uint64_t, uint32_t>, Vu1RoutineStats *>> rows;
+        for (auto &[key, st] : g_vu1Profile)
+            rows.emplace_back(key, &st);
+        std::sort(rows.begin(), rows.end(), [](const auto &a, const auto &b)
+                  { return a.second->instructions > b.second->instructions; });
+        std::fprintf(stderr, "[vu1prof] ---- routines by VU instructions (cumulative)\n");
+        for (const auto &[key, st] : rows)
+        {
+            std::string psm, regs;
+            for (const auto &[p, n] : st->texPsm)
+                psm += std::to_string(p) + ":" + std::to_string(n) + " ";
+            for (const auto &[r, n] : st->regs)
+                regs += std::to_string(r) + " ";
+            std::fprintf(stderr,
+                         "[vu1prof] %016llx@%04x calls=%llu instr=%llu kicks=%llu KB=%llu verts=%llu prims(pt,ln,ls,tri,ts,tf,spr)=%llu,%llu,%llu,%llu,%llu,%llu,%llu tex=%llu abe=%llu fge=%llu iip=%llu psm={%s} regs={%s}\n",
+                         (unsigned long long)key.first, key.second, (unsigned long long)st->calls, (unsigned long long)st->instructions,
+                         (unsigned long long)st->kicks, (unsigned long long)(st->bytes / 1024), (unsigned long long)st->vertices,
+                         (unsigned long long)st->prims[0], (unsigned long long)st->prims[1], (unsigned long long)st->prims[2],
+                         (unsigned long long)st->prims[3], (unsigned long long)st->prims[4], (unsigned long long)st->prims[5],
+                         (unsigned long long)st->prims[6], (unsigned long long)st->textured, (unsigned long long)st->blended,
+                         (unsigned long long)st->fogged, (unsigned long long)st->gouraud, psm.c_str(), regs.c_str());
+        }
+    }
+}
+
 void VU1Interpreter::finishXgkick()
 {
     if (!m_xgkick.active)
@@ -1197,6 +1358,15 @@ void VU1Interpreter::finishXgkick()
         const uint8_t *packet = m_xgkick.packet.data();
         m_gifCapture->insert(m_gifCapture->end(), packet, packet + m_xgkick.totalBytes);
         if (m_gifCaptureOnly)
+        {
+            m_xgkick.active = false;
+            return;
+        }
+    }
+    if (vu1ProfileEnabled())
+    {
+        vu1ProfileKick(m_xgkick.packet.data(), m_xgkick.totalBytes);
+        if (vu1SkipCurrent())
         {
             m_xgkick.active = false;
             return;
@@ -1931,7 +2101,15 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     bool programEnded = false;
     bool interpret = true;
     RecVerify *recVerify = nullptr;
-    if (RecompiledFn fn = m_recDisabled ? nullptr : findRecompiled(vuCode, codeSize, memory))
+    RecompiledFn recompiled = m_recDisabled ? nullptr : findRecompiled(vuCode, codeSize, memory);
+    const uint64_t profileInstrStart = ps2_stats::vu1Instr.load(std::memory_order_relaxed);
+    if (vu1ProfileEnabled() && t_vu1ProgramEnded)
+    {
+        t_vu1Routine = {m_recHash, m_state.pc};
+        std::lock_guard<std::mutex> lock(g_vu1ProfileMutex);
+        g_vu1Profile[t_vu1Routine].calls++;
+    }
+    if (RecompiledFn fn = recompiled)
     {
         static const bool verify = std::getenv("PS2X_VU1_REC_VERIFY") != nullptr;
         if (verify)
@@ -2155,6 +2333,15 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     catchUpXgkick();
     if (interpretedPairs)
         ps2_stats::vu1Instr.fetch_add(interpretedPairs, std::memory_order_relaxed);
+    if (vu1ProfileEnabled())
+    {
+        {
+            std::lock_guard<std::mutex> lock(g_vu1ProfileMutex);
+            g_vu1Profile[t_vu1Routine].instructions += ps2_stats::vu1Instr.load(std::memory_order_relaxed) - profileInstrStart;
+        }
+        t_vu1ProgramEnded = programEnded;
+        vu1ProfileReport();
+    }
     m_state.cycles = m_cycle;
     if (useVuRounding && previousRoundingMode != -1)
         std::fesetround(previousRoundingMode);

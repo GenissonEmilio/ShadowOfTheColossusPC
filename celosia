@@ -252,6 +252,31 @@ cmd_clean() {
     rm -rf "$BUILD"
 }
 
+# PS Vita build: ./celosia vita -> build/vita/ps2xRuntime/ps2EntryRunner.vpk
+# Install the VPK, then copy disc/ to ux0:data/celosia/disc/.
+cmd_vita() {
+    export VITASDK=${VITASDK:-$HOME/vitasdk}
+    [ -f "$VITASDK/share/vita.toolchain.cmake" ] || die "VitaSDK not found (set VITASDK)"
+    [ -n "$(find "$RUNNER_DIR" -maxdepth 1 -name '*.cpp' -print -quit 2>/dev/null)" ] || die "no recompiled code yet (run: ./celosia setup)"
+    local dir=$BUILD/vita
+    say "configuring the Vita build in $dir"
+    cmake -S "$ROOT/PS2Recomp" -B "$dir" -G Ninja \
+        -DCMAKE_TOOLCHAIN_FILE="$VITASDK/share/vita.toolchain.cmake" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DPS2X_BUILD_RECOMP=OFF -DPS2X_BUILD_STUDIO=OFF -DPS2X_BUILD_TEST=OFF -DPS2X_BUILD_ANALYZER=OFF \
+        -DPS2X_ENABLE_AGRESSIVE_LOGS=OFF -DPS2X_ENABLE_FFMPEG=OFF -DPS2X_ENABLE_DEBUG_UI=OFF \
+        -DPS2X_ENABLE_RUNNER_PCH=OFF \
+        "-DPS2X_RUNNER_DIRS=$RUNNER_DIR;$VU1REC_DIR;$ROOT/game/overrides" \
+        "-DPS2X_VITA_APP_NAME=Shadow of the Colossus" -DPS2X_VITA_TITLEID=CELO00001 \
+        -DPS2X_DEFAULT_BOOT_ELF=ux0:data/celosia/disc/$BOOT \
+        ${CELOSIA_VITA_CMAKE_ARGS:-} >"$LOGS/vita-configure.log" 2>&1 ||
+        { tail -30 "$LOGS/vita-configure.log"; die "Vita configure failed (log: logs/vita-configure.log)"; }
+    say "building the Vita VPK (this takes a while)"
+    cmake --build "$dir" --target ps2EntryRunner.vpk-vpk -j "$JOBS" >"$LOGS/vita-build.log" 2>&1 ||
+        { grep -m 20 -E "error|Error" "$LOGS/vita-build.log" || tail -30 "$LOGS/vita-build.log"; die "Vita build failed (log: logs/vita-build.log)"; }
+    say "VPK: $dir/ps2xRuntime/ps2EntryRunner.vpk"
+}
+
 cmd_help() {
     sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     cat <<'EOF'
@@ -264,6 +289,7 @@ Commands:
   recompile            relink modules + recompile game code + rebuild
   build                rebuild the runner (after editing PS2Recomp sources)
   autotest [s] [int]   scripted run with periodic screenshots in shots/run
+  vita                 build the PS Vita VPK (build/vita/ps2xRuntime/ps2EntryRunner.vpk)
   clean                delete the build directory
 EOF
 }
@@ -277,6 +303,7 @@ vu1) cmd_vu1 ;;
 recompile) cmd_recompile ;;
 build) cmd_build ;;
 autotest) shift; cmd_autotest "$@" ;;
+vita) cmd_vita ;;
 clean) cmd_clean ;;
 help | -h | --help) cmd_help ;;
 *) die "unknown command '$1' (see ./celosia help)" ;;

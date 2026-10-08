@@ -1,3 +1,4 @@
+#include <memory>
 #include "ps2_runtime.h"
 #include "games_database.h"
 #if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
@@ -193,7 +194,11 @@ int main(int argc, char *argv[])
             windowTitle += elfName;
         }
 
-        PS2Runtime runtime;
+        // On the heap: the runtime is too large for small main-thread stacks (Vita).
+        std::cout << "[main] creating runtime (" << sizeof(PS2Runtime) << " bytes)" << std::endl;
+        auto runtimeOwner = std::make_unique<PS2Runtime>();
+        PS2Runtime &runtime = *runtimeOwner;
+        std::cout << "[main] runtime created" << std::endl;
 #if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
         // This hook is to prevent leak rlimgui deps to recompiler etc
         PS2DebugPanel debugPanel;
@@ -220,6 +225,7 @@ int main(int argc, char *argv[])
             return 1;
         }
 
+        std::cout << "[main] runtime initialized, loading " << filePathStr << std::endl;
         if (!runtime.loadELF(filePathStr))
         {
             std::cerr << "Failed to load ELF file: " << filePathStr << std::endl;

@@ -570,7 +570,7 @@ PS2Runtime::~PS2Runtime()
         requestStop();
         m_iopSubsystem.reset();
         m_iopHost.reset();
-#if defined(PLATFORM_VITA)
+#if defined(PLATFORM_VITA) && !defined(PS2X_VITA_SDL2_SHIM)
         m_audioBackend.stopAll();
         m_audioBackend.setAudioReady(false);
 #else
@@ -848,7 +848,7 @@ bool PS2Runtime::initialize(const char *title)
             std::cerr << "Failed to bind runtime core subsystems" << std::endl;
             return false;
         }
-#if defined(PLATFORM_VITA)
+#if defined(PLATFORM_VITA) && !defined(PS2X_VITA_SDL2_SHIM)
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
 #else
         SetConfigFlags(FLAG_WINDOW_RESIZABLE);

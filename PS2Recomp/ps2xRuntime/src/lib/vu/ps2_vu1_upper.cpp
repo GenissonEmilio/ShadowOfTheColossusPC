@@ -2,7 +2,7 @@
 #include "ps2_vu1_detail.h"
 
 #include <cmath>
-#if defined(__aarch64__) || defined(__arm64__)
+#if defined(USE_SSE2NEON) || defined(__aarch64__) || defined(__arm64__)
 #include "sse2neon.h"
 #else
 #include <immintrin.h>

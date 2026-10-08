@@ -91,7 +91,11 @@ namespace ps2_stubs
         {
             if (const char *dir = std::getenv("PS2X_MEMCARD_DIR"); dir && *dir)
                 return dir;
+#if defined(PLATFORM_VITA)
+            return "ux0:data/celosia/memcards";
+#else
             return "memcards";
+#endif
         }
 
         // Opens (creating a blank card for slot 1) the image behind a port.

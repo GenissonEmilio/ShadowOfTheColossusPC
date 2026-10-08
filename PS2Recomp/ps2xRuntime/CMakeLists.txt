@@ -17,6 +17,23 @@ option(PS2X_STRICT_RETURN_DIAGNOSTICS "Route generated JR $ra returns through ru
 option(PS2X_SHOW_WINDOWS_CONSOLE "Show a console window for ps2EntryRunner on Windows release builds" ON)
 option(PS2X_ENABLE_DEBUG_UI "Build the desktop runtime debug UI" ON)
 
+option(PS2X_ENABLE_CCACHE "Use ccache as compiler launcher when available (preferred over sccache)" ON)
+if(PS2X_ENABLE_CCACHE)
+    find_program(PS2X_CCACHE_PROGRAM ccache)
+    if(PS2X_CCACHE_PROGRAM)
+        # Content-hashed: unchanged sources (e.g. a header touched but not
+        # changed) come back from the cache instead of being recompiled.
+        set(CMAKE_C_COMPILER_LAUNCHER "${PS2X_CCACHE_PROGRAM}")
+        set(CMAKE_CXX_COMPILER_LAUNCHER "${PS2X_CCACHE_PROGRAM}")
+        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+            # Lets ccache cache sources built with the precompiled header.
+            add_compile_options("SHELL:-Xclang -fno-pch-timestamp")
+        endif()
+        set(PS2X_ENABLE_SCCACHE OFF)
+        message(STATUS "Using ccache: ${PS2X_CCACHE_PROGRAM}")
+    endif()
+endif()
+
 if(PS2X_ENABLE_SCCACHE)
     find_program(PS2X_SCCACHE_PROGRAM sccache)
 
@@ -139,7 +156,28 @@ if(PS2X_DEFAULT_BOOT_ELF)
     string(REPLACE "\"" "\\\"" PS2X_DEFAULT_BOOT_ELF_DEFINE "${PS2X_DEFAULT_BOOT_ELF_DEFINE}")
 endif()
 
-if(PS2X_IS_VITA)
+option(PS2X_VITA_SDL2_SHIM "Vita: implement the raylib subset on SDL2/GXM (platform/vita/raylib) instead of raylib-vita + PVR GLES" ON)
+
+if(PS2X_IS_VITA AND PS2X_VITA_SDL2_SHIM)
+    # SDL2 draws through GXM: no PowerVR GLES modules (which Vita3K cannot run).
+    set(PS2X_VITA_PREFIX "${PS2X_VITASDK}/arm-vita-eabi")
+    add_library(ps2x_vita_raylib STATIC "${CMAKE_CURRENT_SOURCE_DIR}/platform/vita/raylib/raylib_vita.cpp")
+    target_include_directories(ps2x_vita_raylib PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/platform/vita/raylib"
+        "${PS2X_VITA_PREFIX}/include")
+    target_link_libraries(ps2x_vita_raylib PUBLIC
+        SDL2
+        SceDisplay_stub SceCtrl_stub SceTouch_stub SceGxm_stub SceAudio_stub SceAudioIn_stub
+        SceSysmodule_stub SceHid_stub SceMotion_stub SceAppMgr_stub SceAppUtil_stub
+        SceCommonDialog_stub SceIme_stub ScePower_stub SceLibKernel_stub SceProcessmgr_stub
+        SceKernelDmacMgr_stub SceIofilemgr_stub SceRtc_stub
+        # Whole archive: libstdc++ checks for pthread through weak symbols;
+        # without them std::call_once / std::thread throw "Unknown error".
+        -Wl,--whole-archive pthread -Wl,--no-whole-archive
+        m c)
+    target_compile_definitions(ps2_host_backend INTERFACE PLATFORM_VITA PS2X_VITA_SDL2_SHIM=1)
+    target_link_libraries(ps2_host_backend INTERFACE ps2x_vita_raylib)
+elseif(PS2X_IS_VITA)
     set(PS2X_VITA_PREFIX "${PS2X_VITASDK}/arm-vita-eabi")
     set(PS2X_VITA_EXTRA_INCLUDE_DIRS "" CACHE STRING "Extra include directories for Vita host dependencies")
     set(PS2X_VITA_LIBRARY_DIR "${PS2X_VITA_PREFIX}/lib")
@@ -398,7 +436,10 @@ add_library(ps2_runtime STATIC
     src/lib/games_database.cpp
 )
 
-# GPU GS rasterizer (Metal) on macOS; PS2X_GS_GPU=1 selects it at run time.
+# GPU GS rasterizer (Metal) on macOS, the default there (PS2X_GS_GPU=0 = CPU).
+if(NOT APPLE)
+    target_sources(ps2_runtime PRIVATE src/lib/gs/gs_metal_raster_stub.cpp)
+endif()
 if(APPLE)
     target_sources(ps2_runtime PRIVATE src/lib/gs/metal/gs_metal_raster.mm)
     set_source_files_properties(src/lib/gs/metal/gs_metal_raster.mm PROPERTIES SKIP_PRECOMPILE_HEADERS ON SKIP_UNITY_BUILD_INCLUSION ON)
@@ -596,6 +637,15 @@ endif()
 
 # Vita: Work around for GCC 10's LTO plugin
 if(PS2X_IS_VITA)
+    # Cortex-A9: Thumb-2 and NEON. The recompiled game is size-optimized
+    # (tens of MB of code); the runtime itself is speed-optimized.
+    foreach(PS2X_VITA_TARGET IN ITEMS ps2_runtime ps2EntryRunner ps2_iop)
+        if(TARGET ${PS2X_VITA_TARGET})
+            target_compile_options(${PS2X_VITA_TARGET} PRIVATE -mcpu=cortex-a9 -mfpu=neon -mfloat-abi=hard -mthumb)
+        endif()
+    endforeach()
+    target_compile_options(ps2_runtime PRIVATE -O2)
+    target_compile_options(ps2EntryRunner PRIVATE -Os)
     target_link_options(ps2EntryRunner PRIVATE "-Wl,--allow-multiple-definition")
     target_sources(ps2EntryRunner PRIVATE src/lib/ps2_vita_runtime.cpp)
     set_source_files_properties(src/lib/ps2_vita_runtime.cpp PROPERTIES
