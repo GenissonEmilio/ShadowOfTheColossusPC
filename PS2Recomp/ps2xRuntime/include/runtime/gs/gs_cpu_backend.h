@@ -39,6 +39,17 @@ public:
     void SnapshotVram(std::vector<uint8_t> &out) const override;
     GSTransferSnapshot GetTransferSnapshot() const override;
 
+    // For the hardware renderer, which keeps this backend as its GS memory
+    // (uploads, CLUTs, transfers) and draws on the GPU itself.
+    // The draw's texture as RGBA8 (CLUT and TEXA applied), any size. epoch
+    // changes whenever the texture's memory is written.
+    const std::vector<uint32_t> *textureForHw(const GSDrawState &state, uint32_t &width, uint32_t &height, uint64_t &epoch);
+    // Newest write epoch of the GS memory range [begin, end) (bytes).
+    uint64_t newestWrite(uint64_t begin, uint64_t end) const;
+    // Records that the GPU wrote this range (texture cache invalidation).
+    void noteExternalWrite(uint64_t begin, uint64_t end);
+    std::mutex &vramMutex() { return m_mutex; }
+
 private:
     void ResetUnlocked();
     void LoadClutUnlocked(const GSTex0Reg &tex0, const GSTexClutReg &texclut);

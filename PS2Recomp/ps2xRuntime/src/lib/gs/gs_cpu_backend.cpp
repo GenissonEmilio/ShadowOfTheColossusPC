@@ -1362,13 +1362,50 @@ void GSCpuBackend::markVramWritten(uint64_t begin, uint64_t end)
         m_pageEpoch[page % m_pageEpoch.size()] = epoch;
 }
 
+namespace
+{
+    thread_local bool t_decodeAnySize = false;
+}
+
+const std::vector<uint32_t> *GSCpuBackend::textureForHw(const GSDrawState &state, uint32_t &width, uint32_t &height, uint64_t &epoch)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    t_decodeAnySize = true;
+    const DecodedTexture *texture = decodedTexture(state, m_clut.data(), m_clutHash);
+    t_decodeAnySize = false;
+    if (!texture)
+        return nullptr;
+    width = texture->width;
+    height = texture->height;
+    epoch = texture->epoch;
+    return &texture->texels;
+}
+
+uint64_t GSCpuBackend::newestWrite(uint64_t begin, uint64_t end) const
+{
+    if (end <= begin)
+        return 0;
+    uint64_t newest = 0;
+    const uint64_t firstPage = begin / 8192u;
+    const uint64_t lastPage = std::min<uint64_t>((end - 1u) / 8192u, firstPage + m_pageEpoch.size() - 1u);
+    for (uint64_t page = firstPage; page <= lastPage; ++page)
+        newest = std::max(newest, m_pageEpoch[page % m_pageEpoch.size()]);
+    return newest;
+}
+
+void GSCpuBackend::noteExternalWrite(uint64_t begin, uint64_t end)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    markVramWritten(begin, end);
+}
+
 const GSCpuBackend::DecodedTexture *GSCpuBackend::decodedTexture(const GSDrawState &state, const uint16_t *clut, uint64_t clutHash)
 {
     const auto &tex = state.context.tex0;
     const uint32_t width = state.textureWidth;
     const uint32_t height = state.textureHeight;
     // Very large textures sampled by small draws cost more to decode than to sample.
-    if (!m_vram || width * height > 512u * 512u)
+    if (!m_vram || (width * height > 512u * 512u && !t_decodeAnySize))
         return nullptr;
     const bool indexed = isFourBitIndexedPsm(tex.psm) || isEightBitIndexedPsm(tex.psm);
     TextureKey key;

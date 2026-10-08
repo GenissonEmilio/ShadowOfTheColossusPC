@@ -4,6 +4,7 @@
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/gs/gs_async_backend.h"
+#include "runtime/gs/gs_hw_backend.h"
 #include "ps2_log.h"
 #include "runtime/ps2_memory.h"
 #include "ThreadNaming.h"
@@ -117,6 +118,10 @@ namespace
     std::unique_ptr<GSRasterBackend> makeDefaultBackend()
     {
         static const bool synchronous = std::getenv("PS2X_GS_SYNC") != nullptr;
+        // PS2X_GS_HW=1: hardware renderer (GPU render targets, OpenGL).
+        static const bool hardware = std::getenv("PS2X_GS_HW") && std::atoi(std::getenv("PS2X_GS_HW")) != 0;
+        if (hardware)
+            return std::make_unique<GSAsyncBackend>(std::make_unique<GSHwBackend>());
         auto backend = std::make_unique<GSCpuBackend>();
         backend->allowGpu();
         if (synchronous)

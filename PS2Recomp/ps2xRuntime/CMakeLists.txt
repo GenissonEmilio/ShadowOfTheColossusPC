@@ -422,6 +422,7 @@ add_library(ps2_runtime STATIC
     src/lib/gs/gs_frontend.cpp
     src/lib/gs/gs_cpu_backend.cpp
     src/lib/gs/gs_async_backend.cpp
+    src/lib/gs/gs_hw_backend.cpp
     src/lib/ps2_iop_host.cpp
     src/lib/ps2_memory.cpp
     src/lib/ps2_pad.cpp
@@ -443,7 +444,7 @@ endif()
 if(APPLE)
     target_sources(ps2_runtime PRIVATE src/lib/gs/metal/gs_metal_raster.mm)
     set_source_files_properties(src/lib/gs/metal/gs_metal_raster.mm PROPERTIES SKIP_PRECOMPILE_HEADERS ON SKIP_UNITY_BUILD_INCLUSION ON)
-    target_link_libraries(ps2_runtime PUBLIC "-framework Metal" "-framework Foundation")
+    target_link_libraries(ps2_runtime PUBLIC "-framework Metal" "-framework Foundation" "-framework OpenGL")
     target_compile_definitions(ps2_runtime PUBLIC PS2X_HAVE_METAL=1)
 endif()
 

@@ -1,3 +1,7 @@
+#if defined(__APPLE__)
+#include "GLFW/glfw3.h"
+#endif
+#include "runtime/gs/gs_hw_backend.h"
 #include <set>
 #include <map>
 #include "runtime/ps2_stats.h"
@@ -853,6 +857,32 @@ bool PS2Runtime::initialize(const char *title)
 #else
         SetConfigFlags(FLAG_WINDOW_RESIZABLE);
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
+#if defined(__APPLE__)
+        if (std::getenv("PS2X_GS_HW"))
+        {
+            // The hardware GS renderer draws on the GS worker thread: give it a
+            // hidden context sharing objects with the window's.
+            glfwSetErrorCallback([](int code, const char *text)
+                                 { std::cerr << "[gs:hw] GLFW error " << code << ": " << (text ? text : "") << std::endl; });
+            // Same profile as the window's (raylib: 3.3 core), or sharing fails.
+            glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+            glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+            glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+            glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
+            glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+            // raylib's GetWindowHandle() is the Cocoa window on macOS; its
+            // GLFW window is the current context.
+            GLFWwindow *mainWindow = glfwGetCurrentContext();
+            GLFWwindow *gsContext = glfwCreateWindow(16, 16, "gs", nullptr, mainWindow);
+            glfwWindowHint(GLFW_VISIBLE, GLFW_TRUE);
+            glfwMakeContextCurrent(mainWindow);
+            if (gsContext)
+                GSHwBackend::setContextProvider([gsContext]
+                                                { glfwMakeContextCurrent(gsContext); });
+            else
+                std::cerr << "[gs:hw] could not create the GS GL context" << std::endl;
+        }
+#endif
         InitAudioDevice();
         m_audioBackend.setAudioReady(IsAudioDeviceReady());
         // PS2X_NO_SPU2_AUDIO=1 keeps the SPU2 silent on the host.
