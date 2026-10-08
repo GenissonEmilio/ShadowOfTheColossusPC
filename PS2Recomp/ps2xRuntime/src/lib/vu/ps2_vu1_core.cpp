@@ -6,6 +6,7 @@
 #include <set>
 #include "runtime/ps2_stats.h"
 #include "runtime/ps2_vu1.h"
+#include "runtime/ps2_vu1_native.h"
 #include "runtime/gs/ps2_gif_arbiter.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ps2_memory.h"
@@ -1204,6 +1205,46 @@ namespace
     std::map<std::pair<uint64_t, uint32_t>, Vu1RoutineStats> g_vu1Profile;
     thread_local std::pair<uint64_t, uint32_t> t_vu1Routine{0, 0};
     thread_local bool t_vu1ProgramEnded = true;
+    thread_local bool t_vu1Fresh = true;      // the next run() starts a program
+    thread_local uint32_t t_vu1StopPc = 0;    // native verify: interpret up to here
+    thread_local bool t_vu1InNative = false;
+
+    struct NativeLoop
+    {
+        uint64_t hash;
+        uint32_t pc;
+        vu1native::LoopFn fn;
+    };
+    std::vector<NativeLoop> &nativeLoops()
+    {
+        static std::vector<NativeLoop> loops;
+        return loops;
+    }
+    // 0: off, 1: on, 2: verify against the interpreter.
+    int nativeMode()
+    {
+        static const int mode = []
+        {
+            const char *env = std::getenv("PS2X_VU1_NATIVE");
+            if (!env)
+                return 1;
+            if (std::strcmp(env, "verify") == 0)
+                return 2;
+            return std::atoi(env) != 0 ? 1 : 0;
+        }();
+        return mode;
+    }
+    struct NativeVerifyStats
+    {
+        std::mutex mutex;
+        uint64_t runs = 0, mismatches = 0;
+        int reported = 0;
+    } g_nativeVerify;
+}
+static void verifyNativeLoop(VU1Interpreter &I, vu1native::LoopFn fn, uint8_t *vuCode, uint32_t codeSize, uint8_t *vuData, uint32_t dataSize,
+                             GS &gs, PS2Memory *memory, uint32_t maxCycles);
+namespace
+{
 
     // PS2X_VU1_SKIP=<image hash>@<entry pc>[,...]: drop what those routines
     // send to the GS (shows what they draw).
@@ -2102,6 +2143,28 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     bool interpret = true;
     RecVerify *recVerify = nullptr;
     RecompiledFn recompiled = m_recDisabled ? nullptr : findRecompiled(vuCode, codeSize, memory);
+    if (t_vu1Fresh && !t_vu1InNative && recompiled && nativeMode() != 0)
+    {
+        for (const NativeLoop &loop : nativeLoops())
+        {
+            if (loop.hash != m_recHash || loop.pc != m_state.pc)
+                continue;
+            commitReadyPipelines();
+            if (nativeMode() == 2)
+                verifyNativeLoop(*this, loop.fn, vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
+            else
+            {
+                uint64_t cycles = 0;
+                if (const uint32_t pc = loop.fn(m_state, vuData, dataSize, cycles))
+                {
+                    m_state.pc = pc;
+                    advanceTo(m_cycle + cycles);
+                    ps2_stats::vu1Instr.fetch_add(cycles, std::memory_order_relaxed);
+                }
+            }
+            break;
+        }
+    }
     const uint64_t profileInstrStart = ps2_stats::vu1Instr.load(std::memory_order_relaxed);
     if (vu1ProfileEnabled() && t_vu1ProgramEnded)
     {
@@ -2131,6 +2194,8 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     while (interpret && m_cycle < budgetEnd && !m_stopRequested)
     {
         commitReadyPipelines();
+        if (t_vu1StopPc != 0 && m_state.pc == t_vu1StopPc && !m_state.branchPending)
+            break;
         if (m_state.pc + 8u > codeSize)
             break;
 
@@ -2333,6 +2398,8 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     catchUpXgkick();
     if (interpretedPairs)
         ps2_stats::vu1Instr.fetch_add(interpretedPairs, std::memory_order_relaxed);
+    if (!t_vu1InNative)
+        t_vu1Fresh = programEnded;
     if (vu1ProfileEnabled())
     {
         {
@@ -2347,4 +2414,81 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         std::fesetround(previousRoundingMode);
     if (recVerify)
         endRecVerify(recVerify, vuData, dataSize);
+}
+
+void vu1native::registerLoop(uint64_t imageHash, uint32_t entryPc, LoopFn fn)
+{
+    nativeLoops().push_back({imageHash, entryPc, fn});
+}
+
+// The native loop on copies of the state, the microcode on the interpreter
+// up to the pc the native code returns; any difference is reported.
+static void verifyNativeLoop(VU1Interpreter &I, vu1native::LoopFn fn, uint8_t *vuCode, uint32_t codeSize, uint8_t *vuData, uint32_t dataSize,
+                                      GS &gs, PS2Memory *memory, uint32_t maxCycles)
+{
+    VU1State nativeState = I.m_state;
+    std::vector<uint8_t> nativeData(vuData, vuData + dataSize);
+    uint64_t cycles = 0;
+    const uint32_t stopPc = fn(nativeState, nativeData.data(), dataSize, cycles);
+    if (stopPc == 0)
+        return;
+    const bool savedDisabled = I.m_recDisabled;
+    I.m_recDisabled = true;
+    t_vu1InNative = true;
+    t_vu1StopPc = stopPc;
+    I.run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
+    t_vu1StopPc = 0;
+    t_vu1InNative = false;
+    I.m_recDisabled = savedDisabled;
+    I.flushPipelines();
+
+    std::string diff;
+    auto note = [&](const std::string &text)
+    {
+        if (diff.size() < 600)
+            diff += text + " ";
+    };
+    if (I.m_state.pc != stopPc)
+        note("pc=" + std::to_string(I.m_state.pc));
+    for (int r = 0; r < 32; ++r)
+        for (int c = 0; c < 4; ++c)
+            if (std::memcmp(&I.m_state.vf[r][c], &nativeState.vf[r][c], 4) != 0)
+            {
+                uint32_t a, b;
+                std::memcpy(&a, &I.m_state.vf[r][c], 4);
+                std::memcpy(&b, &nativeState.vf[r][c], 4);
+                char text[96];
+                std::snprintf(text, sizeof(text), "vf%d.%c ref=%08x native=%08x", r, "xyzw"[c], a, b);
+                note(text);
+            }
+    for (int r = 1; r < 16; ++r)
+        if (static_cast<int16_t>(I.m_state.vi[r]) != static_cast<int16_t>(nativeState.vi[r]))
+            note("vi" + std::to_string(r) + " ref=" + std::to_string(I.m_state.vi[r]) + " native=" + std::to_string(nativeState.vi[r]));
+    for (int c = 0; c < 4; ++c)
+        if (std::memcmp(&I.m_state.acc[c], &nativeState.acc[c], 4) != 0)
+            note(std::string("acc.") + "xyzw"[c]);
+    if (std::memcmp(&I.m_state.q, &nativeState.q, 4) != 0)
+        note("q");
+    if (std::memcmp(&I.m_state.i, &nativeState.i, 4) != 0)
+        note("i");
+    if ((I.m_state.clip & 0xFFFFFFu) != (nativeState.clip & 0xFFFFFFu))
+        note("clip");
+    uint32_t memDiffs = 0, firstDiff = 0;
+    for (uint32_t a = 0; a < dataSize; ++a)
+        if (vuData[a] != nativeData[a] && memDiffs++ == 0)
+            firstDiff = a;
+    if (memDiffs)
+        note("mem " + std::to_string(memDiffs) + " bytes from qword " + std::to_string(firstDiff / 16));
+
+    std::lock_guard<std::mutex> lock(g_nativeVerify.mutex);
+    ++g_nativeVerify.runs;
+    if (!diff.empty())
+    {
+        ++g_nativeVerify.mismatches;
+        if (g_nativeVerify.reported++ < 20)
+            std::fprintf(stderr, "[vu1:native] MISMATCH hash=%016llx: %s\n", static_cast<unsigned long long>(I.m_recHash), diff.c_str());
+    }
+    if ((g_nativeVerify.runs & 0xFFFu) == 0u)
+        std::fprintf(stderr, "[vu1:native] verified %llu runs, %llu mismatches\n", static_cast<unsigned long long>(g_nativeVerify.runs),
+                     static_cast<unsigned long long>(g_nativeVerify.mismatches));
 }

@@ -221,6 +221,13 @@ void main()
 
     constexpr uint64_t kNeverLoaded = ~0ull;
 
+    // Games read one buffer at several widths (SotC: 256 and 512 at FBP 336):
+    // each layout is its own target; GS pages have one owner among them.
+    inline uint32_t makeTargetKey(uint32_t fbp, uint32_t fbw, uint32_t psm)
+    {
+        return (fbp & 0x1FFu) | ((std::max<uint32_t>(1u, fbw) & 0x3Fu) << 9) | ((psm & 0x3Fu) << 15);
+    }
+
     // A GS frame buffer drawn by the GPU. GS memory and the GPU texture are
     // kept in sync per 8 KiB page (a 64x32 or 64x64 pixel cell): a page is
     // dirty when the GPU drew it after the last write-back, and stale when GS
@@ -228,6 +235,7 @@ void main()
     struct RenderTarget
     {
         uint32_t fbp = 0, fbw = 0, psm = 0;
+        uint32_t key = 0;               // targetKey(fbp, fbw, psm): one target per layout
         uint32_t width = 0, height = 0;
         GLuint texture = 0;
         uint32_t pw = 64, ph = 32;      // page size in pixels
@@ -318,7 +326,7 @@ struct GSHwBackend::Impl
     {
         uint64_t writeBacks = 0, writeBackPixels = 0, reloads = 0, textureUploads = 0, rtTextures = 0;
         double writeBackMs = 0, reloadMs = 0;
-        uint64_t presentWb = 0, textureWb = 0, transferWb = 0, clutWb = 0, discards = 0, memoryClears = 0, directPresents = 0, wrapDraws = 0;
+        uint64_t presentWb = 0, textureWb = 0, transferWb = 0, clutWb = 0, discards = 0, aliasWb = 0, otherWb = 0, memoryClears = 0, directPresents = 0, wrapDraws = 0, gpuPageMoves = 0;
     } stats;
     const char *wbReason = "other";
     // PS2X_GS_HW_TRACE=N: list the draw calls between presents N and N+1.
@@ -343,13 +351,14 @@ struct GSHwBackend::Impl
         if (std::chrono::duration<double>(now - last).count() < 1.0)
             return;
         last = now;
-        std::fprintf(stderr, "[gs:hw] draws=%llu prims=%llu wb=%llu (%.0f ms, %llu px; present %llu texture %llu transfer %llu clut %llu) reloads=%llu (%.0f ms) texUploads=%llu rtTex=%llu discards=%llu memClears=%llu direct=%llu wrap=%llu\n",
+        std::fprintf(stderr, "[gs:hw] draws=%llu prims=%llu wb=%llu (%.0f ms, %llu px; present %llu texture %llu transfer %llu clut %llu) reloads=%llu (%.0f ms) texUploads=%llu rtTex=%llu discards=%llu memClears=%llu direct=%llu wrap=%llu pageMoves=%llu aliasWb=%llu otherWb=%llu\n",
                      (unsigned long long)drawCalls, (unsigned long long)primitives, (unsigned long long)stats.writeBacks, stats.writeBackMs,
                      (unsigned long long)stats.writeBackPixels, (unsigned long long)stats.presentWb, (unsigned long long)stats.textureWb,
                      (unsigned long long)stats.transferWb, (unsigned long long)stats.clutWb, (unsigned long long)stats.reloads, stats.reloadMs,
                      (unsigned long long)stats.textureUploads, (unsigned long long)stats.rtTextures, (unsigned long long)stats.discards,
                      (unsigned long long)stats.memoryClears, (unsigned long long)stats.directPresents,
-                     (unsigned long long)stats.wrapDraws);
+                     (unsigned long long)stats.wrapDraws, (unsigned long long)stats.gpuPageMoves,
+                     (unsigned long long)stats.aliasWb, (unsigned long long)stats.otherWb);
         std::fprintf(stderr, "[gs:hw] textures: decodes=%llu hashHits=%llu cacheClears=%llu\n", (unsigned long long)shadow->textureDecodes,
                      (unsigned long long)shadow->textureHashHits, (unsigned long long)shadow->textureCacheClears);
         shadow->textureDecodes = shadow->textureHashHits = 0;
@@ -506,6 +515,14 @@ struct GSHwBackend::Impl
             else if (!std::strcmp(wbReason, "texture")) ++stats.textureWb;
             else if (!std::strcmp(wbReason, "transfer")) ++stats.transferWb;
             else if (!std::strcmp(wbReason, "clut")) ++stats.clutWb;
+            else if (!std::strcmp(wbReason, "alias")) ++stats.aliasWb;
+            else
+            {
+                ++stats.otherWb;
+                static const bool log = std::getenv("PS2X_GS_HW_WBLOG") != nullptr;
+                if (log)
+                    std::fprintf(stderr, "[gs:wb] %s fbp=%u psm=%u row=%u\n", wbReason, rt.fbp, rt.psm, row);
+            }
         }
         if (flushed)
             stats.writeBackMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -594,7 +611,7 @@ struct GSHwBackend::Impl
                     d = 1;
                     ++rt.dirtyCount;
                 }
-                dirtyOwner[rt.page(col, row)] = static_cast<int32_t>(rt.fbp);
+                dirtyOwner[rt.page(col, row)] = static_cast<int32_t>(rt.key);
             }
     }
 
@@ -605,8 +622,48 @@ struct GSHwBackend::Impl
         rt.dirty[i] = 0;
         --rt.dirtyCount;
         const uint32_t page = (rt.fbp + i) % 512u;
-        if (dirtyOwner[page] == static_cast<int32_t>(rt.fbp))
+        if (dirtyOwner[page] == static_cast<int32_t>(rt.key))
             dirtyOwner[page] = -1;
+    }
+
+    // A GS page is the same 64x32 (or 64x64) pixel block whatever the buffer
+    // width: the newer copy of one moves between two targets of one format as
+    // a GPU copy of that block. The receiving target then owns it (dirty).
+    bool movePageOnGpu(RenderTarget &from, RenderTarget &to, uint32_t page, uint32_t toCol, uint32_t toRow)
+    {
+        const bool sameFormat = from.psm == to.psm || ((from.psm == GS_PSM_CT32 || from.psm == GS_PSM_CT24) && (to.psm == GS_PSM_CT32 || to.psm == GS_PSM_CT24));
+        if (!sameFormat || from.pw != to.pw || from.ph != to.ph)
+            return false;
+        uint32_t fromIndex = ~0u;
+        for (uint32_t i = 0; i < from.dirty.size(); ++i)
+            if ((from.fbp + i) % 512u == page)
+            {
+                fromIndex = i;
+                break;
+            }
+        if (fromIndex == ~0u || !from.dirty[fromIndex])
+            return false;
+        const uint32_t fx = (fromIndex % from.cols) * from.pw, fy = (fromIndex / from.cols) * from.ph;
+        const uint32_t tx = toCol * to.pw, ty = toRow * to.ph;
+        if (fy + from.ph > from.height || ty + to.ph > to.height)
+            return false;
+        flushPending();
+        glDisable(GL_SCISSOR_TEST);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer(from, nullptr));
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer(to, nullptr));
+        glBlitFramebuffer(fx, fy, fx + from.pw, fy + from.ph, tx, ty, tx + to.pw, ty + to.ph, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        clearDirty(from, fromIndex);
+        const uint32_t toIndex = toRow * to.cols + toCol;
+        if (!to.dirty[toIndex])
+        {
+            to.dirty[toIndex] = 1;
+            ++to.dirtyCount;
+        }
+        dirtyOwner[page] = static_cast<int32_t>(to.key);
+        to.synced[toIndex] = pageEpochOf(*shadow, page);
+        ++to.version;
+        ++stats.gpuPageMoves;
+        return true;
     }
 
     // Before rt uses the pages of a rectangle: pages another target holds
@@ -623,7 +680,7 @@ struct GSHwBackend::Impl
             {
                 const uint32_t page = rt.page(col, row);
                 const int32_t owner = dirtyOwner[page];
-                if (owner < 0 || owner == static_cast<int32_t>(rt.fbp))
+                if (owner < 0 || owner == static_cast<int32_t>(rt.key))
                     continue;
                 auto it = targets.find(static_cast<uint32_t>(owner));
                 if (it == targets.end())
@@ -638,14 +695,15 @@ struct GSHwBackend::Impl
                         if ((other.fbp + i) % 512u == page)
                             clearDirty(other, i);
                 }
-                else
+                else if (!movePageOnGpu(other, rt, page, col, row))
                 {
                     const char *reason = wbReason;
                     wbReason = "alias";
                     writeBackPages(other, page * 8192ull, page * 8192ull + 8192ull);
                     wbReason = reason;
                 }
-                dirtyOwner[page] = -1;
+                if (dirtyOwner[page] == owner)
+                    dirtyOwner[page] = -1;
             }
     }
 
@@ -665,7 +723,7 @@ struct GSHwBackend::Impl
     // CPU-side users of GS memory [begin, end): GPU results land there first.
     void writeBackOverlapping(uint64_t begin, uint64_t end)
     {
-        for (auto &[fbp, rt] : targets)
+        for (auto &[targetKey, rt] : targets)
             if (dirtyOverlaps(rt, begin, end))
                 writeBackPages(rt, begin, end);
     }
@@ -694,7 +752,7 @@ struct GSHwBackend::Impl
                 if (!aligned) // the rectangle straddles into the next page too
                     touched[(page + 1) % 512u] = 1;
             }
-        for (auto &[fbp, rt] : targets)
+        for (auto &[targetKey, rt] : targets)
         {
             if (!rt.anyDirty())
                 continue;
@@ -716,7 +774,8 @@ struct GSHwBackend::Impl
 
     RenderTarget &target(uint32_t fbp, uint32_t fbw, uint32_t psm, uint32_t neededHeight)
     {
-        RenderTarget &rt = targets[fbp];
+        const uint32_t key = makeTargetKey(fbp, fbw, psm);
+        RenderTarget &rt = targets[key];
         const uint32_t width = std::max<uint32_t>(1u, fbw) * 64u;
         uint32_t pw = 64, ph = 32;
         pageDims(psm, pw, ph);
@@ -729,7 +788,7 @@ struct GSHwBackend::Impl
                 glDeleteTextures(1, &rt.texture);
                 for (auto it = framebuffers.begin(); it != framebuffers.end();)
                 {
-                    if ((it->first >> 32) == fbp)
+                    if ((it->first >> 32) == key)
                     {
                         glDeleteFramebuffers(1, &it->second);
                         it = framebuffers.erase(it);
@@ -739,6 +798,7 @@ struct GSHwBackend::Impl
                 }
             }
             rt.fbp = fbp;
+            rt.key = key;
             rt.fbw = std::max<uint32_t>(1u, fbw);
             rt.psm = psm;
             rt.width = width;
@@ -788,7 +848,7 @@ struct GSHwBackend::Impl
 
     GLuint framebuffer(RenderTarget &rt, DepthTarget *d)
     {
-        const uint64_t key = (static_cast<uint64_t>(rt.fbp) << 32) | (d ? d->zbp + 1u : 0u);
+        const uint64_t key = (static_cast<uint64_t>(rt.key) << 32) | (d ? d->zbp + 1u : 0u);
         auto it = framebuffers.find(key);
         if (it != framebuffers.end())
             return it->second;
@@ -814,10 +874,10 @@ struct GSHwBackend::Impl
         texH = state.textureHeight;
         alphaFix = -1;
         // A texture at the start of a render target the GPU drew: sample it there.
-        for (auto &[fbp, rt] : targets)
+        for (auto &[targetKey, rt] : targets)
         {
             const bool sameFormat = tex.psm == rt.psm || (tex.psm == GS_PSM_CT24 && rt.psm == GS_PSM_CT32);
-            if (tex.tbp0 == fbp * 32u && sameFormat && rt.texture && tex.tbw * 64u == rt.width && rt.anyDirty())
+            if (tex.tbp0 == rt.fbp * 32u && sameFormat && rt.texture && tex.tbw * 64u == rt.width && rt.anyDirty())
             {
                 // Pages the texture reaches that the GPU does not hold yet come
                 // from GS memory first.
@@ -1108,7 +1168,7 @@ struct GSHwBackend::Impl
             return;
         }
         const DrawKey &key = pendingKey;
-        RenderTarget &rt = targets[key.fbp];
+        RenderTarget &rt = targets[makeTargetKey(key.fbp, key.fbw, key.fpsm)];
         const uint32_t ztst = (key.test >> 17) & 3u;
         const bool zte = ((key.test >> 16) & 1u) != 0u;
         const bool useDepth = zte && ztst != 1u ? true : (zte && !key.zmask);
@@ -1549,7 +1609,9 @@ struct GSHwBackend::Impl
         const uint32_t magh = static_cast<uint32_t>((display >> 23) & 0xFu) + 1u;
         const uint32_t dw = static_cast<uint32_t>((display >> 32) & 0xFFFu) + 1u, dh = static_cast<uint32_t>((display >> 44) & 0x7FFu) + 1u;
         const uint32_t width = dw / magh, height = dh;
-        auto it = targets.find(fbp);
+        auto it = targets.find(makeTargetKey(fbp, fbw, psm));
+        if (it == targets.end() && (psm == GS_PSM_CT24 || psm == GS_PSM_CT32))
+            it = targets.find(makeTargetKey(fbp, fbw, psm == GS_PSM_CT24 ? GS_PSM_CT32 : GS_PSM_CT24));
         if (it == targets.end() || width == 0u || height == 0u)
             return false;
         RenderTarget &rt = it->second;
@@ -1654,6 +1716,11 @@ void GSHwBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
         // The CLUT comes from GS memory, which the GPU may have drawn.
         m_impl->flushPending();
         m_impl->wbReason = "clut";
+        static const bool log = std::getenv("PS2X_GS_HW_CLUTLOG") != nullptr;
+        if (log)
+            for (auto &[targetKey, rt] : m_impl->targets)
+                if (m_impl->dirtyOverlaps(rt, tex0.cbp * 256u, tex0.cbp * 256u + 1024u))
+                    std::fprintf(stderr, "[gs:clutwb] cbp=%x page=%u rt fbp=%u fbw=%u psm=%u\n", tex0.cbp, tex0.cbp / 32u, rt.fbp, rt.fbw, rt.psm);
         m_impl->writeBackOverlapping(tex0.cbp * 256u, tex0.cbp * 256u + 1024u);
         m_impl->wbReason = "other";
     }
@@ -1717,10 +1784,11 @@ PresentationFrame GSHwBackend::Present(const GSPresentationRequest &request)
         for (const uint64_t dispfb : {request.dispfb1, request.dispfb2})
         {
             const uint32_t fbp = static_cast<uint32_t>(dispfb & 0x1FFu);
-            auto it = m_impl->targets.find(fbp);
             m_impl->wbReason = "present";
-            if (it != m_impl->targets.end() && !directOk)
-                m_impl->writeBackPages(it->second);
+            if (!directOk)
+                for (auto &[targetKey, rt] : m_impl->targets)
+                    if (rt.fbp == fbp)
+                        m_impl->writeBackPages(rt);
             m_impl->wbReason = "other";
         }
         m_impl->reportStats();
