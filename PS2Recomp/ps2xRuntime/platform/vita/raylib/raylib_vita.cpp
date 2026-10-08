@@ -199,8 +199,122 @@ void DrawRectangle(int posX, int posY, int width, int height, Color color)
     SDL_RenderFillRect(g_renderer, &rect);
 }
 
-void DrawText(const char *, int, int, int, Color) {} // no font on the Vita build
-int MeasureText(const char *text, int fontSize) { return text ? static_cast<int>(std::strlen(text)) * fontSize / 2 : 0; }
+namespace
+{
+#include "default_font.inc"
+
+    // raylib's default font as a 128x128 atlas, laid out the way LoadFontDefault does.
+    SDL_Texture *g_fontTexture = nullptr;
+    SDL_Rect g_glyphs[224];
+
+    bool ensureFont()
+    {
+        if (g_fontTexture)
+            return true;
+        if (!g_renderer)
+            return false;
+        std::vector<uint32_t> pixels(128 * 128);
+        for (int i = 0, counter = 0; i < 128 * 128; i += 32, ++counter)
+            for (int j = 31; j >= 0; --j)
+                pixels[i + j] = (kDefaultFontBits[counter] & (1u << j)) ? 0xFFFFFFFFu : 0x00FFFFFFu;
+        g_fontTexture = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STATIC, 128, 128);
+        if (!g_fontTexture)
+            return false;
+        SDL_UpdateTexture(g_fontTexture, nullptr, pixels.data(), 128 * 4);
+        SDL_SetTextureBlendMode(g_fontTexture, SDL_BLENDMODE_BLEND);
+        constexpr int kHeight = 10, kDivisor = 1;
+        int line = 0, posX = kDivisor, testX = kDivisor;
+        for (int i = 0; i < 224; ++i)
+        {
+            const int w = kDefaultFontWidths[i];
+            g_glyphs[i] = SDL_Rect{posX, kDivisor + line * (kHeight + kDivisor), w, kHeight};
+            testX += w + kDivisor;
+            if (testX >= 128)
+            {
+                ++line;
+                posX = 2 * kDivisor + w;
+                testX = posX;
+                g_glyphs[i].x = kDivisor;
+                g_glyphs[i].y = kDivisor + line * (kHeight + kDivisor);
+            }
+            else
+                posX = testX;
+        }
+        return true;
+    }
+
+    // UTF-8 -> code point (Latin-1 range is all the font has; others -> '?').
+    int nextCodepoint(const char *&p)
+    {
+        const unsigned char c = static_cast<unsigned char>(*p++);
+        if (c < 0x80)
+            return c;
+        if ((c & 0xE0) == 0xC0 && (static_cast<unsigned char>(*p) & 0xC0) == 0x80)
+            return ((c & 0x1F) << 6) | (static_cast<unsigned char>(*p++) & 0x3F);
+        while ((static_cast<unsigned char>(*p) & 0xC0) == 0x80)
+            ++p;
+        return '?';
+    }
+
+    int glyphIndex(int codepoint)
+    {
+        return (codepoint >= 32 && codepoint < 256) ? codepoint - 32 : '?' - 32;
+    }
+}
+
+// raylib's DrawText: default font scaled to fontSize, fontSize / 10 spacing.
+void DrawText(const char *text, int posX, int posY, int fontSize, Color color)
+{
+    if (!text || !ensureFont())
+        return;
+    fontSize = std::max(fontSize, 10);
+    const float scale = fontSize / 10.0f;
+    const int spacing = fontSize / 10;
+    SDL_SetTextureColorMod(g_fontTexture, color.r, color.g, color.b);
+    SDL_SetTextureAlphaMod(g_fontTexture, color.a);
+    float x = static_cast<float>(posX);
+    int y = posY;
+    for (const char *p = text; *p;)
+    {
+        const int cp = nextCodepoint(p);
+        if (cp == '\n')
+        {
+            x = static_cast<float>(posX);
+            y += fontSize + fontSize / 2;
+            continue;
+        }
+        const SDL_Rect &src = g_glyphs[glyphIndex(cp)];
+        const SDL_Rect dst{static_cast<int>(x), y, static_cast<int>(src.w * scale + 0.5f), fontSize};
+        if (cp != ' ')
+            SDL_RenderCopy(g_renderer, g_fontTexture, &src, &dst);
+        x += src.w * scale + spacing;
+    }
+}
+
+int MeasureText(const char *text, int fontSize)
+{
+    if (!text)
+        return 0;
+    ensureFont();
+    fontSize = std::max(fontSize, 10);
+    const float scale = fontSize / 10.0f;
+    const int spacing = fontSize / 10;
+    float width = 0.0f, best = 0.0f;
+    int glyphs = 0;
+    for (const char *p = text; *p;)
+    {
+        const int cp = nextCodepoint(p);
+        if (cp == '\n')
+        {
+            best = std::max(best, width);
+            width = 0.0f;
+            glyphs = 0;
+            continue;
+        }
+        width += kDefaultFontWidths[glyphIndex(cp)] * scale + (glyphs++ ? spacing : 0);
+    }
+    return static_cast<int>(std::max(best, width));
+}
 
 Image GenImageColor(int width, int height, Color color)
 {

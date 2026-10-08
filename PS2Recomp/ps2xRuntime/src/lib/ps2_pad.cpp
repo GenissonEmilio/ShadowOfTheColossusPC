@@ -1,3 +1,4 @@
+#include "runtime/host_menu.h"
 #include <map>
 #include <sstream>
 #include <string>
@@ -45,6 +46,8 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
 
     uint16_t btns = 0xFFFFu;
     constexpr int kGamepad = 0;
+    if (hostmenu::inputBlocked())
+        return true; // the settings menu owns the controller: nothing pressed
     const bool useGamepad = IsGamepadAvailable(kGamepad);
     auto clearBit = [&btns](uint16_t mask)
     { btns &= ~mask; };

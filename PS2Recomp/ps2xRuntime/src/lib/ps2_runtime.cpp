@@ -6,6 +6,7 @@
 #include <map>
 #include "runtime/ps2_stats.h"
 #include "ps2_runtime.h"
+#include "runtime/host_menu.h"
 #include "ps2_log.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
@@ -820,6 +821,10 @@ namespace
             produced = iop->readAudio(out, frames);
         if (produced < frames)
             std::memset(out + produced * 2u, 0, (frames - produced) * 2u * sizeof(int16_t));
+        const int volume = hostmenu::settings().volume.load(std::memory_order_relaxed);
+        if (volume < 10)
+            for (size_t i = 0; i < produced * 2u; ++i)
+                out[i] = static_cast<int16_t>(out[i] * volume / 10);
     }
 }
 
@@ -883,6 +888,7 @@ bool PS2Runtime::initialize(const char *title)
                 std::cerr << "[gs:hw] could not create the GS GL context" << std::endl;
         }
 #endif
+        hostmenu::load();
         InitAudioDevice();
         m_audioBackend.setAudioReady(IsAudioDeviceReady());
         // PS2X_NO_SPU2_AUDIO=1 keeps the SPU2 silent on the host.
@@ -2915,9 +2921,22 @@ void PS2Runtime::run()
         const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight));
         const float screenWidth = static_cast<float>(GetScreenWidth());
         const float screenHeight = static_cast<float>(GetScreenHeight());
-        const float scale = std::min(screenWidth / srcWidth, screenHeight / srcHeight);
-        const float dstWidth = srcWidth * scale;
-        const float dstHeight = srcHeight * scale;
+        // The PS2 picture is 4:3 whatever its pixel size (512x448, 640x448...).
+        const float aspect = 4.0f / 3.0f;
+        const int screenMode = hostmenu::settings().screenMode.load(std::memory_order_relaxed);
+        float dstWidth = std::min(screenWidth, screenHeight * aspect);
+        float dstHeight = dstWidth / aspect;
+        if (screenMode == hostmenu::kScreenStretch)
+        {
+            dstWidth = screenWidth;
+            dstHeight = screenHeight;
+        }
+        else if (screenMode == hostmenu::kScreenInteger)
+        {
+            const float whole = std::max(1.0f, std::floor(std::min(screenWidth / srcWidth, screenHeight / srcHeight)));
+            dstWidth = srcWidth * whole;
+            dstHeight = srcHeight * whole;
+        }
         const Rectangle srcRect{0.0f, 0.0f, srcWidth, srcHeight};
         const Rectangle dstRect{
             (screenWidth - dstWidth) * 0.5f,
@@ -2925,6 +2944,7 @@ void PS2Runtime::run()
             dstWidth,
             dstHeight};
         DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+        if (hostmenu::settings().showFps.load(std::memory_order_relaxed))
         {
             // FPS overlay: game frames = display lists sent to VIF1 per second.
             static double windowStart = GetTime();
@@ -2946,9 +2966,11 @@ void PS2Runtime::run()
         {
             m_debugUiDrawCallback(*this, m_debugUiUserData);
         }
+        hostmenu::draw(GetScreenWidth(), GetScreenHeight());
         EndDrawing();
+        hostmenu::update();
 
-        if (WindowShouldClose())
+        if (WindowShouldClose() || hostmenu::quitRequested())
         {
             RUNTIME_LOG("[run] window close requested, breaking out of loop");
             requestStop();

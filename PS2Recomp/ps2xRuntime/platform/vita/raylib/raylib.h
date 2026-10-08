@@ -112,6 +112,8 @@ enum KeyboardKey
     KEY_Y = 89,
     KEY_Z = 90,
     KEY_ENTER = 257,
+    KEY_BACKSPACE = 259,
+    KEY_F1 = 290,
     KEY_RIGHT = 262,
     KEY_LEFT = 263,
     KEY_DOWN = 264,

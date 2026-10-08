@@ -1,5 +1,6 @@
 #include "runtime/gs/gs_hw_backend.h"
 #include "runtime/gs/gs_cpu_backend.h"
+#include "runtime/host_menu.h"
 
 #include <algorithm>
 #include <array>
@@ -866,8 +867,10 @@ struct GSHwBackend::Impl
             glDrawArrays(GL_TRIANGLES, 0, count);
             ++drawCalls;
         }
-        static const bool noAfailPass = std::getenv("PS2X_GS_HW_NOAFAIL") != nullptr;
-        if (atst != 1u && afail != 0u && !(noAfailPass && atst != 0u))
+        // Settings menu "Exact transparency" off: pixels that fail a real
+        // comparison are dropped (one pass); ATST=NEVER draws still need it.
+        const bool exactAlpha = hostmenu::settings().exactAlpha.load(std::memory_order_relaxed);
+        if (atst != 1u && afail != 0u && (exactAlpha || atst == 0u))
         {
             const bool failColor = afail != 2u, failZ = afail == 2u && writeZ;
             if (failColor || failZ)

@@ -1,0 +1,481 @@
+#include "runtime/host_menu.h"
+
+#include "raylib.h"
+
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+
+#if defined(PLATFORM_VITA)
+#include <psp2/apputil.h>
+#include <psp2/system_param.h>
+#endif
+
+namespace hostmenu
+{
+namespace
+{
+    Settings g_settings;
+    bool g_open = false;
+    bool g_help = false;
+    bool g_quit = false;
+    bool g_quitArmed = false; // "Quit game" needs a second Cross
+    bool g_holdBlock = false; // a button pressed in the menu is still held
+    int g_tab = 0, g_item = 0;
+    double g_lastSelect = -1.0;
+
+#if defined(PLATFORM_VITA)
+    const char *kSettingsPath = "ux0:data/celosia/settings.cfg";
+#else
+    const char *kSettingsPath = "celosia_settings.cfg";
+#endif
+    constexpr double kDoubleTapSeconds = 0.35;
+
+    // ---- Text -------------------------------------------------------------
+
+    bool portuguese()
+    {
+        const int choice = g_settings.language.load();
+        if (choice != 0)
+            return choice == 1;
+        static const bool systemPt = []
+        {
+#if defined(PLATFORM_VITA)
+            SceAppUtilInitParam init{};
+            SceAppUtilBootParam boot{};
+            sceAppUtilInit(&init, &boot);
+            int lang = 0;
+            sceAppUtilSystemParamGetInt(SCE_SYSTEM_PARAM_ID_LANG, &lang);
+            return lang == SCE_SYSTEM_PARAM_LANG_PORTUGUESE_PT || lang == SCE_SYSTEM_PARAM_LANG_PORTUGUESE_BR;
+#else
+            const char *lang = std::getenv("LANG");
+            return lang && std::strncmp(lang, "pt", 2) == 0;
+#endif
+        }();
+        return systemPt;
+    }
+
+    // English text -> Portuguese.
+    const char *T(const char *en)
+    {
+        if (!portuguese())
+            return en;
+        static const struct
+        {
+            const char *en, *pt;
+        } kTexts[] = {
+            {"SETTINGS", "AJUSTES"},
+            {"Video", "Vídeo"},
+            {"Sound", "Som"},
+            {"System", "Sistema"},
+            {"About", "Sobre"},
+            {"Exact transparency", "Transparências precisas"},
+            {"Show FPS", "Mostrar FPS"},
+            {"Screen", "Tela"},
+            {"Volume", "Volume"},
+            {"Language", "Idioma"},
+            {"Quit game", "Sair do jogo"},
+            {"On", "Ligado"},
+            {"Off", "Desligado"},
+            {"Fit (4:3)", "Ajustar (4:3)"},
+            {"Stretch", "Esticar"},
+            {"Sharp (whole scale)", "Nítido (escala inteira)"},
+            {"Automatic", "Automático"},
+            {"Press X again to quit", "Aperte X de novo para sair"},
+            {"L/R: tab   D-pad: choose   X: change   Triangle: help   O: close",
+             "L/R: aba   Direcional: escolher   X: mudar   Triângulo: ajuda   O: fechar"},
+            {"Triangle / O: back", "Triângulo / O: voltar"},
+            {"Draws the effects that use the alpha test exactly like the PS2 (clouds, mist, shadows). "
+             "Turning it off gains a few frames per second; some mist and edges look harder.",
+             "Desenha os efeitos que usam o teste de alfa exatamente como o PS2 (nuvens, névoa, sombras). "
+             "Desligar ganha alguns quadros por segundo; parte da névoa e das bordas fica mais dura."},
+            {"Shows the game's frame rate in the corner of the screen.",
+             "Mostra a taxa de quadros do jogo no canto da tela."},
+            {"Fit keeps the original 4:3 picture with bars on the sides. Stretch fills the screen. "
+             "Sharp uses the largest whole multiple of the original size, so every pixel has the same size.",
+             "Ajustar mantém a imagem original 4:3 com faixas nas laterais. Esticar preenche a tela. "
+             "Nítido usa o maior múltiplo inteiro do tamanho original, então todo pixel tem o mesmo tamanho."},
+            {"Volume of the game's sound and music.", "Volume do som e da música do jogo."},
+            {"Language of this menu. Automatic follows the system language.",
+             "Idioma deste menu. Automático segue o idioma do sistema."},
+            {"Closes the game. Unsaved progress is lost.", "Fecha o jogo. O progresso não salvo é perdido."},
+            {"Shadow of the Colossus, recompiled to run natively.", "Shadow of the Colossus, recompilado para rodar nativamente."},
+            {"celosia - port by HenryKun55", "celosia - port por HenryKun55"},
+            {"Shadow of the Colossus (c) Sony Interactive Entertainment.", "Shadow of the Colossus (c) Sony Interactive Entertainment."},
+            {"Built on PS2Recomp. Thanks to the sotc-pc project.", "Feito sobre o PS2Recomp. Obrigado ao projeto sotc-pc."},
+        };
+        for (const auto &t : kTexts)
+            if (std::strcmp(t.en, en) == 0)
+                return t.pt;
+        return en;
+    }
+
+    // ---- Items ------------------------------------------------------------
+
+    enum ItemId
+    {
+        kExactAlpha,
+        kShowFps,
+        kScreen,
+        kVolume,
+        kLanguage,
+        kQuit,
+    };
+
+    struct Item
+    {
+        ItemId id;
+        const char *label;
+        const char *help;
+    };
+
+    struct Tab
+    {
+        const char *label;
+        const Item *items;
+        int count;
+    };
+
+    const Item kVideoItems[] = {
+        {kExactAlpha, "Exact transparency",
+         "Draws the effects that use the alpha test exactly like the PS2 (clouds, mist, shadows). "
+         "Turning it off gains a few frames per second; some mist and edges look harder."},
+        {kShowFps, "Show FPS", "Shows the game's frame rate in the corner of the screen."},
+        {kScreen, "Screen",
+         "Fit keeps the original 4:3 picture with bars on the sides. Stretch fills the screen. "
+         "Sharp uses the largest whole multiple of the original size, so every pixel has the same size."},
+    };
+    const Item kSoundItems[] = {
+        {kVolume, "Volume", "Volume of the game's sound and music."},
+    };
+    const Item kSystemItems[] = {
+        {kLanguage, "Language", "Language of this menu. Automatic follows the system language."},
+        {kQuit, "Quit game", "Closes the game. Unsaved progress is lost."},
+    };
+    const Tab kTabs[] = {
+        {"Video", kVideoItems, 3},
+        {"Sound", kSoundItems, 1},
+        {"System", kSystemItems, 2},
+        {"About", nullptr, 0},
+    };
+    constexpr int kTabCount = 4;
+
+    std::string valueText(ItemId id)
+    {
+        switch (id)
+        {
+        case kExactAlpha: return T(g_settings.exactAlpha ? "On" : "Off");
+        case kShowFps: return T(g_settings.showFps ? "On" : "Off");
+        case kScreen:
+        {
+            static const char *modes[] = {"Fit (4:3)", "Stretch", "Sharp (whole scale)"};
+            return T(modes[std::clamp(g_settings.screenMode.load(), 0, 2)]);
+        }
+        case kVolume:
+        {
+            const int v = g_settings.volume.load();
+            return std::string(static_cast<size_t>(v), '|') + std::string(static_cast<size_t>(10 - v), '.') + "  " + std::to_string(v * 10) + "%";
+        }
+        case kLanguage:
+        {
+            static const char *langs[] = {"Automatic", "Português", "English"};
+            return T(langs[std::clamp(g_settings.language.load(), 0, 2)]);
+        }
+        case kQuit: return g_quitArmed ? T("Press X again to quit") : "";
+        }
+        return "";
+    }
+
+    // ---- Persistence --------------------------------------------------------
+
+    void save()
+    {
+        FILE *f = std::fopen(kSettingsPath, "w");
+        if (!f)
+            return;
+        std::fprintf(f, "exact_alpha=%d\nshow_fps=%d\nscreen=%d\nvolume=%d\nlanguage=%d\n", g_settings.exactAlpha ? 1 : 0,
+                     g_settings.showFps ? 1 : 0, g_settings.screenMode.load(), g_settings.volume.load(), g_settings.language.load());
+        std::fclose(f);
+    }
+
+    // Changes an item by +1/-1 (Cross and right = +1).
+    void change(ItemId id, int dir)
+    {
+        switch (id)
+        {
+        case kExactAlpha: g_settings.exactAlpha = !g_settings.exactAlpha; break;
+        case kShowFps: g_settings.showFps = !g_settings.showFps; break;
+        case kScreen: g_settings.screenMode = (g_settings.screenMode + 3 + dir) % 3; break;
+        case kVolume: g_settings.volume = std::clamp(g_settings.volume + dir, 0, 10); break;
+        case kLanguage: g_settings.language = (g_settings.language + 3 + dir) % 3; break;
+        case kQuit:
+            if (dir > 0)
+            {
+                if (g_quitArmed)
+                    g_quit = true;
+                g_quitArmed = true;
+            }
+            return;
+        }
+        save();
+    }
+
+    // ---- Input --------------------------------------------------------------
+
+    enum Button
+    {
+        kUp, kDown, kLeft, kRight, kCross, kCircle, kTriangle, kL1, kR1, kSelect, kButtonCount
+    };
+
+    bool g_down[kButtonCount] = {};
+    bool g_prev[kButtonCount] = {};
+
+    void readButtons()
+    {
+        std::memcpy(g_prev, g_down, sizeof(g_down));
+        std::memset(g_down, 0, sizeof(g_down));
+        const int pad = 0;
+        if (IsGamepadAvailable(pad))
+        {
+            g_down[kUp] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_FACE_UP) || GetGamepadAxisMovement(pad, GAMEPAD_AXIS_LEFT_Y) < -0.6f;
+            g_down[kDown] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_FACE_DOWN) || GetGamepadAxisMovement(pad, GAMEPAD_AXIS_LEFT_Y) > 0.6f;
+            g_down[kLeft] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_FACE_LEFT) || GetGamepadAxisMovement(pad, GAMEPAD_AXIS_LEFT_X) < -0.6f;
+            g_down[kRight] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_FACE_RIGHT) || GetGamepadAxisMovement(pad, GAMEPAD_AXIS_LEFT_X) > 0.6f;
+            g_down[kCross] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_RIGHT_FACE_DOWN);
+            g_down[kCircle] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT);
+            g_down[kTriangle] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_RIGHT_FACE_UP);
+            g_down[kL1] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_TRIGGER_1);
+            g_down[kR1] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_RIGHT_TRIGGER_1);
+            g_down[kSelect] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_MIDDLE_LEFT);
+        }
+        // Keyboard: arrows, Enter = Cross, Backspace = Circle, H = help, Q/E = tabs.
+        g_down[kUp] |= IsKeyDown(KEY_UP);
+        g_down[kDown] |= IsKeyDown(KEY_DOWN);
+        g_down[kLeft] |= IsKeyDown(KEY_LEFT);
+        g_down[kRight] |= IsKeyDown(KEY_RIGHT);
+        g_down[kCross] |= IsKeyDown(KEY_ENTER);
+        g_down[kCircle] |= IsKeyDown(KEY_BACKSPACE);
+        g_down[kTriangle] |= IsKeyDown(KEY_H);
+        g_down[kL1] |= IsKeyDown(KEY_Q);
+        g_down[kR1] |= IsKeyDown(KEY_E);
+    }
+
+    bool pressed(Button b) { return g_down[b] && !g_prev[b]; }
+
+    bool anyDown()
+    {
+        for (bool d : g_down)
+            if (d)
+                return true;
+        return false;
+    }
+
+    void close()
+    {
+        g_open = false;
+        g_help = false;
+        g_quitArmed = false;
+        g_holdBlock = true; // until the closing button is released
+    }
+
+    // ---- Drawing --------------------------------------------------------------
+
+    void drawWrapped(const char *text, int x, int y, int maxWidth, int size, Color color, int lineGap)
+    {
+        std::string line, word;
+        auto flush = [&]
+        {
+            DrawText(line.c_str(), x, y, size, color);
+            y += size + lineGap;
+            line.clear();
+        };
+        for (const char *p = text;; ++p)
+        {
+            if (*p == ' ' || *p == '\0')
+            {
+                const std::string candidate = line.empty() ? word : line + " " + word;
+                if (!line.empty() && MeasureText(candidate.c_str(), size) > maxWidth)
+                {
+                    flush();
+                    line = word;
+                }
+                else
+                    line = candidate;
+                word.clear();
+                if (*p == '\0')
+                    break;
+            }
+            else
+                word += *p;
+        }
+        if (!line.empty())
+            flush();
+    }
+}
+
+Settings &settings() { return g_settings; }
+
+void load()
+{
+    if (const char *open = std::getenv("PS2X_SETTINGS_OPEN")) // development: open at start on tab N
+    {
+        g_open = true;
+        g_tab = std::clamp(std::atoi(open), 0, kTabCount - 1);
+    }
+    FILE *f = std::fopen(kSettingsPath, "r");
+    if (!f)
+        return;
+    char key[64];
+    int value = 0;
+    while (std::fscanf(f, " %63[^=]=%d", key, &value) == 2)
+    {
+        if (!std::strcmp(key, "exact_alpha")) g_settings.exactAlpha = value != 0;
+        else if (!std::strcmp(key, "show_fps")) g_settings.showFps = value != 0;
+        else if (!std::strcmp(key, "screen")) g_settings.screenMode = std::clamp(value, 0, 2);
+        else if (!std::strcmp(key, "volume")) g_settings.volume = std::clamp(value, 0, 10);
+        else if (!std::strcmp(key, "language")) g_settings.language = std::clamp(value, 0, 2);
+    }
+    std::fclose(f);
+}
+
+bool isOpen() { return g_open; }
+bool quitRequested() { return g_quit; }
+bool inputBlocked() { return g_open || g_holdBlock; }
+
+void update()
+{
+    readButtons();
+    if (g_holdBlock && !anyDown())
+        g_holdBlock = false;
+
+    if (!g_open)
+    {
+        bool open = IsKeyPressed(KEY_F1);
+        if (pressed(kSelect))
+        {
+            const double now = GetTime();
+            open |= g_lastSelect >= 0.0 && now - g_lastSelect < kDoubleTapSeconds;
+            g_lastSelect = open ? -1.0 : now;
+        }
+        if (open)
+        {
+            g_open = true;
+            g_help = false;
+            g_item = std::min(g_item, std::max(kTabs[g_tab].count - 1, 0));
+        }
+        return;
+    }
+
+    if (IsKeyPressed(KEY_F1) || pressed(kSelect))
+    {
+        close();
+        return;
+    }
+    if (g_help)
+    {
+        if (pressed(kTriangle) || pressed(kCircle))
+            g_help = false;
+        return;
+    }
+    if (pressed(kCircle))
+    {
+        close();
+        return;
+    }
+    const Tab &tab = kTabs[g_tab];
+    if (pressed(kL1) || pressed(kR1))
+    {
+        g_tab = (g_tab + (pressed(kR1) ? 1 : kTabCount - 1)) % kTabCount;
+        g_item = 0;
+        g_quitArmed = false;
+        return;
+    }
+    if (tab.count == 0)
+        return;
+    if (pressed(kUp) || pressed(kDown))
+    {
+        g_item = (g_item + (pressed(kDown) ? 1 : tab.count - 1)) % tab.count;
+        g_quitArmed = false;
+    }
+    const ItemId id = tab.items[g_item].id;
+    if (pressed(kCross) || pressed(kRight))
+        change(id, +1);
+    else if (pressed(kLeft) && id != kQuit)
+        change(id, -1);
+    if (pressed(kTriangle))
+        g_help = true;
+}
+
+void draw(int screenWidth, int screenHeight)
+{
+    if (!g_open)
+        return;
+    const int size = std::max(10, screenHeight / 27 / 2 * 2); // ~20 px on the Vita
+    const int small = std::max(10, size * 4 / 5);
+    const int pad = size;
+    const int boxW = std::min(screenWidth - 2 * pad, size * 34);
+    const int boxH = std::min(screenHeight - 2 * pad, size * 20);
+    const int boxX = (screenWidth - boxW) / 2, boxY = (screenHeight - boxH) / 2;
+    const Color panel{12, 14, 18, 230}, line{70, 80, 90, 255}, text{225, 228, 230, 255}, dim{150, 156, 162, 255},
+        accent{232, 196, 120, 255}, highlight{255, 255, 255, 28};
+
+    DrawRectangle(0, 0, screenWidth, screenHeight, Color{0, 0, 0, 110});
+    DrawRectangle(boxX, boxY, boxW, boxH, panel);
+    DrawRectangle(boxX, boxY, boxW, 2, accent);
+    DrawText(T("SETTINGS"), boxX + pad, boxY + pad * 2 / 3, size, accent);
+
+    // Tabs
+    int tabX = boxX + pad;
+    const int tabY = boxY + pad * 2;
+    for (int i = 0; i < kTabCount; ++i)
+    {
+        const char *label = T(kTabs[i].label);
+        const int w = MeasureText(label, size);
+        if (i == g_tab)
+            DrawRectangle(tabX - size / 3, tabY + size + size / 4, w + size * 2 / 3, 2, accent);
+        DrawText(label, tabX, tabY, size, i == g_tab ? text : dim);
+        tabX += w + size * 3 / 2;
+    }
+    DrawRectangle(boxX + pad, tabY + size * 3 / 2 + 2, boxW - 2 * pad, 1, line);
+
+    const Tab &tab = kTabs[g_tab];
+    const int listY = tabY + size * 2 + size / 2;
+    const int helpY = boxY + boxH - size * 5;
+    if (g_help && tab.count > 0)
+    {
+        const Item &item = tab.items[g_item];
+        DrawText(T(item.label), boxX + pad, listY, size, accent);
+        drawWrapped(T(item.help), boxX + pad, listY + size * 2, boxW - 2 * pad, small, text, small / 2);
+        DrawText(T("Triangle / O: back"), boxX + pad, boxY + boxH - size * 3 / 2, small, dim);
+        return;
+    }
+    if (tab.count == 0)
+    {
+        int y = listY;
+        for (const char *l : {"Shadow of the Colossus, recompiled to run natively.", "celosia - port by HenryKun55", "",
+                              "Shadow of the Colossus (c) Sony Interactive Entertainment.",
+                              "Built on PS2Recomp. Thanks to the sotc-pc project."})
+        {
+            DrawText(T(l), boxX + pad, y, small, *l ? text : dim);
+            y += small * 3 / 2;
+        }
+    }
+    else
+    {
+        for (int i = 0; i < tab.count; ++i)
+        {
+            const int y = listY + i * size * 3 / 2;
+            if (i == g_item)
+                DrawRectangle(boxX + pad / 2, y - size / 4, boxW - pad, size * 3 / 2, highlight);
+            DrawText(T(tab.items[i].label), boxX + pad, y, size, i == g_item ? text : dim);
+            const std::string value = valueText(tab.items[i].id);
+            DrawText(value.c_str(), boxX + boxW * 11 / 20, y, size, i == g_item ? accent : dim);
+        }
+        DrawRectangle(boxX + pad, helpY - size / 2, boxW - 2 * pad, 1, line);
+        drawWrapped(T(tab.items[g_item].help), boxX + pad, helpY, boxW - 2 * pad, small, dim, small / 3);
+    }
+    DrawText(T("L/R: tab   D-pad: choose   X: change   Triangle: help   O: close"), boxX + pad, boxY + boxH - size * 3 / 2, small, dim);
+}
+}

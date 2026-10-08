@@ -1,3 +1,4 @@
+#include "runtime/host_menu.h"
 #include <map>
 #include <string>
 #include <cstdlib>
@@ -99,7 +100,7 @@ namespace ps2_stubs
 
         void applyGamepadState(PadInputState &state)
         {
-            if (!IsWindowReady())
+            if (!IsWindowReady() || hostmenu::inputBlocked())
             {
                 return;
             }
@@ -143,7 +144,7 @@ namespace ps2_stubs
 
         void applyKeyboardState(PadInputState &state, bool allowAnalog)
         {
-            if (!IsWindowReady())
+            if (!IsWindowReady() || hostmenu::inputBlocked())
             {
                 return;
             }
