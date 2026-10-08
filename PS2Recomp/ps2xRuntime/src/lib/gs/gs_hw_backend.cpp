@@ -1223,6 +1223,34 @@ struct GSHwBackend::Impl
         ++rt.version;
         if (verify && tracing())
             compareWithCpu(rt);
+        // PS2X_GS_HW_STEPDUMP=<dir> (with PS2X_GS_HW_TRACE): in the traced
+        // frame, the display target after every draw covering much of it.
+        static const char *stepDir = std::getenv("PS2X_GS_HW_STEPDUMP");
+        if (stepDir && tracing() && rt.fbp == 224u)
+        {
+            float bx0 = 1e9f, bx1 = -1e9f, by0 = 1e9f, by1 = -1e9f;
+            for (const auto &v : pending)
+            {
+                bx0 = std::min(bx0, v.x); bx1 = std::max(bx1, v.x); by0 = std::min(by0, v.y); by1 = std::max(by1, v.y);
+            }
+            if ((bx1 - bx0) * (by1 - by0) > 0.3f * rt.width * 448.0f)
+            {
+                static int step = 0;
+                std::vector<uint8_t> px(static_cast<size_t>(rt.width) * 448u * 4u);
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer(rt, nullptr));
+                glReadPixels(0, 0, rt.width, 448, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+                char path[512];
+                std::snprintf(path, sizeof(path), "%s/step_%03d_tex%x_a%llx.ppm", stepDir, step++, static_cast<unsigned>(key.tex0 & 0x3FFFu),
+                              static_cast<unsigned long long>(key.alpha));
+                if (FILE *f = std::fopen(path, "wb"))
+                {
+                    std::fprintf(f, "P6\n%u %u\n255\n", rt.width, 448u);
+                    for (size_t i = 0; i < px.size(); i += 4)
+                        std::fwrite(&px[i], 1, 3, f);
+                    std::fclose(f);
+                }
+            }
+        }
         pending.clear();
         hasPending = false;
     }
@@ -1266,6 +1294,22 @@ struct GSHwBackend::Impl
         key.colclamp = static_cast<uint32_t>(state.colclamp & 1u);
         key.texAlphaScale = 1.0f;
         if (!verify && clearInMemory(batch, rt, key, ofx, ofy))
+            return;
+        // PS2X_GS_HW_SKIP=tbp,tbp: drop textured draws from these TBP0s (diagnostics).
+        static const std::vector<uint32_t> skipTbp = []
+        {
+            std::vector<uint32_t> list;
+            if (const char *env = std::getenv("PS2X_GS_HW_SKIP"))
+                for (const char *p = env; *p;)
+                {
+                    char *end = nullptr;
+                    list.push_back(static_cast<uint32_t>(std::strtoul(p, &end, 16)));
+                    p = (*end == ',') ? end + 1 : end;
+                    if (end == p && *p) ++p;
+                }
+            return list;
+        }();
+        if (key.tme && std::find(skipTbp.begin(), skipTbp.end(), static_cast<uint32_t>(ctx.tex0.tbp0)) != skipTbp.end())
             return;
         if (key.tme)
         {
