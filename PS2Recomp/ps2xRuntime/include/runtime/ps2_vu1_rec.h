@@ -171,6 +171,177 @@ namespace vu1rec
         storeWords<DEST>(I, vuData, dataSize, qword, words);
     }
 
+    // Fast regions: CLIPw.xyz (fs against fs/ft w), DIV and RSQRT as the
+    // interpreter computes them, written at once.
+    inline uint32_t fastClip(uint32_t clip, const float *v, const float *wv)
+    {
+        uint32_t wBits;
+        std::memcpy(&wBits, &wv[3], 4);
+        const int32_t limit = (wBits & 0x7F800000u) != 0u ? static_cast<int32_t>(wBits & 0x7FFFFFFFu) : 0x007FFFFF;
+        auto ex = [limit](float value, uint32_t m)
+        {
+            uint32_t b;
+            std::memcpy(&b, &value, 4);
+            b ^= m;
+            int32_t o;
+            std::memcpy(&o, &b, 4);
+            return o > limit;
+        };
+        uint32_t f = 0;
+        if (ex(v[0], 0u)) f |= 1u;
+        if (ex(v[0], 0x80000000u)) f |= 2u;
+        if (ex(v[1], 0u)) f |= 4u;
+        if (ex(v[1], 0x80000000u)) f |= 8u;
+        if (ex(v[2], 0u)) f |= 16u;
+        if (ex(v[2], 0x80000000u)) f |= 32u;
+        return ((clip << 6) | f) & 0xFFFFFFu;
+    }
+    inline float fastDiv(float n, float d)
+    {
+        const float num = norm(n), den = norm(d);
+        if (den == 0.0f)
+            return std::signbit(num) != std::signbit(den) ? -3.40282347e38f : 3.40282347e38f;
+        return norm(num / den);
+    }
+    inline float fastRsqrt(float n, float r)
+    {
+        const float num = norm(n), den = std::sqrt(std::fabs(norm(r)));
+        if (den == 0.0f)
+            return std::signbit(num) ? -3.40282347e38f : 3.40282347e38f;
+        return norm(num / den);
+    }
+
+    // VU1Interpreter::cheapFmacFlags + updateFmacFlags: normalises the dest
+    // lanes of res and gives the MAC and status (Z S U O) bits they set.
+    template <uint8_t DEST>
+    inline void fastFmacFlags(float *res, uint32_t &mac, uint32_t &status)
+    {
+        mac = 0u;
+        status = 0u;
+        for (uint32_t c = 0; c < 4u; ++c)
+        {
+            const uint32_t lane = 0x8u >> c;
+            if ((DEST & lane) == 0u)
+                continue;
+            uint32_t bits;
+            std::memcpy(&bits, &res[c], 4);
+            const uint32_t sign = bits & 0x80000000u, magnitude = bits & 0x7FFFFFFFu, exponent = (bits >> 23) & 0xFFu;
+            uint32_t flags = sign ? 0x2u : 0u;
+            if (magnitude == 0u)
+                flags |= 0x1u;
+            else if (exponent == 0u)
+            {
+                flags |= 0x5u;
+                bits = sign;
+            }
+            else if (exponent == 0xFFu)
+            {
+                flags |= 0x8u;
+                bits = sign | 0x7F7FFFFFu;
+            }
+            if ((bits & 0x7FFFFFFFu) == 0x7F7FFFFFu)
+                flags |= 0x8u;
+            std::memcpy(&res[c], &bits, 4);
+            if (flags & 0x1u) mac |= lane;
+            if (flags & 0x2u) mac |= lane << 4;
+            if (flags & 0x4u) mac |= lane << 8;
+            if (flags & 0x8u) mac |= lane << 12;
+            status |= flags;
+        }
+    }
+
+    // MAC/status flags of a fast region, delivered as the interpreter's flag
+    // pipeline does: an FMAC's 4 pairs after it, a divide's D/I bits with Q.
+    // Pairs stand in for cycles (stalls only make the hardware later).
+    struct FastFlags
+    {
+        struct Entry
+        {
+            uint64_t at;
+            uint32_t mac, status;
+        };
+        Entry fmac[16];
+        uint32_t head = 0, tail = 0;
+        uint64_t diAt = 0;
+        uint32_t di = 0;
+        bool diValid = false;
+
+        void push(uint64_t at, uint32_t mac, uint32_t status)
+        {
+            fmac[tail & 15u] = {at, mac, status};
+            ++tail;
+        }
+        void pushDi(uint64_t at, uint32_t bits)
+        {
+            diAt = at;
+            di = bits & 0x30u;
+            diValid = true;
+        }
+        void commit(VU1State &S, uint64_t now)
+        {
+            while (head != tail && fmac[head & 15u].at <= now)
+            {
+                const Entry &e = fmac[head & 15u];
+                S.mac = e.mac;
+                const uint32_t current = e.status & 0xFu;
+                S.status = (S.status & 0xFF0u) | current | (current << 6);
+                ++head;
+            }
+            if (diValid && diAt <= now)
+            {
+                S.status = (S.status & 0xFCFu) | di | (di << 6);
+                diValid = false;
+            }
+        }
+    };
+
+    inline uint32_t divStatus(float n, float d)
+    {
+        const float num = norm(n), den = norm(d);
+        return den == 0.0f ? (num == 0.0f ? 0x10u : 0x20u) : 0u;
+    }
+    inline uint32_t rsqrtStatus(float n, float r)
+    {
+        const float num = norm(n), radicand = norm(r);
+        const float den = std::sqrt(std::fabs(radicand));
+        uint32_t di = radicand < 0.0f ? 0x10u : 0u;
+        if (den == 0.0f)
+            di = num == 0.0f ? 0x10u : 0x20u;
+        return di;
+    }
+
+    // Fast regions (vu1fast_*.cpp) run from a program's start, before any
+    // XGKICK: no transfer to catch up with. Same call shape as above.
+    struct FastNoKick
+    {
+    };
+    template <uint8_t DEST>
+    inline void storeWords(FastNoKick, uint8_t *vuData, uint32_t dataSize, uint32_t qword, const uint32_t *words)
+    {
+        const uint32_t addr = (qword * 16u) & (dataSize - 1u);
+        if (addr + 16u > dataSize)
+            return;
+        uint8_t *dst = vuData + addr;
+        if (DEST & 0x8u) std::memcpy(dst + 0, &words[0], 4);
+        if (DEST & 0x4u) std::memcpy(dst + 4, &words[1], 4);
+        if (DEST & 0x2u) std::memcpy(dst + 8, &words[2], 4);
+        if (DEST & 0x1u) std::memcpy(dst + 12, &words[3], 4);
+    }
+    template <uint8_t DEST>
+    inline void storeQ(FastNoKick I, uint8_t *vuData, uint32_t dataSize, uint32_t qword, const float *src)
+    {
+        uint32_t words[4];
+        std::memcpy(words, src, 16);
+        storeWords<DEST>(I, vuData, dataSize, qword, words);
+    }
+    template <uint8_t DEST>
+    inline void storeVi(FastNoKick I, uint8_t *vuData, uint32_t dataSize, uint32_t qword, int32_t vi)
+    {
+        const uint32_t v = static_cast<uint32_t>(static_cast<uint16_t>(vi & 0xFFFF));
+        const uint32_t words[4] = {v, v, v, v};
+        storeWords<DEST>(I, vuData, dataSize, qword, words);
+    }
+
     inline int32_t loadVi(const uint8_t *vuData, uint32_t dataSize, uint32_t qword, uint32_t component, int32_t old)
     {
         const uint32_t addr = (qword * 16u) & (dataSize - 1u);

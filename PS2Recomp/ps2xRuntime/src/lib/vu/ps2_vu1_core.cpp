@@ -1214,6 +1214,7 @@ namespace
         uint64_t hash;
         uint32_t pc;
         vu1native::LoopFn fn;
+        bool generated = false;
     };
     std::vector<NativeLoop> &nativeLoops()
     {
@@ -2416,9 +2417,29 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         endRecVerify(recVerify, vuData, dataSize);
 }
 
-void vu1native::registerLoop(uint64_t imageHash, uint32_t entryPc, LoopFn fn)
+void vu1native::registerLoop(uint64_t imageHash, uint32_t entryPc, LoopFn fn, bool generated)
 {
-    nativeLoops().push_back({imageHash, entryPc, fn});
+    // Hand-written loops win over generated regions for the same entry.
+    auto &loops = nativeLoops();
+    for (NativeLoop &loop : loops)
+        if (loop.hash == imageHash && loop.pc == entryPc)
+        {
+            if (!generated)
+            {
+                loop.fn = fn;
+                loop.generated = false;
+            }
+            return;
+        }
+    loops.push_back({imageHash, entryPc, fn, generated});
+}
+
+bool vu1native::isRegistered(uint64_t imageHash, uint32_t entryPc)
+{
+    for (const NativeLoop &loop : nativeLoops())
+        if (loop.hash == imageHash && loop.pc == entryPc && !loop.generated)
+            return true;
+    return false;
 }
 
 // The native loop on copies of the state, the microcode on the interpreter
@@ -2482,6 +2503,8 @@ static void verifyNativeLoop(VU1Interpreter &I, vu1native::LoopFn fn, uint8_t *v
 
     std::lock_guard<std::mutex> lock(g_nativeVerify.mutex);
     ++g_nativeVerify.runs;
+    static std::map<uint64_t, uint64_t> perImage;
+    ++perImage[I.m_recHash];
     if (!diff.empty())
     {
         ++g_nativeVerify.mismatches;
@@ -2489,6 +2512,11 @@ static void verifyNativeLoop(VU1Interpreter &I, vu1native::LoopFn fn, uint8_t *v
             std::fprintf(stderr, "[vu1:native] MISMATCH hash=%016llx: %s\n", static_cast<unsigned long long>(I.m_recHash), diff.c_str());
     }
     if ((g_nativeVerify.runs & 0xFFFu) == 0u)
-        std::fprintf(stderr, "[vu1:native] verified %llu runs, %llu mismatches\n", static_cast<unsigned long long>(g_nativeVerify.runs),
+    {
+        std::fprintf(stderr, "[vu1:native] verified %llu runs, %llu mismatches |", static_cast<unsigned long long>(g_nativeVerify.runs),
                      static_cast<unsigned long long>(g_nativeVerify.mismatches));
+        for (const auto &[hash, runs] : perImage)
+            std::fprintf(stderr, " %08llx:%llu", static_cast<unsigned long long>(hash >> 32), static_cast<unsigned long long>(runs));
+        std::fprintf(stderr, "\n");
+    }
 }

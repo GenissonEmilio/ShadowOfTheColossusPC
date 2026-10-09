@@ -19,10 +19,17 @@ namespace vu1native
     // cycles: VU1 cycles the replaced code would have taken (an estimate).
     using LoopFn = uint32_t (*)(VU1State &state, uint8_t *vuData, uint32_t dataSize, uint64_t &cycles);
 
-    void registerLoop(uint64_t imageHash, uint32_t entryPc, LoopFn fn);
+    void registerLoop(uint64_t imageHash, uint32_t entryPc, LoopFn fn, bool generated = false);
+    // A hand-written loop (game overrides) for that entry; generated fast
+    // regions (vu1fast_*.cpp) do not count.
+    bool isRegistered(uint64_t imageHash, uint32_t entryPc);
 
     struct Registrar
     {
         Registrar(uint64_t imageHash, uint32_t entryPc, LoopFn fn) { registerLoop(imageHash, entryPc, fn); }
+    };
+    struct GeneratedRegistrar
+    {
+        GeneratedRegistrar(uint64_t imageHash, uint32_t entryPc, LoopFn fn) { registerLoop(imageHash, entryPc, fn, true); }
     };
 }

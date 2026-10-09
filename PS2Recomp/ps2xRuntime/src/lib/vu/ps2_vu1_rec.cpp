@@ -1,4 +1,5 @@
 #include "runtime/ps2_vu1.h"
+#include "runtime/ps2_vu1_native.h"
 #include "runtime/ps2_memory.h"
 #include "ps2_vu1_detail.h"
 
@@ -530,6 +531,568 @@ namespace
     }
 }
 
+namespace
+{
+    using DecodedInstructionPair = VU1Interpreter::DecodedInstructionPair;
+
+    // ---- Fast regions --------------------------------------------------------
+    //
+    // From each program entry, the code up to the first XGKICK, end of
+    // program, D/T bit, register jump or instruction without a direct form,
+    // as straight C++: pairs in program order, every write immediate, no
+    // cycle model. That equals the interpreter (which stalls readers of
+    // pending VF/VI/ACC writes) except for the non-interlocked Q and clip
+    // flags; a region is only generated when every Q reader is at least the
+    // divide latency (7, RSQRT 13) pairs after the divide or behind a WAITQ,
+    // and every clip reader 4 pairs after the clip write, on every path --
+    // the region's exits included, against the microcode that continues
+    // there. Images that read MAC/status flags are left out. Registered as
+    // vu1native loops: PS2X_VU1_NATIVE=verify checks them against the
+    // interpreter.
+    struct FastPair
+    {
+        bool ok = false;      // has a direct form
+        bool branch = false;  // lower is a branch
+        bool stop = false;    // ends a region before it runs
+        uint8_t qLatency = 0; // writes Q (DIV/SQRT/RSQRT)
+        bool readsQ = false;
+        bool waitQ = false;
+        bool writesClip = false;
+        bool readsClip = false;
+        bool writesFlags = false; // an FMAC whose MAC/status flags someone can read
+        bool readsFlags = false;  // FMAND/FMEQ/FMOR/FSAND
+        std::string code;     // the pair, branch excluded
+    };
+
+    std::string fastUpperCode(uint32_t instr, const std::string &in, bool &ok, bool &readsQ, bool &writesClip, bool needFlags)
+    {
+        ok = true;
+        readsQ = false;
+        writesClip = false;
+        LaneOp op{};
+        uint8_t bc = 0;
+        const uint8_t dest = DEST(instr);
+        const uint8_t ft = FT(instr), fs = FS(instr), fd = FD(instr);
+        if (describeUpper(instr, op, bc))
+        {
+            if (op.expr[0] == '\0' || dest == 0u)
+                return {};
+            static const char *lanes = "xyzw";
+            std::set<std::string> uses;
+            std::string expressions[4];
+            for (uint32_t c = 0; c < 4u; ++c)
+                if (dest & laneBit(c))
+                    expressions[c] = laneExpression(op, c, uses);
+            std::ostringstream o;
+            o << in << "{ // " << op.name << "\n";
+            for (const std::string &u : uses)
+            {
+                o << in << "    const float " << u << " = vu1rec::norm(";
+                if (u == "bc")
+                    o << "S.vf[" << int(ft) << "][" << int(bc) << "]";
+                else if (u == "qv")
+                {
+                    o << "S.q";
+                    readsQ = true;
+                }
+                else if (u == "iv")
+                    o << "S.i";
+                else
+                {
+                    const uint32_t lane = static_cast<uint32_t>(std::strchr(lanes, u[1]) - lanes);
+                    if (u[0] == 's')
+                        o << "S.vf[" << int(fs) << "][" << lane << "]";
+                    else if (u[0] == 't')
+                        o << "S.vf[" << int(ft) << "][" << lane << "]";
+                    else
+                        o << "S.acc[" << lane << "]";
+                }
+                o << ");\n";
+            }
+            const std::string target = op.toAcc ? "S.acc" : "S.vf[" + std::to_string(fd) + "]";
+            if (needFlags && !op.minmax)
+            {
+                // Its flags can be read: computed and delivered 4 pairs on.
+                o << in << "    float res[4] = {";
+                for (uint32_t c = 0; c < 4u; ++c)
+                    o << (c ? ", " : "") << ((dest & laneBit(c)) ? expressions[c] : std::string("0.0f"));
+                o << "};\n"
+                  << in << "    uint32_t fm, fs;\n"
+                  << in << "    vu1rec::fastFmacFlags<" << int(dest) << ">(res, fm, fs);\n"
+                  << in << "    fl.push(n + 4u, fm, fs);\n"
+                  << in << "    vu1rec::applyDest<" << int(dest) << ">(" << target << ", res);\n"
+                  << in << "}\n";
+                return o.str();
+            }
+            for (uint32_t c = 0; c < 4u; ++c)
+            {
+                if (!(dest & laneBit(c)))
+                    continue;
+                if (op.minmax)
+                    o << in << "    " << target << "[" << c << "] = " << expressions[c] << ";\n";
+                else
+                    o << in << "    " << target << "[" << c << "] = vu1rec::norm(" << expressions[c] << ");\n";
+            }
+            o << in << "}\n";
+            return o.str();
+        }
+        if ((instr & 0x3Fu) < 0x3Cu)
+        {
+            ok = false;
+            return {};
+        }
+        const uint8_t special = static_cast<uint8_t>((instr & 0x3u) | ((instr >> 4) & 0x7Cu));
+        const std::string D = std::to_string(dest);
+        const std::string vs = "S.vf[" + std::to_string(fs) + "]";
+        const std::string vt = "S.vf[" + std::to_string(ft) + "]";
+        static const char *itofDiv[4] = {"", " / 16.0f", " / 4096.0f", " / 32768.0f"};
+        static const char *ftoiScale[4] = {"1.0f", "16.0f", "4096.0f", "32768.0f"};
+        std::ostringstream o;
+        if (special >= 0x10 && special <= 0x13)
+            o << in << "{ float r[4]; for (int c = 0; c < 4; ++c) { int32_t iv; std::memcpy(&iv, &" << vs << "[c], 4); r[c] = static_cast<float>(iv)"
+              << itofDiv[special & 3] << "; } vu1rec::applyDest<" << D << ">(" << vt << ", r); }\n";
+        else if (special >= 0x14 && special <= 0x17)
+            o << in << "{ float r[4]; for (int c = 0; c < 4; ++c) { const int32_t iv = vu1rec::floatToInt(vu1rec::norm(" << vs << "[c]), "
+              << ftoiScale[special & 3] << "); std::memcpy(&r[c], &iv, 4); } vu1rec::applyDest<" << D << ">(" << vt << ", r); }\n";
+        else if (special == 0x1D)
+            o << in << "{ float r[4]; for (int c = 0; c < 4; ++c) r[c] = std::fabs(vu1rec::norm(" << vs << "[c])); vu1rec::applyDest<" << D << ">(" << vt
+              << ", r); }\n";
+        else if (special == 0x1F) // CLIP
+        {
+            writesClip = true;
+            o << in << "S.clip = vu1rec::fastClip(S.clip, " << vs << ", " << vt << ");\n";
+        }
+        else if (special == 0x2F || special == 0x30) // NOP
+            return {};
+        else
+            ok = false;
+        return o.str();
+    }
+
+    // Lower half; kind: 0 plain, 1 branch (code empty), -1 unsupported.
+    std::string fastLowerCode(const DecodedInstructionPair &d, const std::string &in, int &kind, FastPair &info)
+    {
+        kind = 0;
+        if (d.iBit)
+            return in + "{ const uint32_t immBits = " + hex(d.lower) + "u; float immediate; std::memcpy(&immediate, &immBits, 4); S.i = vu1rec::norm(immediate); }\n";
+        const uint32_t instr = d.lower;
+        if (instr == 0u || instr == 0x8000033Cu)
+            return {};
+        if (isBranchLower(instr, false))
+        {
+            kind = 1;
+            return {};
+        }
+        const uint8_t opHi = static_cast<uint8_t>((instr >> 25) & 0x7Fu);
+        if (opHi == 0x11u) // FCSET
+        {
+            info.writesClip = true;
+            return in + "S.clip = " + hex(instr & 0xFFFFFFu) + "u;\n";
+        }
+        if (opHi == 0x1Cu) // FCGET
+        {
+            const int vit = VIT(instr);
+            info.readsClip = true;
+            return vit ? in + "S.vi[" + std::to_string(vit) + "] = static_cast<int32_t>(S.clip & 0x0FFFu);\n" : std::string();
+        }
+        if (opHi == 0x10u || opHi == 0x12u || opHi == 0x13u)
+            info.readsClip = true;
+        if (opHi == 0x18u || opHi == 0x1Au || opHi == 0x1Bu || opHi == 0x16u) // FMEQ FMAND FMOR FSAND
+        {
+            info.readsFlags = true;
+            const int it = VIT(instr), is = VIS(instr);
+            const std::string commit = in + "fl.commit(S, n);\n";
+            if (it == 0)
+                return commit;
+            const std::string dst = in + "S.vi[" + std::to_string(it) + "] = ";
+            const std::string viS = "(uint32_t)(uint16_t)S.vi[" + std::to_string(is) + "]";
+            if (opHi == 0x18u)
+                return commit + dst + "((S.mac & 0xFFFFu) == " + viS + ") ? 1 : 0;\n";
+            if (opHi == 0x1Au)
+                return commit + dst + "(int32_t)(S.mac & " + viS + ");\n";
+            if (opHi == 0x1Bu)
+                return commit + dst + "(int32_t)(S.mac | " + viS + ");\n";
+            const uint16_t imm12 = static_cast<uint16_t>((((instr >> 21) & 0x1u) << 11) | (instr & 0x7FFu));
+            return commit + dst + "(int32_t)((S.status & 0xFFFu) & " + hex(imm12) + "u);\n";
+        }
+        if (opHi == 0x14u || opHi == 0x15u || opHi == 0x17u) // FSEQ FSSET FSOR: sticky bits
+        {
+            kind = -1;
+            return {};
+        }
+        std::string code = lowerCode(instr, in);
+        if (!code.empty())
+            return code;
+        if (opHi != 0x40u || (instr & 0x3Fu) < 0x3Cu)
+        {
+            kind = -1;
+            return {};
+        }
+        const uint8_t funct2 = static_cast<uint8_t>((instr & 0x3u) | ((instr >> 4) & 0x7Cu));
+        const int fsf = (instr >> 21) & 0x3, ftf = (instr >> 23) & 0x3;
+        const std::string fsv = "S.vf[" + std::to_string(FS(instr)) + "][" + std::to_string(fsf) + "]";
+        const std::string ftv = "S.vf[" + std::to_string(FT(instr)) + "][" + std::to_string(ftf) + "]";
+        const int vit = VIT(instr);
+        switch (funct2)
+        {
+        case 0x38: // DIV
+            info.qLatency = 7;
+            return in + "fl.pushDi(n + 7u, vu1rec::divStatus(" + fsv + ", " + ftv + "));\n" + in + "S.q = vu1rec::fastDiv(" + fsv + ", " + ftv + ");\n";
+        case 0x39: // SQRT
+            info.qLatency = 7;
+            return in + "fl.pushDi(n + 7u, vu1rec::norm(" + ftv + ") < 0.0f ? 0x10u : 0u);\n" + in + "S.q = std::sqrt(std::fabs(vu1rec::norm(" + ftv + ")));\n";
+        case 0x3A: // RSQRT
+            info.qLatency = 13;
+            return in + "fl.pushDi(n + 13u, vu1rec::rsqrtStatus(" + fsv + ", " + ftv + "));\n" + in + "S.q = vu1rec::fastRsqrt(" + fsv + ", " + ftv + ");\n";
+        case 0x3B: // WAITQ
+            info.waitQ = true;
+            return {};
+        case 0x68: // XTOP
+            return vit ? in + "S.vi[" + std::to_string(vit) + "] = (int32_t)(S.top & 0x3FFu);\n" : std::string();
+        case 0x69: // XITOP
+            return vit ? in + "S.vi[" + std::to_string(vit) + "] = (int32_t)(S.itop & 0x3FFu);\n" : std::string();
+        default:
+            kind = -1;
+            return {};
+        }
+    }
+
+    void writeFastImage(uint64_t hash, const std::vector<DecodedInstructionPair> &pairs, const std::set<uint32_t> &entries,
+                        const std::vector<bool> &flagsNeeded, const char *outDir)
+    {
+        const std::string tag = hex(hash, 16).substr(2);
+        // Per pair: its direct form.
+        std::vector<FastPair> info(0x800);
+        for (uint32_t k = 0; k < 0x800u; ++k)
+        {
+            const DecodedInstructionPair &d = pairs[k];
+            FastPair &f = info[k];
+            const std::string in = "    ";
+            bool upperOk = true, readsQ = false, upperClip = false;
+            const std::string upper = fastUpperCode(d.upper, in, upperOk, readsQ, upperClip, flagsNeeded[k]);
+            {
+                LaneOp op{};
+                uint8_t bc = 0;
+                f.writesFlags = flagsNeeded[k] && describeUpper(d.upper, op, bc) && !op.minmax && op.expr[0] != '\0' && DEST(d.upper) != 0u;
+            }
+            int kind = 0;
+            const std::string lower = fastLowerCode(d, in, kind, f);
+            // Known for every pair: the code after a region's exits is checked too.
+            f.readsQ = readsQ;
+            f.readsClip = f.readsClip || d.lowerUsage.readsClip;
+            f.writesClip = f.writesClip || upperClip;
+            f.branch = kind == 1;
+            // The upper writes the clip flags before this emission's lower
+            // would read them (the hardware reads first): no direct form.
+            if (upperClip && f.readsClip)
+                upperOk = false;
+            if (d.upperUsage.reserved || d.lowerUsage.reserved || d.dBit || d.tBit || d.eBit || d.mBit || !upperOk || kind < 0)
+            {
+                f.stop = true;
+                continue;
+            }
+            // A lower write the upper reads in the same pair: the upper sees
+            // the old value (both halves read first).
+            std::ostringstream o;
+            const uint32_t viWriteBits = d.lowerUsage.viWrite & 0xFFFEu;
+            const uint32_t writtenVi = viWriteBits ? static_cast<uint32_t>(__builtin_ctz(viWriteBits)) : 0u;
+            const bool recordBranchVi = writtenVi != 0u && d.lowerUsage.delaysNextBranchRead;
+            if (recordBranchVi)
+                o << in << "const int32_t oldVi = S.vi[" << writtenVi << "];\n";
+            if (!d.iBit && d.upperVfShadowReg != 0u)
+            {
+                const std::string reg = "S.vf[" + std::to_string(d.upperVfShadowReg) + "]";
+                o << in << "{\n" << in << "float oldVf[4], upperVf[4];\n" << in << "std::memcpy(oldVf, " << reg << ", 16);\n" << upper
+                  << in << "std::memcpy(upperVf, " << reg << ", 16);\n" << in << "std::memcpy(" << reg << ", oldVf, 16);\n" << lower
+                  << in << "std::memcpy(" << reg << ", upperVf, 16);\n" << in << "}\n";
+            }
+            else
+                o << upper << lower;
+            if (recordBranchVi)
+                o << in << "bbReg = " << writtenVi << "; bbVal = oldVi;\n";
+            else
+                o << in << "bbReg = 0;\n";
+            const bool writesZero = (d.upperUsage.vfWrite.reg == 0u && d.upperUsage.vfWrite.lanes != 0u) ||
+                                    (d.lowerUsage.vfWrite.reg == 0u && d.lowerUsage.vfWrite.lanes != 0u);
+            if (writesZero)
+                o << in << "vu1rec::resetZeroRegs(S);\n";
+            f.code = "    {\n" + o.str() + "    }\n";
+            f.ok = true;
+        }
+
+        auto branchTarget = [&](uint32_t pc) -> int64_t
+        {
+            const uint32_t instr = pairs[pc / 8u].lower;
+            const uint8_t opHi = static_cast<uint8_t>((instr >> 25) & 0x7Fu);
+            if (opHi == 0x24u || opHi == 0x25u)
+                return -1; // JR / JALR
+            return (pc + 8u + static_cast<int32_t>(IMM11(instr)) * 8) & 0x3FF8u;
+        };
+        auto conditional = [&](uint32_t pc)
+        {
+            const uint8_t opHi = static_cast<uint8_t>((pairs[pc / 8u].lower >> 25) & 0x7Fu);
+            return opHi >= 0x28u;
+        };
+        // Successors in the whole microcode (for the code after an exit).
+        auto programSuccessors = [&](uint32_t pc, std::vector<uint32_t> &out)
+        {
+            out.clear();
+            const DecodedInstructionPair &d = pairs[pc / 8u];
+            if (d.eBit)
+            {
+                out.push_back((pc + 8u) & 0x3FF8u); // its delay slot, then the end
+                return;
+            }
+            const uint32_t prevPc = (pc - 8u) & 0x3FF8u;
+            const DecodedInstructionPair &prev = pairs[prevPc / 8u];
+            if (prev.eBit)
+                return; // delay slot of the end
+            if (!d.iBit && isBranchLower(d.lower, false))
+            {
+                out.push_back((pc + 8u) & 0x3FF8u);
+                return;
+            }
+            if (!prev.iBit && isBranchLower(prev.lower, false))
+            {
+                const int64_t t = branchTarget(prevPc);
+                if (t >= 0)
+                    out.push_back(static_cast<uint32_t>(t));
+                if (conditional(prevPc))
+                    out.push_back((pc + 8u) & 0x3FF8u);
+                return;
+            }
+            out.push_back((pc + 8u) & 0x3FF8u);
+        };
+
+        std::ostringstream file;
+        file << "// Generated by VU1Interpreter::generateRecompiled (fast regions) from " << hex(hash, 16) << ".bin. Do not edit.\n"
+             << "#include \"runtime/ps2_vu1_rec.h\"\n#include \"runtime/ps2_vu1_native.h\"\n\n#include <cfloat>\n#include <cmath>\n\n"
+             << "namespace\n{\n"
+             << "\n";
+
+        uint32_t generated = 0, rejected = 0;
+        std::ostringstream registrations;
+        for (const uint32_t entryRaw : entries)
+        {
+            const uint32_t entry = entryRaw & 0x3FF8u;
+            if (entry == 0u || info[entry / 8u].stop)
+                continue;
+            // Region: nodes reached from the entry; a branch's delay slot is
+            // emitted inside the branch node.
+            std::map<uint32_t, int> node; // pc -> 0 normal, 1 branch, 2 stop (exit)
+            std::vector<uint32_t> work{entry};
+            bool bad = false;
+            while (!work.empty() && !bad)
+            {
+                const uint32_t pc = work.back();
+                work.pop_back();
+                if (node.count(pc))
+                    continue;
+                const FastPair &f = info[pc / 8u];
+                if (f.stop)
+                {
+                    node[pc] = 2;
+                    continue;
+                }
+                if (!f.branch)
+                {
+                    node[pc] = 0;
+                    work.push_back((pc + 8u) & 0x3FF8u);
+                    continue;
+                }
+                const uint32_t slot = (pc + 8u) & 0x3FF8u;
+                const FastPair &s = info[slot / 8u];
+                const int64_t target = branchTarget(pc);
+                if (s.stop || s.branch || target < 0)
+                {
+                    node[pc] = 2;
+                    continue;
+                }
+                node[pc] = 1;
+                work.push_back(static_cast<uint32_t>(target));
+                if (conditional(pc))
+                    work.push_back((pc + 16u) & 0x3FF8u);
+            }
+            for (const auto &[pc, kind] : node)
+                if (kind == 2 && pc == 0u)
+                    bad = true; // 0 means "declined" to the caller
+            // Execution successors inside the region (delay slot folded in).
+            auto regionSuccessors = [&](uint32_t pc, std::vector<uint32_t> &out)
+            {
+                out.clear();
+                const int kind = node.at(pc);
+                if (kind == 2)
+                    return;
+                if (kind == 0)
+                {
+                    out.push_back((pc + 8u) & 0x3FF8u);
+                    return;
+                }
+                out.push_back(static_cast<uint32_t>(branchTarget(pc)));
+                if (conditional(pc))
+                    out.push_back((pc + 16u) & 0x3FF8u);
+            };
+            // Pairs a node executes: 1, or 2 for a branch and its delay slot.
+            auto weight = [&](uint32_t pc) { return node.at(pc) == 1 ? 2u : 1u; };
+            auto nodeReadsQ = [&](uint32_t pc) { return info[pc / 8u].readsQ || (node.at(pc) == 1 && info[((pc + 8u) & 0x3FF8u) / 8u].readsQ); };
+            auto nodeWaitsQ = [&](uint32_t pc) { return info[pc / 8u].waitQ; };
+            auto nodeReadsClip = [&](uint32_t pc) { return info[pc / 8u].readsClip || (node.at(pc) == 1 && info[((pc + 8u) & 0x3FF8u) / 8u].readsClip); };
+            // In the whole microcode from pc, within `budget` pairs: a reader?
+            auto programReads = [&](uint32_t start, uint32_t budget, int what) -> bool
+            {
+                std::vector<std::pair<uint32_t, uint32_t>> stack{{start, 0u}};
+                std::set<std::pair<uint32_t, uint32_t>> seen;
+                std::vector<uint32_t> next;
+                while (!stack.empty())
+                {
+                    const auto [pc, dist] = stack.back();
+                    stack.pop_back();
+                    if (dist >= budget || !seen.insert({pc, dist}).second)
+                        continue;
+                    const FastPair &f = info[pc / 8u];
+                    const DecodedInstructionPair &d = pairs[pc / 8u];
+                    const bool reads = what == 0 ? (f.readsQ && !f.waitQ) : what == 1 ? (f.readsClip || d.lowerUsage.readsClip) : f.readsFlags;
+                    if (reads)
+                        return true;
+                    if (what == 0 && f.waitQ)
+                        continue;
+                    programSuccessors(pc, next);
+                    for (uint32_t n : next)
+                        stack.push_back({n, dist + 1u});
+                }
+                return false;
+            };
+            // Writers: a reader, or an exit followed by one, closer than the latency.
+            // startDist: pairs from the writer to the next node's first pair
+            // (2 from a branch, 1 from its delay slot or a plain pair).
+            // what: 0 Q, 1 clip, 2 MAC/status (delivered at run time inside the
+            // region: only the code after an exit counts).
+            auto hazard = [&](uint32_t writerPc, uint32_t latency, int what, uint32_t startDist) -> bool
+            {
+                std::vector<std::pair<uint32_t, uint32_t>> stack;
+                std::set<std::pair<uint32_t, uint32_t>> seen;
+                std::vector<uint32_t> next;
+                regionSuccessors(writerPc, next);
+                for (uint32_t n : next)
+                    stack.push_back({n, startDist});
+                while (!stack.empty())
+                {
+                    const auto [pc, dist] = stack.back();
+                    stack.pop_back();
+                    if (dist >= latency || !seen.insert({pc, dist}).second)
+                        continue;
+                    if (!node.count(pc) || node.at(pc) == 2)
+                    {
+                        if (programReads(pc, latency - dist, what))
+                            return true;
+                        continue;
+                    }
+                    if (what == 0 && nodeWaitsQ(pc))
+                        continue;
+                    if (what == 0 ? nodeReadsQ(pc) : what == 1 ? nodeReadsClip(pc) : false)
+                        return true;
+                    regionSuccessors(pc, next);
+                    for (uint32_t n : next)
+                        stack.push_back({n, dist + weight(pc)});
+                }
+                return false;
+            };
+            for (const auto &[pc, kind] : node)
+            {
+                if (bad || kind == 2)
+                    continue;
+                const uint32_t members[2] = {pc, (pc + 8u) & 0x3FF8u};
+                for (int m = 0; m < (kind == 1 ? 2 : 1) && !bad; ++m)
+                {
+                    const FastPair &f = info[members[m] / 8u];
+                    // A reader in the same node as the writer, after it.
+                    if (f.qLatency && (m == 0 && kind == 1 && info[members[1] / 8u].readsQ))
+                        bad = true;
+                    if (f.writesClip && (m == 0 && kind == 1 && info[members[1] / 8u].readsClip))
+                        bad = true;
+                    // In the same pair the reader reads first: fine.
+                    const uint32_t startDist = (kind == 1 && m == 0) ? 2u : 1u;
+                    if (f.qLatency && (hazard(pc, f.qLatency, 0, startDist) || hazard(pc, f.qLatency, 2, startDist)))
+                        bad = true;
+                    if (f.writesClip && hazard(pc, 4u, 1, startDist))
+                        bad = true;
+                    if (f.writesFlags && hazard(pc, 4u, 2, startDist))
+                        bad = true;
+                }
+            }
+            if (bad)
+            {
+                ++rejected;
+                continue;
+            }
+
+            const std::string fn = "vu1fast_" + tag + "_" + hex(entry, 4).substr(2);
+            file << "uint32_t " << fn << "(VU1State &S, uint8_t *vuData, uint32_t dataSize, uint64_t &cycles)\n{\n"
+                 << "    vu1rec::FastNoKick I;\n    (void)I; (void)vuData; (void)dataSize;\n"
+                 << "    vu1rec::FastFlags fl;\n"
+                 << "    uint64_t n = 0;\n    int32_t bbReg = 0, bbVal = 0;\n"
+                 << "    auto bv = [&](int r) -> int32_t { return r == 0 ? 0 : (bbReg == r ? bbVal : S.vi[r]); };\n"
+                 << "    (void)bv;\n";
+            file << "    goto L_" << hex(entry, 4).substr(2) << ";\n";
+            for (const auto &[pc, kind] : node)
+            {
+                const std::string label = "L_" + hex(pc, 4).substr(2);
+                file << label << ":\n";
+                if (kind == 2)
+                {
+                    file << "    fl.commit(S, ~0ull);\n    cycles = n;\n    return " << hex(pc, 4) << ";\n";
+                    continue;
+                }
+                if (kind == 0)
+                {
+                    file << "    ++n;\n" << info[pc / 8u].code;
+                    const uint32_t next = (pc + 8u) & 0x3FF8u;
+                    auto it = node.find(pc);
+                    ++it;
+                    if (it == node.end() || it->first != next)
+                        file << "    goto L_" << hex(next, 4).substr(2) << ";\n";
+                    continue;
+                }
+                // Branch: the condition (VI as the branch reads it), then the delay slot.
+                const uint32_t instr = pairs[pc / 8u].lower;
+                const uint8_t opHi = static_cast<uint8_t>((instr >> 25) & 0x7Fu);
+                const int vis = VIS(instr), vit = VIT(instr);
+                std::string cond = "true";
+                switch (opHi)
+                {
+                case 0x28u: cond = "(int16_t)bv(" + std::to_string(vis) + ") == (int16_t)bv(" + std::to_string(vit) + ")"; break;
+                case 0x29u: cond = "(int16_t)bv(" + std::to_string(vis) + ") != (int16_t)bv(" + std::to_string(vit) + ")"; break;
+                case 0x2Cu: cond = "(int16_t)bv(" + std::to_string(vis) + ") < 0"; break;
+                case 0x2Du: cond = "(int16_t)bv(" + std::to_string(vis) + ") > 0"; break;
+                case 0x2Eu: cond = "(int16_t)bv(" + std::to_string(vis) + ") <= 0"; break;
+                case 0x2Fu: cond = "(int16_t)bv(" + std::to_string(vis) + ") >= 0"; break;
+                default: break;
+                }
+                // The condition reads the VIs as the branch does (the backup
+                // left by the previous pair), before this pair's code.
+                file << "    {\n        const bool take = " << cond << ";\n        (void)take;\n";
+                file << "        ++n;\n" << info[pc / 8u].code;
+                if (opHi == 0x21u && vit != 0) // BAL
+                    file << "        S.vi[" << vit << "] = " << ((pc + 16u) / 8u) << ";\n";
+                file << "        ++n;\n" << info[((pc + 8u) & 0x3FF8u) / 8u].code;
+                file << "        if (take)\n            goto L_" << hex(static_cast<uint32_t>(branchTarget(pc)), 4).substr(2) << ";\n";
+                if (conditional(pc))
+                    file << "        goto L_" << hex((pc + 16u) & 0x3FF8u, 4).substr(2) << ";\n";
+                file << "    }\n";
+            }
+            file << "}\n\n";
+            registrations << "vu1native::GeneratedRegistrar reg_" << tag << "_" << hex(entry, 4).substr(2) << "(" << hex(hash, 16) << "ull, " << hex(entry, 4)
+                          << ", &" << fn << ");\n";
+            ++generated;
+        }
+        file << registrations.str() << "}\n";
+        const std::string path = std::string(outDir) + "/vu1fast_" + tag + ".cpp";
+        std::ofstream out(path);
+        out << file.str();
+        std::fprintf(stderr, "[vu1fast] %s: %u regions, %u rejected (Q/clip timing)\n", path.c_str(), generated, rejected);
+    }
+}
+
 int VU1Interpreter::generateRecompiled(const char *dumpDir, const char *outDir)
 {
     std::map<uint64_t, ImageInfo> images;
@@ -973,6 +1536,18 @@ int VU1Interpreter::generateRecompiled(const char *dumpDir, const char *outDir)
         const std::string path = std::string(outDir) + "/vu1rec_" + hex(hash, 16).substr(2) + ".cpp";
         std::ofstream out(path);
         out << o.str();
+        // Fast regions, for images that never read MAC/status flags; entries
+        // with a hand-written native loop (game overrides) keep it.
+        if (!stickyLive)
+        {
+            std::set<uint32_t> fastEntries;
+            for (uint32_t entry : image.entries)
+                if (!vu1native::isRegistered(hash, entry & 0x3FF8u))
+                    fastEntries.insert(entry);
+            writeFastImage(hash, pairs, fastEntries, flagsNeeded, outDir);
+        }
+        else
+            std::fprintf(stderr, "[vu1fast] %016llx: reads sticky status flags, no fast regions\n", static_cast<unsigned long long>(hash));
         std::fprintf(stderr, "[vu1rec] %s: %u pairs compiled, %u/%u FMACs keep flags%s\n", path.c_str(), compiled,
                      needed, writers, stickyLive ? " (sticky live)" : "");
     }
