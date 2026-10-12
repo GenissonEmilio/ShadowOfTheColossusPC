@@ -649,6 +649,13 @@ if(MSVC)
     target_link_options(ps2EntryRunner PRIVATE "/FORCE:MULTIPLE")
 endif()
 
+# Generated/native VU1 code trusts the FPU mode instead of normalising every
+# float in software (see vu1rec::norm).
+option(PS2X_VU1_TRUST_FPU "VU1 native/generated code: no software float normalisation" ON)
+if(PS2X_VU1_TRUST_FPU)
+    target_compile_definitions(ps2EntryRunner PRIVATE PS2X_VU1_TRUST_FPU=1)
+endif()
+
 # Vita: Work around for GCC 10's LTO plugin
 if(PS2X_IS_VITA)
     # Cortex-A9: Thumb-2 and NEON. The recompiled game is size-optimized

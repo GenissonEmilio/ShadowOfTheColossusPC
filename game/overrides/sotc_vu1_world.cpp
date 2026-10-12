@@ -32,6 +32,13 @@ namespace
 
     __attribute__((always_inline)) inline float norm(float value)
     {
+#if defined(PS2X_VU1_TRUST_FPU)
+        // The VU1 threads run with round-toward-zero and flush-to-zero
+        // (ps2SetEeFloatingPointMode): the FPU itself gives denormals as
+        // signed zero and overflow as +-FLT_MAX. Only Inf/NaN inputs, absent
+        // from game data, would differ (PS2X_VU1_NATIVE=verify checks).
+        return value;
+#endif
         uint32_t bits;
         std::memcpy(&bits, &value, sizeof(bits));
         const uint32_t exponent = bits & 0x7F800000u;
