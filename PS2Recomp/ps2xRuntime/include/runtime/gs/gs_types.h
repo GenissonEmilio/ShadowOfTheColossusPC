@@ -256,6 +256,28 @@ struct GSPrimitiveBatch
     GSDrawState state{};
 };
 
+// A VU1 batch drawn with the GPU's vertex stage instead of VU1 + GIF (see
+// docs/vu1_gpu_path.md): the vertices as the game sent them to VU1, and the
+// microcode's transform. Clip position = m * (x, y, z, 1) (column-major,
+// columns = VU vf1..vf4), q = 1 / w; screen x, y in GS pixels and Z as
+// stored, texture coordinate s, t (12.4 fixed) / 4096 with q, fog =
+// clamp(fogBase + fogScale * q, 0, 255), colour as given (0..255, alpha
+// 0x80 = 1).
+struct GSVuVertex
+{
+    float x = 0.0f, y = 0.0f, z = 0.0f;
+    int32_t s = 0, t = 0;
+    uint8_t r = 0, g = 0, b = 0, a = 0;
+};
+
+struct GSVuBatch
+{
+    GSDrawState state{}; // what a kick of the batch's packet would draw with
+    std::vector<GSVuVertex> vertices;
+    float m[16]{};
+    float fogBase = 0.0f, fogScale = 0.0f;
+};
+
 struct GSTransferCommand
 {
     GSBitBltBuf bitbltbuf{};

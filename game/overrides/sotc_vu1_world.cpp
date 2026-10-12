@@ -17,12 +17,17 @@
 #include "ps2_runtime.h"
 #include "runtime/ps2_vu1.h"
 #include "runtime/ps2_vu1_native.h"
+#include "runtime/gs/gs_frontend.h"
 
+#include <atomic>
 #include <cfloat>
+#include <cstdio>
+#include <cstdlib>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <vector>
 
 namespace
 {
@@ -176,9 +181,117 @@ namespace
         }
     };
 
+    template <uint32_t Entry>
+    uint32_t worldLoopCpu(VU1State &S, uint8_t *data, uint32_t dataSize, uint64_t &cycles);
+
+    // ---- The world batch on the GPU (docs/vu1_gpu_path.md, stage 1) --------
+    //
+    // PS2X_VU1_DIRECT=1: the batch is drawn by the GS backend's vertex stage
+    // (GSVuBatch) instead of being kicked as the packet the loop writes. The
+    // loop still runs (other programs read its output); the packet's XGKICK
+    // and the guard-band clipper are skipped (the GPU clips).
+    struct DirectWorld
+    {
+        bool active = false;
+        uint64_t tagLo = 0;
+        std::vector<GSVuVertex> vertices;
+        float m[16]{};
+        float fogBase = 0.0f, fogScale = 0.0f;
+    };
+
+    bool directEnabled()
+    {
+        static const bool on = std::getenv("PS2X_VU1_DIRECT") && std::atoi(std::getenv("PS2X_VU1_DIRECT")) != 0;
+        return on;
+    }
+
+    // Before the loop: the input batch at TOP as the game sent it.
+    void captureWorld(const VU1State &S, const uint8_t *data, uint32_t dataSize, DirectWorld &w)
+    {
+        GS *gs = vu1native::gs();
+        if (!directEnabled() || !gs || !gs->supportsVuBatch())
+            return;
+        const uint32_t mask = dataSize - 1u;
+        const uint32_t top = S.top & 0x3FFu;
+        uint64_t tagLo;
+        std::memcpy(&tagLo, data + ((top * 16u) & mask), 8);
+        const uint32_t count = static_cast<uint32_t>(tagLo & 0x7FFFu);
+        const uint32_t prim = static_cast<uint32_t>((tagLo >> 47) & 0x7FFu);
+        const uint32_t type = prim & 7u;
+        const bool pre = ((tagLo >> 46) & 1u) != 0u;
+        // Triangles, Gouraud, STQ: what the vertex stage reproduces.
+        if (!pre || type < 3u || type > 5u || !(prim & 0x8u) || (prim & 0x100u) || count == 0u || count > 1024u)
+        {
+            static std::atomic<uint64_t> s_rejects{0};
+            const uint64_t n = ++s_rejects;
+            if ((n & (n - 1)) == 0)
+                std::fprintf(stderr, "[vu1:direct] %llu batches kept on the CPU (tag %016llx)\n",
+                             static_cast<unsigned long long>(n), static_cast<unsigned long long>(tagLo));
+            return;
+        }
+        w.tagLo = tagLo;
+        w.vertices.resize(count);
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            const uint8_t *q = data + (((top + 1u + i * 3u) * 16u) & mask);
+            GSVuVertex &v = w.vertices[i];
+            std::memcpy(&v.x, q + 0, 4);
+            std::memcpy(&v.y, q + 4, 4);
+            std::memcpy(&v.z, q + 8, 4);
+            const uint8_t *uv = data + (((top + 2u + i * 3u) * 16u) & mask);
+            std::memcpy(&v.s, uv + 0, 4);
+            std::memcpy(&v.t, uv + 4, 4);
+            const uint8_t *c = data + (((top + 3u + i * 3u) * 16u) & mask);
+            int32_t rgba[4];
+            std::memcpy(rgba, c, 16);
+            v.r = static_cast<uint8_t>(rgba[0]);
+            v.g = static_cast<uint8_t>(rgba[1]);
+            v.b = static_cast<uint8_t>(rgba[2]);
+            v.a = static_cast<uint8_t>(rgba[3]);
+        }
+        for (int col = 0; col < 4; ++col)
+            for (int row = 0; row < 4; ++row)
+                w.m[col * 4 + row] = S.vf[1 + col][row];
+        w.fogBase = S.vf[17][3];  // MULA.w ACC, vf17, vf0
+        w.fogScale = S.vf[17][0]; // MR32.w vf29, vf17 -> MADDq.w vf26, vf29, q
+        w.active = true;
+    }
+
+    // After the loop (pc 0x13b8): the microcode's stores before its XGKICK,
+    // then the batch to the GS; the microcode resumes after the XGKICK.
+    uint32_t finishWorldDirect(VU1State &S, uint8_t *data, uint32_t dataSize, DirectWorld &w)
+    {
+        const uint32_t mask = dataSize - 1u;
+        auto isw = [&](uint32_t qword, int lane, int32_t value)
+        {
+            const uint32_t v = static_cast<uint16_t>(value & 0xFFFF);
+            std::memcpy(data + ((qword * 16u) & mask) + lane * 4, &v, 4);
+        };
+        isw(1017, 1, S.vi[6]);  // ISW.y vi6, 1017(vi0)
+        isw(1017, 2, S.vi[8]);  // ISW.z vi8, 1017(vi0)
+        isw(1017, 3, S.vi[14]); // ISW.w vi14, 1017(vi0)  (clipper skipped: the GPU clips)
+        vu1native::gs()->submitVuBatch(w.tagLo, std::move(w.vertices), w.m, w.fogBase, w.fogScale);
+        static std::atomic<uint64_t> s_batches{0};
+        const uint64_t n = ++s_batches;
+        if ((n & (n - 1)) == 0 && n >= 1024)
+            std::fprintf(stderr, "[vu1:direct] %llu world batches on the GPU\n", static_cast<unsigned long long>(n));
+        return 0x13f8; // after XGKICK vi6: NOP, then JR vi14
+    }
+
     // Entry: the program's BAL vi14, 0x1140 (its delay slot is a NOP).
     template <uint32_t Entry>
     uint32_t worldLoop(VU1State &S, uint8_t *data, uint32_t dataSize, uint64_t &cycles)
+    {
+        DirectWorld direct;
+        captureWorld(S, data, dataSize, direct);
+        const uint32_t pc = worldLoopCpu<Entry>(S, data, dataSize, cycles);
+        if (pc == kWorldResume && direct.active)
+            return finishWorldDirect(S, data, dataSize, direct);
+        return pc;
+    }
+
+    template <uint32_t Entry>
+    uint32_t worldLoopCpu(VU1State &S, uint8_t *data, uint32_t dataSize, uint64_t &cycles)
     {
         constexpr uint32_t kWorldEntry = Entry;
         if (dataSize == 0 || (dataSize & (dataSize - 1)) != 0)

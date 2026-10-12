@@ -34,6 +34,8 @@ public:
     void Initialize(uint8_t *vram, uint32_t vramSize) override;
     void Reset() override;
     void Submit(const GSPrimitiveBatch &batch) override;
+    bool SupportsVuBatch() const override;
+    void SubmitVuBatch(const GSVuBatch &batch) override;
     void LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut) override;
     void BeginTransfer(const GSTransferCommand &command) override;
     void UploadImage(const uint8_t *data, uint32_t sizeBytes) override;

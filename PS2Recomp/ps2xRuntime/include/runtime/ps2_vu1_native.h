@@ -12,6 +12,7 @@
 #include <cstdint>
 
 struct VU1State;
+class GS;
 
 namespace vu1native
 {
@@ -28,6 +29,9 @@ namespace vu1native
     // whole, now (the microcode double-buffers, so nothing it writes later
     // lands in a packet in flight). No-op while verifying (copies).
     void xgkick(uint32_t qwordAddress);
+
+    // The GS this VU1 run kicks to (nullptr while verifying).
+    GS *gs();
 
     struct Registrar
     {

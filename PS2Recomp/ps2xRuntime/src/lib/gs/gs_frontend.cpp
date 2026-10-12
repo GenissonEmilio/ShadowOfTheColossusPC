@@ -783,6 +783,32 @@ void GS::gifWorkerLoop()
     }
 }
 
+bool GS::supportsVuBatch() const
+{
+    return m_backend && m_backend->SupportsVuBatch();
+}
+
+void GS::submitVuBatch(uint64_t tagLo, std::vector<GSVuVertex> vertices, const float m[16], float fogBase, float fogScale)
+{
+    auto batch = std::make_shared<GSVuBatch>();
+    batch->vertices = std::move(vertices);
+    std::memcpy(batch->m, m, sizeof(batch->m));
+    batch->fogBase = fogBase;
+    batch->fogScale = fogScale;
+    runInGifOrder([this, tagLo, batch]
+                  {
+                      std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+                      if (!m_backend)
+                          return;
+                      // The packet's tag: PRIM when PRE is set, then a fresh
+                      // vertex queue (as the GIF's PRIM write leaves it).
+                      if ((tagLo >> 46) & 1u)
+                          writeRegisterUnlocked(GS_REG_PRIM, (tagLo >> 47) & 0x7FFu);
+                      m_vtxCount = 0;
+                      batch->state = buildDrawBatch(0).state;
+                      m_backend->SubmitVuBatch(*batch); });
+}
+
 void GS::runInGifOrder(std::function<void()> fn)
 {
     if (m_gifWorkerEnabled && PS2Memory::onVu1Worker())

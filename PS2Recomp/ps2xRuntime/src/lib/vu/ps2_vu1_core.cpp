@@ -2452,6 +2452,11 @@ void vu1native::xgkick(uint32_t qwordAddress)
     }
 }
 
+GS *vu1native::gs()
+{
+    return t_vu1KickTarget ? t_vu1KickTarget->m_activeGs : nullptr;
+}
+
 bool vu1native::isRegistered(uint64_t imageHash, uint32_t entryPc)
 {
     for (const NativeLoop &loop : nativeLoops())

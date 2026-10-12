@@ -201,6 +201,51 @@ void main()
 }
 )";
 
+    // VU1 batches (GSVuBatch): the world microcode's transform on the GPU.
+    // Clip position = M p; screen = clip.xy / w in GS pixels; Z = clip.z / w;
+    // S, T, Q = uv q, q -- the same as a perspective-correct uv, which the
+    // rasterizer does. Colour, fog and Z are interpolated in screen space,
+    // as the GS does (noperspective). Clipping, including behind the eye, is
+    // the GPU's (the microcode's guard-band clipper is not needed).
+    const char *kVuVertexShader = R"(#version 330 core
+layout(location = 0) in vec3 aPos;     // object space
+layout(location = 1) in vec2 aTex;     // texture coordinate (normalised)
+layout(location = 2) in vec4 aColor;   // 0..255
+layout(location = 3) in float aBatch;  // index into uM / uBatch
+uniform mat4 uM[32];
+uniform vec4 uBatch[32];    // fog = clamp(x + y q, 0, 255); zw: XYOFFSET in pixels
+uniform vec2 uTarget;
+uniform float uDepthScale;  // GS Z -> 0..1
+out vec3 vTex;
+noperspective out vec4 vColor;
+noperspective out float vFog;
+noperspective out float vDepth;
+void main()
+{
+    int b = int(aBatch);
+    vec4 c = uM[b] * vec4(aPos, 1.0);
+    vec4 k = uBatch[b];
+    float q = 1.0 / c.w;
+    vec2 p = c.xy * q - k.zw + 0.5;
+    gl_Position = vec4((p / uTarget * 2.0 - 1.0) * c.w, 0.0, c.w);
+    vDepth = clamp(c.z * q * uDepthScale, 0.0, 1.0);
+    vTex = vec3(aTex, 1.0);
+    vColor = aColor;
+    vFog = clamp(k.x + k.y * q, 0.0, 255.0);
+}
+)";
+
+    struct VuGpuVertex
+    {
+        float x, y, z;
+        float s, t;
+        uint8_t r, g, b, a;
+        float batch;
+    };
+    // Consecutive VU batches with the same draw state share one draw call
+    // (as triangle lists), each with its own matrix and constants.
+    constexpr size_t kVuBatchesPerDraw = 32;
+
     // COLCLAMP off: the GS wraps colors modulo 256 (SotC's shadow volumes add
     // +1 and 255 per face). Such draws add into a float target; this writes
     // the sums back as 8-bit values.
@@ -482,6 +527,15 @@ struct GSHwBackend::Impl
     bool glFailed = false;
     std::thread::id glThread;
     GLuint program = 0, vao = 0, vbo = 0;
+    // VU1 batches: their own vertex stage and layout; the fragment stage is
+    // the GS one (screen-space interpolation of colour, fog and Z).
+    GLuint vuProgram = 0, vuVao = 0, vuVbo = 0;
+    GLuint activeProgram = 0;
+    std::unordered_map<std::string, GLint> vuUniforms;
+    bool pendingVu = false;
+    std::vector<VuGpuVertex> vuPending;
+    std::vector<float> vuMatrices; // 16 per batch
+    std::vector<float> vuConstants; // 4 per batch: fog base, fog scale, XYOFFSET
     GLuint wrapProgram = 0; // float sums -> 8-bit values modulo 256
     struct WrapTarget
     {
@@ -604,6 +658,42 @@ struct GSHwBackend::Impl
         // No COLCLAMP wrap path yet (it needs a float target): wrapProgram 0.
         measureOrientation();
 #else
+        {
+            // VU batches: the GS fragment stage with screen-space colour, fog and Z.
+            std::string fs = kFragmentShader;
+            for (const char *v : {"in vec4 vColor;", "in float vFog;", "in float vDepth;"})
+            {
+                const size_t at = fs.find(v);
+                if (at != std::string::npos)
+                    fs.insert(at, "noperspective ");
+            }
+            vuProgram = buildProgram(kVuVertexShader, fs.c_str());
+            GLint linked = 0;
+            glGetProgramiv(vuProgram, GL_LINK_STATUS, &linked);
+            if (!linked)
+            {
+                std::cerr << "[gs:hw] VU batch program link failed" << std::endl;
+                vuProgram = 0;
+            }
+            else
+            {
+                glUseProgram(vuProgram);
+                glUniform1i(glGetUniformLocation(vuProgram, "uTexture"), 0);
+                glGenVertexArrays(1, &vuVao);
+                glGenBuffers(1, &vuVbo);
+                glBindVertexArray(vuVao);
+                glBindBuffer(GL_ARRAY_BUFFER, vuVbo);
+                glEnableVertexAttribArray(0);
+                glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(VuGpuVertex), reinterpret_cast<void *>(offsetof(VuGpuVertex, x)));
+                glEnableVertexAttribArray(1);
+                glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(VuGpuVertex), reinterpret_cast<void *>(offsetof(VuGpuVertex, s)));
+                glEnableVertexAttribArray(2);
+                glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(VuGpuVertex), reinterpret_cast<void *>(offsetof(VuGpuVertex, r)));
+                glEnableVertexAttribArray(3);
+                glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(VuGpuVertex), reinterpret_cast<void *>(offsetof(VuGpuVertex, batch)));
+                glUseProgram(program);
+            }
+        }
         {
             GLuint wvs = compile(GL_VERTEX_SHADER, kWrapVertexShader), wfs = compile(GL_FRAGMENT_SHADER, kWrapFragmentShader);
             wrapProgram = glCreateProgram();
@@ -737,11 +827,13 @@ struct GSHwBackend::Impl
 
     GLint uniform(const char *name)
     {
-        auto it = uniforms.find(name);
-        if (it != uniforms.end())
+        const bool vu = activeProgram != 0 && activeProgram == vuProgram;
+        auto &cache = vu ? vuUniforms : uniforms;
+        auto it = cache.find(name);
+        if (it != cache.end())
             return it->second;
-        const GLint location = glGetUniformLocation(program, name);
-        uniforms.emplace(name, location);
+        const GLint location = glGetUniformLocation(vu ? vuProgram : program, name);
+        cache.emplace(name, location);
         return location;
     }
 
@@ -1767,10 +1859,12 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
 
     void flushPending()
     {
-        if (!hasPending || pending.empty())
+        if (!hasPending || (pending.empty() && vuPending.empty()))
         {
             pending.clear();
+            clearVuPending();
             hasPending = false;
+            pendingVu = false;
             return;
         }
         const DrawKey &key = pendingKey;
@@ -1780,7 +1874,8 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
         const bool useDepth = zte && ztst != 1u ? true : (zte && !key.zmask);
         DepthTarget *d = useDepth ? &depth(key.zbp, rt.width, rt.height) : nullptr;
         // COLCLAMP off and a blend that can leave 0..255: the GS wraps.
-        const bool wrapAdd = !key.colclamp && key.abe && (rt.psm == GS_PSM_CT32 || rt.psm == GS_PSM_CT24) && blendCanOverflow(key);
+        // (Not for VU batches yet: the wrap area comes from screen-space vertices.)
+        const bool wrapAdd = !pendingVu && !key.colclamp && key.abe && (rt.psm == GS_PSM_CT32 || rt.psm == GS_PSM_CT24) && blendCanOverflow(key);
         GLuint wrapFbo = 0;
         if (wrapAdd)
             wrapFbo = beginWrapAdd(rt, d, key);
@@ -1803,7 +1898,8 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
         const bool writeA = key.fpsm != GS_PSM_CT24 && (m & 0xFF000000u) != 0xFF000000u;
         const bool writeZ = d && !key.zmask;
         const int32_t blendFix = applyBlend(key);
-        glUseProgram(program);
+        activeProgram = pendingVu ? vuProgram : program;
+        glUseProgram(activeProgram);
         glUniform2f(uniform("uTarget"), static_cast<float>(rt.width), static_cast<float>(rt.height));
         setInt("uTme", key.tme && key.texture ? 1 : 0);
         setInt("uTfx", static_cast<GLint>(key.tfx));
@@ -1850,9 +1946,27 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wms == 0 ? GL_REPEAT : GL_CLAMP_TO_EDGE);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wmt == 0 ? GL_REPEAT : GL_CLAMP_TO_EDGE);
         }
-        bindVertices();
-        glBufferData(GL_ARRAY_BUFFER, pending.size() * sizeof(HwVertex), pending.data(), GL_STREAM_DRAW);
-        if (tracing())
+        GLenum drawMode = GL_TRIANGLES;
+        GLsizei vertexCount = static_cast<GLsizei>(pending.size());
+        if (pendingVu)
+        {
+            const GLsizei batches = static_cast<GLsizei>(vuConstants.size() / 4u);
+            glUniformMatrix4fv(uniform("uM"), batches, GL_FALSE, vuMatrices.data());
+            glUniform4fv(uniform("uBatch"), batches, vuConstants.data());
+            const float depthScale = (key.zpsm == GS_PSM_Z16 || key.zpsm == GS_PSM_Z16S) ? 65536.0f
+                                     : key.zpsm == GS_PSM_Z24 ? 16777216.0f : 4294967296.0f;
+            glUniform1f(uniform("uDepthScale"), 1.0f / depthScale);
+            glBindVertexArray(vuVao);
+            glBindBuffer(GL_ARRAY_BUFFER, vuVbo);
+            glBufferData(GL_ARRAY_BUFFER, vuPending.size() * sizeof(VuGpuVertex), vuPending.data(), GL_STREAM_DRAW);
+            vertexCount = static_cast<GLsizei>(vuPending.size());
+        }
+        else
+        {
+            bindVertices();
+            glBufferData(GL_ARRAY_BUFFER, pending.size() * sizeof(HwVertex), pending.data(), GL_STREAM_DRAW);
+        }
+        if (tracing() && !pendingVu)
         {
             ++tracedDraws;
             float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
@@ -1869,7 +1983,7 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
                 for (const auto &v : pending)
                     std::fprintf(stderr, "[gs:trace]   v (%.1f,%.1f) z=%.9g st=(%g,%g,%g) rgba=%02x%02x%02x%02x fog=%g\n", v.x, v.y, v.z, v.s, v.t, v.q, v.r, v.g, v.b, v.a, v.fog);
         }
-        if (verify && tracing())
+        if (verify && tracing() && !pendingVu)
         {
             verifyBefore.resize(static_cast<size_t>(rt.width) * rt.height * 4u);
             glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer(rt, nullptr));
@@ -1878,7 +1992,7 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
         }
         // Pass 1: pixels that pass the alpha test write everything enabled.
         // Pass 2 (AFAIL != KEEP): failing pixels write FB only, Z only, or RGB only.
-        const GLsizei count = static_cast<GLsizei>(pending.size());
+        const GLsizei count = vertexCount;
         const bool exactAlpha = hostmenu::settings().exactAlpha.load(std::memory_order_relaxed);
         const bool failPass = atst != 1u && afail != 0u && (exactAlpha || atst == 0u);
         const bool failColor = afail != 2u, failZ = afail == 2u && writeZ;
@@ -1898,7 +2012,7 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
                 glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
                 if (d)
                     glDepthMask(GL_FALSE);
-                glDrawArrays(GL_TRIANGLES, first, n);
+                glDrawArrays(drawMode, first, n);
                 glEnable(GL_BLEND);
                 glUniform1f(uniform("uBlendFix"), static_cast<float>(blendFix));
                 glColorMask(r, g, b, GL_FALSE);
@@ -1907,13 +2021,13 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
                 glColorMask(r, g, b, a);
             if (d)
                 glDepthMask(z ? GL_TRUE : GL_FALSE);
-            glDrawArrays(GL_TRIANGLES, first, n);
+            glDrawArrays(drawMode, first, n);
             ++drawCalls;
         };
         // PS2X_GS_HW_AFAIL_ORDERED=1 (diagnostics): both passes triangle by
         // triangle, in the GS's order.
         static const bool ordered = std::getenv("PS2X_GS_HW_AFAIL_ORDERED") != nullptr;
-        if (ordered && atst != 0u && failPass && (failColor || failZ))
+        if (ordered && !pendingVu && atst != 0u && failPass && (failColor || failZ))
         {
             for (GLint t = 0; t < count; t += 3)
             {
@@ -1937,12 +2051,12 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
         if (wrapFbo)
             endWrapAdd(rt, key, writeR, writeG, writeB, writeA);
         ++rt.version;
-        if (verify && tracing())
+        if (verify && tracing() && !pendingVu)
             compareWithCpu(rt);
         // PS2X_GS_HW_STEPDUMP=<dir> (with PS2X_GS_HW_TRACE): in the traced
         // frame, the display target after every draw covering much of it.
         static const char *stepDir = std::getenv("PS2X_GS_HW_STEPDUMP");
-        if (stepDir && tracing() && rt.fbp == 224u)
+        if (stepDir && tracing() && rt.fbp == 224u && !pendingVu)
         {
             float bx0 = 1e9f, bx1 = -1e9f, by0 = 1e9f, by1 = -1e9f;
             for (const auto &v : pending)
@@ -1968,22 +2082,23 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
             }
         }
         pending.clear();
+        clearVuPending();
         hasPending = false;
+        pendingVu = false;
+        activeProgram = program;
     }
 
-    void submit(const GSPrimitiveBatch &batch)
+    void clearVuPending()
     {
-        if (!ensureGl())
-            return;
-        const GSDrawState &state = batch.state;
+        vuPending.clear();
+        vuMatrices.clear();
+        vuConstants.clear();
+    }
+
+    // The GPU state a draw with this GS state needs (textures: textureKey).
+    DrawKey baseKey(const GSDrawState &state, const RenderTarget &rt)
+    {
         const GSContext &ctx = state.context;
-        const auto type = state.prim.type;
-        if (!isColorPsm(ctx.frame.psm))
-            return; // drawing into Z or texture formats: not handled yet
-
-        const float ofx = ctx.xyoffset.ofx / 16.0f, ofy = ctx.xyoffset.ofy / 16.0f;
-        RenderTarget &rt = target(ctx.frame.fbp, ctx.frame.fbw, ctx.frame.psm, static_cast<uint32_t>(ctx.scissor.y1) + 1u);
-
         DrawKey key{};
         key.fbp = ctx.frame.fbp;
         key.fbw = ctx.frame.fbw;
@@ -2009,6 +2124,92 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
         key.linear = state.linearFilter;
         key.colclamp = static_cast<uint32_t>(state.colclamp & 1u);
         key.texAlphaScale = 1.0f;
+        return key;
+    }
+
+    void textureKey(const GSDrawState &state, DrawKey &key)
+    {
+        const GSContext &ctx = state.context;
+        float alphaScale = 1.0f;
+        uint32_t tw = 0, th = 0;
+        int32_t alphaFix = -1;
+        key.texture = textureFor(state, alphaScale, tw, th, alphaFix);
+        key.alphaFix = alphaFix;
+        key.tex0 = (static_cast<uint64_t>(ctx.tex0.tbp0)) | (static_cast<uint64_t>(ctx.tex0.tbw) << 14) | (static_cast<uint64_t>(ctx.tex0.psm) << 20) |
+                   (static_cast<uint64_t>(ctx.tex0.cbp) << 37);
+        key.gsW = state.textureWidth;
+        key.gsH = state.textureHeight;
+        key.texAlphaScale = alphaScale;
+        key.texW = tw;
+        key.texH = th;
+    }
+
+    // A VU1 batch (GSVuBatch), drawn with the VU vertex stage; it joins the
+    // queued batches when the draw state is the same. The GPU decides where
+    // it lands: its pages are those of the scissor area.
+    void submitVu(const GSVuBatch &batch)
+    {
+        if (!ensureGl() || !vuProgram)
+            return;
+        const GSDrawState &state = batch.state;
+        const GSContext &ctx = state.context;
+        if (!isColorPsm(ctx.frame.psm) || batch.vertices.empty())
+            return;
+        const auto type = state.prim.type;
+        if (type != GS_PRIM_TRIANGLE && type != GS_PRIM_TRISTRIP && type != GS_PRIM_TRIFAN)
+            return;
+        RenderTarget &rt = target(ctx.frame.fbp, ctx.frame.fbw, ctx.frame.psm, static_cast<uint32_t>(ctx.scissor.y1) + 1u);
+        DrawKey key = baseKey(state, rt);
+        if (key.tme)
+        {
+            flushPendingIfTextureChanges(state);
+            textureKey(state, key);
+        }
+        if (hasPending && (!pendingVu || !(key == pendingKey) || vuConstants.size() / 4u >= kVuBatchesPerDraw))
+            flushPending();
+        if (key.sx1 < key.sx0 || key.sy1 < key.sy0)
+            return;
+        resolveAliases(rt, key.sx0, key.sy0, key.sx1 + 1u, key.sy1 + 1u);
+        loadStalePages(rt, key.sx0, key.sy0, key.sx1 + 1u, key.sy1 + 1u);
+        markDirty(rt, key.sx0, key.sy0, key.sx1 + 1u, key.sy1 + 1u);
+        if (hasPending && !pendingVu) // a write-back above drew the queue
+            flushPending();
+        pendingKey = key;
+        hasPending = true;
+        pendingVu = true;
+
+        const float index = static_cast<float>(vuConstants.size() / 4u);
+        vuMatrices.insert(vuMatrices.end(), batch.m, batch.m + 16);
+        vuConstants.insert(vuConstants.end(), {batch.fogBase, batch.fogScale, ctx.xyoffset.ofx / 16.0f, ctx.xyoffset.ofy / 16.0f});
+        const auto &in = batch.vertices;
+        auto put = [&](const GSVuVertex &v)
+        {
+            vuPending.push_back({v.x, v.y, v.z, v.s / 4096.0f, v.t / 4096.0f, v.r, v.g, v.b, v.a, index});
+        };
+        const size_t n = in.size();
+        if (type == GS_PRIM_TRIANGLE)
+            for (size_t i = 0; i + 2 < n; i += 3)
+                put(in[i]), put(in[i + 1]), put(in[i + 2]);
+        else
+            for (size_t i = 0; i + 2 < n; ++i)
+                put(type == GS_PRIM_TRIFAN ? in[0] : in[i]), put(in[i + 1]), put(in[i + 2]);
+        primitives += n;
+    }
+
+    void submit(const GSPrimitiveBatch &batch)
+    {
+        if (!ensureGl())
+            return;
+        const GSDrawState &state = batch.state;
+        const GSContext &ctx = state.context;
+        const auto type = state.prim.type;
+        if (!isColorPsm(ctx.frame.psm))
+            return; // drawing into Z or texture formats: not handled yet
+
+        const float ofx = ctx.xyoffset.ofx / 16.0f, ofy = ctx.xyoffset.ofy / 16.0f;
+        RenderTarget &rt = target(ctx.frame.fbp, ctx.frame.fbw, ctx.frame.psm, static_cast<uint32_t>(ctx.scissor.y1) + 1u);
+
+        DrawKey key = baseKey(state, rt);
         if (!verify && clearInMemory(batch, rt, key, ofx, ofy))
             return;
         // PS2X_GS_HW_SKIP=tbp,tbp: drop textured draws from these TBP0s (diagnostics).
@@ -2030,18 +2231,7 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
         if (key.tme)
         {
             flushPendingIfTextureChanges(state);
-            float alphaScale = 1.0f;
-            uint32_t tw = 0, th = 0;
-            int32_t alphaFix = -1;
-            key.texture = textureFor(state, alphaScale, tw, th, alphaFix);
-            key.alphaFix = alphaFix;
-            key.tex0 = (static_cast<uint64_t>(ctx.tex0.tbp0)) | (static_cast<uint64_t>(ctx.tex0.tbw) << 14) | (static_cast<uint64_t>(ctx.tex0.psm) << 20) |
-                       (static_cast<uint64_t>(ctx.tex0.cbp) << 37);
-            key.gsW = state.textureWidth;
-            key.gsH = state.textureHeight;
-            key.texAlphaScale = alphaScale;
-            key.texW = tw;
-            key.texH = th;
+            textureKey(state, key);
         }
         if (hasPending && !(key == pendingKey))
             flushPending();
@@ -2374,6 +2564,21 @@ void GSHwBackend::Submit(const GSPrimitiveBatch &batch)
         m_impl->shadow->Submit(batch);
 }
 
+bool GSHwBackend::SupportsVuBatch() const
+{
+#if defined(PS2X_GS_HW_VITA)
+    return false; // the CG vertex stage is still to come
+#else
+    return available();
+#endif
+}
+
+void GSHwBackend::SubmitVuBatch(const GSVuBatch &batch)
+{
+    PS2X_GS_GL_LOCK();
+    m_impl->submitVu(batch);
+}
+
 void GSHwBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
 {
     PS2X_GS_GL_LOCK();
@@ -2499,6 +2704,8 @@ GSHwBackend::~GSHwBackend() = default;
 void GSHwBackend::Initialize(uint8_t *vram, uint32_t vramSize) { m_impl->shadow->Initialize(vram, vramSize); }
 void GSHwBackend::Reset() { m_impl->shadow->Reset(); }
 void GSHwBackend::Submit(const GSPrimitiveBatch &batch) { m_impl->shadow->Submit(batch); }
+bool GSHwBackend::SupportsVuBatch() const { return false; }
+void GSHwBackend::SubmitVuBatch(const GSVuBatch &) {}
 void GSHwBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut) { m_impl->shadow->LoadClut(tex0, texclut); }
 void GSHwBackend::BeginTransfer(const GSTransferCommand &command) { m_impl->shadow->BeginTransfer(command); }
 void GSHwBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes) { m_impl->shadow->UploadImage(data, sizeBytes); }

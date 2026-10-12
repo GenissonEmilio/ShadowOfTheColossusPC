@@ -23,6 +23,8 @@ public:
     void Reset() override;
 
     void Submit(const GSPrimitiveBatch &batch) override;
+    bool SupportsVuBatch() const override { return m_inner->SupportsVuBatch(); }
+    void SubmitVuBatch(const GSVuBatch &batch) override;
     void LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut) override;
     void BeginTransfer(const GSTransferCommand &command) override;
     void UploadImage(const uint8_t *data, uint32_t sizeBytes) override;
@@ -58,6 +60,7 @@ private:
         WriteVram,
         Clear,
         Present,
+        VuBatch,
     };
 
     struct Command
@@ -70,6 +73,7 @@ private:
         uint32_t args[6]{};
         std::shared_ptr<GSContext> context;
         std::shared_ptr<GSPresentationRequest> present;
+        std::shared_ptr<GSVuBatch> vuBatch;
     };
 
     struct Chunk

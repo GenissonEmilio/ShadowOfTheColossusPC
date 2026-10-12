@@ -120,6 +120,13 @@ public:
     void enableGifWorker(std::function<void()> added, std::function<void()> done);
     // Runs fn after the packets queued so far (inline without the worker).
     void runInGifOrder(std::function<void()> fn);
+
+    // VU1 batches on the GPU (docs/vu1_gpu_path.md). submitVuBatch draws one
+    // in GIF order, as the kick of a packet with this GIF tag would: PRIM
+    // from the tag, the rest of the GS state as it stands. From the VU1
+    // worker, like XGKICK.
+    bool supportsVuBatch() const;
+    void submitVuBatch(uint64_t tagLo, std::vector<GSVuVertex> vertices, const float m[16], float fogBase, float fogScale);
     // Hands the packets the VU1 worker collected to the GIF worker.
     void flushGifWork();
     bool processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes);

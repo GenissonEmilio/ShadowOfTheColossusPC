@@ -201,6 +201,9 @@ void GSAsyncBackend::execute(const Command &command, const Chunk &chunk)
     case Kind::Clut:
         m_inner->LoadClut(command.tex0, command.texclut);
         break;
+    case Kind::VuBatch:
+        m_inner->SubmitVuBatch(*command.vuBatch);
+        break;
     case Kind::Transfer:
         m_inner->BeginTransfer(command.transfer);
         break;
@@ -278,6 +281,14 @@ void GSAsyncBackend::Submit(const GSPrimitiveBatch &batch)
     Command command;
     command.kind = Kind::Draw;
     command.batch = batch;
+    enqueue(std::move(command));
+}
+
+void GSAsyncBackend::SubmitVuBatch(const GSVuBatch &batch)
+{
+    Command command;
+    command.kind = Kind::VuBatch;
+    command.vuBatch = std::make_shared<GSVuBatch>(batch);
     enqueue(std::move(command));
 }
 

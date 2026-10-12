@@ -14,6 +14,10 @@ public:
     virtual void Reset() = 0;
 
     virtual void Submit(const GSPrimitiveBatch &batch) = 0;
+    // VU1 batches drawn on the GPU (GSVuBatch). Backends without a vertex
+    // stage say no, and the caller draws the CPU way.
+    virtual bool SupportsVuBatch() const { return false; }
+    virtual void SubmitVuBatch(const GSVuBatch &) {}
     virtual void LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut) = 0;
 
     virtual void BeginTransfer(const GSTransferCommand &command) = 0;
