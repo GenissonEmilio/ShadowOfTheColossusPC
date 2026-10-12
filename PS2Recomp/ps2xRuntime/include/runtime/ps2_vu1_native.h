@@ -24,6 +24,11 @@ namespace vu1native
     // regions (vu1fast_*.cpp) do not count.
     bool isRegistered(uint64_t imageHash, uint32_t entryPc);
 
+    // XGKICK from native code: the GIF packet at that VU data qword goes out
+    // whole, now (the microcode double-buffers, so nothing it writes later
+    // lands in a packet in flight). No-op while verifying (copies).
+    void xgkick(uint32_t qwordAddress);
+
     struct Registrar
     {
         Registrar(uint64_t imageHash, uint32_t entryPc, LoopFn fn) { registerLoop(imageHash, entryPc, fn); }

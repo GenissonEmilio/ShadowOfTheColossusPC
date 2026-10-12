@@ -751,6 +751,8 @@ namespace
             return vit ? in + "S.vi[" + std::to_string(vit) + "] = (int32_t)(S.top & 0x3FFu);\n" : std::string();
         case 0x69: // XITOP
             return vit ? in + "S.vi[" + std::to_string(vit) + "] = (int32_t)(S.itop & 0x3FFu);\n" : std::string();
+        case 0x6C: // XGKICK: the packet goes out whole, now
+            return in + "vu1native::xgkick((uint32_t)(uint16_t)S.vi[" + std::to_string(VIS(instr)) + "]);\n";
         default:
             kind = -1;
             return {};
@@ -875,8 +877,8 @@ namespace
         for (const uint32_t entryRaw : entries)
         {
             const uint32_t entry = entryRaw & 0x3FF8u;
-            if (entry == 0u || info[entry / 8u].stop)
-                continue;
+            if (info[entry / 8u].stop)
+                continue; // (an exit at pc 0 is refused below: 0 means "declined")
             // Region: nodes reached from the entry; a branch's delay slot is
             // emitted inside the branch node.
             std::map<uint32_t, int> node; // pc -> 0 normal, 1 branch, 2 stop (exit)

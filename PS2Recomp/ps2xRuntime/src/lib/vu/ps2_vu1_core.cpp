@@ -1208,6 +1208,7 @@ namespace
     thread_local bool t_vu1Fresh = true;      // the next run() starts a program
     thread_local uint32_t t_vu1StopPc = 0;    // native verify: interpret up to here
     thread_local bool t_vu1InNative = false;
+    thread_local VU1Interpreter *t_vu1KickTarget = nullptr; // native code's XGKICKs go here
 
     struct NativeLoop
     {
@@ -2156,7 +2157,10 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             else
             {
                 uint64_t cycles = 0;
-                if (const uint32_t pc = loop.fn(m_state, vuData, dataSize, cycles))
+                t_vu1KickTarget = this;
+                const uint32_t pc = loop.fn(m_state, vuData, dataSize, cycles);
+                t_vu1KickTarget = nullptr;
+                if (pc)
                 {
                     m_state.pc = pc;
                     advanceTo(m_cycle + cycles);
@@ -2432,6 +2436,20 @@ void vu1native::registerLoop(uint64_t imageHash, uint32_t entryPc, LoopFn fn, bo
             return;
         }
     loops.push_back({imageHash, entryPc, fn, generated});
+}
+
+void vu1native::xgkick(uint32_t qwordAddress)
+{
+    VU1Interpreter *I = t_vu1KickTarget;
+    if (!I)
+        return;
+    I->startXgkick(qwordAddress);
+    // The whole packet, now: credit the transfer until it ends.
+    for (int guard = 0; I->m_xgkick.active && guard < 64; ++guard)
+    {
+        I->m_xgkickDue = I->m_xgkick.progressedCycle + 0x40000u;
+        I->catchUpXgkickSlow();
+    }
 }
 
 bool vu1native::isRegistered(uint64_t imageHash, uint32_t entryPc)
