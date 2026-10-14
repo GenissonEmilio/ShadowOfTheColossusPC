@@ -35,6 +35,15 @@ texture mode (1 one texture, 2 two), +0x2c / +0x3c texture indices, +0x60
 GS register packet (A+D: TEX0, ALPHA, TEST...), +0xc0 second-pass registers,
 +0x10c alpha.
 
+Surface flags read by `modelDisp` (bit n of the u64 at +0x18): 28 never
+drawn; 16 boss-effect shell (drawn only while `getNowBossEffect`, the word
+at 0x1186290, has bit 0; it wraps Wander); 23 shadow effect (bit 1 of the
+same word); 25 hidden while the underwater fog (word at 0x1186328) is on.
+Layer (`modelGetDlLayer`): 0x1020000 -> 8, bit 23 -> 10, 25 -> 16, 9 -> 17,
+10 -> 12/13, 14 -> 1, 15 -> 18, else 2/3 (5/6 for the second owner), the
+odd one when bit 8 is set or the instance fades (+0x244 > 0). Blending:
+ALPHA_1 in the +0x60 packet, 0x44 normal, 0x48 additive.
+
 Draw packet (8 words): [0] size in bytes, [1] LOD, [2] surface index, [3]
 part (-1 = always), [4] address of the vertex block, [7] its DMA chain:
 `CALL` surface registers (+0x60), `REF` vertex block (VIF data: the batch
