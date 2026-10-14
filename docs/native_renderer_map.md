@@ -1,0 +1,76 @@
+# Native renderer: map of SotC's drawing (from the game's symbols)
+
+What the game calls to draw, found with Ghidra on SCUS_974.72 (the ELF
+keeps its function names). The goal is a Metal renderer fed at this level
+(model + matrix + material), with no VIF/VU1/GIF/GS emulation.
+
+## Display lists
+
+The game never draws directly: every system appends prebuilt DMA chains to
+a display list split in layers (`iosDlPushLayer(n)` / `iosDlChainTailCurrent(addr)`
+/ `iosDlPopLayer()`), and `transMicroCode(n)` (0x1114b50) appends the
+upload of VU1 microcode n (table at 0x118cd90) when the layer's current one
+differs. The layers are sent to the VIF1 once a frame.
+
+## Models (`model*`, 0x1096840-0x1099980)
+
+Objects, scenery and characters go through one model system. A loaded
+model header (`modelInitialize`, `modelCreatePacketTransPacket`):
+
+| offset | contents |
+|--------|----------|
+| +0x08 | owner set at load |
+| +0x0c | non-zero: second fade factor applies |
+| +0x14 | packets built at load: [0] one per draw packet (0x30 bytes), [1] one per surface (0x40) |
+| +0x18 | flags (bit 0: LOD model), +0x1c LOD count |
+| +0x20..+0x2c | bounds (copied to the display instance) |
+| +0x30 | per LOD: clip box (8 corners tested with VCLIP) and the packets of that LOD |
+| +0x40 / +0x44 | textures (0x20 each; +0x10 the texture resource) / count |
+| +0x50 / +0x54 | surfaces (0x120 bytes each) / count |
+| +0x60 / +0x64 | draw packets (8 words each) / count |
+
+Surface (0x120 bytes): +0x18 flags (64-bit: alpha, two-pass, shadow,
+underwater, boss effect, layer selection in `modelGetDlLayer`), +0x1c
+texture mode (1 one texture, 2 two), +0x2c / +0x3c texture indices, +0x60
+GS register packet (A+D: TEX0, ALPHA, TEST...), +0xc0 second-pass registers,
++0x10c alpha.
+
+Draw packet (8 words): [0] size in bytes, [1] LOD, [2] surface index, [3]
+part (-1 = always), [4] address of the vertex block, [7] its DMA chain:
+`CALL` surface registers (+0x60), `REF` vertex block (VIF data: the batch
+the world microcode reads, see game/overrides/sotc_vu1_world.cpp), `MSCAL`
+to the microcode, `RET`.
+
+`modelDisp(instance, matrix)` (0x1097118): camera x model matrix, VCLIP of
+the LOD's box (skips it off screen), then per packet of the current LOD:
+layer from `modelGetDlLayer`, texture uploads (`texTransRequest[Multi]`)
+when the surface changes, `iosDlChainTailCurrent(packet chain)`; surfaces
+with flag bit 24 or 0x2200 add a second pass (layers 9/14/15, registers
+from the per-surface packet). Callers: the object display functions
+0x10F3B58 / 0x10F3DE8 (they also call `shadowDisp`). Instance setup:
+`modelInitDispModelClass` (from 0x10EF9D0): lights (`setLight`), unit
+matrix, specularity, the layer mask (+0x96 words).
+
+Skinned characters: `modelClipSkin` (0x1098450); 0x1098CC0 selects 14
+microcodes (characters).
+
+## Other systems that append chains or microcode
+
+- `mesh*` (0x109a4d8-): `meshDisp`, `meshDispInstance`, `meshTransMatrix`,
+  `meshTransLightMatrix`; callers 0x1138050, 0x1383048.
+- `shadow*` (0x109d158-): `shadowDisp`, `shadowDraw`.
+- particles `ptclman*` (0x1099e00-): material, vertex and environment packets.
+- `waterRefractionBegin/End` (0x109c108).
+- sprites / text: `kPrintf*`, `spriteTexFast`, `getSpriteDraw`; `bgDraw`
+  (0x1085258) is a full-screen fog sprite (from `zFog`), not scenery.
+- line objects (debug and effects), `dispVuColiDispWork`, `dischargeMain`.
+- textures: `texTransRequest`, `texTransRequestMulti`, `texResetVRAMRequest`.
+
+## Next
+
+1. Count, at run time, the calls of each system per frame (hooks on the
+   functions above) to see what the shrine and the field draw.
+2. Read one model straight from guest memory (header -> surfaces ->
+   packets -> vertex blocks) and draw it with Metal next to the emulated
+   picture.
+3. Then the Metal renderer at `modelDisp` level, system by system.
