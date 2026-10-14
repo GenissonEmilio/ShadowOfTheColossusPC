@@ -1,6 +1,8 @@
 #include "runtime/ps2_stats.h"
 // Based on Blackline Interactive implementation
 #include "runtime/ps2_memory.h"
+#include "runtime/ps2_vu1_native.h"
+#include <algorithm>
 #include <cstring>
 
 enum VIFCmd : uint8_t
@@ -296,6 +298,49 @@ void PS2Memory::processVIF1Data(uint32_t srcPhys, uint32_t sizeBytes)
     processVIF1Data(m_rdram + srcPhys, sizeBytes);
 }
 
+namespace
+{
+    // Bytes of data an UNPACK reads (CYCLE: CL, WL), rounded to a word.
+    uint32_t unpackDataBytes(uint8_t opcode, uint8_t num, uint32_t cycle)
+    {
+        const uint32_t vn = (opcode >> 2) & 3u, vl = opcode & 3u;
+        const uint32_t bits = (vl == 3u && vn == 3u) ? 16u : (vn + 1u) * (32u >> vl);
+        const uint32_t bytesPerVector = (bits + 7u) / 8u;
+        const uint32_t writes = num == 0u ? 256u : num;
+        uint32_t cl = cycle & 0xFFu, wl = (cycle >> 8) & 0xFFu;
+        if (cl == 0u)
+            cl = 1u;
+        if (wl == 0u)
+            wl = 1u;
+        uint32_t reads = writes;
+        if (cl < wl)
+            reads = (writes / wl) * cl + std::min(writes % wl, cl);
+        return (reads * bytesPerVector + 3u) & ~3u;
+    }
+
+    // From the UNPACK at pos: the end of the MSCNT that closes the batch, if
+    // only UNPACK, STCYCL, STMOD and NOP come before it in this buffer; 0 if not.
+    uint32_t batchEnd(const uint8_t *data, uint32_t pos, uint32_t sizeBytes, uint32_t cycle)
+    {
+        while (pos + 4u <= sizeBytes)
+        {
+            uint32_t cmd;
+            std::memcpy(&cmd, data + pos, 4);
+            pos += 4u;
+            const uint8_t opcode = (cmd >> 24) & 0x7Fu;
+            if ((opcode & 0x60u) == 0x60u)
+                pos += unpackDataBytes(opcode, (cmd >> 16) & 0xFFu, cycle);
+            else if (opcode == VIF_STCYCL)
+                cycle = cmd & 0xFFFFu;
+            else if (opcode == VIF_MSCNT)
+                return (cmd & 0x80000000u) ? 0u : pos; // an interrupt bit: leave it to VIF1
+            else if (opcode != VIF_STMOD && opcode != VIF_NOP)
+                return 0u;
+        }
+        return 0u;
+    }
+}
+
 void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 {
     ps2_stats::vif1Bytes.fetch_add(sizeBytes, std::memory_order_relaxed);
@@ -303,14 +348,56 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         return;
 
     uint32_t pos = 0;
+    // Native VU1 batches (vu1native::registerBatch): offered once per program.
+    bool offerBatch = vu1native::hasBatchFns();
 
     while (pos + 4 <= sizeBytes)
     {
         uint32_t cmd;
         memcpy(&cmd, data + pos, 4);
-        pos += 4;
 
         uint8_t opcode = (cmd >> 24) & 0x7F;
+        if (offerBatch && (opcode & 0x60) == 0x60)
+        {
+            offerBatch = false;
+            if (const uint32_t end = batchEnd(data, pos, sizeBytes, vif1_regs.cycle))
+            {
+                vu1native::VifBatch batch{data + pos, end - pos, vif1_regs.row, vif1_regs.cycle, vif1_regs.mode, nullptr};
+                if (vu1native::tryBatch(batch))
+                {
+                    // VIF1 registers as the codes leave them; then the MSCNT
+                    // without the VU1 program.
+                    for (uint32_t p = pos; p + 4u < end;)
+                    {
+                        uint32_t c;
+                        std::memcpy(&c, data + p, 4);
+                        p += 4u;
+                        const uint8_t op = (c >> 24) & 0x7Fu;
+                        if ((op & 0x60u) == 0x60u)
+                            p += unpackDataBytes(op, (c >> 16) & 0xFFu, vif1_regs.cycle);
+                        else if (op == VIF_STCYCL)
+                            vif1_regs.cycle = c & 0xFFFFu;
+                        else if (op == VIF_STMOD)
+                            vif1_regs.mode = c & 3u;
+                    }
+                    std::memcpy(&cmd, data + end - 4u, 4);
+                    vif1_regs.code = cmd;
+                    vif1_regs.num = (cmd >> 16) & 0xFFu;
+                    vif1_regs.top = vif1_regs.tops & 0x3FFu;
+                    vif1_regs.itop = vif1_regs.itops & 0x3FFu;
+                    const bool dbf = (vif1_regs.stat & (1u << 7)) != 0u;
+                    vif1_regs.tops = (dbf ? vif1_regs.base : vif1_regs.base + vif1_regs.ofst) & 0x3FFu;
+                    vif1_regs.stat ^= (1u << 7);
+                    ps2_stats::vu1Mscnt.fetch_add(1, std::memory_order_relaxed);
+                    ps2_stats::vu1DirectBatches.fetch_add(1, std::memory_order_relaxed);
+                    pos = end;
+                    offerBatch = true;
+                    continue;
+                }
+            }
+        }
+        pos += 4;
+
         uint16_t imm = cmd & 0xFFFF;
         uint8_t num = (cmd >> 16) & 0xFF;
         ps2_stats::vifOpcodes[opcode].fetch_add(1, std::memory_order_relaxed);
@@ -395,6 +482,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             ps2_stats::vu1Mscal.fetch_add(1, std::memory_order_relaxed);
             if (m_vu1MscalCallback)
                 m_vu1MscalCallback(startPC, runTop, runItop);
+            offerBatch = vu1native::hasBatchFns();
             continue;
         }
         else if (opcode == VIF_MSCNT)
@@ -414,6 +502,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             ps2_stats::vu1Mscnt.fetch_add(1, std::memory_order_relaxed);
             if (m_vu1MscntCallback)
                 m_vu1MscntCallback(runTop, runItop);
+            offerBatch = vu1native::hasBatchFns();
             continue;
         }
         else if (opcode == VIF_STMASK)

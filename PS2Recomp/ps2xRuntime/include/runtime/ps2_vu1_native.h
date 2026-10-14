@@ -13,6 +13,8 @@
 
 struct VU1State;
 class GS;
+class PS2Memory;
+class VU1Interpreter;
 
 namespace vu1native
 {
@@ -32,6 +34,33 @@ namespace vu1native
 
     // The GS this VU1 run kicks to (nullptr while verifying).
     GS *gs();
+
+    // A VIF1 batch that never reaches VU1. When an MSCNT would start the
+    // program at (image hash, pc), the VIF codes from the batch's first
+    // UNPACK up to that MSCNT (included) go to the batch function instead of
+    // being unpacked; it returns true when it drew them itself. VU1 then does
+    // not run: its registers and data memory stay as they were, so this is
+    // only for programs whose effects end with their GS output.
+    struct VifBatch
+    {
+        const uint8_t *codes; // the VIF codes and their data
+        uint32_t size;        // bytes, up to the end of the MSCNT
+        const uint32_t *row;  // VIF1 ROW, CYCLE and MODE at the first UNPACK
+        uint32_t cycle;
+        uint32_t mode;
+        GS *gs;
+    };
+    using BatchFn = bool (*)(const VU1State &state, const VifBatch &batch);
+    void registerBatch(uint64_t imageHash, uint32_t pc, BatchFn fn);
+    // The VU1 whose program state decides (set by the runtime).
+    void setBatchTarget(VU1Interpreter *vu1, PS2Memory *memory, GS *gs);
+    bool hasBatchFns();
+    bool tryBatch(VifBatch &batch);
+
+    struct BatchRegistrar
+    {
+        BatchRegistrar(uint64_t imageHash, uint32_t pc, BatchFn fn) { registerBatch(imageHash, pc, fn); }
+    };
 
     struct Registrar
     {

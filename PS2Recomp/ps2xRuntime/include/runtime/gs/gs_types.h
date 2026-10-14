@@ -276,6 +276,9 @@ struct GSVuBatch
     std::vector<GSVuVertex> vertices;
     float m[16]{};
     float fogBase = 0.0f, fogScale = 0.0f;
+    // The microcode clipper's near plane: (C row z + C row w) . (x, y, z, 1)
+    // >= 0 keeps a point (C: the clipping matrix; its row w is M's).
+    float nearPlane[4]{0.0f, 0.0f, 0.0f, 1.0f};
 };
 
 struct GSTransferCommand

@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -214,6 +215,7 @@ layout(location = 2) in vec4 aColor;   // 0..255
 layout(location = 3) in float aBatch;  // index into uM / uBatch
 uniform mat4 uM[32];
 uniform vec4 uBatch[32];    // fog = clamp(x + y q, 0, 255); zw: XYOFFSET in pixels
+uniform vec4 uNear[32];     // the microcode clipper's near plane (GSVuBatch)
 uniform vec2 uTarget;
 uniform float uDepthScale;  // GS Z -> 0..1
 out vec3 vTex;
@@ -227,7 +229,9 @@ void main()
     vec4 k = uBatch[b];
     float q = 1.0 / c.w;
     vec2 p = c.xy * q - k.zw + 0.5;
-    gl_Position = vec4((p / uTarget * 2.0 - 1.0) * c.w, 0.0, c.w);
+    // z: the clipper's planes (z >= -w: near; z <= w: its far plane, C row
+    // w being M's); the depth itself goes through vDepth.
+    gl_Position = vec4((p / uTarget * 2.0 - 1.0) * c.w, dot(uNear[b], vec4(aPos, 1.0)) - c.w, c.w);
     vDepth = clamp(c.z * q * uDepthScale, 0.0, 1.0);
     vTex = vec3(aTex, 1.0);
     vColor = aColor;
@@ -367,6 +371,44 @@ float4 main(float4 vTex : TEXCOORD0, float4 vColor : TEXCOORD1) : COLOR
     return float4(c.rgb / 255.0, (uBlendFix >= 0.0 ? uBlendFix : c.a) / 128.0);
 }
 )";
+
+    // VU batches (kVuVertexShader in CG). CG has no noperspective: colour and
+    // fog are sent times w with w itself in vLin.x; dividing by the
+    // interpolated w gives their screen-space interpolation. Z is the
+    // position's z times w (linear in screen space after the divide). ST
+    // stays perspective-correct (S, T, 1).
+    const char *kVuVertexShaderCg = R"(
+void main(float3 aPos, float2 aTex, float4 aColor, float aBatch,
+          uniform float4 uM[128],
+          uniform float4 uBatch[32],
+          uniform float2 uTarget,
+          uniform float uFlipY,
+          uniform float uDepthScale,
+          float4 out oPosition : POSITION,
+          float4 out vTex : TEXCOORD0,
+          float4 out vColor : TEXCOORD1,
+          float4 out vLin : TEXCOORD2)
+{
+    int b = (int)aBatch;
+    float4 c = uM[b * 4] * aPos.x + uM[b * 4 + 1] * aPos.y + uM[b * 4 + 2] * aPos.z + uM[b * 4 + 3];
+    float4 k = uBatch[b];
+    float q = 1.0 / c.w;
+    float2 p = (c.xy * q - k.zw + 0.5) / uTarget * 2.0 - 1.0;
+    float depth = clamp(c.z * q * uDepthScale, 0.0, 1.0);
+    oPosition = float4(p.x * c.w, p.y * uFlipY * c.w, depth * c.w, c.w);
+    vTex = float4(aTex, 1.0, clamp(k.x + k.y * q, 0.0, 255.0) * c.w);
+    vColor = aColor * c.w;
+    vLin = float4(c.w, 0.0, 0.0, 0.0);
+}
+)";
+    // The GS fragment stage behind the division by the interpolated w.
+    const char *kVuFragmentMainCg = R"(
+float4 main(float4 vTex : TEXCOORD0, float4 vColor : TEXCOORD1, float4 vLin : TEXCOORD2) : COLOR
+{
+    float r = 1.0 / vLin.x;
+    return gsMain(float4(vTex.xyz, vTex.w * r), vColor * r);
+}
+)";
 #endif
 
     GLuint compile(GLenum type, const char *source)
@@ -401,6 +443,7 @@ float4 main(float4 vTex : TEXCOORD0, float4 vColor : TEXCOORD1) : COLOR
         glBindAttribLocation(program, 1, "aTex");
         glBindAttribLocation(program, 2, "aColor");
         glBindAttribLocation(program, 3, "aFog");
+        glBindAttribLocation(program, 3, "aBatch");
         glLinkProgram(program);
         return program;
     }
@@ -409,6 +452,7 @@ float4 main(float4 vTex : TEXCOORD0, float4 vColor : TEXCOORD1) : COLOR
     // libshacccg needs more stack than the GS thread has: the program is
     // compiled on the main thread, when the host has vitaGL up.
     GLuint g_vitaProgram = 0;
+    GLuint g_vitaVuProgram = 0;
 #endif
 
     struct HwVertex
@@ -513,6 +557,24 @@ void GSHwBackend::setContextProvider(std::function<void()> makeCurrent)
     std::lock_guard<std::recursive_mutex> lock(ps2xVitaGlMutex());
     if (!g_vitaProgram)
         g_vitaProgram = buildProgram(kVertexShaderCg, kFragmentShaderCg);
+    if (!g_vitaVuProgram)
+    {
+        std::string fs = kFragmentShaderCg;
+        const size_t at = fs.find("float4 main(");
+        if (at != std::string::npos)
+        {
+            fs.replace(at, 11, "float4 gsMain");
+            fs += kVuFragmentMainCg;
+            g_vitaVuProgram = buildProgram(kVuVertexShaderCg, fs.c_str());
+            GLint linked = 0;
+            glGetProgramiv(g_vitaVuProgram, GL_LINK_STATUS, &linked);
+            if (!linked)
+            {
+                std::cerr << "[gs:hw] VU batch program link failed" << std::endl;
+                g_vitaVuProgram = 0;
+            }
+        }
+    }
     g_makeCurrent = std::move(makeCurrent);
 }
 #endif
@@ -536,6 +598,7 @@ struct GSHwBackend::Impl
     std::vector<VuGpuVertex> vuPending;
     std::vector<float> vuMatrices; // 16 per batch
     std::vector<float> vuConstants; // 4 per batch: fog base, fog scale, XYOFFSET
+    std::vector<float> vuNear; // 4 per batch: the near plane (Mac; the Vita gets batches that stay in front of it)
     GLuint wrapProgram = 0; // float sums -> 8-bit values modulo 256
     struct WrapTarget
     {
@@ -657,6 +720,7 @@ struct GSHwBackend::Impl
 #if defined(PS2X_GS_HW_VITA)
         // No COLCLAMP wrap path yet (it needs a float target): wrapProgram 0.
         measureOrientation();
+        vuProgram = g_vitaVuProgram; // built on the main thread (setContextProvider)
 #else
         {
             // VU batches: the GS fragment stage with screen-space colour, fog and Z.
@@ -675,25 +739,27 @@ struct GSHwBackend::Impl
                 std::cerr << "[gs:hw] VU batch program link failed" << std::endl;
                 vuProgram = 0;
             }
-            else
-            {
-                glUseProgram(vuProgram);
-                glUniform1i(glGetUniformLocation(vuProgram, "uTexture"), 0);
-                glGenVertexArrays(1, &vuVao);
-                glGenBuffers(1, &vuVbo);
-                glBindVertexArray(vuVao);
-                glBindBuffer(GL_ARRAY_BUFFER, vuVbo);
-                glEnableVertexAttribArray(0);
-                glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(VuGpuVertex), reinterpret_cast<void *>(offsetof(VuGpuVertex, x)));
-                glEnableVertexAttribArray(1);
-                glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(VuGpuVertex), reinterpret_cast<void *>(offsetof(VuGpuVertex, s)));
-                glEnableVertexAttribArray(2);
-                glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(VuGpuVertex), reinterpret_cast<void *>(offsetof(VuGpuVertex, r)));
-                glEnableVertexAttribArray(3);
-                glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(VuGpuVertex), reinterpret_cast<void *>(offsetof(VuGpuVertex, batch)));
-                glUseProgram(program);
-            }
         }
+#endif
+        if (vuProgram)
+        {
+            glUseProgram(vuProgram);
+            glUniform1i(glGetUniformLocation(vuProgram, "uTexture"), 0);
+            glGenVertexArrays(1, &vuVao);
+            glGenBuffers(1, &vuVbo);
+            glBindVertexArray(vuVao);
+            glBindBuffer(GL_ARRAY_BUFFER, vuVbo);
+            glEnableVertexAttribArray(0);
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(VuGpuVertex), reinterpret_cast<void *>(offsetof(VuGpuVertex, x)));
+            glEnableVertexAttribArray(1);
+            glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(VuGpuVertex), reinterpret_cast<void *>(offsetof(VuGpuVertex, s)));
+            glEnableVertexAttribArray(2);
+            glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(VuGpuVertex), reinterpret_cast<void *>(offsetof(VuGpuVertex, r)));
+            glEnableVertexAttribArray(3);
+            glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(VuGpuVertex), reinterpret_cast<void *>(offsetof(VuGpuVertex, batch)));
+            glUseProgram(program);
+        }
+#if !defined(PS2X_GS_HW_VITA)
         {
             GLuint wvs = compile(GL_VERTEX_SHADER, kWrapVertexShader), wfs = compile(GL_FRAGMENT_SHADER, kWrapFragmentShader);
             wrapProgram = glCreateProgram();
@@ -1514,6 +1580,10 @@ struct GSHwBackend::Impl
         glBindTexture(GL_TEXTURE_2D, cached.texture);
         if (cached.epoch != epoch || cached.width != w || cached.height != h)
         {
+            // Queued draws may sample this texture as it was: draw them first.
+            if (hasPending && cached.width != 0)
+                flushPending();
+            glBindTexture(GL_TEXTURE_2D, cached.texture);
             if (cached.width == w && cached.height == h)
                 glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, texels->data());
             else
@@ -1951,8 +2021,15 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
         if (pendingVu)
         {
             const GLsizei batches = static_cast<GLsizei>(vuConstants.size() / 4u);
+#if defined(PS2X_GS_HW_VITA)
+            glUniform4fv(uniform("uM"), batches * 4, vuMatrices.data()); // float4 uM[128]: the columns
+#else
             glUniformMatrix4fv(uniform("uM"), batches, GL_FALSE, vuMatrices.data());
+#endif
             glUniform4fv(uniform("uBatch"), batches, vuConstants.data());
+#if !defined(PS2X_GS_HW_VITA)
+            glUniform4fv(uniform("uNear"), batches, vuNear.data());
+#endif
             const float depthScale = (key.zpsm == GS_PSM_Z16 || key.zpsm == GS_PSM_Z16S) ? 65536.0f
                                      : key.zpsm == GS_PSM_Z24 ? 16777216.0f : 4294967296.0f;
             glUniform1f(uniform("uDepthScale"), 1.0f / depthScale);
@@ -1966,6 +2043,10 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
             bindVertices();
             glBufferData(GL_ARRAY_BUFFER, pending.size() * sizeof(HwVertex), pending.data(), GL_STREAM_DRAW);
         }
+        if (tracing() && pendingVu)
+            std::fprintf(stderr, "[gs:trace] vu fbp=%u batches=%zu verts=%zu tex=%llx fge=%u abe=%u alpha=%llx scissor=(%u,%u)-(%u,%u)\n", key.fbp,
+                         vuConstants.size() / 4u, vuPending.size(), (unsigned long long)key.tex0, key.fge, key.abe, (unsigned long long)key.alpha,
+                         key.sx0, key.sy0, key.sx1, key.sy1);
         if (tracing() && !pendingVu)
         {
             ++tracedDraws;
@@ -2093,6 +2174,7 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
         vuPending.clear();
         vuMatrices.clear();
         vuConstants.clear();
+        vuNear.clear();
     }
 
     // The GPU state a draw with this GS state needs (textures: textureKey).
@@ -2181,6 +2263,7 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
         const float index = static_cast<float>(vuConstants.size() / 4u);
         vuMatrices.insert(vuMatrices.end(), batch.m, batch.m + 16);
         vuConstants.insert(vuConstants.end(), {batch.fogBase, batch.fogScale, ctx.xyoffset.ofx / 16.0f, ctx.xyoffset.ofy / 16.0f});
+        vuNear.insert(vuNear.end(), batch.nearPlane, batch.nearPlane + 4);
         const auto &in = batch.vertices;
         auto put = [&](const GSVuVertex &v)
         {
@@ -2567,7 +2650,7 @@ void GSHwBackend::Submit(const GSPrimitiveBatch &batch)
 bool GSHwBackend::SupportsVuBatch() const
 {
 #if defined(PS2X_GS_HW_VITA)
-    return false; // the CG vertex stage is still to come
+    return g_vitaVuProgram != 0 && available();
 #else
     return available();
 #endif
@@ -2589,8 +2672,10 @@ void GSHwBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
     const bool loads = tex0.cld >= 1u && tex0.cld <= 5u;
     if (indexed && loads && m_impl->onGlThread())
     {
-        // The CLUT comes from GS memory, which the GPU may have drawn.
-        m_impl->flushPending();
+        // The CLUT comes from GS memory, which the GPU may have drawn (a
+        // write-back draws the queued draws first when they reach it). Queued
+        // draws keep their textures: a texture decoded again with the new
+        // CLUT draws them first (textureFor).
         m_impl->wbReason = "clut";
         static const bool log = std::getenv("PS2X_GS_HW_CLUTLOG") != nullptr;
         if (log)
@@ -2646,9 +2731,10 @@ void GSHwBackend::Flush()
 
 void GSHwBackend::TextureFlush()
 {
-    PS2X_GS_GL_LOCK();
-    if (m_impl->onGlThread())
-        m_impl->flushPending();
+    // TEXFLUSH changes no GS memory: transfers (BeginTransfer), textures
+    // decoded again (textureFor) and render targets sampled as textures
+    // draw the queue when they must. Games write it before most draws: a
+    // flush here split every merged VU batch.
     m_impl->shadow->TextureFlush();
 }
 

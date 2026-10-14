@@ -14,6 +14,7 @@
 // sees the latest write; the two lanes of a pair read before either writes.
 // PS2X_VU1_NATIVE=verify compares this with the interpreter.
 
+#include "runtime/ps2_stats.h"
 #include "ps2_runtime.h"
 #include "runtime/ps2_vu1.h"
 #include "runtime/ps2_vu1_native.h"
@@ -186,7 +187,7 @@ namespace
 
     // ---- The world batch on the GPU (docs/vu1_gpu_path.md, stage 1) --------
     //
-    // PS2X_VU1_DIRECT=1: the batch is drawn by the GS backend's vertex stage
+    // PS2X_VU1_DIRECT=1 (always on the Vita): the batch is drawn by the GS backend's vertex stage
     // (GSVuBatch) instead of being kicked as the packet the loop writes. The
     // loop still runs (other programs read its output); the packet's XGKICK
     // and the guard-band clipper are skipped (the GPU clips).
@@ -197,12 +198,43 @@ namespace
         std::vector<GSVuVertex> vertices;
         float m[16]{};
         float fogBase = 0.0f, fogScale = 0.0f;
+        float nearPlane[4]{};
     };
 
     bool directEnabled()
     {
-        static const bool on = std::getenv("PS2X_VU1_DIRECT") && std::atoi(std::getenv("PS2X_VU1_DIRECT")) != 0;
-        return on;
+#if defined(__vita__)
+        return true; // no environment there; the GPU path is the point of the port
+#else
+        // 2: every other game frame only, to compare the two paths frame to
+        // frame on a still scene.
+        static const int mode = std::getenv("PS2X_VU1_DIRECT") ? std::atoi(std::getenv("PS2X_VU1_DIRECT")) : 0;
+        if (mode == 2)
+            return (ps2_stats::vif1Chains.load(std::memory_order_relaxed) & 1u) == 0u;
+        return mode != 0;
+#endif
+    }
+
+    // The microcode's clipper (0x1410) cuts the triangles its CLIPw marks
+    // against the box of the clipping matrix C (vf5-vf8; the same as its
+    // copy at 1004-1007, and C's row w is M's). The box's sides lie on or
+    // outside the scissor; its near plane (C z >= -C w, at GS Z = 2^24 for
+    // SotC's camera) is what the GPU must cut too. On the Vita (no free
+    // clip plane: z carries the depth there) a batch reaching behind it
+    // stays on VU1.
+    bool nearPlane(const VU1State &S, const GSVuVertex *v, size_t count, float plane[4])
+    {
+        for (int col = 0; col < 4; ++col)
+            plane[col] = S.vf[5 + col][2] + S.vf[5 + col][3];
+#if defined(__vita__)
+        for (size_t i = 0; i < count; ++i)
+            if (plane[0] * v[i].x + plane[1] * v[i].y + plane[2] * v[i].z + plane[3] < 0.0f)
+                return false;
+#else
+        (void)v;
+        (void)count;
+#endif
+        return true;
     }
 
     // Before the loop: the input batch at TOP as the game sent it.
@@ -254,7 +286,7 @@ namespace
                 w.m[col * 4 + row] = S.vf[1 + col][row];
         w.fogBase = S.vf[17][3];  // MULA.w ACC, vf17, vf0
         w.fogScale = S.vf[17][0]; // MR32.w vf29, vf17 -> MADDq.w vf26, vf29, q
-        w.active = true;
+        w.active = nearPlane(S, w.vertices.data(), w.vertices.size(), w.nearPlane);
     }
 
     // After the loop (pc 0x13b8): the microcode's stores before its XGKICK,
@@ -270,12 +302,91 @@ namespace
         isw(1017, 1, S.vi[6]);  // ISW.y vi6, 1017(vi0)
         isw(1017, 2, S.vi[8]);  // ISW.z vi8, 1017(vi0)
         isw(1017, 3, S.vi[14]); // ISW.w vi14, 1017(vi0)  (clipper skipped: the GPU clips)
-        vu1native::gs()->submitVuBatch(w.tagLo, std::move(w.vertices), w.m, w.fogBase, w.fogScale);
+        vu1native::gs()->submitVuBatch(w.tagLo, std::move(w.vertices), w.m, w.fogBase, w.fogScale, w.nearPlane);
         static std::atomic<uint64_t> s_batches{0};
         const uint64_t n = ++s_batches;
         if ((n & (n - 1)) == 0 && n >= 1024)
             std::fprintf(stderr, "[vu1:direct] %llu world batches on the GPU\n", static_cast<unsigned long long>(n));
         return 0x13f8; // after XGKICK vi6: NOP, then JR vi14
+    }
+
+    // ---- The world batch without VU1 (VIF1 -> GPU) ----------------------
+    //
+    // The game sends each world batch as
+    //   UNPACK V4-32 x1 -> TOP+0      GIF tag (NLOOP = vertex count)
+    //   UNPACK V3-32 xN -> TOP+1      positions, STCYCL CL=3 WL=1
+    //   STMOD 1, UNPACK V2-16 xN -> TOP+2   ST (12-bit fraction) + ROW
+    //   STMOD 0, UNPACK V4-8 xN (unsigned) -> TOP+3   colour
+    //   MSCNT                          the program resumes at 0x0538/0x05b0
+    // and the program draws it and stops again at the same pc, with nothing
+    // that later programs read. So the batch goes from the VIF data to the
+    // GPU; VU1 data memory and registers are not touched.
+    bool worldBatch(const VU1State &S, const vu1native::VifBatch &b)
+    {
+        if (!directEnabled() || !b.gs || !b.gs->supportsVuBatch() || (b.cycle & 0xFFFFu) != 0x0103u)
+            return false;
+        const uint8_t *p = b.codes;
+        const uint8_t *const end = b.codes + b.size;
+        auto code = [&](uint32_t expect, uint32_t mask) -> bool
+        {
+            if (p + 4 > end)
+                return false;
+            uint32_t c;
+            std::memcpy(&c, p, 4);
+            if ((c & mask) != expect)
+                return false;
+            p += 4;
+            return true;
+        };
+        if (!code(0x6C018000u, 0xFFFFFFFFu))
+            return false;
+        uint64_t tagLo;
+        std::memcpy(&tagLo, p, 8);
+        p += 16;
+        const uint32_t count = static_cast<uint32_t>(tagLo & 0x7FFFu);
+        const uint32_t prim = static_cast<uint32_t>((tagLo >> 47) & 0x7FFu);
+        const uint32_t type = prim & 7u;
+        if (count == 0u || count > 255u || !((tagLo >> 46) & 1u) || type < 3u || type > 5u || !(prim & 0x8u) || (prim & 0x100u))
+            return false;
+        const uint32_t n = count << 16;
+        if (!code(0x68008001u | n, 0xFFFFFFFFu))
+            return false;
+        const uint8_t *pos = p;
+        p += count * 12u;
+        if (!code(0x05000001u, 0xFFFFFFFFu) || !code(0x65008002u | n, 0xFFFFFFFFu))
+            return false;
+        const uint8_t *st = p;
+        p += (count * 4u + 3u) & ~3u;
+        if (!code(0x05000000u, 0xFFFFFFFFu) || !code(0x6E00C003u | n, 0xFFFFFFFFu))
+            return false;
+        const uint8_t *rgba = p;
+        p += count * 4u;
+        if (!code(0x17000000u, 0xFFFFFFFFu) || p != end)
+            return false;
+
+        std::vector<GSVuVertex> vertices(count);
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            GSVuVertex &v = vertices[i];
+            std::memcpy(&v.x, pos + i * 12u, 12);
+            int16_t uv[2];
+            std::memcpy(uv, st + i * 4u, 4);
+            v.s = static_cast<int32_t>(uv[0] + b.row[0]); // STMOD 1: + ROW
+            v.t = static_cast<int32_t>(uv[1] + b.row[1]);
+            v.r = rgba[i * 4u + 0];
+            v.g = rgba[i * 4u + 1];
+            v.b = rgba[i * 4u + 2];
+            v.a = rgba[i * 4u + 3];
+        }
+        float m[16];
+        for (int col = 0; col < 4; ++col)
+            for (int row = 0; row < 4; ++row)
+                m[col * 4 + row] = S.vf[1 + col][row];
+        float plane[4];
+        if (!nearPlane(S, vertices.data(), vertices.size(), plane))
+            return false;
+        b.gs->submitVuBatch(tagLo, std::move(vertices), m, S.vf[17][3], S.vf[17][0], plane);
+        return true;
     }
 
     // Entry: the program's BAL vi14, 0x1140 (its delay slot is a NOP).
@@ -820,6 +931,8 @@ namespace
     }
 
     // Every program that runs one of the loops.
+    vu1native::BatchRegistrar g_worldBatch0538(kWorldImage, 0x0538, worldBatch);
+    vu1native::BatchRegistrar g_worldBatch05b0(kWorldImage, 0x05b0, worldBatch);
     vu1native::Registrar g_world0538(kWorldImage, 0x0538, worldLoop<0x0538>);
     vu1native::Registrar g_world05b0(kWorldImage, 0x05b0, worldLoop<0x05b0>);
     vu1native::Registrar g_world0628(kWorldImage, 0x0628, worldLoop<0x0628>);

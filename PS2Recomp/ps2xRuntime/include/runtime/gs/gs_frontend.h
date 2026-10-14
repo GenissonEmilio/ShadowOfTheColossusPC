@@ -126,7 +126,8 @@ public:
     // from the tag, the rest of the GS state as it stands. From the VU1
     // worker, like XGKICK.
     bool supportsVuBatch() const;
-    void submitVuBatch(uint64_t tagLo, std::vector<GSVuVertex> vertices, const float m[16], float fogBase, float fogScale);
+    void submitVuBatch(uint64_t tagLo, std::vector<GSVuVertex> vertices, const float m[16], float fogBase, float fogScale,
+                       const float nearPlane[4]);
     // Hands the packets the VU1 worker collected to the GIF worker.
     void flushGifWork();
     bool processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes);

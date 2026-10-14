@@ -788,11 +788,13 @@ bool GS::supportsVuBatch() const
     return m_backend && m_backend->SupportsVuBatch();
 }
 
-void GS::submitVuBatch(uint64_t tagLo, std::vector<GSVuVertex> vertices, const float m[16], float fogBase, float fogScale)
+void GS::submitVuBatch(uint64_t tagLo, std::vector<GSVuVertex> vertices, const float m[16], float fogBase, float fogScale,
+                       const float nearPlane[4])
 {
     auto batch = std::make_shared<GSVuBatch>();
     batch->vertices = std::move(vertices);
     std::memcpy(batch->m, m, sizeof(batch->m));
+    std::memcpy(batch->nearPlane, nearPlane, sizeof(batch->nearPlane));
     batch->fogBase = fogBase;
     batch->fogScale = fogScale;
     runInGifOrder([this, tagLo, batch]

@@ -9,6 +9,7 @@ namespace ps2_stats
     inline std::atomic<uint64_t> vu1Mscal{0};
     inline std::atomic<uint64_t> vu1Xgkick{0};
     inline std::atomic<uint64_t> vu1Mscnt{0};
+    inline std::atomic<uint64_t> vu1DirectBatches{0}; // VIF1 batches drawn without VU1
     inline std::atomic<uint64_t> vifMpg{0};
     inline std::atomic<uint64_t> vu1Instr{0};
     inline std::atomic<uint64_t> vu1StallCycles{0};
@@ -17,7 +18,7 @@ namespace ps2_stats
     inline std::atomic<uint64_t> vif1Bytes{0};
     inline std::atomic<uint64_t> gsPrims[8]{};
     inline std::atomic<uint64_t> gsPixels{0};
-    inline std::atomic<uint64_t> vif1Chains{0};
+    inline std::atomic<uint64_t> vif1Chains{0}; // ~game frames, ever (scripted runs' clock)
     inline std::atomic<uint64_t> presentedFrames{0};
     inline std::atomic<uint64_t> frameSequence{0}; // captured game frames, ever
     // Host refreshes each new game frame stayed in the window: [1], [2], [3], [4+].

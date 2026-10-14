@@ -2452,6 +2452,58 @@ void vu1native::xgkick(uint32_t qwordAddress)
     }
 }
 
+namespace
+{
+    struct BatchEntry
+    {
+        uint64_t hash;
+        uint32_t pc;
+        vu1native::BatchFn fn;
+    };
+    std::vector<BatchEntry> &batchFns()
+    {
+        static std::vector<BatchEntry> fns;
+        return fns;
+    }
+    VU1Interpreter *g_batchVu = nullptr;
+    PS2Memory *g_batchMemory = nullptr;
+    GS *g_batchGs = nullptr;
+}
+
+void vu1native::registerBatch(uint64_t imageHash, uint32_t pc, BatchFn fn)
+{
+    batchFns().push_back({imageHash, pc, fn});
+}
+
+void vu1native::setBatchTarget(VU1Interpreter *vu1, PS2Memory *memory, GS *gs)
+{
+    g_batchVu = vu1;
+    g_batchMemory = memory;
+    g_batchGs = gs;
+}
+
+bool vu1native::hasBatchFns()
+{
+    return !batchFns().empty() && g_batchVu && nativeMode() == 1;
+}
+
+bool vu1native::tryBatch(VifBatch &batch)
+{
+    // Only between programs (the MSCNT starts one) and with native code on.
+    if (!hasBatchFns() || !t_vu1Fresh || t_vu1InNative)
+        return false;
+    VU1Interpreter &vu = *g_batchVu;
+    if (!vu.findRecompiled(g_batchMemory->getVU1Code(), PS2_VU1_CODE_SIZE, g_batchMemory))
+        return false;
+    for (const BatchEntry &entry : batchFns())
+        if (entry.hash == vu.m_recHash && entry.pc == vu.state().pc)
+        {
+            batch.gs = g_batchGs;
+            return entry.fn(vu.state(), batch);
+        }
+    return false;
+}
+
 GS *vu1native::gs()
 {
     return t_vu1KickTarget ? t_vu1KickTarget->m_activeGs : nullptr;

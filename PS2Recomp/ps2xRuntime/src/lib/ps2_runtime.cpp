@@ -5,6 +5,7 @@
 #include <set>
 #include <map>
 #include "runtime/ps2_stats.h"
+#include "runtime/ps2_vu1_native.h"
 #include "ps2_runtime.h"
 #include "runtime/host_menu.h"
 #include "runtime/gs/gs_direct_frame.h"
@@ -799,6 +800,7 @@ bool PS2Runtime::syncCoreSubsystems()
                                  {
                                      const R5900Context *context = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
                                      return (context ? context : &m_cpuContext)->vu0_fbrst; });
+    vu1native::setBatchTarget(&m_vu1, &m_memory, &m_gs);
     m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t top, uint32_t itop)
                                  {
                                      // On the MTVU worker the EE context belongs to another
@@ -2910,6 +2912,7 @@ void PS2Runtime::run()
             std::cerr << "[stats] t=" << static_cast<int>(GetTime())
                       << " gameFps=" << (statChains - lastStatChains) / 5.0
                       << " shownFps=" << ps2_stats::presentedFrames.exchange(0) / 5.0
+                      << " frames=" << statChains
                       << [this]
                       {
                           // PS2X_STATS_CLOCK=<addr>:<ticks per second>: speed of a guest
@@ -2935,6 +2938,7 @@ void PS2Runtime::run()
                       << " vu1Rec=" << ps2_stats::vu1RecRuns.exchange(0) << "/" << ps2_stats::vu1RecBails.exchange(0)
                       << "/" << ps2_stats::vu1InterpRuns.exchange(0)
                       << " xgkick=" << ps2_stats::vu1Xgkick.exchange(0)
+                      << " direct=" << ps2_stats::vu1DirectBatches.exchange(0)
                       << " mscnt=" << ps2_stats::vu1Mscnt.exchange(0)
                       << " unpack=" << ps2_stats::vifUnpack.exchange(0)
                       << " vif1KB=" << (ps2_stats::vif1Bytes.exchange(0) >> 10)
