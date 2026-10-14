@@ -133,7 +133,8 @@ uniform int uLinear;
 uniform float uAlphaFix;     // >= 0: texture alpha (TA0; + 256: AEM)
 uniform float uTexAlphaScale; // texture alpha read / scale -> PS2 alpha units of 128
 uniform vec3 uFogColor;
-uniform int uExactBlend;     // 1: the GS blend here, in integers, on a copy of the target (uDst)
+uniform int uExactBlend;     // 1: the GS blend here, in integers, on a copy of the target (uDst);
+                             // 2: GL blends Cs * As (+ Cd ...), the source biased to truncate like the GS
 uniform sampler2D uDst;
 uniform ivec4 uBlendSel;     // ALPHA: A, B, D in {Cs, Cd, 0}; C in {As, Ad, FIX}
 uniform float uBlendFixC;    // ALPHA.FIX
@@ -207,7 +208,7 @@ void main()
             discard;
     }
     oColor = vec4(c.rgb / 255.0, c.a / 128.0);
-    if (uExactBlend != 0)
+    if (uExactBlend == 1)
     {
         // ((A - B) * C >> 7) + D, clamped: GL's blender rounds where the GS
         // truncates, which feedback passes (SotC's bloom) add up frame after frame.
@@ -219,6 +220,16 @@ void main()
         float C = uBlendSel.z == 0 ? floor(c.a + 1.0 / 512.0) : uBlendSel.z == 1 ? ad : uBlendFixC;
         vec3 D = uBlendSel.w == 0 ? cs : uBlendSel.w == 1 ? cd : vec3(0.0);
         oColor.rgb = clamp(floor((A - B) * C / 128.0) + D, 0.0, 255.0) / 255.0;
+    }
+    else if (uExactBlend == 2)
+    {
+        // The blender adds Cs * As to the rest and rounds to nearest; the
+        // GS truncates ((Cs - Cd) * As >> 7). Products are in 1/128 steps,
+        // so taking 0.498 off the Cs * As term rounds to the truncated value.
+        float a = floor(c.a + 1.0 / 512.0);
+        vec3 cs = floor(c.rgb + 1.0 / 512.0);
+        oColor.rgb = a > 0.0 ? max(cs - 0.498 * 128.0 / a, 0.0) / 255.0 : cs / 255.0;
+        oColor.a = a / 128.0;
     }
     gl_FragDepth = vDepth;
 }
@@ -2023,13 +2034,23 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
         const bool writeR = (m & 0xFFu) != 0xFFu, writeG = (m & 0xFF00u) != 0xFF00u, writeB = (m & 0xFF0000u) != 0xFF0000u;
         const bool writeA = key.fpsm != GS_PSM_CT24 && (m & 0xFF000000u) != 0xFF000000u;
         const bool writeZ = d && !key.zmask;
-        // Blended sprites (post-processing passes) blend in the shader like
-        // the GS, on a copy of the target. PS2X_GS_HW_EXACT_BLEND=0: GL's blender.
+        // Blended sprites into small targets (post-processing buffers, which
+        // games feed back frame after frame: SotC's bloom) blend in the
+        // shader like the GS, on a copy of the target; elsewhere GL's
+        // rounding is half a unit off once, not worth a copy per draw.
+        // PS2X_GS_HW_EXACT_BLEND=0: GL's blender everywhere.
 #if defined(PS2X_GS_HW_VITA)
-        const bool exactBlend = false;
+        const bool exactBlend = false, biasBlend = false;
 #else
         static const bool exactBlendOn = !std::getenv("PS2X_GS_HW_EXACT_BLEND") || std::atoi(std::getenv("PS2X_GS_HW_EXACT_BLEND")) != 0;
-        const bool exactBlend = exactBlendOn && !pendingVu && !wrapFbo && key.abe && !pendingNonSprite && (rt.psm == GS_PSM_CT32 || rt.psm == GS_PSM_CT24);
+        // (Cs - Cd) * As + Cd and Cs * As + Cd (most blends) only need the
+        // source biased (mode 2, any draw); the other blends of small targets
+        // read a copy of the target (mode 1).
+        const uint32_t blendA = key.alpha & 3u, blendB = (key.alpha >> 2) & 3u, blendC = (key.alpha >> 4) & 3u, blendD = (key.alpha >> 6) & 3u;
+        const bool biasBlend = exactBlendOn && !wrapFbo && key.abe && blendA == 0u && blendC == 0u && blendD == 1u && (blendB == 1u || blendB == 2u) &&
+                               (rt.psm == GS_PSM_CT32 || rt.psm == GS_PSM_CT24);
+        const bool exactBlend = !biasBlend && exactBlendOn && !pendingVu && !wrapFbo && key.abe && !pendingNonSprite && (rt.psm == GS_PSM_CT32 || rt.psm == GS_PSM_CT24) &&
+                                rt.width <= 256u && rt.height <= 256u;
 #endif
         int32_t blendFix = applyBlend(key);
         if (exactBlend)
@@ -2039,7 +2060,7 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
         }
         activeProgram = pendingVu ? vuProgram : program;
         glUseProgram(activeProgram);
-        setInt("uExactBlend", exactBlend ? 1 : 0);
+        setInt("uExactBlend", exactBlend ? 1 : biasBlend ? 2 : 0);
         if (exactBlend)
         {
             setInt("uDst", 1);
