@@ -178,6 +178,69 @@ namespace
                 std::cerr << "[census] no function at 0x" << std::hex << kCensus[i].addr << std::dec << " (" << kCensus[i].name << ")" << std::endl;
     }
 
+    // SOTC_MODEL_DUMP=<game frame>: in that frame, each modelDisp call
+    // (instance, model header, model matrix, camera context and its matrix at
+    // +0x5a0) goes to logs/model_dump/calls.txt, then guest RAM to
+    // logs/model_dump/ram.bin: input for tools/model_view.py.
+    constexpr uint32_t kModelDisp = 0x01097118u, kGetCameraContext = 0x0108F518u;
+    PS2Runtime::RecompiledFunction g_modelDispOriginal = nullptr, g_getCameraOriginal = nullptr;
+    uint32_t g_lastCameraContext = 0;
+    std::string g_modelDumpCalls;
+    int g_modelDumpState = 0; // 0 waiting, 1 recording, 2 done
+
+    void getCameraContextHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_getCameraOriginal(rdram, ctx, runtime);
+        g_lastCameraContext = GPR_U32(ctx, 2);
+    }
+
+    void modelDispDumpHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static const uint64_t at = std::strtoull(std::getenv("SOTC_MODEL_DUMP"), nullptr, 10);
+        const uint64_t frame = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
+        auto word = [rdram](uint32_t addr) { uint32_t v = 0; std::memcpy(&v, rdram + (addr & 0x1FFFFFCu), 4); return v; };
+        auto floats = [rdram](uint32_t addr, int n)
+        {
+            std::string out;
+            for (int i = 0; i < n; ++i)
+            {
+                float f = 0.0f;
+                std::memcpy(&f, rdram + ((addr + i * 4u) & 0x1FFFFFCu), 4);
+                char text[32];
+                std::snprintf(text, sizeof(text), " %.9g", f);
+                out += text;
+            }
+            return out;
+        };
+        if (g_modelDumpState == 0 && frame >= at)
+            g_modelDumpState = 1;
+        if (g_modelDumpState == 1 && frame > at + 1u)
+        {
+            std::system("mkdir -p logs/model_dump");
+            if (FILE *f = std::fopen("logs/model_dump/calls.txt", "w"))
+            {
+                std::fputs(g_modelDumpCalls.c_str(), f);
+                std::fclose(f);
+            }
+            if (FILE *f = std::fopen("logs/model_dump/ram.bin", "wb"))
+            {
+                std::fwrite(rdram, 1, 32u << 20, f);
+                std::fclose(f);
+            }
+            std::cerr << "[sotc] model dump written (frame " << at << ")" << std::endl;
+            g_modelDumpState = 2;
+        }
+        const uint32_t instance = GPR_U32(ctx, 4), matrix = GPR_U32(ctx, 5);
+        g_modelDispOriginal(rdram, ctx, runtime);
+        if (g_modelDumpState == 1 && frame == at + 1u)
+        {
+            const uint32_t header = word(word(instance) + 0x20u);
+            char head[96];
+            std::snprintf(head, sizeof(head), "call instance=%08x header=%08x camera=%08x", instance, header, g_lastCameraContext);
+            g_modelDumpCalls += std::string(head) + " model" + floats(matrix, 16) + " camera" + floats(g_lastCameraContext + 0x5a0u, 16) + "\n";
+        }
+    }
+
     // SOTC_DUMP_SPRITE_PACKETS=1: dump the display-list bytes spriteDrawSprite emits.
     constexpr uint32_t kSpriteDrawSprite = 0x010A32B8u;
     constexpr uint32_t kDlAllocPtr = 0x002132E8u; // iosAllocPacketPtrPath1UnCachedA cursor
@@ -276,6 +339,13 @@ namespace
         }
         installCallTracing(runtime);
         installCensus(runtime);
+        if (std::getenv("SOTC_MODEL_DUMP") && runtime.hasFunction(kModelDisp) && runtime.hasFunction(kGetCameraContext))
+        {
+            g_modelDispOriginal = runtime.lookupFunction(kModelDisp);
+            runtime.registerFunction(kModelDisp, modelDispDumpHook);
+            g_getCameraOriginal = runtime.lookupFunction(kGetCameraContext);
+            runtime.registerFunction(kGetCameraContext, getCameraContextHook);
+        }
         if (runtime.hasFunction(kGamecoreEntry))
         {
             g_gamecoreEntry = runtime.lookupFunction(kGamecoreEntry);

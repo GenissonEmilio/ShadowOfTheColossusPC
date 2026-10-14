@@ -82,6 +82,28 @@ So nearly all 3D goes through one model system; screen effects are
 sprites over buffers; and the per-frame texture uploads disappear once
 textures live in GPU memory.
 
+## Checked against a frame (tools/model_view.py, SOTC_MODEL_DUMP)
+
+- The VU1 matrix of a model's batches is exactly `S x camera x model`:
+  camera = camera context (`iosgluGetCameraContext`) + 0x5a0, model = the
+  matrix passed to `modelDisp`, S maps clip to GS pixels: x = 2048 + 256 x/w,
+  y = 2048 - 224 y/w (the depth row scaled too). 22 of 50 models of the frame
+  matched the matrices the VU1 used to 1e-4.
+- A draw packet holds several world batches, each ending in MSCNT
+  (GIF tag, positions V3-32, ST V2-16, colours V4-8; triangle strips).
+- The packets drawn: the instance's LOD (bits 40-42 of the 64-bit word at
+  instance + 0x250, clamped to the model's LOD count) and, per part, the
+  visibility the clip wrote at LOD table + part x 0x30 + 0x2c (0, 2 drawn).
+- Positions are model-local; the sky is model 0 of the frame (radius
+  10000-33000); large one-packet models around Wander are transparent
+  planes (fog/light). Lit surfaces have no vertex colour: the lit
+  microcode computes it from normals. Skinned characters (Wander) are not
+  drawn by `modelDisp`.
+
+Still to read for drawing: textures (ST, texture resources, CLUTs), the lit
+batch (normals) and its lights (instance + 0x20..0x9f), surface materials
+(GS registers at surface + 0x60: alpha, test), skinned characters.
+
 ## Next
 
 1. Read one model straight from guest memory (header -> surfaces ->
