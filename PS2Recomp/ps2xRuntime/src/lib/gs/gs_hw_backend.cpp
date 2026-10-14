@@ -133,6 +133,10 @@ uniform int uLinear;
 uniform float uAlphaFix;     // >= 0: texture alpha (TA0; + 256: AEM)
 uniform float uTexAlphaScale; // texture alpha read / scale -> PS2 alpha units of 128
 uniform vec3 uFogColor;
+uniform int uExactBlend;     // 1: the GS blend here, in integers, on a copy of the target (uDst)
+uniform sampler2D uDst;
+uniform ivec4 uBlendSel;     // ALPHA: A, B, D in {Cs, Cd, 0}; C in {As, Ad, FIX}
+uniform float uBlendFixC;    // ALPHA.FIX
 out vec4 oColor;
 
 // GS texel addressing (CLAMP register) in GS texture space, then a fetch from
@@ -174,6 +178,8 @@ void main()
             t.a = all(lessThan(t.rgb, vec3(0.5))) ? 0.0 : uAlphaFix - 256.0;
         else if (uAlphaFix >= 0.0)
             t.a = uAlphaFix;
+        if (uExactBlend != 0)
+            t = floor(t + 0.5); // the GS's texel values (filtering rounds)
         vec3 rgb;
         float a;
         if (uTfx == 0)      { rgb = t.rgb * c.rgb / 128.0; a = (uTcc != 0) ? t.a * c.a / 128.0 : c.a; }   // MODULATE
@@ -181,6 +187,8 @@ void main()
         else if (uTfx == 2) { rgb = t.rgb * c.rgb / 128.0 + c.a; a = (uTcc != 0) ? t.a + c.a : c.a; }   // HIGHLIGHT
         else                { rgb = t.rgb * c.rgb / 128.0 + c.a; a = (uTcc != 0) ? t.a : c.a; }       // HIGHLIGHT2
         c = vec4(min(rgb, vec3(255.0)), min(a, 255.0));
+        if (uExactBlend != 0)
+            c = floor(c + 1.0 / 512.0); // (T * C) >> 7
     }
     if (uFge != 0)
         c.rgb = mix(uFogColor, c.rgb, vFog / 255.0);
@@ -199,6 +207,19 @@ void main()
             discard;
     }
     oColor = vec4(c.rgb / 255.0, c.a / 128.0);
+    if (uExactBlend != 0)
+    {
+        // ((A - B) * C >> 7) + D, clamped: GL's blender rounds where the GS
+        // truncates, which feedback passes (SotC's bloom) add up frame after frame.
+        vec4 dst = texelFetch(uDst, ivec2(gl_FragCoord.xy), 0);
+        vec3 cs = floor(c.rgb + 1.0 / 512.0), cd = floor(dst.rgb * 255.0 + 0.5);
+        float ad = floor(dst.a * 128.0 + 0.5);
+        vec3 A = uBlendSel.x == 0 ? cs : uBlendSel.x == 1 ? cd : vec3(0.0);
+        vec3 B = uBlendSel.y == 0 ? cs : uBlendSel.y == 1 ? cd : vec3(0.0);
+        float C = uBlendSel.z == 0 ? floor(c.a + 1.0 / 512.0) : uBlendSel.z == 1 ? ad : uBlendFixC;
+        vec3 D = uBlendSel.w == 0 ? cs : uBlendSel.w == 1 ? cd : vec3(0.0);
+        oColor.rgb = clamp(floor((A - B) * C / 128.0) + D, 0.0, 255.0) / 255.0;
+    }
     gl_FragDepth = vDepth;
 }
 )";
@@ -596,6 +617,13 @@ struct GSHwBackend::Impl
     GLuint activeProgram = 0;
     std::unordered_map<std::string, GLint> vuUniforms;
     bool pendingVu = false;
+    bool pendingNonSprite = false; // the queue has primitives other than sprites
+    // Copies of a target's area for blends done in the shader (by size).
+    struct DstCopy
+    {
+        GLuint texture = 0, fbo = 0;
+    };
+    std::unordered_map<uint64_t, DstCopy> dstCopies;
     std::vector<VuGpuVertex> vuPending;
     std::vector<float> vuMatrices; // 16 per batch
     std::vector<float> vuConstants; // 4 per batch: fog base, fog scale, XYOFFSET
@@ -637,7 +665,7 @@ struct GSHwBackend::Impl
     {
         uint64_t writeBacks = 0, writeBackPixels = 0, reloads = 0, textureUploads = 0, rtTextures = 0;
         double writeBackMs = 0, reloadMs = 0;
-        uint64_t presentWb = 0, textureWb = 0, transferWb = 0, clutWb = 0, discards = 0, aliasWb = 0, otherWb = 0, memoryClears = 0, directPresents = 0, wrapDraws = 0, gpuPageMoves = 0;
+        uint64_t presentWb = 0, textureWb = 0, transferWb = 0, clutWb = 0, discards = 0, aliasWb = 0, otherWb = 0, memoryClears = 0, directPresents = 0, wrapDraws = 0, gpuPageMoves = 0, exactBlendCopies = 0;
     } stats;
     const char *wbReason = "other";
     // PS2X_GS_HW_TRACE=N: list the draw calls of the first frame after guest vsync N.
@@ -666,13 +694,13 @@ struct GSHwBackend::Impl
         if (std::chrono::duration<double>(now - last).count() < 1.0)
             return;
         last = now;
-        std::fprintf(stderr, "[gs:hw] draws=%llu prims=%llu wb=%llu (%.0f ms, %llu px; present %llu texture %llu transfer %llu clut %llu) reloads=%llu (%.0f ms) texUploads=%llu rtTex=%llu discards=%llu memClears=%llu direct=%llu wrap=%llu pageMoves=%llu aliasWb=%llu otherWb=%llu\n",
+        std::fprintf(stderr, "[gs:hw] draws=%llu prims=%llu wb=%llu (%.0f ms, %llu px; present %llu texture %llu transfer %llu clut %llu) reloads=%llu (%.0f ms) texUploads=%llu rtTex=%llu discards=%llu memClears=%llu direct=%llu wrap=%llu exactBlend=%llu pageMoves=%llu aliasWb=%llu otherWb=%llu\n",
                      (unsigned long long)drawCalls, (unsigned long long)primitives, (unsigned long long)stats.writeBacks, stats.writeBackMs,
                      (unsigned long long)stats.writeBackPixels, (unsigned long long)stats.presentWb, (unsigned long long)stats.textureWb,
                      (unsigned long long)stats.transferWb, (unsigned long long)stats.clutWb, (unsigned long long)stats.reloads, stats.reloadMs,
                      (unsigned long long)stats.textureUploads, (unsigned long long)stats.rtTextures, (unsigned long long)stats.discards,
                      (unsigned long long)stats.memoryClears, (unsigned long long)stats.directPresents,
-                     (unsigned long long)stats.wrapDraws, (unsigned long long)stats.gpuPageMoves,
+                     (unsigned long long)stats.wrapDraws, (unsigned long long)stats.exactBlendCopies, (unsigned long long)stats.gpuPageMoves,
                      (unsigned long long)stats.aliasWb, (unsigned long long)stats.otherWb);
         std::fprintf(stderr, "[gs:hw] textures: decodes=%llu hashHits=%llu cacheClears=%llu\n", (unsigned long long)shadow->textureDecodes,
                      (unsigned long long)shadow->textureHashHits, (unsigned long long)shadow->textureCacheClears);
@@ -1928,6 +1956,32 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
         glUseProgram(program);
     }
 
+    // [x0, x1) x [y0, y1) of rt into its copy (texture unit 1) for a blend
+    // done in the shader; rt's framebuffer, viewport and scissor are restored.
+    void copyTargetArea(RenderTarget &rt, DepthTarget *d, const DrawKey &key, GLint x0, GLint y0, GLint x1, GLint y1)
+    {
+        DstCopy &copy = dstCopies[(static_cast<uint64_t>(rt.width) << 32) | rt.height];
+        if (!copy.texture)
+        {
+            glGenTextures(1, &copy.texture);
+            glBindTexture(GL_TEXTURE_2D, copy.texture);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, rt.width, rt.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glGenFramebuffers(1, &copy.fbo);
+            glBindFramebuffer(GL_FRAMEBUFFER, copy.fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, copy.texture, 0);
+        }
+        if (x1 > x0 && y1 > y0)
+            blitRect(framebuffer(rt, nullptr), copy.fbo, rt.height, rt.height, x0, y0, x0, y0, x1 - x0, y1 - y0);
+        ++stats.exactBlendCopies;
+        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer(rt, d));
+        setScissor(&rt, true, key.sx0, key.sy0, key.sx1 >= key.sx0 ? key.sx1 - key.sx0 + 1 : 0, key.sy1 >= key.sy0 ? key.sy1 - key.sy0 + 1 : 0);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, copy.texture);
+        glActiveTexture(GL_TEXTURE0);
+    }
+
     void flushPending()
     {
         if (!hasPending || (pending.empty() && vuPending.empty()))
@@ -1936,6 +1990,7 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
             clearVuPending();
             hasPending = false;
             pendingVu = false;
+            pendingNonSprite = false;
             return;
         }
         const DrawKey &key = pendingKey;
@@ -1968,9 +2023,30 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
         const bool writeR = (m & 0xFFu) != 0xFFu, writeG = (m & 0xFF00u) != 0xFF00u, writeB = (m & 0xFF0000u) != 0xFF0000u;
         const bool writeA = key.fpsm != GS_PSM_CT24 && (m & 0xFF000000u) != 0xFF000000u;
         const bool writeZ = d && !key.zmask;
-        const int32_t blendFix = applyBlend(key);
+        // Blended sprites (post-processing passes) blend in the shader like
+        // the GS, on a copy of the target. PS2X_GS_HW_EXACT_BLEND=0: GL's blender.
+#if defined(PS2X_GS_HW_VITA)
+        const bool exactBlend = false;
+#else
+        static const bool exactBlendOn = !std::getenv("PS2X_GS_HW_EXACT_BLEND") || std::atoi(std::getenv("PS2X_GS_HW_EXACT_BLEND")) != 0;
+        const bool exactBlend = exactBlendOn && !pendingVu && !wrapFbo && key.abe && !pendingNonSprite && (rt.psm == GS_PSM_CT32 || rt.psm == GS_PSM_CT24);
+#endif
+        int32_t blendFix = applyBlend(key);
+        if (exactBlend)
+        {
+            glDisable(GL_BLEND);
+            blendFix = -1;
+        }
         activeProgram = pendingVu ? vuProgram : program;
         glUseProgram(activeProgram);
+        setInt("uExactBlend", exactBlend ? 1 : 0);
+        if (exactBlend)
+        {
+            setInt("uDst", 1);
+            glUniform4i(uniform("uBlendSel"), static_cast<GLint>(key.alpha & 3u), static_cast<GLint>((key.alpha >> 2) & 3u),
+                        static_cast<GLint>((key.alpha >> 4) & 3u), static_cast<GLint>((key.alpha >> 6) & 3u));
+            glUniform1f(uniform("uBlendFixC"), static_cast<float>((key.alpha >> 32) & 0xFFu));
+        }
         glUniform2f(uniform("uTarget"), static_cast<float>(rt.width), static_cast<float>(rt.height));
         setInt("uTme", key.tme && key.texture ? 1 : 0);
         setInt("uTfx", static_cast<GLint>(key.tfx));
@@ -2119,14 +2195,55 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
         }
         else
         {
-            // Pass 1: pixels that pass the alpha test write everything enabled.
-            if (atst != 0u)
-                drawPass(false, 0, count);
-            // Pass 2 (AFAIL != KEEP): failing pixels write FB only, Z only or RGB
-            // only. Settings menu "Exact transparency" off: pixels that fail a
-            // real comparison are dropped (ATST=NEVER draws still need it).
-            if (failPass && (failColor || failZ))
-                drawPass(true, 0, count);
+            auto drawRange = [&](GLint first, GLsizei n)
+            {
+                // Pass 1: pixels that pass the alpha test write everything enabled.
+                if (atst != 0u)
+                    drawPass(false, first, n);
+                // Pass 2 (AFAIL != KEEP): failing pixels write FB only, Z only or RGB
+                // only. Settings menu "Exact transparency" off: pixels that fail a
+                // real comparison are dropped (ATST=NEVER draws still need it).
+                if (failPass && (failColor || failZ))
+                    drawPass(true, first, n);
+            };
+            if (exactBlend)
+            {
+                // Sprites read the target as it was before them: a run of
+                // sprites that do not overlap shares one copy of its area.
+                GLint x0 = 0, y0 = 0, x1 = 0, y1 = 0, runFirst = 0;
+                for (GLint first = 0; first < count; first += 6)
+                {
+                    float bx0 = 1e30f, by0 = 1e30f, bx1 = -1e30f, by1 = -1e30f;
+                    for (GLint i = first; i < first + 6 && i < count; ++i)
+                    {
+                        bx0 = std::min(bx0, pending[i].x); bx1 = std::max(bx1, pending[i].x);
+                        by0 = std::min(by0, pending[i].y); by1 = std::max(by1, pending[i].y);
+                    }
+                    const GLint sx0 = std::max<GLint>(static_cast<GLint>(std::floor(bx0)) - 1, static_cast<GLint>(key.sx0));
+                    const GLint sy0 = std::max<GLint>(static_cast<GLint>(std::floor(by0)) - 1, static_cast<GLint>(key.sy0));
+                    const GLint sx1 = std::min<GLint>(static_cast<GLint>(std::ceil(bx1)) + 1, std::min<GLint>(static_cast<GLint>(key.sx1) + 1, static_cast<GLint>(rt.width)));
+                    const GLint sy1 = std::min<GLint>(static_cast<GLint>(std::ceil(by1)) + 1, std::min<GLint>(static_cast<GLint>(key.sy1) + 1, static_cast<GLint>(rt.height)));
+                    if (first > runFirst && sx0 < x1 && x0 < sx1 && sy0 < y1 && y0 < sy1)
+                    {
+                        copyTargetArea(rt, d, key, x0, y0, x1, y1);
+                        drawRange(runFirst, first - runFirst);
+                        runFirst = first;
+                        x0 = sx0; y0 = sy0; x1 = sx1; y1 = sy1;
+                    }
+                    else if (first == runFirst)
+                    {
+                        x0 = sx0; y0 = sy0; x1 = sx1; y1 = sy1;
+                    }
+                    else
+                    {
+                        x0 = std::min(x0, sx0); y0 = std::min(y0, sy0); x1 = std::max(x1, sx1); y1 = std::max(y1, sy1);
+                    }
+                }
+                copyTargetArea(rt, d, key, x0, y0, x1, y1);
+                drawRange(runFirst, count - runFirst);
+            }
+            else
+                drawRange(0, count);
         }
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glDepthMask(GL_TRUE);
@@ -2167,6 +2284,7 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
         clearVuPending();
         hasPending = false;
         pendingVu = false;
+        pendingNonSprite = false;
         activeProgram = program;
     }
 
@@ -2395,6 +2513,8 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
             if (!verify)
                 markDirty(rt, static_cast<uint32_t>(x0), static_cast<uint32_t>(y0), static_cast<uint32_t>(x1) + 1u, static_cast<uint32_t>(y1) + 1u);
         }
+        if (type != GS_PRIM_SPRITE)
+            pendingNonSprite = true;
         if ((type == GS_PRIM_TRIANGLE || type == GS_PRIM_TRISTRIP || type == GS_PRIM_TRIFAN) && batch.vertexCount >= 3)
         {
             for (int i = 0; i < 3; ++i)
