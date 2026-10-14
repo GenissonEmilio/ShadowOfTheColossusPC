@@ -243,6 +243,25 @@ namespace
         }
     }
 
+    // Cloth and other grid meshes (meshCreate): meshDispInstance(instance)
+    // and meshDisp(mesh) calls of the dumped frame, as "mesh" lines.
+    constexpr uint32_t kMeshDispInstance = 0x0109A4D8u, kMeshDisp = 0x0109AB80u;
+    PS2Runtime::RecompiledFunction g_meshDispInstanceOriginal = nullptr, g_meshDispOriginal = nullptr;
+
+    template <PS2Runtime::RecompiledFunction *Original, char Kind>
+    void meshDumpHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t arg = GPR_U32(ctx, 4);
+        (*Original)(rdram, ctx, runtime);
+        static const uint64_t at = std::strtoull(std::getenv("SOTC_MODEL_DUMP"), nullptr, 10);
+        if (g_modelDumpState == 1 && ps2_stats::vif1Chains.load(std::memory_order_relaxed) == at + 1u)
+        {
+            char line[96];
+            std::snprintf(line, sizeof(line), "mesh %s=%08x camera=%08x\n", Kind == 'i' ? "instance" : "mesh", arg, g_lastCameraContext);
+            g_modelDumpCalls += line;
+        }
+    }
+
     // SOTC_DUMP_SPRITE_PACKETS=1: dump the display-list bytes spriteDrawSprite emits.
     constexpr uint32_t kSpriteDrawSprite = 0x010A32B8u;
     constexpr uint32_t kDlAllocPtr = 0x002132E8u; // iosAllocPacketPtrPath1UnCachedA cursor
@@ -348,6 +367,13 @@ namespace
             runtime.registerFunction(kModelDisp, modelDispDumpHook);
             g_getCameraOriginal = runtime.lookupFunction(kGetCameraContext);
             runtime.registerFunction(kGetCameraContext, getCameraContextHook);
+            if (runtime.hasFunction(kMeshDispInstance) && runtime.hasFunction(kMeshDisp))
+            {
+                g_meshDispInstanceOriginal = runtime.lookupFunction(kMeshDispInstance);
+                runtime.registerFunction(kMeshDispInstance, meshDumpHook<&g_meshDispInstanceOriginal, 'i'>);
+                g_meshDispOriginal = runtime.lookupFunction(kMeshDisp);
+                runtime.registerFunction(kMeshDisp, meshDumpHook<&g_meshDispOriginal, 'm'>);
+            }
         }
         if (runtime.hasFunction(kGamecoreEntry))
         {

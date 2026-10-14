@@ -247,14 +247,28 @@ namespace sotc_native
     }
 
     // An NTO2 texture (level 0) as RGBA8, on the GPU once under its header address.
+    // The game streams data in and reuses memory when the area changes: what
+    // is cached under an address is also keyed by a sample of its contents.
+    uint64_t sample(uint32_t addr, uint32_t bytes, uint32_t samples)
+    {
+        uint64_t h = 0xcbf29ce484222325ull ^ addr;
+        const uint32_t step = std::max<uint32_t>((bytes / samples) & ~3u, 4u);
+        for (uint32_t off = 0; off + 4u <= bytes; off += step)
+            h = (h ^ word(addr + off)) * 0x100000001b3ull;
+        return h;
+    }
+
     uint64_t texture(uint32_t header)
     {
         if (!header || word(header) != 0x324F544Eu) // "NTO2"
             return 0;
-        if (native_renderer::hasTexture(header))
-            return header;
         const uint32_t format = word(header + 0x1Cu), psm = format & 0x3Fu;
         const uint32_t width = 1u << ((format >> 16) & 0xFu), height = 1u << ((format >> 20) & 0xFu);
+        const uint32_t pixelBytes = psm == 0x14u ? width * height / 2u : width * height;
+        const uint64_t key = sample(header + word(header + 0x14u), pixelBytes, 64u) ^
+                             sample(header + word(header + 0x18u), psm == 0x14u ? 64u : 1024u, 16u) * 31u ^ format;
+        if (native_renderer::hasTexture(key))
+            return key;
         if ((psm != 0x13u && psm != 0x14u) || width > 1024u || height > 1024u)
             return 0;
         const uint32_t pixels = header + word(header + 0x14u), clut = header + word(header + 0x18u);
@@ -307,8 +321,8 @@ namespace sotc_native
                     index = g_ram[(pixels + y * width + x) & 0x1FFFFFFu];
                 std::memcpy(&rgba[(static_cast<size_t>(y) * width + x) * 4u], &palette[index & (entries - 1u)], 4);
             }
-        native_renderer::uploadTexture(header, width, height, rgba.data());
-        return header;
+        native_renderer::uploadTexture(key, width, height, rgba.data());
+        return key;
     }
 
     uint64_t surfaceTexture(uint32_t header, uint32_t surface)
@@ -489,7 +503,7 @@ namespace sotc_native
             if (!surfaceDrawn(s))
                 continue;
             const uint32_t size = word(pk), data = word(pk + 16u);
-            const uint64_t id = (static_cast<uint64_t>(size) << 32) | data;
+            const uint64_t id = ((static_cast<uint64_t>(size) << 32) | data) ^ (sample(data, size, 32u) & 0x7FFF000000000000ull);
             auto skinnedPacket = g_skinnedPackets.find(id);
             if (skinnedPacket == g_skinnedPackets.end() && !native_renderer::hasMesh(id))
             {

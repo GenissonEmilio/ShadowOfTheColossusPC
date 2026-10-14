@@ -55,6 +55,8 @@ def load(d):
     calls = []
     for line in open(d + '/calls.txt'):
         parts = line.split()
+        if not parts or parts[0] != 'call':
+            continue
         kv = dict(p.split('=') for p in parts[1:4])
         i = parts.index('model'); j = parts.index('camera', i)
         calls.append({'instance': int(kv['instance'], 16), 'header': int(kv['header'], 16),
