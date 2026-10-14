@@ -124,6 +124,19 @@ ALPHA 0x64, (Cs - Cd) x FIX + Cd, FIX = amount x 128. `spriteNoTexFast`
 writes its registers itself and is only called by screen effects (bloom,
 shadows, reflection, fog, boss death).
 
+All of the 2D goes through gsReg from a handful of functions (found with
+SOTC_GSREG_CENSUS=1, gsReg calls by return address): the sprite family
+above, fadeScreen / drawDemoBar, subtitles (0x134b490: pre-rendered lines,
+one textured sprite, 64 texel rows per line, layer from the script), HUD
+gauges (0x13f6b20 / 0x13f7178 / 0x13f75d0: ellipses of 44 segments, fans
+and strips with vertex colour), the title menu backdrop (0x14033f0), the
+loading indicator (0x1c2dd0: lines), windows (spriteDraw*, windowPrintf,
+windowSprite*). Each asks for its texture with texTransRequest(resource)
+just before drawing and pushes its display list layer. The other gsReg
+callers are screen effects that draw into other buffers (0x10f37c8 frame
+copy, 0x108ac18 / screenBlur, bossDeathEffect*, reflection*, shadow*,
+waterRefraction*, drawFrontFog, 0x109e2a0 bloom).
+
 Model instance opacity (modelDisp, to the microcode at packet + 0xdc):
 1 - instance[0x91] (+0x244), times 1 - instance[0x92] (+0x248) when the
 header's +0xc is set; 0 hides the instance (e.g. the dark wisps near Wander).

@@ -426,10 +426,13 @@ namespace sotc_native
     std::unordered_set<uint64_t> g_litPackets;                        // packets with normals
     uint64_t g_skinnedDraws = 0;                                       // this frame's skinned meshes
 
+    void flush2D();
+
     void endFrame()
     {
         if (g_frame == 0)
             return;
+        flush2D();
         native_renderer::endFrame(512, 448);
         static const bool show = std::atoi(std::getenv("SOTC_NATIVE")) != 2; // 2: draw, keep the emulated picture
         native_renderer::setShown(show && g_frameDraws != 0);
@@ -456,179 +459,251 @@ namespace sotc_native
         }
     }
 
-    // ---- 2D: sprites, fades, cinema bars ------------------------------------
+    // ---- 2D ---------------------------------------------------------------
     //
-    // The 2D functions write GS registers with gsReg(reg, value) (0x1c5b00):
-    // PRIM, RGBAQ, UV or ST, XYZF2 per vertex, ALPHA. They are read as they
-    // are written, told apart by gsReg's return address: the recompiled
-    // functions run in pieces the dispatcher continues after a call returns,
-    // so a hook around the call sees none of the writes. Entry hooks note
-    // what the registers do not carry (texture, display list layer).
-    //   spriteDrawSprite(obj, z, layer)  0x10a32b8: triangle strip, layer 25 + layer
-    //   spriteDrawSpriteTexNoSet(obj, z) 0x10a24c0: the same, texture already set
-    //   spriteDrawSpriteUV / ST(.., .., obj)   0x10a45f0 / 0x10a4890: SPRITE, layer 26
-    //   spriteDrawSpriteUV2 / ST2(obj, ..)     0x10a4b38 / 0x10a4ed0: SPRITE, layer 26
-    //   fadeScreen(amount)        0x108a408: full screen, colour 0x1186340, layer 0x1186350
-    //   drawDemoBar(amount, layer, height) 0x108a588: the cinema bars
-    // A sprite object (0x50 bytes) holds its texture resource at [0]; the
-    // resource's +0x20 is the NTO2 header. Positions are 12.4 on a 512 x 448
-    // screen centred on 2048. Fades blend with ALPHA C = FIX: FIX is the alpha.
-    constexpr uint32_t kGsReg = 0x001C5B00u;
-    PS2Runtime::RecompiledFunction g_gsReg = nullptr;
+    // SotC's 2D functions write GS registers with gsReg(reg, value)
+    // (0x1c5b00): PRIM, RGBAQ, UV or ST, then XYZ2 / XYZF2 per vertex, plus
+    // ALPHA. They are read as they are written and assembled into
+    // primitives here. The writes are told apart by gsReg's return address
+    // (the recompiled functions run in pieces the dispatcher continues after
+    // a call returns: a hook around a call sees none of its writes). The
+    // texture is the last texTransRequest(resource) (the 2D functions ask for
+    // theirs just before drawing; the resource's +0x20 is the NTO2 header),
+    // the layer the current iosDlPushLayer. Screen effects (bloom, blur,
+    // reflection, fog, boss death) draw into other buffers and are not
+    // listed. Positions are 12.4 on a 512 x 448 screen centred on 2048;
+    // ALPHA with C = FIX (fades) blends by FIX.
+    constexpr uint32_t kGsReg = 0x001C5B00u, kTexTransRequest = 0x010AAD48u;
+    constexpr uint32_t kPushLayer = 0x001C0210u, kPopLayer = 0x001BF8C0u;
+    PS2Runtime::RecompiledFunction g_gsReg = nullptr, g_texTransRequest = nullptr, g_pushLayer = nullptr, g_popLayer = nullptr;
 
-    struct Emitter
+    struct Range
     {
-        uint32_t start, end; // the function, as gsReg's return address sees it
-        int objectReg;       // GPR holding the sprite object at entry, -1: none
-        int layer;           // fixed display list layer, -1: from the entry hook
-        PS2Runtime::RecompiledFunction original;
+        uint32_t start, end;
     };
-    Emitter g_emitters[] = {
-        {0x010A24C0u, 0x010A32B8u, 4, 25, nullptr},  // spriteDrawSpriteTexNoSet
-        {0x010A32B8u, 0x010A45F0u, 4, -1, nullptr},  // spriteDrawSprite
-        {0x010A45F0u, 0x010A4890u, 6, 26, nullptr},  // spriteDrawSpriteUV
-        {0x010A4890u, 0x010A4B38u, 6, 26, nullptr},  // spriteDrawSpriteST
-        {0x010A4B38u, 0x010A4ED0u, 4, 26, nullptr},  // spriteDrawSpriteUV2
-        {0x010A4ED0u, 0x010A5270u, 4, 26, nullptr},  // spriteDrawSpriteST2
-        {0x0108A408u, 0x0108A588u, -1, -1, nullptr}, // fadeScreen
-        {0x0108A588u, 0x0108A758u, -1, -1, nullptr}, // drawDemoBar
+    constexpr Range k2D[] = {
+        {0x010A24C0u, 0x010A5270u}, // spriteDrawSpriteTexNoSet .. spriteDrawSpriteST2 (menus, title, map)
+        {0x0108A408u, 0x0108A758u}, // fadeScreen, drawDemoBar (cinema bars)
+        {0x0134B490u, 0x0134B6F8u}, // subtitles (pre-rendered lines, a textured sprite)
+        {0x013F6B20u, 0x013F78A8u}, // HUD gauges (fans and strips)
+        {0x014033F0u, 0x01403558u}, // title menu backdrop
+        {0x001C2DD0u, 0x001C30D0u}, // loading indicator (lines)
+        {0x0114FD00u, 0x01150278u}, // spriteDraw*, windowPrintf (windows)
+        {0x01155B98u, 0x01155ED8u}, // windowSpriteNoTex, windowSprite
     };
-    constexpr int kEmitters = static_cast<int>(sizeof(g_emitters) / sizeof(g_emitters[0]));
 
-    struct Sprite
+    std::vector<uint32_t> g_layers; // iosDlPushLayer stack
+    uint32_t g_requested = 0;       // NTO2 header of the last texTransRequest
+
+    struct Assembler
     {
-        uint32_t layer = 25;
-        uint32_t header = 0; // NTO2, 0: untextured
         uint64_t prim = 0, rgbaq = 0, alpha = 0x44;
         float s = 0.0f, t = 0.0f;
         uint32_t u = 0, v = 0;
-        native_renderer::Vertex corners[4];
-        uint32_t count = 0;
-    } g_sprite;
+        uint32_t header = 0, layer = 0;
+        std::vector<native_renderer::Vertex> strip; // this primitive's vertices
+        std::vector<native_renderer::Vertex> batch; // triangles under one state
+        uint64_t batchKey = ~0ull;
+        uint64_t batchPrim = 0, batchAlpha = 0;      // that state
+        uint32_t batchHeader = 0, batchLayer = 0;
+    } g_2d;
 
-    void spriteDraw(const native_renderer::Vertex *tris, uint32_t count)
+    void flush2D()
     {
-        const Sprite &sp = g_sprite;
+        Assembler &a = g_2d;
+        if (a.batch.empty())
+            return;
         const uint64_t mesh = (1ull << 62) | g_skinnedDraws++;
-        native_renderer::uploadMesh(mesh, tris, count);
+        native_renderer::uploadMesh(mesh, a.batch.data(), static_cast<uint32_t>(a.batch.size()));
         native_renderer::DrawState state;
         state.screen = true;
-        state.texture = (sp.prim & 0x10u) ? texture(sp.header) : 0;
-        const uint32_t mode = static_cast<uint32_t>(sp.alpha & 0xFFu);
-        state.blend = !(sp.prim & 0x40u) ? native_renderer::Blend::Opaque
+        state.texture = (a.batchPrim & 0x10u) ? texture(a.batchHeader) : 0;
+        const uint32_t mode = static_cast<uint32_t>(a.batchAlpha & 0xFFu);
+        state.blend = !(a.batchPrim & 0x40u) ? native_renderer::Blend::Opaque
                       : (mode == 0x48u ? native_renderer::Blend::Additive : native_renderer::Blend::Normal);
-        state.order = sp.layer;
+        state.order = a.batchLayer;
         static const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
         native_renderer::draw(mesh, identity, state);
         ++g_frameDraws;
+        a.batch.clear();
+        a.batchKey = ~0ull;
     }
 
-    void spriteVertex(uint64_t xyz)
+    void emit2D(const native_renderer::Vertex &v0, const native_renderer::Vertex &v1, const native_renderer::Vertex &v2)
     {
-        Sprite &sp = g_sprite;
-        native_renderer::Vertex &o = sp.corners[sp.count & 3u];
+        Assembler &a = g_2d;
+        const uint64_t key = (a.prim & 0x150u) ^ ((a.alpha & 0xFFu) << 12) ^ (static_cast<uint64_t>(a.header) << 20) ^ (static_cast<uint64_t>(a.layer) << 56);
+        if (key != a.batchKey)
+        {
+            flush2D();
+            a.batchKey = key;
+            a.batchPrim = a.prim;
+            a.batchAlpha = a.alpha;
+            a.batchHeader = a.header;
+            a.batchLayer = a.layer;
+        }
+        a.batch.push_back(v0);
+        a.batch.push_back(v1);
+        a.batch.push_back(v2);
+    }
+
+    void vertex2D(uint64_t xyz, bool kick)
+    {
+        Assembler &a = g_2d;
+        native_renderer::Vertex o{};
         o.x = ((static_cast<float>(xyz & 0xFFFFu) / 16.0f) - 2048.0f) / 256.0f;
         o.y = -((static_cast<float>((xyz >> 16) & 0xFFFFu) / 16.0f) - 2048.0f) / 224.0f;
-        o.z = 0.0f;
-        o.nx = o.ny = 0.0f;
         o.nz = 1.0f;
-        o.r = static_cast<uint8_t>(sp.rgbaq);
-        o.g = static_cast<uint8_t>(sp.rgbaq >> 8);
-        o.b = static_cast<uint8_t>(sp.rgbaq >> 16);
-        o.a = static_cast<uint8_t>(sp.rgbaq >> 24);
-        if (((sp.alpha >> 4) & 3u) == 2u) // C = FIX
-            o.a = static_cast<uint8_t>(std::min<uint64_t>((sp.alpha >> 32) & 0xFFu, 0x80u));
-        const uint32_t format = sp.header ? word(sp.header + 0x1Cu) : 0u;
-        const float width = static_cast<float>(1u << ((format >> 16) & 0xFu)), height = static_cast<float>(1u << ((format >> 20) & 0xFu));
-        if (sp.prim & 0x100u) // FST: UV in texels, 12.4
+        o.r = static_cast<uint8_t>(a.rgbaq);
+        o.g = static_cast<uint8_t>(a.rgbaq >> 8);
+        o.b = static_cast<uint8_t>(a.rgbaq >> 16);
+        o.a = static_cast<uint8_t>(a.rgbaq >> 24);
+        if (((a.alpha >> 4) & 3u) == 2u) // C = FIX
+            o.a = static_cast<uint8_t>(std::min<uint64_t>((a.alpha >> 32) & 0xFFu, 0x80u));
+        const uint32_t format = a.header ? word(a.header + 0x1Cu) : 0u;
+        if (a.prim & 0x100u) // FST: UV in texels, 12.4
         {
-            o.u = (static_cast<float>(sp.u) / 16.0f) / width;
-            o.v = (static_cast<float>(sp.v) / 16.0f) / height;
+            o.u = (static_cast<float>(a.u) / 16.0f) / static_cast<float>(1u << ((format >> 16) & 0xFu));
+            o.v = (static_cast<float>(a.v) / 16.0f) / static_cast<float>(1u << ((format >> 20) & 0xFu));
         }
         else
         {
-            o.u = sp.s;
-            o.v = sp.t;
+            o.u = a.s;
+            o.v = a.t;
         }
-        ++sp.count;
-        const native_renderer::Vertex *c = sp.corners;
-        if ((sp.prim & 7u) == 6u) // SPRITE: two opposite corners
+        std::vector<native_renderer::Vertex> &v = a.strip;
+        v.push_back(o);
+        if (!kick)
+            return;
+        const size_t n = v.size();
+        switch (a.prim & 7u)
         {
-            if (sp.count < 2u)
-                return;
-            sp.count = 0;
-            native_renderer::Vertex q[4] = {c[0], c[1], c[1], c[1]};
-            q[1].y = c[0].y; q[1].v = c[0].v; // (x1, y0)
-            q[2].x = c[0].x; q[2].u = c[0].u; // (x0, y1)
-            const native_renderer::Vertex tris[6] = {q[0], q[1], q[2], q[1], q[3], q[2]};
-            spriteDraw(tris, 6);
-            return;
+        case 1: case 2: // line, line strip: one pixel wide
+            if (n >= 2)
+            {
+                native_renderer::Vertex p0 = v[n - 2], p1 = v[n - 1];
+                float dx = (p1.x - p0.x) * 256.0f, dy = (p1.y - p0.y) * 224.0f;
+                const float len = std::sqrt(dx * dx + dy * dy);
+                if (len > 0.0f)
+                {
+                    const float nx = -dy / len * 0.5f / 256.0f, ny = dx / len * 0.5f / 224.0f;
+                    native_renderer::Vertex q[4] = {p0, p0, p1, p1};
+                    q[0].x += nx; q[0].y += ny; q[1].x -= nx; q[1].y -= ny;
+                    q[2].x += nx; q[2].y += ny; q[3].x -= nx; q[3].y -= ny;
+                    emit2D(q[0], q[1], q[2]);
+                    emit2D(q[1], q[3], q[2]);
+                }
+                if ((a.prim & 7u) == 1u)
+                    v.clear();
+            }
+            break;
+        case 3: // triangles
+            if (n == 3)
+            {
+                emit2D(v[0], v[1], v[2]);
+                v.clear();
+            }
+            break;
+        case 4: // triangle strip
+            if (n >= 3)
+                emit2D(v[n - 3], v[n - 2], v[n - 1]);
+            break;
+        case 5: // triangle fan
+            if (n >= 3)
+                emit2D(v[0], v[n - 2], v[n - 1]);
+            break;
+        case 6: // sprite: two opposite corners
+            if (n == 2)
+            {
+                native_renderer::Vertex q[4] = {v[0], v[1], v[1], v[1]};
+                q[1].y = v[0].y; q[1].v = v[0].v; // (x1, y0)
+                q[2].x = v[0].x; q[2].u = v[0].u; // (x0, y1)
+                emit2D(q[0], q[1], q[2]);
+                emit2D(q[1], q[3], q[2]);
+                v.clear();
+            }
+            break;
+        default:
+            v.clear();
         }
-        if (sp.count < 4u) // triangle strip of four
+    }
+
+    // SOTC_GSREG_CENSUS=1: gsReg calls by return address, every 120 frames
+    // (resolve with recomp/game/symbols.txt): who draws 2D through gsReg.
+    void gsRegCensus(uint32_t ra)
+    {
+        static const bool on = std::getenv("SOTC_GSREG_CENSUS") != nullptr;
+        if (!on)
             return;
-        sp.count = 0;
-        const native_renderer::Vertex tris[6] = {c[0], c[1], c[2], c[1], c[3], c[2]};
-        spriteDraw(tris, 6);
+        static std::unordered_map<uint32_t, uint32_t> calls;
+        static uint64_t since = 0;
+        ++calls[ra];
+        if (g_frame < since + 120u)
+            return;
+        std::vector<std::pair<uint32_t, uint32_t>> top(calls.begin(), calls.end());
+        std::sort(top.begin(), top.end(), [](const auto &a, const auto &b) { return a.second > b.second; });
+        std::string line = "[gsreg] frame=" + std::to_string(g_frame);
+        char item[32];
+        for (size_t i = 0; i < top.size() && i < 24u; ++i)
+        {
+            std::snprintf(item, sizeof(item), " %08x:%u", top[i].first, top[i].second);
+            line += item;
+        }
+        std::fprintf(stderr, "%s\n", line.c_str());
+        calls.clear();
+        since = g_frame;
     }
 
     void gsRegHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t ra = GPR_U32(ctx, 31);
-        for (const Emitter &e : g_emitters)
+        gsRegCensus(ra);
+        for (const Range &r : k2D)
         {
-            if (ra < e.start || ra >= e.end)
+            if (ra < r.start || ra >= r.end)
                 continue;
             syncFrame(rdram);
+            Assembler &a = g_2d;
+            a.layer = g_layers.empty() ? 25u : g_layers.back();
+            a.header = g_requested;
             const uint64_t value = GPR_U64(ctx, 5);
             switch (GPR_U32(ctx, 4) & 0xFFu)
             {
-            case 0x00u: g_sprite.prim = value; g_sprite.count = 0; break;
-            case 0x01u: g_sprite.rgbaq = value; break;
+            case 0x00u: a.prim = value; a.strip.clear(); break;
+            case 0x01u: a.rgbaq = value; break;
             case 0x02u:
-                std::memcpy(&g_sprite.s, &value, 4);
-                std::memcpy(&g_sprite.t, reinterpret_cast<const uint8_t *>(&value) + 4, 4);
+                std::memcpy(&a.s, &value, 4);
+                std::memcpy(&a.t, reinterpret_cast<const uint8_t *>(&value) + 4, 4);
                 break;
-            case 0x03u: g_sprite.u = value & 0x3FFFu; g_sprite.v = (value >> 16) & 0x3FFFu; break;
-            case 0x04u: case 0x05u: spriteVertex(value); break;
-            case 0x42u: g_sprite.alpha = value; break;
+            case 0x03u: a.u = value & 0x3FFFu; a.v = (value >> 16) & 0x3FFFu; break;
+            case 0x04u: case 0x05u: vertex2D(value, true); break;   // XYZF2, XYZ2
+            case 0x0Cu: case 0x0Du: vertex2D(value, false); break;  // XYZF3, XYZ3: no drawing kick
+            case 0x42u: a.alpha = value; break;
             }
             break;
         }
         g_gsReg(rdram, ctx, runtime);
     }
 
-    template <int Index>
-    void emitterHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void texTransRequestHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        syncFrame(rdram);
-        const Emitter &e = g_emitters[Index];
-        g_sprite = Sprite{};
-        if (e.objectReg >= 0)
-        {
-            const uint32_t resource = word(GPR_U32(ctx, e.objectReg));
-            g_sprite.header = resource ? word(resource + 0x20u) : 0u;
-        }
-        if (e.layer >= 0)
-            g_sprite.layer = static_cast<uint32_t>(e.layer);
-        else if (e.start == 0x010A32B8u) // spriteDrawSprite(obj, z, layer)
-            g_sprite.layer = 25u + std::min<uint32_t>(GPR_U32(ctx, 6), 5u);
-        else if (e.start == 0x0108A408u) // fadeScreen
-            g_sprite.layer = word(0x1186350u);
-        else // drawDemoBar(amount, layer, height)
-            g_sprite.layer = GPR_U32(ctx, 4);
-        e.original(rdram, ctx, runtime);
+        g_ram = rdram;
+        const uint32_t resource = GPR_U32(ctx, 4);
+        g_requested = resource ? word(resource + 0x20u) : 0u;
+        g_texTransRequest(rdram, ctx, runtime);
     }
 
-    template <int... I>
-    void installEmitters(PS2Runtime &runtime, std::integer_sequence<int, I...>)
+    void pushLayerHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        const PS2Runtime::RecompiledFunction hooks[] = {emitterHook<I>...};
-        for (int i = 0; i < kEmitters; ++i)
-            if (runtime.hasFunction(g_emitters[i].start))
-            {
-                g_emitters[i].original = runtime.lookupFunction(g_emitters[i].start);
-                runtime.registerFunction(g_emitters[i].start, hooks[i]);
-            }
+        g_layers.push_back(GPR_U32(ctx, 4));
+        g_pushLayer(rdram, ctx, runtime);
+    }
+
+    void popLayerHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (!g_layers.empty())
+            g_layers.pop_back();
+        g_popLayer(rdram, ctx, runtime);
     }
 
     void modelDispHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -781,11 +856,16 @@ void installSotcNative(PS2Runtime &runtime)
     runtime.registerFunction(kModelDisp, modelDispHook);
     g_getCameraContext = runtime.lookupFunction(kGetCameraContext);
     runtime.registerFunction(kGetCameraContext, getCameraContextHook);
-    if (runtime.hasFunction(kGsReg))
+    if (runtime.hasFunction(kGsReg) && runtime.hasFunction(kTexTransRequest) && runtime.hasFunction(kPushLayer) && runtime.hasFunction(kPopLayer))
     {
-        installEmitters(runtime, std::make_integer_sequence<int, kEmitters>{});
         g_gsReg = runtime.lookupFunction(kGsReg);
         runtime.registerFunction(kGsReg, gsRegHook);
+        g_texTransRequest = runtime.lookupFunction(kTexTransRequest);
+        runtime.registerFunction(kTexTransRequest, texTransRequestHook);
+        g_pushLayer = runtime.lookupFunction(kPushLayer);
+        runtime.registerFunction(kPushLayer, pushLayerHook);
+        g_popLayer = runtime.lookupFunction(kPopLayer);
+        runtime.registerFunction(kPopLayer, popLayerHook);
     }
     std::cerr << "[sotc:native] models drawn by the native renderer" << std::endl;
 }
