@@ -220,6 +220,60 @@ namespace sotc_native
         return object ? texture(word(object + 0x20u)) : 0;
     }
 
+    // modelGetDlLayer (0x1096a80): the display list layer of a surface; the
+    // layers go to the GS in increasing order, so it is the draw order.
+    uint32_t surfaceLayer(uint32_t header, uint32_t s, bool fading)
+    {
+        uint64_t flags;
+        std::memcpy(&flags, g_ram + ((s + 0x18u) & 0x1FFFFF8u), 8);
+        const uint32_t owner = word(header + 8u);
+        const bool second = owner && word(owner + 0x38u) == 1u;
+        const auto bit = [flags](int n) { return ((flags >> n) & 1u) != 0; };
+        if (flags & 0x1020000u)
+            return 8;
+        if (bit(23))
+            return 10;
+        if (bit(25))
+            return 16;
+        if (bit(9))
+            return 17;
+        if (bit(10))
+            return (bit(8) || fading) ? 13 : 12;
+        if (bit(14))
+            return 1;
+        if (bit(15))
+            return 18;
+        if (bit(8) || fading)
+            return second ? 6 : 3;
+        return second ? 5 : 2;
+    }
+
+    // modelDisp's skips: bit 28 never drawn; bit 16 (boss effect) and bit 23
+    // (shadow effect) only while getNowBossEffect (0x1186290) has bit 0 / 1;
+    // bit 25 not while the underwater fog (getFogUnderWater, 0x1186328) is on.
+    bool surfaceDrawn(uint32_t s)
+    {
+        uint64_t flags;
+        std::memcpy(&flags, g_ram + ((s + 0x18u) & 0x1FFFFF8u), 8);
+        const uint32_t boss = word(0x1186290u);
+        if ((flags >> 28) & 1u)
+            return false;
+        if ((flags >> 16) & 1u)
+            return (boss & 1u) != 0;
+        if (((flags >> 23) & 1u) && !(boss & 2u))
+            return false;
+        return !(((flags >> 25) & 1u) && word(0x1186328u) != 0u);
+    }
+
+    // The ALPHA_1 register in the surface's A+D packet (+0x60): 0x48 adds.
+    native_renderer::Blend surfaceBlend(uint32_t s)
+    {
+        for (uint32_t q = s + 0x60u; q < s + 0xC0u; q += 16u)
+            if (word(q + 8u) == 0x42u)
+                return (word(q) & 0xFFu) == 0x48u ? native_renderer::Blend::Additive : native_renderer::Blend::Normal;
+        return native_renderer::Blend::Normal;
+    }
+
     void endFrame()
     {
         if (g_frame == 0)
@@ -267,6 +321,7 @@ namespace sotc_native
             }
 
         const uint32_t header = word(word(instance) + 0x20u);
+        const bool fading = real(instance + 0x244u) > 0.0f; // modelDisp: param_1[0x91]
         uint64_t lodWord;
         std::memcpy(&lodWord, rdram + ((instance + 0x250u) & 0x1FFFFF8u), 8);
         uint32_t lod = static_cast<uint32_t>((lodWord >> 40) & 7u);
@@ -287,6 +342,9 @@ namespace sotc_native
                 if (visibility != 0u && visibility != 2u)
                     continue;
             }
+            const uint32_t surface = word(pk + 8u), s = word(header + 0x50u) + surface * 0x120u;
+            if (!surfaceDrawn(s))
+                continue;
             const uint32_t size = word(pk), data = word(pk + 16u);
             const uint64_t id = (static_cast<uint64_t>(size) << 32) | data;
             if (!native_renderer::hasMesh(id))
@@ -295,7 +353,11 @@ namespace sotc_native
                 buildMesh(data, size, vertices);
                 native_renderer::uploadMesh(id, vertices.data(), static_cast<uint32_t>(vertices.size()));
             }
-            native_renderer::draw(id, clip, surfaceTexture(header, word(pk + 8u)));
+            native_renderer::DrawState state;
+            state.texture = surfaceTexture(header, surface);
+            state.blend = surfaceBlend(s);
+            state.order = surfaceLayer(header, s, fading);
+            native_renderer::draw(id, clip, state);
             ++g_frameDraws;
         }
     }

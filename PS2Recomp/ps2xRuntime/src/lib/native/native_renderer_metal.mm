@@ -4,6 +4,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <iostream>
@@ -58,10 +59,10 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
     else
         shade = in.color.rgb;
     float4 t = textured != 0 ? tex.sample(repeatLinear, in.uv) : float4(1.0);
-    float alpha = t.a * 2.0 * in.color.a; // texture alpha 0x80 = opaque
-    if (textured != 0 && alpha < 0.25)
+    float alpha = saturate(t.a * (textured != 0 ? 2.0 : 1.0) * in.color.a); // texture alpha 0x80 = opaque
+    if (alpha < 0.02)
         discard_fragment();
-    return float4(saturate(t.rgb * shade), 1.0);
+    return float4(saturate(t.rgb * shade), alpha);
 }
 )MSL";
 
@@ -74,7 +75,7 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
     struct Draw
     {
         uint64_t mesh;
-        uint64_t texture;
+        native_renderer::DrawState state;
         float clip[16];
     };
 
@@ -82,7 +83,9 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
     {
         id<MTLDevice> device = nil;
         id<MTLCommandQueue> queue = nil;
-        id<MTLRenderPipelineState> pipeline = nil;
+        id<MTLRenderPipelineState> pipeline = nil;  // normal blend
+        id<MTLRenderPipelineState> additive = nil;
+        id<MTLDepthStencilState> depthReadOnly = nil;
         id<MTLDepthStencilState> depthState = nil;
         id<MTLTexture> color = nil, depth = nil;
         uint32_t width = 0, height = 0;
@@ -124,7 +127,17 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
             desc.vertexDescriptor = layout;
             desc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
             desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+            auto blend = desc.colorAttachments[0];
+            blend.blendingEnabled = YES;
+            blend.rgbBlendOperation = MTLBlendOperationAdd;
+            blend.sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+            blend.destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+            blend.alphaBlendOperation = MTLBlendOperationAdd;
+            blend.sourceAlphaBlendFactor = MTLBlendFactorOne;
+            blend.destinationAlphaBlendFactor = MTLBlendFactorZero;
             pipeline = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+            blend.destinationRGBBlendFactor = MTLBlendFactorOne;
+            additive = [device newRenderPipelineStateWithDescriptor:desc error:&error];
             [desc release];
             [library release];
             if (!pipeline)
@@ -136,6 +149,8 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
             depthDesc.depthCompareFunction = MTLCompareFunctionLess;
             depthDesc.depthWriteEnabled = YES;
             depthState = [device newDepthStencilStateWithDescriptor:depthDesc];
+            depthDesc.depthWriteEnabled = NO;
+            depthReadOnly = [device newDepthStencilStateWithDescriptor:depthDesc];
             [depthDesc release];
             return true;
         }
@@ -174,17 +189,25 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
                 pass.depthAttachment.storeAction = MTLStoreActionDontCare;
                 id<MTLCommandBuffer> commands = [queue commandBuffer];
                 id<MTLRenderCommandEncoder> encoder = [commands renderCommandEncoderWithDescriptor:pass];
-                [encoder setRenderPipelineState:pipeline];
-                [encoder setDepthStencilState:depthState];
                 [encoder setCullMode:MTLCullModeNone];
+                std::stable_sort(draws.begin(), draws.end(), [](const Draw &a, const Draw &b) { return a.state.order < b.state.order; });
+                int bound = -1;
                 for (const Draw &d : draws)
                 {
+                    const int mode = d.state.blend == native_renderer::Blend::Additive ? 1 : 0;
+                    if (mode != bound)
+                    {
+                        // Additive glows do not hide what is drawn after them.
+                        [encoder setRenderPipelineState:mode ? additive : pipeline];
+                        [encoder setDepthStencilState:mode ? depthReadOnly : depthState];
+                        bound = mode;
+                    }
                     auto it = meshes.find(d.mesh);
                     if (it == meshes.end() || it->second.count == 0)
                         continue;
                     [encoder setVertexBuffer:it->second.buffer offset:0 atIndex:0];
                     [encoder setVertexBytes:d.clip length:sizeof(d.clip) atIndex:1];
-                    auto tex = d.texture ? textures.find(d.texture) : textures.end();
+                    auto tex = d.state.texture ? textures.find(d.state.texture) : textures.end();
                     const int textured = tex != textures.end() ? 1 : 0;
                     if (textured)
                         [encoder setFragmentTexture:tex->second atIndex:0];
@@ -273,14 +296,14 @@ namespace native_renderer
             r->draws.clear();
     }
 
-    void draw(uint64_t mesh, const float clip[16], uint64_t texture)
+    void draw(uint64_t mesh, const float clip[16], const DrawState &state)
     {
         Renderer *r = renderer();
         if (!r)
             return;
         Draw d;
         d.mesh = mesh;
-        d.texture = texture;
+        d.state = state;
         std::memcpy(d.clip, clip, sizeof(d.clip));
         r->draws.push_back(d);
     }

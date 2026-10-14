@@ -32,7 +32,18 @@ namespace native_renderer
     // space with x, y and w as the game's projection gives them (x/w, y/w in
     // -1..1, y up); depth comes from w.
     void beginFrame();
-    void draw(uint64_t mesh, const float clip[16], uint64_t texture = 0); // texture 0: none
+    enum class Blend : uint8_t
+    {
+        Normal,   // Cs x As + Cd x (1 - As), alpha = texture x vertex (0x80 = 1)
+        Additive, // Cs x As + Cd
+    };
+    struct DrawState
+    {
+        uint64_t texture = 0; // 0: none
+        Blend blend = Blend::Normal;
+        uint32_t order = 0;   // draws go in this order (stable), like the game's display list layers
+    };
+    void draw(uint64_t mesh, const float clip[16], const DrawState &state);
     void endFrame(uint32_t width, uint32_t height);
 
     // Shown instead of the emulated picture (the emulator's present path asks).

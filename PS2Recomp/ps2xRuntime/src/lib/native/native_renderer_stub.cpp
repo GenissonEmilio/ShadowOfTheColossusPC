@@ -12,7 +12,7 @@ namespace native_renderer
     void beginFrame() {}
     bool hasTexture(uint64_t) { return false; }
     void uploadTexture(uint64_t, uint32_t, uint32_t, const uint8_t *) {}
-    void draw(uint64_t, const float[16], uint64_t) {}
+    void draw(uint64_t, const float[16], const DrawState &) {}
     void endFrame(uint32_t, uint32_t) {}
     void setShown(bool) {}
     bool shown() { return false; }
