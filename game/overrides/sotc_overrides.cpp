@@ -3,6 +3,7 @@
 #include "ps2_runtime_macros.h"
 #include "game_overrides.h"
 #include "runtime/ee_scheduler.h"
+#include "runtime/ps2_stats.h"
 
 #include <array>
 #include <atomic>
@@ -79,6 +80,102 @@ namespace
             runtime.registerFunction(addr, tracers[slot]);
             ++slot;
         }
+    }
+
+    // SOTC_CENSUS=1: calls per frame of the game's drawing functions
+    // (docs/native_renderer_map.md), printed every 120 game frames; for
+    // modelDisp also the distinct models and their draw packets.
+    struct CensusEntry
+    {
+        uint32_t addr;
+        const char *name;
+    };
+    constexpr CensusEntry kCensus[] = {
+        {0x01097118u, "modelDisp"}, {0x01098450u, "modelClipSkin"}, {0x01098840u, "modelClipSolid"}, {0x01098cc0u, "skinDisp?"},
+        {0x0109ab80u, "meshDisp"}, {0x0109a4d8u, "meshDispInstance"}, {0x0109e0e8u, "shadowDisp"}, {0x0109d320u, "shadowDraw"},
+        {0x0109a228u, "ptclmanEnd"}, {0x0109a170u, "ptclDisplayListPut"}, {0x0109c108u, "waterRefraction"}, {0x01085258u, "bgDraw"},
+        {0x01090a88u, "kPrintf"}, {0x001c5548u, "spriteTexFast"}, {0x010a32b8u, "spriteDrawSprite"}, {0x01114b50u, "transMicroCode"},
+        {0x010aad48u, "texTransRequest"}, {0x010aae70u, "texTransRequestMulti"}, {0x01092f50u, "lineObjectDisp"},
+        {0x01348468u, "dispVuColiDispWork"}, {0x01385128u, "dischargeMain"},
+    };
+    constexpr int kCensusCount = static_cast<int>(sizeof(kCensus) / sizeof(kCensus[0]));
+    std::array<PS2Runtime::RecompiledFunction, kCensusCount> g_censusOriginal{};
+    std::array<uint64_t, kCensusCount> g_censusCalls{};
+    uint64_t g_censusModelPackets = 0;
+    std::array<uint32_t, 4096> g_censusModels{}; // distinct model headers this window (open addressing)
+    uint64_t g_censusDistinct = 0, g_censusFrame0 = 0;
+
+    void censusReport()
+    {
+        const uint64_t frame = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
+        if (g_censusFrame0 == 0)
+            g_censusFrame0 = frame;
+        if (frame < g_censusFrame0 + 120u)
+            return;
+        const double frames = static_cast<double>(frame - g_censusFrame0);
+        char line[128];
+        std::string out = "[census] frame=" + std::to_string(frame);
+        for (int i = 0; i < kCensusCount; ++i)
+            if (g_censusCalls[i])
+            {
+                std::snprintf(line, sizeof(line), " %s=%.1f", kCensus[i].name, g_censusCalls[i] / frames);
+                out += line;
+                g_censusCalls[i] = 0;
+            }
+        std::snprintf(line, sizeof(line), " | distinctModels=%llu modelPackets/frame=%.1f", (unsigned long long)g_censusDistinct,
+                      g_censusModelPackets / frames);
+        out += line;
+        std::cerr << out << std::endl;
+        g_censusModelPackets = 0;
+        g_censusDistinct = 0;
+        g_censusModels.fill(0);
+        g_censusFrame0 = frame;
+    }
+
+    template <int Slot>
+    void censusCall(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        ++g_censusCalls[Slot];
+        if (Slot == 0) // modelDisp(instance, matrix): header = *(*instance + 0x20)
+        {
+            auto word = [rdram](uint32_t addr) { uint32_t v = 0; std::memcpy(&v, rdram + (addr & 0x1FFFFFCu), 4); return v; };
+            const uint32_t header = word(word(GPR_U32(ctx, 4)) + 0x20u);
+            g_censusModelPackets += word(header + 0x64u);
+            for (uint32_t probe = (header >> 4) & 4095u;; probe = (probe + 1u) & 4095u)
+            {
+                if (g_censusModels[probe] == header)
+                    break;
+                if (g_censusModels[probe] == 0u)
+                {
+                    g_censusModels[probe] = header;
+                    ++g_censusDistinct;
+                    break;
+                }
+            }
+            censusReport();
+        }
+        g_censusOriginal[Slot](rdram, ctx, runtime);
+    }
+
+    template <int... Slots>
+    constexpr std::array<PS2Runtime::RecompiledFunction, sizeof...(Slots)> makeCensus(std::integer_sequence<int, Slots...>)
+    {
+        return {&censusCall<Slots>...};
+    }
+
+    void installCensus(PS2Runtime &runtime)
+    {
+        if (!std::getenv("SOTC_CENSUS"))
+            return;
+        static const auto hooks = makeCensus(std::make_integer_sequence<int, kCensusCount>{});
+        for (int i = 0; i < kCensusCount; ++i)
+            if (runtime.hasFunction(kCensus[i].addr))
+            {
+                g_censusOriginal[i] = runtime.lookupFunction(kCensus[i].addr);
+                runtime.registerFunction(kCensus[i].addr, hooks[i]);
+            }
+            else
+                std::cerr << "[census] no function at 0x" << std::hex << kCensus[i].addr << std::dec << " (" << kCensus[i].name << ")" << std::endl;
     }
 
     // SOTC_DUMP_SPRITE_PACKETS=1: dump the display-list bytes spriteDrawSprite emits.
@@ -178,6 +275,7 @@ namespace
             runtime.registerFunction(kSpriteDrawSprite, spriteDrawSpriteHook);
         }
         installCallTracing(runtime);
+        installCensus(runtime);
         if (runtime.hasFunction(kGamecoreEntry))
         {
             g_gamecoreEntry = runtime.lookupFunction(kGamecoreEntry);

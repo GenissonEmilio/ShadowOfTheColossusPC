@@ -66,11 +66,25 @@ microcodes (characters).
 - line objects (debug and effects), `dispVuColiDispWork`, `dischargeMain`.
 - textures: `texTransRequest`, `texTransRequestMulti`, `texResetVRAMRequest`.
 
+## Census (SOTC_CENSUS=1, shrine, Wander standing; per frame)
+
+| function | calls | |
+|----------|-------|---|
+| modelDisp | ~50 | 35 distinct models, ~2800 draw packets in their headers |
+| modelClipSolid / modelClipSkin | 124 / 20 | from `ClipLayoutObjModel`: scenery, objects and characters are all layout-object models, clipped part by part |
+| meshDisp | 7-15 | |
+| ptclmanEnd (particles) | ~50 | |
+| spriteTexFast | 192 | screen passes: 0x109E2A0 (32 call sites, the bloom chain), 0x10A0100, `depthOfField`, `shadowDraw`, `reflectionBegin`, `waterRefractionBegin`, `screenBlur`, `bossDeathEffectEnd` |
+| texTransRequest | ~310 | the game re-uploads its textures to the 4 MB GS memory every frame |
+| transMicroCode | ~237 | |
+
+So nearly all 3D goes through one model system; screen effects are
+sprites over buffers; and the per-frame texture uploads disappear once
+textures live in GPU memory.
+
 ## Next
 
-1. Count, at run time, the calls of each system per frame (hooks on the
-   functions above) to see what the shrine and the field draw.
-2. Read one model straight from guest memory (header -> surfaces ->
+1. Read one model straight from guest memory (header -> surfaces ->
    packets -> vertex blocks) and draw it with Metal next to the emulated
    picture.
-3. Then the Metal renderer at `modelDisp` level, system by system.
+2. Then the Metal renderer at `modelDisp` level, system by system.
