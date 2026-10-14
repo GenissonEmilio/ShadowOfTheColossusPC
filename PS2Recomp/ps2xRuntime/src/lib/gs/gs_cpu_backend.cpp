@@ -1,5 +1,6 @@
 #include <map>
 #include <chrono>
+#include "runtime/native_renderer.h"
 #include "runtime/ps2_stats.h"
 #include "runtime/gs/gs_parallel.h"
 #include <climits>
@@ -3404,7 +3405,32 @@ PresentationFrame GSCpuBackend::Present(const GSPresentationRequest &request)
 
     thread_local GSCpuBackend snapshotBackend;
     snapshotBackend.Initialize(snapshot.data(), static_cast<uint32_t>(snapshot.size()));
-    return snapshotBackend.PresentFromLocalMemory(request);
+    PresentationFrame frame = snapshotBackend.PresentFromLocalMemory(request);
+    // A game override drawing natively (runtime/native_renderer.h) shows its picture instead.
+    if (frame && native_renderer::shown())
+    {
+        // Scaled to the display output, in the presentation's layout (rows
+        // of kHostFrameWidth pixels).
+        thread_local std::vector<uint8_t> native;
+        uint32_t width = 0, height = 0;
+        if (native_renderer::latestFrame(native, width, height) && width && height)
+        {
+            constexpr uint32_t kStride = 640u;
+            for (uint32_t y = 0; y < frame.height; ++y)
+            {
+                const uint32_t sy = y * height / frame.height;
+                for (uint32_t x = 0; x < frame.width && x < kStride; ++x)
+                {
+                    const size_t dst = (static_cast<size_t>(y) * kStride + x) * 4u;
+                    if (dst + 4u > frame.pixels.size())
+                        break;
+                    const uint32_t sx = x * width / frame.width;
+                    std::memcpy(&frame.pixels[dst], &native[(static_cast<size_t>(sy) * width + sx) * 4u], 4);
+                }
+            }
+        }
+    }
+    return frame;
 }
 
 PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationRequest &request)

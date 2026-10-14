@@ -12,6 +12,8 @@
 #include <sstream>
 #include <string>
 
+void installSotcNative(PS2Runtime &runtime); // sotc_native.cpp
+
 namespace
 {
     // Entry point of GAMECORE.XFF as laid out by the game's own loader.
@@ -339,6 +341,7 @@ namespace
         }
         installCallTracing(runtime);
         installCensus(runtime);
+        installSotcNative(runtime);
         if (std::getenv("SOTC_MODEL_DUMP") && runtime.hasFunction(kModelDisp) && runtime.hasFunction(kGetCameraContext))
         {
             g_modelDispOriginal = runtime.lookupFunction(kModelDisp);

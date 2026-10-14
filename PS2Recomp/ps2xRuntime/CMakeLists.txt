@@ -452,11 +452,11 @@ add_library(ps2_runtime STATIC
 
 # GPU GS rasterizer (Metal) on macOS, the default there (PS2X_GS_GPU=0 = CPU).
 if(NOT APPLE)
-    target_sources(ps2_runtime PRIVATE src/lib/gs/gs_metal_raster_stub.cpp)
+    target_sources(ps2_runtime PRIVATE src/lib/gs/gs_metal_raster_stub.cpp src/lib/native/native_renderer_stub.cpp)
 endif()
 if(APPLE)
-    target_sources(ps2_runtime PRIVATE src/lib/gs/metal/gs_metal_raster.mm)
-    set_source_files_properties(src/lib/gs/metal/gs_metal_raster.mm PROPERTIES SKIP_PRECOMPILE_HEADERS ON SKIP_UNITY_BUILD_INCLUSION ON)
+    target_sources(ps2_runtime PRIVATE src/lib/gs/metal/gs_metal_raster.mm src/lib/native/native_renderer_metal.mm)
+    set_source_files_properties(src/lib/gs/metal/gs_metal_raster.mm src/lib/native/native_renderer_metal.mm PROPERTIES SKIP_PRECOMPILE_HEADERS ON SKIP_UNITY_BUILD_INCLUSION ON)
     target_link_libraries(ps2_runtime PUBLIC "-framework Metal" "-framework Foundation" "-framework OpenGL")
     target_compile_definitions(ps2_runtime PUBLIC PS2X_HAVE_METAL=1)
 endif()
