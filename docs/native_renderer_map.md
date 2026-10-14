@@ -94,6 +94,14 @@ space) with the same lights.
 Skinned characters: `modelClipSkin` (0x1098450); 0x1098CC0 selects 14
 microcodes (characters).
 
+Cloth and hair (`meshCreate` / `meshDisp`, 0x109ab80): grids simulated on
+the CPU, ~15 a frame in the shrine (Wander's cloak, Mono's dress). The "#"
+object's +0x20 block: [0]/[1] two buffers, [2] rows, [3] columns, [4] the
+current one. A buffer: DMA/VIF header, the view matrix (qwords 4-7), then
+per row an UNPACK and columns x 4 qwords: world position, normal (world),
+ST(Q), colour as floats (0x80 = 1). Each row joins the next as a strip. The
+texture is whatever the caller requested just before.
+
 ## Other systems that append chains or microcode
 
 - `mesh*` (0x109a4d8-): `meshDisp`, `meshDispInstance`, `meshTransMatrix`,

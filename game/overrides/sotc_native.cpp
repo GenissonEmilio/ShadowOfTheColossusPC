@@ -798,6 +798,84 @@ namespace sotc_native
         g_popLayer(rdram, ctx, runtime);
     }
 
+    // ---- Cloth and hair: meshDisp -------------------------------------------
+    //
+    // meshCreate builds a grid of rows x columns simulated on the CPU (two
+    // buffers, the current one at +0x10 of the "#" object's +0x20 block:
+    // [0]/[1] buffers, [2] rows, [3] columns, [4] current). A buffer holds
+    // the view matrix (qwords 4-7), then per row an UNPACK and `columns`
+    // vertices of 4 qwords: world position, normal, ST(Q), colour (floats,
+    // 0x80 = 1); triangle strips join each row to the next. meshDisp (0x109ab80)
+    // chains the current buffer; the caller has asked for the texture.
+    // Lights in camera space: those of the last skinned part drawn (the
+    // character the cloth hangs from).
+    float g_viewLights[32];
+    bool g_haveViewLights = false;
+    constexpr uint32_t kMeshDisp = 0x0109AB80u;
+    PS2Runtime::RecompiledFunction g_meshDisp = nullptr;
+
+    void meshDispHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        syncFrame(rdram);
+        const uint32_t object = GPR_U32(ctx, 4);
+        const uint32_t header = g_requested;
+        const uint32_t layer = g_layers.empty() ? 2u : g_layers.back();
+        g_meshDisp(rdram, ctx, runtime);
+        if (!g_cameraContext || g_ram[(object + 8u) & 0x1FFFFFFu] != '#')
+            return;
+        const uint32_t base = object + 0x20u;
+        const uint32_t rows = word(base + 8u), columns = word(base + 12u);
+        const uint32_t buffer = word(base + (word(base + 16u) & 1u) * 4u);
+        if (rows < 2u || rows > 64u || columns < 2u || columns > 64u || !buffer)
+            return;
+        float view[16]; // the buffer's view matrix: normals to camera space
+        for (int i = 0; i < 16; ++i)
+            view[i] = real(buffer + 0x40u + i * 4u);
+        auto vertexAt = [&](uint32_t r, uint32_t c)
+        {
+            const uint32_t q = buffer + 0xB0u + r * (columns * 0x40u + 0x10u) + c * 0x40u;
+            native_renderer::Vertex v{};
+            v.x = real(q);
+            v.y = real(q + 4u);
+            v.z = real(q + 8u);
+            const float nx = real(q + 16u), ny = real(q + 20u), nz = real(q + 24u);
+            v.nx = view[0] * nx + view[4] * ny + view[8] * nz;
+            v.ny = view[1] * nx + view[5] * ny + view[9] * nz;
+            v.nz = view[2] * nx + view[6] * ny + view[10] * nz;
+            v.u = real(q + 32u);
+            v.v = real(q + 36u);
+            v.r = static_cast<uint8_t>(std::clamp(real(q + 48u), 0.0f, 255.0f));
+            v.g = static_cast<uint8_t>(std::clamp(real(q + 52u), 0.0f, 255.0f));
+            v.b = static_cast<uint8_t>(std::clamp(real(q + 56u), 0.0f, 255.0f));
+            v.a = static_cast<uint8_t>(std::clamp(real(q + 60u), 0.0f, 255.0f));
+            return v;
+        };
+        static std::vector<native_renderer::Vertex> tris;
+        tris.clear();
+        for (uint32_t r = 0; r + 1u < rows; ++r)
+            for (uint32_t c = 0; c + 1u < columns; ++c)
+            {
+                const native_renderer::Vertex a = vertexAt(r, c), b = vertexAt(r, c + 1u), d = vertexAt(r + 1u, c), e = vertexAt(r + 1u, c + 1u);
+                tris.insert(tris.end(), {a, b, d, b, e, d});
+            }
+        const uint64_t mesh = (1ull << 60) | g_skinnedDraws++;
+        native_renderer::uploadMesh(mesh, tris.data(), static_cast<uint32_t>(tris.size()));
+        float camera[16];
+        for (int i = 0; i < 16; ++i)
+            camera[i] = real(g_cameraContext + 0x5A0u + i * 4u);
+        native_renderer::DrawState state;
+        state.texture = texture(header);
+        state.order = layer;
+        state.fogged = layer == 2u || layer == 3u;
+        if (g_haveViewLights)
+        {
+            state.lit = true;
+            std::memcpy(state.light, g_viewLights, sizeof(state.light));
+        }
+        native_renderer::draw(mesh, camera, state);
+        ++g_frameDraws;
+    }
+
     void modelDispHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         syncFrame(rdram);
@@ -952,6 +1030,11 @@ namespace sotc_native
                 const uint32_t own = word(instance + 0xCu);
                 for (uint32_t i = 0; i < 32u; ++i)
                     state.light[i] = real(own + 0x10u + i * 4u);
+                if (mesh != id) // skinned: its lights are in camera space
+                {
+                    std::memcpy(g_viewLights, state.light, sizeof(g_viewLights));
+                    g_haveViewLights = true;
+                }
             }
             const bool twoTextures = word(s + 0x1Cu) == 2u && mesh == id;
             if (twoTextures)
@@ -998,6 +1081,11 @@ void installSotcNative(PS2Runtime &runtime)
         runtime.registerFunction(kPushLayer, pushLayerHook);
         g_popLayer = runtime.lookupFunction(kPopLayer);
         runtime.registerFunction(kPopLayer, popLayerHook);
+    }
+    if (runtime.hasFunction(kMeshDisp))
+    {
+        g_meshDisp = runtime.lookupFunction(kMeshDisp);
+        runtime.registerFunction(kMeshDisp, meshDispHook);
     }
     if (runtime.hasFunction(kZFog))
     {
