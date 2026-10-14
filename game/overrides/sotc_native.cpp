@@ -428,11 +428,37 @@ namespace sotc_native
 
     void flush2D();
 
+    // zFog (0x10ac0a8, layer 4): after the opaque world (layers 2-3) it
+    // writes a fog amount into the frame's alpha by depth, in N + 1 slices
+    // (globals at 0x118c46c: N, width, margin; 0x118c480: far) from
+    // far - margin - width to far - margin (view depth), and bgDraw then
+    // blends the background buffer (the sky, layer 1) over the scene by it.
+    constexpr uint32_t kZFog = 0x010AC0A8u;
+    PS2Runtime::RecompiledFunction g_zFog = nullptr;
+    native_renderer::Fog g_fog;
+
+    void zFogHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_ram = rdram;
+        const int32_t slices = static_cast<int32_t>(word(0x118C46Cu));
+        const float width = real(0x118C470u), margin = real(0x118C474u), farDistance = real(0x118C480u);
+        if (slices > 0 && width > 0.0f)
+        {
+            g_fog.enabled = true;
+            g_fog.width = width;
+            g_fog.start = farDistance - margin - width;
+            g_fog.steps = slices;
+        }
+        g_zFog(rdram, ctx, runtime);
+    }
+
     void endFrame()
     {
         if (g_frame == 0)
             return;
         flush2D();
+        native_renderer::setFog(g_fog);
+        g_fog = native_renderer::Fog{};
         native_renderer::endFrame(512, 448);
         static const bool show = std::atoi(std::getenv("SOTC_NATIVE")) != 2; // 2: draw, keep the emulated picture
         native_renderer::setShown(show && g_frameDraws != 0);
@@ -483,7 +509,7 @@ namespace sotc_native
     };
     constexpr Range k2D[] = {
         {0x010A24C0u, 0x010A5270u}, // spriteDrawSpriteTexNoSet .. spriteDrawSpriteST2 (menus, title, map)
-        {0x0108A408u, 0x0108A758u}, // fadeScreen, drawDemoBar (cinema bars)
+        {0x0108A288u, 0x0108A758u}, // drawFrontFog, fadeScreen, drawDemoBar (cinema bars)
         {0x0134B490u, 0x0134B6F8u}, // subtitles (pre-rendered lines, a textured sprite)
         {0x013F6B20u, 0x013F78A8u}, // HUD gauges (fans and strips)
         {0x014033F0u, 0x01403558u}, // title menu backdrop
@@ -827,6 +853,8 @@ namespace sotc_native
             state.blend = surfaceBlend(s);
             state.order = surfaceLayer(header, s, fading);
             state.opacity = opacity;
+            state.background = state.order == 1u;            // the sky
+            state.fogged = state.order == 2u || state.order == 3u; // drawn before zFog
             if (g_litPackets.count(id))
             {
                 // The instance's lights (its own 15 qwords, unpacked to VU1
@@ -866,6 +894,11 @@ void installSotcNative(PS2Runtime &runtime)
         runtime.registerFunction(kPushLayer, pushLayerHook);
         g_popLayer = runtime.lookupFunction(kPopLayer);
         runtime.registerFunction(kPopLayer, popLayerHook);
+    }
+    if (runtime.hasFunction(kZFog))
+    {
+        g_zFog = runtime.lookupFunction(kZFog);
+        runtime.registerFunction(kZFog, zFogHook);
     }
     std::cerr << "[sotc:native] models drawn by the native renderer" << std::endl;
 }

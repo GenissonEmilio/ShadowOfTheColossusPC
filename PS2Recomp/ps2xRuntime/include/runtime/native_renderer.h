@@ -48,11 +48,22 @@ namespace native_renderer
         // light[16..31] (three light colours, then ambient); it scales the
         // vertex colour.
         float opacity = 1.0f; // scales the alpha
+        bool background = false; // also drawn into the background image (what distance fades to)
+        bool fogged = false;     // fades to the background image with distance (setFog)
         bool screen = false; // 2D: positions already in clip space, no depth test or write
         bool lit = false;
         float light[32] = {};
     };
     void draw(uint64_t mesh, const float clip[16], const DrawState &state);
+    // Distance fog of this frame: fogged draws blend towards the background
+    // image by clamp((w - start) / width, 0, 1), in `steps` steps (w: depth).
+    struct Fog
+    {
+        bool enabled = false;
+        float start = 0.0f, width = 1.0f;
+        int steps = 0; // 0: smooth
+    };
+    void setFog(const Fog &fog);
     void endFrame(uint32_t width, uint32_t height);
 
     // Shown instead of the emulated picture (the emulator's present path asks).

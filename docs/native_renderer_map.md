@@ -137,6 +137,20 @@ callers are screen effects that draw into other buffers (0x10f37c8 frame
 copy, 0x108ac18 / screenBlur, bossDeathEffect*, reflection*, shadow*,
 waterRefraction*, drawFrontFog, 0x109e2a0 bloom).
 
+## Distance fog (zFog, bgDraw)
+
+The sky (surfaces in layer 1, flag bit 14) is drawn into a separate
+background buffer, not over the scene: the dome is small and would hide the
+landscape. After the opaque world (layers 2-3), `zFog` (0x10ac0a8, layer 4)
+writes a fog amount into the frame's alpha by depth: N + 1 full screen
+sprites at view depths far - margin - width + width x i / N (N, width,
+margin at 0x118c46c/70/74, far at 0x118c480), alpha i x 128 / N, Z test
+GEQUAL, so each pixel keeps the amount of the last slice in front of it.
+`bgDraw` (0x1085258) then blends the background buffer over the scene by
+that alpha (ALPHA 0x54: (Cs - Cd) x Ad + Cd): the distance fades into the
+sky. `drawFrontFog` adds a flat colour on top (layer 0x14, colour and
+amount at 0x118b8dc..f0, set by graphSetFogParam).
+
 Model instance opacity (modelDisp, to the microcode at packet + 0xdc):
 1 - instance[0x91] (+0x244), times 1 - instance[0x92] (+0x248) when the
 header's +0xc is set; 0 hides the instance (e.g. the dark wisps near Wander).

@@ -31,6 +31,14 @@ struct VOut
     float3 normal;
     float2 uv;
     float4 color;
+    float depth; // w
+};
+
+struct FogParams
+{
+    float start, width, steps;
+    int fogged;
+    float2 size;
 };
 
 struct Light
@@ -47,6 +55,7 @@ vertex VOut nativeVertex(VIn in [[stage_in]], constant float4x4 &clip [[buffer(1
     float4 c = clip * float4(in.position, 1.0);
     // Depth from w (near plane at w = 1): z / w = 1 - 1 / w.
     out.position = float4(c.x, c.y, c.w - 1.0, c.w);
+    out.depth = c.w;
     out.normal = in.normal;
     out.uv = in.uv;
     out.color = float4(in.color) / 128.0; // 0x80 = 1.0
@@ -60,7 +69,8 @@ vertex VOut nativeVertex(VIn in [[stage_in]], constant float4x4 &clip [[buffer(1
     return out;
 }
 
-fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], constant int &textured [[buffer(0)]])
+fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], texture2d<float> background [[texture(1)]],
+                               constant int &textured [[buffer(0)]], constant FogParams &fog [[buffer(1)]])
 {
     constexpr sampler repeatLinear(address::repeat, filter::linear);
     float3 shade = in.color.rgb;
@@ -68,7 +78,19 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
     float alpha = saturate(t.a * (textured != 0 ? 2.0 : 1.0) * in.color.a); // texture alpha 0x80 = opaque
     if (alpha < 0.02)
         discard_fragment();
-    return float4(saturate(t.rgb * shade), alpha);
+    float3 rgb = saturate(t.rgb * shade);
+    if (fog.fogged != 0)
+    {
+        // SotC's zFog: the scene fades into the background image (the sky)
+        // in steps of depth.
+        float f = saturate((in.depth - fog.start) / fog.width);
+        if (fog.steps > 0.0)
+            f = floor(f * fog.steps) / fog.steps;
+        constexpr sampler clampLinear(address::clamp_to_edge, filter::linear);
+        float3 bg = background.sample(clampLinear, in.position.xy / fog.size).rgb;
+        rgb = mix(rgb, bg, f);
+    }
+    return float4(rgb, alpha);
 }
 )MSL";
 
@@ -95,7 +117,8 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
         id<MTLDepthStencilState> depthOff = nil;
         id<MTLDepthStencilState> depthReadOnly = nil;
         id<MTLDepthStencilState> depthState = nil;
-        id<MTLTexture> color = nil, depth = nil;
+        id<MTLTexture> color = nil, depth = nil, backgroundColor = nil;
+        native_renderer::Fog fog;
         uint32_t width = 0, height = 0;
         std::unordered_map<uint64_t, Mesh> meshes;
         std::unordered_map<uint64_t, id<MTLTexture>> textures;
@@ -173,10 +196,14 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
                 return;
             [color release];
             [depth release];
+            [backgroundColor release];
             MTLTextureDescriptor *cd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
             cd.usage = MTLTextureUsageRenderTarget;
             cd.storageMode = MTLStorageModeShared;
             color = [device newTextureWithDescriptor:cd];
+            cd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+            cd.storageMode = MTLStorageModePrivate;
+            backgroundColor = [device newTextureWithDescriptor:cd];
             MTLTextureDescriptor *dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:w height:h mipmapped:NO];
             dd.usage = MTLTextureUsageRenderTarget;
             dd.storageMode = MTLStorageModePrivate;
@@ -190,55 +217,76 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
             @autoreleasepool
             {
                 ensureTargets(w, h);
-                MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
-                pass.colorAttachments[0].texture = color;
-                pass.colorAttachments[0].loadAction = MTLLoadActionClear;
-                pass.colorAttachments[0].clearColor = MTLClearColorMake(0.08, 0.08, 0.1, 1.0);
-                pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-                pass.depthAttachment.texture = depth;
-                pass.depthAttachment.loadAction = MTLLoadActionClear;
-                pass.depthAttachment.clearDepth = 1.0;
-                pass.depthAttachment.storeAction = MTLStoreActionDontCare;
-                id<MTLCommandBuffer> commands = [queue commandBuffer];
-                id<MTLRenderCommandEncoder> encoder = [commands renderCommandEncoderWithDescriptor:pass];
-                [encoder setCullMode:MTLCullModeNone];
                 std::stable_sort(draws.begin(), draws.end(), [](const Draw &a, const Draw &b) { return a.state.order < b.state.order; });
-                int bound = -1;
-                for (const Draw &d : draws)
+                id<MTLCommandBuffer> commands = [queue commandBuffer];
+                const bool fogOn = fog.enabled && fog.width > 0.0f;
+                auto pass = [&](id<MTLTexture> target, bool backgroundOnly)
                 {
-                    const int blendMode = static_cast<int>(d.state.blend);
-                    const int mode = blendMode | (d.state.screen ? 4 : 0);
-                    if (mode != bound)
+                    MTLRenderPassDescriptor *desc = [MTLRenderPassDescriptor renderPassDescriptor];
+                    desc.colorAttachments[0].texture = target;
+                    desc.colorAttachments[0].loadAction = MTLLoadActionClear;
+                    desc.colorAttachments[0].clearColor = MTLClearColorMake(0.08, 0.08, 0.1, 1.0);
+                    desc.colorAttachments[0].storeAction = MTLStoreActionStore;
+                    desc.depthAttachment.texture = depth;
+                    desc.depthAttachment.loadAction = MTLLoadActionClear;
+                    desc.depthAttachment.clearDepth = 1.0;
+                    desc.depthAttachment.storeAction = MTLStoreActionDontCare;
+                    id<MTLRenderCommandEncoder> encoder = [commands renderCommandEncoderWithDescriptor:desc];
+                    [encoder setCullMode:MTLCullModeNone];
+                    if (!backgroundOnly)
+                        [encoder setFragmentTexture:backgroundColor atIndex:1];
+                    int bound = -1;
+                    for (const Draw &d : draws)
                     {
-                        [encoder setRenderPipelineState:blendMode == 1 ? additive : (blendMode == 2 ? opaque : pipeline)];
-                        // Additive glows do not hide what is drawn after them; 2D ignores depth.
-                        [encoder setDepthStencilState:d.state.screen ? depthOff : (blendMode == 1 ? depthReadOnly : depthState)];
-                        bound = mode;
+                        if (backgroundOnly && !d.state.background)
+                            continue;
+                        const int blendMode = static_cast<int>(d.state.blend);
+                        const bool backdrop = d.state.screen || d.state.background;
+                        const int mode = blendMode | (backdrop ? 4 : 0);
+                        if (mode != bound)
+                        {
+                            [encoder setRenderPipelineState:blendMode == 1 ? additive : (blendMode == 2 ? opaque : pipeline)];
+                            // Additive glows do not hide what is drawn after them; 2D and the
+                            // background (the sky, a small dome drawn first) ignore depth.
+                            [encoder setDepthStencilState:backdrop ? depthOff : (blendMode == 1 ? depthReadOnly : depthState)];
+                            bound = mode;
+                        }
+                        auto it = meshes.find(d.mesh);
+                        if (it == meshes.end() || it->second.count == 0)
+                            continue;
+                        [encoder setVertexBuffer:it->second.buffer offset:0 atIndex:0];
+                        [encoder setVertexBytes:d.clip length:sizeof(d.clip) atIndex:1];
+                        struct
+                        {
+                            float light[32];
+                            int lit;
+                            float opacity;
+                            int pad[2];
+                        } light;
+                        std::memcpy(light.light, d.state.light, sizeof(light.light));
+                        light.lit = d.state.lit ? 1 : 0;
+                        light.opacity = d.state.opacity;
+                        [encoder setVertexBytes:&light length:sizeof(light) atIndex:2];
+                        auto tex = d.state.texture ? textures.find(d.state.texture) : textures.end();
+                        const int textured = tex != textures.end() ? 1 : 0;
+                        if (textured)
+                            [encoder setFragmentTexture:tex->second atIndex:0];
+                        [encoder setFragmentBytes:&textured length:sizeof(textured) atIndex:0];
+                        struct
+                        {
+                            float start, width, steps;
+                            int fogged;
+                            float size[2];
+                        } fp = {fog.start, fog.width, static_cast<float>(fog.steps), (!backgroundOnly && fogOn && d.state.fogged) ? 1 : 0,
+                                {static_cast<float>(w), static_cast<float>(h)}};
+                        [encoder setFragmentBytes:&fp length:sizeof(fp) atIndex:1];
+                        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:it->second.count];
                     }
-                    auto it = meshes.find(d.mesh);
-                    if (it == meshes.end() || it->second.count == 0)
-                        continue;
-                    [encoder setVertexBuffer:it->second.buffer offset:0 atIndex:0];
-                    [encoder setVertexBytes:d.clip length:sizeof(d.clip) atIndex:1];
-                    struct
-                    {
-                        float light[32];
-                        int lit;
-                        float opacity;
-                        int pad[2];
-                    } light;
-                    std::memcpy(light.light, d.state.light, sizeof(light.light));
-                    light.lit = d.state.lit ? 1 : 0;
-                    light.opacity = d.state.opacity;
-                    [encoder setVertexBytes:&light length:sizeof(light) atIndex:2];
-                    auto tex = d.state.texture ? textures.find(d.state.texture) : textures.end();
-                    const int textured = tex != textures.end() ? 1 : 0;
-                    if (textured)
-                        [encoder setFragmentTexture:tex->second atIndex:0];
-                    [encoder setFragmentBytes:&textured length:sizeof(textured) atIndex:0];
-                    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:it->second.count];
-                }
-                [encoder endEncoding];
+                    [encoder endEncoding];
+                };
+                if (fogOn)
+                    pass(backgroundColor, true); // the sky, what distance fades into
+                pass(color, false);
                 [commands commit];
                 [commands waitUntilCompleted];
                 std::lock_guard<std::mutex> lock(outputMutex);
@@ -330,6 +378,12 @@ namespace native_renderer
         d.state = state;
         std::memcpy(d.clip, clip, sizeof(d.clip));
         r->draws.push_back(d);
+    }
+
+    void setFog(const Fog &fog)
+    {
+        if (Renderer *r = renderer())
+            r->fog = fog;
     }
 
     void endFrame(uint32_t width, uint32_t height)

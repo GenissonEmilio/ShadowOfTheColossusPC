@@ -13,6 +13,7 @@ namespace native_renderer
     bool hasTexture(uint64_t) { return false; }
     void uploadTexture(uint64_t, uint32_t, uint32_t, const uint8_t *) {}
     void draw(uint64_t, const float[16], const DrawState &) {}
+    void setFog(const Fog &) {}
     void endFrame(uint32_t, uint32_t) {}
     void setShown(bool) {}
     bool shown() { return false; }
