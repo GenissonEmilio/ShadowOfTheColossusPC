@@ -115,6 +115,19 @@ strip), RGBAQ, UV or ST, XYZF2 per corner (12.4, screen centred on 2048,
 The recompiled function runs in pieces the dispatcher continues after the
 call returns: hooks that wrap the call see none of its gsReg writes.
 
+The same gsReg path: `spriteDrawSpriteUV/ST` (obj in a2) and `UV2/ST2` (obj
+in a0) draw SPRITE primitives (two corners) in layer 26;
+`spriteDrawSpriteTexNoSet(obj, z)`; `fadeScreen(amount)` (0x108a408, full
+screen, colour at 0x1186340/44/48, layer at 0x1186350) and
+`drawDemoBar(amount, layer, height)` (0x108a588, the cinema bars) blend with
+ALPHA 0x64, (Cs - Cd) x FIX + Cd, FIX = amount x 128. `spriteNoTexFast`
+writes its registers itself and is only called by screen effects (bloom,
+shadows, reflection, fog, boss death).
+
+Model instance opacity (modelDisp, to the microcode at packet + 0xdc):
+1 - instance[0x91] (+0x244), times 1 - instance[0x92] (+0x248) when the
+header's +0xc is set; 0 hides the instance (e.g. the dark wisps near Wander).
+
 ## Census (SOTC_CENSUS=1, shrine, Wander standing; per frame)
 
 | function | calls | |

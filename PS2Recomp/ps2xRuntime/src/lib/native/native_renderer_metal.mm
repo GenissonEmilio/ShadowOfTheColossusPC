@@ -38,6 +38,7 @@ struct Light
     float4x4 directions; // columns: the normal's x, y, z, 1
     float4x4 colours;    // columns: light 0, 1, 2, ambient
     int lit;
+    float opacity;
 };
 
 vertex VOut nativeVertex(VIn in [[stage_in]], constant float4x4 &clip [[buffer(1)]], constant Light &light [[buffer(2)]])
@@ -49,6 +50,7 @@ vertex VOut nativeVertex(VIn in [[stage_in]], constant float4x4 &clip [[buffer(1
     out.normal = in.normal;
     out.uv = in.uv;
     out.color = float4(in.color) / 128.0; // 0x80 = 1.0
+    out.color.a *= light.opacity;
     if (light.lit != 0)
     {
         float4 d = max(light.directions * float4(in.normal, 1.0), 0.0);
@@ -222,10 +224,12 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
                     {
                         float light[32];
                         int lit;
-                        int pad[3];
+                        float opacity;
+                        int pad[2];
                     } light;
                     std::memcpy(light.light, d.state.light, sizeof(light.light));
                     light.lit = d.state.lit ? 1 : 0;
+                    light.opacity = d.state.opacity;
                     [encoder setVertexBytes:&light length:sizeof(light) atIndex:2];
                     auto tex = d.state.texture ? textures.find(d.state.texture) : textures.end();
                     const int textured = tex != textures.end() ? 1 : 0;
