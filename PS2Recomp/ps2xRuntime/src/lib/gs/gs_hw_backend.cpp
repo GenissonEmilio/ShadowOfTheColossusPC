@@ -1400,6 +1400,51 @@ struct GSHwBackend::Impl
         }
     }
 
+    // A transfer only waits for the queued draws when it writes or reads GS
+    // memory they draw into (target, Z) or sample: otherwise uploads (many a
+    // frame) would split the queue into small draws.
+    void flushPendingBeforeTransfer(const GSTransferCommand &command)
+    {
+        if (!hasPending)
+            return;
+        std::array<uint8_t, 512> pages{};
+        auto mark = [&pages](uint64_t begin, uint64_t end)
+        {
+            for (uint64_t page = begin / 8192u; page < (end + 8191u) / 8192u && page < begin / 8192u + 512u; ++page)
+                pages[page % 512u] = 1;
+        };
+        const auto &b = command.bitbltbuf;
+        const uint32_t rows = std::max<uint32_t>(1u, command.trxreg.rrh);
+        uint64_t begin = 0, end = 0;
+        rowPages(b.dbp * 256u, std::max<uint32_t>(1u, b.dbw) * 64u, command.trxpos.dsay, command.trxpos.dsay + rows - 1u, b.dpsm, begin, end);
+        mark(begin, end);
+        if (command.direction != 0u)
+        {
+            rowPages(b.sbp * 256u, std::max<uint32_t>(1u, b.sbw) * 64u, command.trxpos.ssay, command.trxpos.ssay + rows - 1u, b.spsm, begin, end);
+            mark(begin, end);
+        }
+        auto hits = [&pages](uint32_t firstPage, uint32_t count)
+        {
+            for (uint32_t i = 0; i < count && i < 512u; ++i)
+                if (pages[(firstPage + i) % 512u])
+                    return true;
+            return false;
+        };
+        const DrawKey &key = pendingKey;
+        auto it = targets.find(makeTargetKey(key.fbp, key.fbw, key.fpsm));
+        const uint32_t targetPages = it != targets.end() ? static_cast<uint32_t>(it->second.dirty.size()) : 512u;
+        bool touches = hits(key.fbp, targetPages) || hits(key.zbp, targetPages);
+        if (!touches && key.tme)
+        {
+            const uint32_t tbp0 = static_cast<uint32_t>(key.tex0 & 0x3FFFu), tbw = static_cast<uint32_t>((key.tex0 >> 14) & 0x3Fu);
+            const uint32_t tpsm = static_cast<uint32_t>((key.tex0 >> 20) & 0x3Fu);
+            rowPages(tbp0 * 256u, std::max<uint32_t>(1u, tbw) * 64u, 0u, std::max<uint32_t>(1u, key.gsH) - 1u, tpsm, begin, end);
+            touches = hits(static_cast<uint32_t>(begin / 8192u), static_cast<uint32_t>((end - begin + 8191u) / 8192u));
+        }
+        if (touches)
+            flushPending();
+    }
+
     // A host upload into the rectangle of a transfer: GPU pages it replaces
     // whole are dropped (they reload from GS memory when drawn or sampled);
     // pages it covers in part are written back first so the rest survives.
@@ -2901,7 +2946,11 @@ void GSHwBackend::BeginTransfer(const GSTransferCommand &command)
     PS2X_GS_GL_LOCK();
     if (m_impl->onGlThread())
     {
-        m_impl->flushPending();
+        {
+            ps2_stats::TimeInto flushTime{ps2_stats::gsXferUs[0]};
+            m_impl->flushPendingBeforeTransfer(command);
+        }
+        ps2_stats::TimeInto hwTime{ps2_stats::gsXferUs[1]};
         // Uploads and copies go through GS memory: make the GPU's results land
         // there first so partial overwrites keep the rest.
         uint64_t begin = 0, end = 0;
@@ -2920,6 +2969,7 @@ void GSHwBackend::BeginTransfer(const GSTransferCommand &command)
         }
         m_impl->wbReason = "other";
     }
+    ps2_stats::TimeInto shadowTime{ps2_stats::gsXferUs[2]};
     m_impl->shadow->BeginTransfer(command);
 }
 
