@@ -156,7 +156,8 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
     // of seconds, so the run is the same at any speed (the pad itself is read
     // every VBlank: a press shorter than a slow frame would be lost).
     // A duration with a "v" suffix counts guest VBlanks from the press, and a
-    // start of "+<n>v" is n VBlanks after the previous entry's start: SotC
+    // start of "+<n>v" is n VBlanks after the previous entry's start ("<n>v":
+    // at guest VBlank n): SotC
     // moves Wander by VBlank time, so a walk timed in VBlanks covers the same
     // ground at any frame rate. Each entry's first and last game frame go to
     // the log ([input]). A start of "@<addr>=<value>" (hex) waits for that
@@ -168,6 +169,7 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
     {
         double at = 0.0;        // start (seconds or frames), or VBlanks after the previous entry's start
         bool afterPrevious = false;
+        bool atVblank = false;  // start at an absolute guest VBlank ("<n>v")
         bool onMemory = false;  // start when the word at memoryAddress holds memoryValue
         uint32_t memoryAddress = 0, memoryValue = 0;
         uint16_t mask = 0;
@@ -212,7 +214,10 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
                     e.memoryValue = eq == std::string::npos ? 0u : static_cast<uint32_t>(std::strtoul(at.c_str() + eq + 1, nullptr, 16));
                 }
                 else
+                {
                     e.at = std::atof(at.c_str() + (e.afterPrevious ? 1 : 0));
+                    e.atVblank = !e.afterPrevious && !at.empty() && at.back() == 'v';
+                }
                 e.mask = it->second;
                 e.vblankDuration = !dur.empty() && dur.back() == 'v';
                 e.duration = dur.empty() ? 0.2 : std::atof(dur.c_str());
@@ -248,7 +253,8 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
                 }
                 else
                     due = e.afterPrevious ? (previous && previous->state != 0 && vblank >= previous->startVblank + static_cast<uint64_t>(e.at))
-                                          : now >= e.at;
+                          : e.atVblank  ? static_cast<double>(vblank) >= e.at
+                                        : now >= e.at;
                 if (!due)
                     continue;
                 e.state = 1;

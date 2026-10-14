@@ -12,16 +12,18 @@ cd "$(dirname "$0")/.."
 LABEL=${1:?usage: tools/measure.sh <label> [seconds]}
 SECS=${2:-210}
 OUT=shots/$LABEL
-# The menus are driven by game frame (PS2X_INPUT_CLOCK=frames). The save
-# (memcards/Mcd001.ps2: shrine, 1 colossus defeated) loads in real time, so
-# the rest hangs off the moment the wake-up cutscene starts (the word at
-# 0xd7d824 drops to 0 then) and is timed in VBlanks ("v"), the game's own
-# clock: START 10 s into the cutscene skips it; Wander stands at the altar
-# (SNAP 6-8, the pictures compared run to run); then a turn and a 15 s walk
-# (SNAP 11-13, to look at; the same place only with SOTC_FRAME_INTERVAL).
+# Timed in VBlanks ("v"), the game's own clock (the intro, the menus and
+# Wander move by it): the menus from guest VBlank 2560 (START ends the intro
+# demo), the rest from the wake-up cutscene starting (0xd7d824 drops to 0;
+# the save in memcards/Mcd001.ps2, shrine with 1 colossus defeated, loads in
+# real time). Title -> Load Game -> the save; START 10 s into the cutscene
+# skips it; Wander stands at the altar (SNAP 6-8, the pictures compared run
+# to run); then a turn and a 15 s walk (SNAP 11-13, to look at; the same
+# place only with SOTC_FRAME_INTERVAL).
 [ -f memcards/Mcd001.ps2 ] || { echo "needs the SotC save in memcards/Mcd001.ps2" >&2; exit 1; }
-IN="1656:START:12;1992:START:12;2100:CROSS:8;2200:CROSS:8"
-IN="$IN;@d7d824=0:WAIT;+600v:START:12"                       # entries 4, 5 (0-3: menus)
+IN="2560v:START:12;+760v:START:12"                          # entries 0, 1: intro, title
+IN="$IN;+150v:CROSS:8;+150v:CROSS:8"                         # 2, 3: Load Game, the save
+IN="$IN;@d7d824=0:WAIT;+600v:START:12"                       # 4, 5: cutscene, skipped
 IN="$IN;+700v:SNAP;+60v:SNAP;+60v:SNAP"                      # 6-8: standing
 IN="$IN;+1080v:LS_LEFT:60v;+60v:LS_UP:900v"                  # 9, 10: turn, walk
 IN="$IN;+300v:SNAP;+300v:SNAP;+600v:SNAP"                    # 11-13: walk pictures
@@ -29,7 +31,7 @@ rm -rf "$OUT" build/measure-mc && mkdir -p "$OUT" build/measure-mc
 cp memcards/Mcd001.ps2 build/measure-mc/
 PS2X_MEMCARD_DIR=$PWD/build/measure-mc \
 PS2X_GS_HW=${PS2X_GS_HW:-1} PS2X_STATS=1 PS2X_INPUT_CLOCK=frames PS2X_INPUT_SCRIPT="$IN" \
-    PS2X_SNAPSHOT_FRAMES=1000 ./celosia autotest "$SECS" 100000 >/dev/null 2>&1
+    ./celosia autotest "$SECS" 100000 >/dev/null 2>&1
 cp logs/autotest.log "$OUT/run.log"
 mv shots/run/gameframe_*.ppm shots/run/snap_*.ppm "$OUT/" 2>/dev/null # autotest saves to shots/run
 for n in 11 12 13; do [ -f "$OUT/snap_$n.ppm" ] && mv "$OUT/snap_$n.ppm" "$OUT/look_$n.ppm"; done
