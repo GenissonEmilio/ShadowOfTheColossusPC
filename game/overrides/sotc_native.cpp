@@ -30,6 +30,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -439,7 +440,8 @@ namespace sotc_native
         g_cameraContext = GPR_U32(ctx, 2);
     }
 
-    void modelDispHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    // A frame of the game ends when the display list goes to the VIF1.
+    void syncFrame(uint8_t *rdram)
     {
         g_ram = rdram;
         const uint64_t frame = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
@@ -451,6 +453,120 @@ namespace sotc_native
             g_frameDraws = 0;
             g_skinnedDraws = 0;
         }
+    }
+
+    // ---- 2D: spriteDrawSprite ----------------------------------------------
+    //
+    // spriteDrawSprite(obj, z, layer, ...) (0x10a32b8) computes the corners on
+    // screen and writes GS registers with gsReg(reg, value) (0x1c5b00): PRIM,
+    // RGBAQ, UV or ST, then XYZF2 per corner (a triangle strip), ALPHA from
+    // the object's flags, in display list layer 25 + layer (after all 3D).
+    // The registers are read as they are written; the texture is the
+    // object's resource (obj[0], its +0x20 the NTO2 header). The recompiled
+    // function runs in pieces the dispatcher continues after the call
+    // returns, so gsReg tells sprite writes by its return address.
+    constexpr uint32_t kSpriteDrawSprite = 0x010A32B8u, kSpriteDrawSpriteEnd = 0x010A45F0u, kGsReg = 0x001C5B00u;
+    PS2Runtime::RecompiledFunction g_spriteDrawSprite = nullptr, g_gsReg = nullptr;
+
+    struct Sprite
+    {
+        uint32_t layer = 0;
+        uint32_t header = 0; // NTO2
+        uint64_t prim = 0, rgbaq = 0, alpha = 0x44, test = 0;
+        float s = 0.0f, t = 0.0f;
+        uint32_t u = 0, v = 0;
+        native_renderer::Vertex corners[4];
+        uint32_t count = 0;
+    } g_sprite;
+    std::vector<native_renderer::Vertex> g_quad;
+
+    void spriteVertex(uint64_t xyz)
+    {
+        Sprite &sp = g_sprite;
+        native_renderer::Vertex &o = sp.corners[sp.count & 3u];
+        // 12.4 fixed point; the 512 x 448 screen is centred on 2048.
+        o.x = ((static_cast<float>(xyz & 0xFFFFu) / 16.0f) - 2048.0f) / 256.0f;
+        o.y = -((static_cast<float>((xyz >> 16) & 0xFFFFu) / 16.0f) - 2048.0f) / 224.0f;
+        o.z = 0.0f;
+        o.nx = o.ny = 0.0f;
+        o.nz = 1.0f;
+        o.r = static_cast<uint8_t>(sp.rgbaq);
+        o.g = static_cast<uint8_t>(sp.rgbaq >> 8);
+        o.b = static_cast<uint8_t>(sp.rgbaq >> 16);
+        o.a = static_cast<uint8_t>(sp.rgbaq >> 24);
+        const uint32_t format = sp.header ? word(sp.header + 0x1Cu) : 0u;
+        const float width = static_cast<float>(1u << ((format >> 16) & 0xFu)), height = static_cast<float>(1u << ((format >> 20) & 0xFu));
+        if (sp.prim & 0x100u) // FST: UV in texels, 12.4
+        {
+            o.u = (static_cast<float>(sp.u) / 16.0f) / width;
+            o.v = (static_cast<float>(sp.v) / 16.0f) / height;
+        }
+        else
+        {
+            o.u = sp.s;
+            o.v = sp.t;
+        }
+        if (++sp.count < 4u)
+            return;
+        sp.count = 0;
+        // ATST = NEVER: the pass that only writes destination alpha.
+        if ((sp.test & 1u) && ((sp.test >> 1) & 7u) == 0u)
+            return;
+        const native_renderer::Vertex *c = sp.corners;
+        const native_renderer::Vertex tris[6] = {c[0], c[1], c[2], c[1], c[3], c[2]};
+        const uint64_t mesh = (1ull << 62) | g_skinnedDraws++;
+        native_renderer::uploadMesh(mesh, tris, 6);
+        native_renderer::DrawState state;
+        state.screen = true;
+        state.texture = (sp.prim & 0x10u) ? texture(sp.header) : 0;
+        const uint32_t mode = static_cast<uint32_t>(sp.alpha & 0xFFu);
+        state.blend = !(sp.prim & 0x40u) ? native_renderer::Blend::Opaque
+                      : (mode == 0x48u ? native_renderer::Blend::Additive : native_renderer::Blend::Normal);
+        state.order = sp.layer;
+        static const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        native_renderer::draw(mesh, identity, state);
+        ++g_frameDraws;
+    }
+
+    void gsRegHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t ra = GPR_U32(ctx, 31);
+        if (ra >= kSpriteDrawSprite && ra < kSpriteDrawSpriteEnd)
+        {
+            syncFrame(rdram);
+            const uint32_t reg = GPR_U32(ctx, 4) & 0xFFu;
+            const uint64_t value = GPR_U64(ctx, 5);
+            switch (reg)
+            {
+            case 0x00u: g_sprite.prim = value; g_sprite.count = 0; break;
+            case 0x01u: g_sprite.rgbaq = value; break;
+            case 0x02u:
+                std::memcpy(&g_sprite.s, &value, 4);
+                std::memcpy(&g_sprite.t, reinterpret_cast<const uint8_t *>(&value) + 4, 4);
+                break;
+            case 0x03u: g_sprite.u = value & 0x3FFFu; g_sprite.v = (value >> 16) & 0x3FFFu; break;
+            case 0x04u: case 0x05u: spriteVertex(value); break;
+            case 0x42u: g_sprite.alpha = value; break;
+            case 0x47u: g_sprite.test = value; break;
+            }
+        }
+        g_gsReg(rdram, ctx, runtime);
+    }
+
+    void spriteDrawSpriteHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        syncFrame(rdram);
+        const uint32_t object = GPR_U32(ctx, 4);
+        g_sprite = Sprite{};
+        g_sprite.layer = 25u + std::min<uint32_t>(GPR_U32(ctx, 6), 5u);
+        const uint32_t resource = word(object);
+        g_sprite.header = resource ? word(resource + 0x20u) : 0u;
+        g_spriteDrawSprite(rdram, ctx, runtime);
+    }
+
+    void modelDispHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        syncFrame(rdram);
         const uint32_t instance = GPR_U32(ctx, 4), matrix = GPR_U32(ctx, 5);
         float model[16];
         for (int i = 0; i < 16; ++i)
@@ -590,5 +706,12 @@ void installSotcNative(PS2Runtime &runtime)
     runtime.registerFunction(kModelDisp, modelDispHook);
     g_getCameraContext = runtime.lookupFunction(kGetCameraContext);
     runtime.registerFunction(kGetCameraContext, getCameraContextHook);
+    if (runtime.hasFunction(kSpriteDrawSprite) && runtime.hasFunction(kGsReg))
+    {
+        g_spriteDrawSprite = runtime.lookupFunction(kSpriteDrawSprite);
+        runtime.registerFunction(kSpriteDrawSprite, spriteDrawSpriteHook);
+        g_gsReg = runtime.lookupFunction(kGsReg);
+        runtime.registerFunction(kGsReg, gsRegHook);
+    }
     std::cerr << "[sotc:native] models drawn by the native renderer" << std::endl;
 }

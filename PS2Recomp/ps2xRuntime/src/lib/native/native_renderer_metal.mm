@@ -89,6 +89,8 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
         id<MTLCommandQueue> queue = nil;
         id<MTLRenderPipelineState> pipeline = nil;  // normal blend
         id<MTLRenderPipelineState> additive = nil;
+        id<MTLRenderPipelineState> opaque = nil;
+        id<MTLDepthStencilState> depthOff = nil;
         id<MTLDepthStencilState> depthReadOnly = nil;
         id<MTLDepthStencilState> depthState = nil;
         id<MTLTexture> color = nil, depth = nil;
@@ -142,6 +144,8 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
             pipeline = [device newRenderPipelineStateWithDescriptor:desc error:&error];
             blend.destinationRGBBlendFactor = MTLBlendFactorOne;
             additive = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+            blend.blendingEnabled = NO;
+            opaque = [device newRenderPipelineStateWithDescriptor:desc error:&error];
             [desc release];
             [library release];
             if (!pipeline)
@@ -155,6 +159,8 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
             depthState = [device newDepthStencilStateWithDescriptor:depthDesc];
             depthDesc.depthWriteEnabled = NO;
             depthReadOnly = [device newDepthStencilStateWithDescriptor:depthDesc];
+            depthDesc.depthCompareFunction = MTLCompareFunctionAlways;
+            depthOff = [device newDepthStencilStateWithDescriptor:depthDesc];
             [depthDesc release];
             return true;
         }
@@ -198,12 +204,13 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
                 int bound = -1;
                 for (const Draw &d : draws)
                 {
-                    const int mode = d.state.blend == native_renderer::Blend::Additive ? 1 : 0;
+                    const int blendMode = static_cast<int>(d.state.blend);
+                    const int mode = blendMode | (d.state.screen ? 4 : 0);
                     if (mode != bound)
                     {
-                        // Additive glows do not hide what is drawn after them.
-                        [encoder setRenderPipelineState:mode ? additive : pipeline];
-                        [encoder setDepthStencilState:mode ? depthReadOnly : depthState];
+                        [encoder setRenderPipelineState:blendMode == 1 ? additive : (blendMode == 2 ? opaque : pipeline)];
+                        // Additive glows do not hide what is drawn after them; 2D ignores depth.
+                        [encoder setDepthStencilState:d.state.screen ? depthOff : (blendMode == 1 ? depthReadOnly : depthState)];
                         bound = mode;
                     }
                     auto it = meshes.find(d.mesh);

@@ -36,6 +36,7 @@ namespace native_renderer
     {
         Normal,   // Cs x As + Cd x (1 - As), alpha = texture x vertex (0x80 = 1)
         Additive, // Cs x As + Cd
+        Opaque,   // no blending (alpha still cuts out)
     };
     struct DrawState
     {
@@ -46,6 +47,7 @@ namespace native_renderer
         // L the columns light[0..15]; colour = C x (d.xyz, 1), C the columns
         // light[16..31] (three light colours, then ambient); it scales the
         // vertex colour.
+        bool screen = false; // 2D: positions already in clip space, no depth test or write
         bool lit = false;
         float light[32] = {};
     };

@@ -99,6 +99,12 @@ namespace
         {0x01090a88u, "kPrintf"}, {0x001c5548u, "spriteTexFast"}, {0x010a32b8u, "spriteDrawSprite"}, {0x01114b50u, "transMicroCode"},
         {0x010aad48u, "texTransRequest"}, {0x010aae70u, "texTransRequestMulti"}, {0x01092f50u, "lineObjectDisp"},
         {0x01348468u, "dispVuColiDispWork"}, {0x01385128u, "dischargeMain"},
+        // 2D: sprite objects, the immediate gl* API, text
+        {0x010a24c0u, "spriteDrawSpriteTexNoSet"}, {0x010a45f0u, "spriteDrawSpriteUV"}, {0x010a4890u, "spriteDrawSpriteST"},
+        {0x010a4b38u, "spriteDrawSpriteUV2"}, {0x010a4ed0u, "spriteDrawSpriteST2"}, {0x001c5110u, "spriteNoTexFast"},
+        {0x0108e530u, "glBegin"}, {0x0108bb38u, "glBeginWithDlLayerNo"}, {0x0108d060u, "glEnd"}, {0x0108ea20u, "glVertex2f"},
+        {0x0108eb28u, "glVertex3f"}, {0x0108ebc0u, "glVertex3fv"}, {0x0108ec08u, "glVertex4f"}, {0x01090bd8u, "kPrintfScale"},
+        {0x01090d28u, "kPrintfAsSprite"}, {0x01090ff8u, "kprintfContext"}, {0x010910b0u, "kprintfContextCentering"},
     };
     constexpr int kCensusCount = static_cast<int>(sizeof(kCensus) / sizeof(kCensus[0]));
     std::array<PS2Runtime::RecompiledFunction, kCensusCount> g_censusOriginal{};

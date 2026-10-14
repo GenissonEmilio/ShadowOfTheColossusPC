@@ -100,6 +100,21 @@ microcodes (characters).
 - line objects (debug and effects), `dispVuColiDispWork`, `dischargeMain`.
 - textures: `texTransRequest`, `texTransRequestMulti`, `texResetVRAMRequest`.
 
+## 2D: sprite objects
+
+Menus, the title, the map and the load/save boxes are sprite objects
+(`spriteCreateObject`, 0x50 bytes: [0] texture resource (+0x20 NTO2), +4
+RGBA, +8 alpha factor, +0x10..0x1c UV rectangle, +0x20..0x2c ST, +0x30/+0x34
+position, +0x40/+0x44 scale, +0x48 rotation and flags: blend mode bits
+40-43, ST bit 48) drawn by `spriteDrawSprite(obj, z, layer, ...)`
+(0x10a32b8; floats f12-f17: position, scale, rotation, alpha factor). It
+writes A+D registers with `gsReg(reg, value)` (0x1c5b00): PRIM (triangle
+strip), RGBAQ, UV or ST, XYZF2 per corner (12.4, screen centred on 2048,
+512 x 448), ALPHA (0x44 / 0x48 / 0x42 / 0x54 by mode), in display list layer
+25 + layer. Title screen: ~9 per frame; memory card and map: ~200.
+The recompiled function runs in pieces the dispatcher continues after the
+call returns: hooks that wrap the call see none of its gsReg writes.
+
 ## Census (SOTC_CENSUS=1, shrine, Wander standing; per frame)
 
 | function | calls | |
