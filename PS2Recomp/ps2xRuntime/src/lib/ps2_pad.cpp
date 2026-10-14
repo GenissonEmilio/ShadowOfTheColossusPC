@@ -33,6 +33,13 @@ namespace
     constexpr uint16_t PAD_L2 = 0x0100u;
 }
 
+namespace
+{
+    const uint8_t *g_scriptRam = nullptr;
+}
+
+void PSPadBackend::setScriptMemory(const uint8_t *rdram) { g_scriptRam = rdram; }
+
 bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t size)
 {
     if (!data || size < 32)
@@ -148,10 +155,32 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
     // PS2X_INPUT_CLOCK=frames: times and durations count game frames instead
     // of seconds, so the run is the same at any speed (the pad itself is read
     // every VBlank: a press shorter than a slow frame would be lost).
-    static constexpr uint16_t kStickUp = 0xF001u, kStickDown = 0xF002u, kStickLeft = 0xF003u, kStickRight = 0xF004u;
-    static const std::vector<std::tuple<double, uint16_t, double>> script = []
+    // A duration with a "v" suffix counts guest VBlanks from the press, and a
+    // start of "+<n>v" is n VBlanks after the previous entry's start: SotC
+    // moves Wander by VBlank time, so a walk timed in VBlanks covers the same
+    // ground at any frame rate. Each entry's first and last game frame go to
+    // the log ([input]). A start of "@<addr>=<value>" (hex) waits for that
+    // guest RAM word to hold the value (WAIT presses nothing: an anchor for
+    // the "+<n>v" entries after it), e.g. "@d7d824=0:WAIT;+300v:START:12".
+    // SNAP saves the next presented frame as snap_<entry>.ppm (GPU backend,
+    // PS2X_SNAPSHOT_DIR).
+    struct ScriptEntry
     {
-        std::vector<std::tuple<double, uint16_t, double>> out;
+        double at = 0.0;        // start (seconds or frames), or VBlanks after the previous entry's start
+        bool afterPrevious = false;
+        bool onMemory = false;  // start when the word at memoryAddress holds memoryValue
+        uint32_t memoryAddress = 0, memoryValue = 0;
+        uint16_t mask = 0;
+        double duration = 0.0;
+        bool vblankDuration = false;
+        uint64_t startVblank = 0; // set when the entry starts
+        double startNow = 0.0;
+        int state = 0;            // 0 waiting, 1 pressed, 2 done
+    };
+    static constexpr uint16_t kStickUp = 0xF001u, kStickDown = 0xF002u, kStickLeft = 0xF003u, kStickRight = 0xF004u, kSnap = 0xF005u;
+    static std::vector<ScriptEntry> script = []
+    {
+        std::vector<ScriptEntry> out;
         const char *env = std::getenv("PS2X_INPUT_SCRIPT");
         if (!env)
             return out;
@@ -159,7 +188,7 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
             {"UP", PAD_UP}, {"DOWN", PAD_DOWN}, {"LEFT", PAD_LEFT}, {"RIGHT", PAD_RIGHT},
             {"CROSS", PAD_CROSS}, {"CIRCLE", PAD_CIRCLE}, {"SQUARE", PAD_SQUARE}, {"TRIANGLE", PAD_TRIANGLE},
             {"L1", PAD_L1}, {"L2", PAD_L2}, {"R1", PAD_R1}, {"R2", PAD_R2},
-            {"START", PAD_START}, {"SELECT", PAD_SELECT},
+            {"START", PAD_START}, {"SELECT", PAD_SELECT}, {"WAIT", 0}, {"SNAP", kSnap},
             {"LS_UP", kStickUp}, {"LS_DOWN", kStickDown}, {"LS_LEFT", kStickLeft}, {"LS_RIGHT", kStickRight}};
         std::stringstream all(env);
         std::string item;
@@ -171,8 +200,23 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
             {
                 std::getline(fields, dur, ':');
                 const auto it = names.find(name);
-                if (it != names.end())
-                    out.emplace_back(std::atof(at.c_str()), it->second, dur.empty() ? 0.2 : std::atof(dur.c_str()));
+                if (it == names.end())
+                    continue;
+                ScriptEntry e;
+                e.afterPrevious = !at.empty() && at[0] == '+';
+                e.onMemory = !at.empty() && at[0] == '@';
+                if (e.onMemory)
+                {
+                    const size_t eq = at.find('=');
+                    e.memoryAddress = static_cast<uint32_t>(std::strtoul(at.c_str() + 1, nullptr, 16));
+                    e.memoryValue = eq == std::string::npos ? 0u : static_cast<uint32_t>(std::strtoul(at.c_str() + eq + 1, nullptr, 16));
+                }
+                else
+                    e.at = std::atof(at.c_str() + (e.afterPrevious ? 1 : 0));
+                e.mask = it->second;
+                e.vblankDuration = !dur.empty() && dur.back() == 'v';
+                e.duration = dur.empty() ? 0.2 : std::atof(dur.c_str());
+                out.push_back(e);
             }
         }
         return out;
@@ -184,18 +228,56 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
     }();
     if (!script.empty())
     {
-        const double now = frameClock ? static_cast<double>(ps2_stats::vif1Chains.load(std::memory_order_relaxed)) : GetTime();
-        for (const auto &[at, mask, duration] : script)
+        const uint64_t frame = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
+        const uint64_t vblank = ps2_stats::vblanks.load(std::memory_order_relaxed);
+        const double now = frameClock ? static_cast<double>(frame) : GetTime();
+        for (size_t i = 0; i < script.size(); ++i)
         {
-            if (!(now >= at && now < at + duration))
-                continue;
-            switch (mask)
+            ScriptEntry &e = script[i];
+            if (e.state == 0)
             {
+                const ScriptEntry *previous = i > 0 ? &script[i - 1] : nullptr;
+                bool due = false;
+                if (e.onMemory)
+                {
+                    // In script order: only once the entries before it started.
+                    uint32_t word = 0;
+                    if (g_scriptRam && (previous == nullptr || previous->state != 0))
+                        std::memcpy(&word, g_scriptRam + (e.memoryAddress & 0x1FFFFFCu), sizeof(word));
+                    due = g_scriptRam && (previous == nullptr || previous->state != 0) && word == e.memoryValue;
+                }
+                else
+                    due = e.afterPrevious ? (previous && previous->state != 0 && vblank >= previous->startVblank + static_cast<uint64_t>(e.at))
+                                          : now >= e.at;
+                if (!due)
+                    continue;
+                e.state = 1;
+                e.startVblank = vblank;
+                e.startNow = now;
+                if (e.mask == kSnap)
+                    ps2_stats::snapshotRequest.store(static_cast<int>(i), std::memory_order_relaxed);
+                std::fprintf(stderr, "[input] entry %zu pressed at frame %llu vblank %llu\n", i, (unsigned long long)frame, (unsigned long long)vblank);
+            }
+            if (e.state != 1)
+                continue;
+            const bool over = e.vblankDuration ? vblank >= e.startVblank + static_cast<uint64_t>(e.duration)
+                                               : now >= e.startNow + e.duration;
+            if (over)
+            {
+                e.state = 2;
+                std::fprintf(stderr, "[input] entry %zu released at frame %llu vblank %llu\n", i, (unsigned long long)frame, (unsigned long long)vblank);
+                continue;
+            }
+            switch (e.mask)
+            {
+            case 0:
+            case kSnap:
+                break;
             case kStickUp: setStick(6, 7, 0, -1); break;
             case kStickDown: setStick(6, 7, 0, 1); break;
             case kStickLeft: setStick(6, 7, -1, 0); break;
             case kStickRight: setStick(6, 7, 1, 0); break;
-            default: clearBit(mask); break;
+            default: clearBit(e.mask); break;
             }
         }
     }

@@ -22,15 +22,19 @@ in `docs/native_port_log.md` (one row per step, before and after):
 
 1. **Same route every run.** `tools/measure.sh <label>`: title -> Load Game
    (the save in `memcards/Mcd001.ps2`) -> the wake-up cutscene skipped ->
-   walk out of the shrine. The input script counts game frames
-   (`PS2X_INPUT_CLOCK=frames`), so the run passes the same moments at any
-   speed; the Vita reads the same switches from `ux0:data/celosia/env.txt`.
-2. **Speed.** Game fps per section (title, walk) and the busy share of each
-   emulation thread (game / vu1 / gif / gs), printed in one line.
+   Wander standing at the altar -> a walk out of the shrine. The menus are
+   driven by game frame (`PS2X_INPUT_CLOCK=frames`); the rest hangs off the
+   start of the cutscene (a word in guest RAM) and is timed in VBlanks, the
+   game's own clock. With `SOTC_FRAME_INTERVAL=4` every frame lasts four
+   VBlanks, so the game runs the same in every run, walk included. The Vita
+   reads the same switches from `ux0:data/celosia/env.txt`.
+2. **Speed.** Busy ms per game frame of each emulation thread (game / vu1 /
+   gif / gs) standing and walking (capped run: comparable to ~2%), and the
+   fps of an uncapped run (~10% noise), printed in one line.
 3. **The new path did the work.** Counters per frame (like `direct`)
    show its share of the work, and its fallback count.
-4. **Picture.** The route's frames (`PS2X_SNAPSHOT_FRAMES`, saved by the GS
-   backend at game frame n) are compared with the previous step's by
+4. **Picture.** The route's pictures (SNAP entries of the input script,
+   saved by the GS backend) are compared with the previous step's by
    `tools/framediff.py`; differences above the threshold are looked at.
 5. **Rule.** No fps drop, no picture difference that is not explained.
    Otherwise the step is fixed or reverted, never committed "for later".

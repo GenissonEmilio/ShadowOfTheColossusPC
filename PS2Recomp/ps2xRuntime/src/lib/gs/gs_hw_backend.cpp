@@ -2664,11 +2664,21 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
         }();
         static size_t next = 0;
         const uint64_t now = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
-        if (next >= frames.size() || now < frames[next])
-            return;
-        while (next + 1 < frames.size() && now >= frames[next + 1])
-            ++next; // missed ones are named by the last due
-        const uint64_t at = frames[next++];
+        // A SNAP entry of the input script asks for this picture by name.
+        const int request = ps2_stats::snapshotRequest.exchange(-1, std::memory_order_relaxed);
+        std::string name;
+        uint64_t at = now;
+        if (request >= 0)
+            name = "snap_" + std::to_string(request);
+        else
+        {
+            if (next >= frames.size() || now < frames[next])
+                return;
+            while (next + 1 < frames.size() && now >= frames[next + 1])
+                ++next; // missed ones are named by the last due
+            at = frames[next++];
+            name = "gameframe_" + std::to_string(at);
+        }
         std::vector<uint8_t> rgba(static_cast<size_t>(width) * height * 4u);
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
         glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
@@ -2679,7 +2689,7 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
 #endif
         if (!dir)
             return;
-        const std::string path = std::string(dir) + "/gameframe_" + std::to_string(at) + ".ppm";
+        const std::string path = std::string(dir) + "/" + name + ".ppm";
         if (FILE *f = std::fopen(path.c_str(), "wb"))
         {
             std::fprintf(f, "P6\n%u %u\n255\n", width, height);

@@ -1,45 +1,60 @@
 #!/bin/bash
-# Measurement gate of docs/native_port_plan.md (Mac): the scripted route
-# (title -> Continue -> shrine walk) driven by game frames, so every
-# run passes the same moments whatever the speed. Prints one summary line,
-# keeps the log and the route's frames in shots/<label>/.
+# Measurement gate of docs/native_port_plan.md (Mac): a scripted route
+# (title -> Load Game -> shrine -> walk out) that passes the same moments at
+# any speed. Prints one summary line, keeps the log and the route's pictures
+# in shots/<label>/.
 # Usage: [PS2X_...=...] tools/measure.sh <label> [seconds]
 #   compare: python3 tools/framediff.py shots/<before> shots/<after>
+#   SOTC_FRAME_INTERVAL=4: every frame lasts 4 VBlanks (15 fps), so the game
+#   itself runs the same in every run (the walk ends in the same place);
+#   compare the busy ms per frame then, not the fps.
 cd "$(dirname "$0")/.."
 LABEL=${1:?usage: tools/measure.sh <label> [seconds]}
 SECS=${2:-210}
 OUT=shots/$LABEL
-# Title -> Load Game -> the save in memcards/Mcd001.ps2 (shrine, 1 colossus
-# defeated) -> its wake-up cutscene skipped -> Wander standing at the altar
-# (the same picture every run: the section to compare speed on) -> a walk.
-# Frames calibrated on the Mac (2026-10-13): the cutscene runs ~2600-3600
-# (START lands in it whatever the load time), control from ~3270.
+# The menus are driven by game frame (PS2X_INPUT_CLOCK=frames). The save
+# (memcards/Mcd001.ps2: shrine, 1 colossus defeated) loads in real time, so
+# the rest hangs off the moment the wake-up cutscene starts (the word at
+# 0xd7d824 drops to 0 then) and is timed in VBlanks ("v"), the game's own
+# clock: START 10 s into the cutscene skips it; Wander stands at the altar
+# (SNAP 6-8, the pictures compared run to run); then a turn and a 15 s walk
+# (SNAP 11-13, to look at; the same place only with SOTC_FRAME_INTERVAL).
 [ -f memcards/Mcd001.ps2 ] || { echo "needs the SotC save in memcards/Mcd001.ps2" >&2; exit 1; }
-IN="1656:START:12;1992:START:12;2100:CROSS:8;2200:CROSS:8;3000:START:12;4000:LS_LEFT:60;4060:LS_UP:900"
-# Compared frames: title and Wander standing at the altar (the same in every
-# run up to his breathing). Walk frames (look_*) differ run to run (the path
-# drifts with the moment control starts): only to look at side by side.
-SHOTS=1000,3330,3360,3390
-LOOK=4200,4500,4800
+IN="1656:START:12;1992:START:12;2100:CROSS:8;2200:CROSS:8"
+IN="$IN;@d7d824=0:WAIT;+600v:START:12"                       # entries 4, 5 (0-3: menus)
+IN="$IN;+700v:SNAP;+60v:SNAP;+60v:SNAP"                      # 6-8: standing
+IN="$IN;+1080v:LS_LEFT:60v;+60v:LS_UP:900v"                  # 9, 10: turn, walk
+IN="$IN;+300v:SNAP;+300v:SNAP;+600v:SNAP"                    # 11-13: walk pictures
 rm -rf "$OUT" build/measure-mc && mkdir -p "$OUT" build/measure-mc
 cp memcards/Mcd001.ps2 build/measure-mc/
 PS2X_MEMCARD_DIR=$PWD/build/measure-mc \
 PS2X_GS_HW=${PS2X_GS_HW:-1} PS2X_STATS=1 PS2X_INPUT_CLOCK=frames PS2X_INPUT_SCRIPT="$IN" \
-    PS2X_SNAPSHOT_FRAMES=$SHOTS,$LOOK ./celosia autotest "$SECS" 100000 >/dev/null 2>&1
+    PS2X_SNAPSHOT_FRAMES=1000 ./celosia autotest "$SECS" 100000 >/dev/null 2>&1
 cp logs/autotest.log "$OUT/run.log"
-mv shots/run/gameframe_*.ppm "$OUT/" 2>/dev/null # autotest saves to shots/run
-for f in ${LOOK//,/ }; do [ -f "$OUT/gameframe_$f.ppm" ] && mv "$OUT/gameframe_$f.ppm" "$OUT/look_$f.ppm"; done
+mv shots/run/gameframe_*.ppm shots/run/snap_*.ppm "$OUT/" 2>/dev/null # autotest saves to shots/run
+for n in 11 12 13; do [ -f "$OUT/snap_$n.ppm" ] && mv "$OUT/snap_$n.ppm" "$OUT/look_$n.ppm"; done
 python3 - "$OUT/run.log" "$LABEL" <<'EOF'
 import re, sys
 log = open(sys.argv[1], errors='ignore').read()
-# Route sections by game frame: title/menus, Wander still at the altar, walk.
-sections = [('title', 300, 1650), ('idle', 3350, 3990), ('walk', 4060, 4960)]
-acc = {s[0]: [0, 0] for s in sections}
-busy = {s[0]: {} for s in sections}  # thread -> busy % sums over the section's windows
+# Script entries' first game frame and VBlank ([input] lines).
+entry = {int(i): (int(f), int(v)) for i, f, v in re.findall(r'\[input\] entry (\d+) pressed at frame (\d+) vblank (\d+)', log)}
+released = {int(i): (int(f), int(v)) for i, f, v in re.findall(r'\[input\] entry (\d+) released at frame (\d+) vblank (\d+)', log)}
+never = (10**9, 10**9)
+# Sections: menus (by frame), Wander standing (SNAP 6 -> the turn), the walk.
+sections = [('title', (300, 0), (1650, 0)), ('idle', entry.get(6, never), entry.get(9, never)),
+            ('walk', entry.get(10, never), released.get(10, never))]
+fps = {}
+for name, a, b in sections:
+    if name != 'title' and b != never and b[1] > a[1]:
+        fps[name] = (b[0] - a[0]) / ((b[1] - a[1]) / 59.94) # frames per second of guest time
+# Busy ms per frame per thread over each section: [load] windows (5 s) inside it.
+busy = {name: {} for name, _, _ in sections}
+frames = {name: 0 for name, _, _ in sections}
 counters = {}
 last = 0
 end = 0
 window_load = None
+title = [0, 0]
 for line in log.splitlines():
     if line.startswith('[load]'):
         window_load = {k: int(v) for k, v in re.findall(r'(\w+)=(\d+)%', line) if k != 'gsWaitsHostGl'}
@@ -49,21 +64,28 @@ for line in log.splitlines():
         continue
     f = int(m[1])
     for name, a, b in sections:
-        if a <= last and f <= b:
-            acc[name][0] += f - last
-            acc[name][1] += 5
+        if a[0] <= last and f <= b[0]:
+            frames[name] += f - last
             for k, v in (window_load or {}).items():
                 busy[name][k] = busy[name].get(k, 0) + v
+            if name == 'title':
+                title[0] += f - last
+                title[1] += 5
     for k in ('direct', 'mscnt', 'vu1Instr', 'xgkick'):
         c = re.search(r' %s=(\d+)' % k, line)
         if c and last >= 300:
             counters[k] = counters.get(k, 0) + int(c[1])
     last = end = f
-fps = ' '.join('%s %4.1f' % (n, acc[n][0] / acc[n][1] if acc[n][1] else 0) for n, _, _ in sections)
-# Busy ms per game frame on the still scene: thread busy share x window / frames.
-ms = ' '.join('%s=%.1f' % (k, v * 0.05 / acc['idle'][0] * 1000.0) for k, v in busy['idle'].items()) if acc['idle'][0] else '-'
-frames = max(end - 300, 1)
-cnt = ' '.join('%s/frame=%d' % (k, v / frames) for k, v in counters.items())
-done = 'route done' if end >= 4960 else 'route NOT done (frame %d)' % end
-print('%-14s fps: %s | idle ms/frame: %s | %s | %s' % (sys.argv[2], fps, ms, cnt, done))
+if title[1]:
+    fps['title'] = title[0] / title[1]
+fpsText = ' '.join('%s %4.1f' % (n, fps.get(n, 0.0)) for n, _, _ in sections)
+# Busy share x 5 s window / frames in the windows = ms per frame.
+def ms(name):
+    if not frames[name]:
+        return '-'
+    return ' '.join('%s=%.1f' % (k, v * 0.05 / frames[name] * 1000.0) for k, v in busy[name].items())
+total = max(end - 300, 1)
+cnt = ' '.join('%s/frame=%d' % (k, v / total) for k, v in counters.items())
+done = 'route done' if 13 in entry else 'route NOT done (frame %d)' % end
+print('%-14s fps: %s | ms/frame idle: %s | walk: %s | %s | %s' % (sys.argv[2], fpsText, ms('idle'), ms('walk'), cnt, done))
 EOF

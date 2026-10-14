@@ -801,6 +801,7 @@ bool PS2Runtime::syncCoreSubsystems()
                                      const R5900Context *context = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
                                      return (context ? context : &m_cpuContext)->vu0_fbrst; });
     vu1native::setBatchTarget(&m_vu1, &m_memory, &m_gs);
+    PSPadBackend::setScriptMemory(m_memory.getRDRAM());
     m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t top, uint32_t itop)
                                  {
                                      // On the MTVU worker the EE context belongs to another

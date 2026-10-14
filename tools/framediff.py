@@ -3,11 +3,11 @@
 
 Usage: tools/framediff.py <dir before> <dir after> [threshold]
 
-For each gameframe_<n>.ppm in both: a pixel counts as changed when no pixel
+For each gameframe_<n>.ppm or snap_<n>.ppm in both: a pixel counts as changed when no pixel
 of the other frame within one pixel of it is within <threshold> (default 24)
 in every channel, so sub-pixel camera sway and edge jitter between runs are
 not counted, while wrong colours, textures or missing geometry are. Frames
-with over 1.5% changed pixels are flagged and get diff_<n>.png next to the
+with over 1.5% changed pixels are flagged and get diff_<name>.png next to the
 after frame (changed pixels in red over the darkened after frame). Exit
 status 1 when any frame is flagged.
 """
@@ -42,8 +42,9 @@ def changed_mask(a, b, threshold):
 def main():
     before, after = sys.argv[1], sys.argv[2]
     threshold = int(sys.argv[3]) if len(sys.argv) > 3 else 24
-    names = sorted((n for n in os.listdir(after) if re.match(r'gameframe_\d+\.ppm$', n)),
-                   key=lambda n: int(re.findall(r'\d+', n)[0]))
+    picture = re.compile(r'(gameframe|snap)_\d+\.ppm$')
+    names = sorted((n for n in os.listdir(after) if picture.match(n)),
+                   key=lambda n: (n[0], int(re.findall(r'\d+', n)[0])))
     flagged = 0
     for name in names:
         ref = os.path.join(before, name)
@@ -70,9 +71,9 @@ def main():
             dark = b.point(lambda v: v // 3)
             red = Image.new('RGB', (w - 2, h - 2), (255, 0, 0))
             dark.paste(red, (1, 1), mask)
-            dark.save(os.path.join(after, name.replace('gameframe_', 'diff_').replace('.ppm', '.png')))
+            dark.save(os.path.join(after, 'diff_' + name.replace('.ppm', '.png')))
     for name in sorted(os.listdir(before)):
-        if re.match(r'gameframe_\d+\.ppm$', name) and name not in names:
+        if picture.match(name) and name not in names:
             print('%-22s missing in %s' % (name, after))
             flagged += 1
     sys.exit(1 if flagged else 0)

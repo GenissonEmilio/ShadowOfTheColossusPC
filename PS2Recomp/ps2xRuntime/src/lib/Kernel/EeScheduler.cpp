@@ -3,6 +3,7 @@
 
 #include "ps2_log.h"
 #include "ps2_runtime_macros.h"
+#include "runtime/ps2_stats.h"
 #include "runtime/ps2_thread_load.h"
 
 #include <algorithm>
@@ -2040,6 +2041,7 @@ void EeScheduler::processEvent(const EeEvent &event)
     case EeEventType::VBlankStart:
         ++m_vsyncTick;
         m_runtime.memory().gs().vsyncTick.store(m_vsyncTick, std::memory_order_release);
+        ps2_stats::vblanks.store(m_vsyncTick, std::memory_order_relaxed);
         // The frame the game shows now: queue its capture after every GS
         // packet the VU1 thread still holds for it, without waiting for them.
         m_runtime.memory().runInVu1Order([gs = &m_runtime.gs()]

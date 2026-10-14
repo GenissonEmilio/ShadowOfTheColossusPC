@@ -1,9 +1,13 @@
 # Native port log
 
-One row per step of `native_port_plan.md`, measured with the gate. Mac:
-game fps title / bridge / shrine. Vita: Vita3K 444 MHz 3 cores, game fps
-and thread loads (game / vu1 / gif / gs %).
+One row per step of `native_port_plan.md`, measured with the gate
+(`tools/measure.sh`). Mac: busy ms per frame per thread (game / vu1 / gif /
+gs) with Wander standing at the altar and on the walk, from runs with
+SOTC_FRAME_INTERVAL=4 (the same game run every time; about 2% run to run),
+plus the uncapped fps (about 10% run to run). Vita: Vita3K 444 MHz 3 cores,
+game fps and thread loads (game / vu1 / gif / gs %).
 
 | Date | Step | Mac fps | Vita fps | Vita loads | Counters | Picture |
 |------|------|---------|----------|------------|----------|---------|
 | 2026-10-12 | before the plan (world VIF->GPU, uncommitted) | 30 on the route | ~0.7 (eagle scene, not the scripted route) | 72 / 94 / ? / ? | direct ~45% of MSCNT | Mac matches |
+| 2026-10-14 | baseline after phase 0 (direct world batches, near clip, TEXFLUSH, exact blend; PS2X_VU1_DIRECT=1) | ms/frame standing 12.8 / 14.7 / 4.2 / 47.5, walk 13.2 / 7.3 / 2.7 / 45.2; uncapped standing 22-25 fps | not measured yet | | direct/frame ~3550, mscnt/frame ~7050 | two capped runs: standing and walk pictures within 0.14% |

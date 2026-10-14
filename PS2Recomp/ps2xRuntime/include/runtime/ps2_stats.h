@@ -19,6 +19,8 @@ namespace ps2_stats
     inline std::atomic<uint64_t> gsPrims[8]{};
     inline std::atomic<uint64_t> gsPixels{0};
     inline std::atomic<uint64_t> vif1Chains{0}; // ~game frames, ever (scripted runs' clock)
+    inline std::atomic<uint64_t> vblanks{0};    // guest VBlanks, ever (the game's own clock)
+    inline std::atomic<int> snapshotRequest{-1}; // PS2X_INPUT_SCRIPT SNAP entry waiting for a picture
     inline std::atomic<uint64_t> presentedFrames{0};
     inline std::atomic<uint64_t> frameSequence{0}; // captured game frames, ever
     // Host refreshes each new game frame stayed in the window: [1], [2], [3], [4+].
