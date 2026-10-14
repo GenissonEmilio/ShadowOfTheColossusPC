@@ -64,6 +64,21 @@ namespace native_renderer
         int steps = 0; // 0: smooth
     };
     void setFog(const Fog &fog);
+
+    // SotC's bloom: a mask of what lies beyond `threshold` (GS Z: zA + zB / w;
+    // empty pixels are 0), in `maskColor`, blurred at a quarter of the
+    // resolution, lerped with the last frame's by `temporal` and added over
+    // the 3D (draws before `order`) in `color` (0x80 = 1, alpha the amount).
+    struct Bloom
+    {
+        bool enabled = false;
+        uint32_t order = 20;
+        float threshold = 0.0f, zA = 0.0f, zB = 0.0f;
+        float maskColor[3] = {1, 1, 1};
+        float color[4] = {0, 0, 0, 0};
+        float temporal = 1.0f;
+    };
+    void setBloom(const Bloom &bloom);
     void endFrame(uint32_t width, uint32_t height);
 
     // Shown instead of the emulated picture (the emulator's present path asks).

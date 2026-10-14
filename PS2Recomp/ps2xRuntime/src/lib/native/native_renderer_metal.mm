@@ -92,6 +92,70 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
     }
     return float4(rgb, alpha);
 }
+
+// ---- full-screen passes (bloom) ----
+struct Quad
+{
+    float4 position [[position]];
+    float2 uv;
+};
+
+vertex Quad fullscreenVertex(uint id [[vertex_id]])
+{
+    Quad q;
+    float2 p = float2((id << 1) & 2, id & 2);
+    q.position = float4(p * 2.0 - 1.0, 0.0, 1.0);
+    q.uv = float2(p.x, 1.0 - p.y);
+    return q;
+}
+
+struct BloomParams
+{
+    float threshold, zA, zB, temporal;
+    float4 maskColor;
+    float4 color;
+    float2 texel; // of the source
+};
+
+// The mask at a quarter resolution: the share of the 4x4 block beyond the threshold.
+fragment float4 bloomMask(Quad in [[stage_in]], depth2d<float> depth [[texture(0)]], constant BloomParams &b [[buffer(0)]])
+{
+    float sum = 0.0;
+    uint2 size = uint2(depth.get_width(), depth.get_height());
+    uint2 base = uint2(in.uv * float2(size)) & ~uint2(3);
+    for (uint y = 0; y < 4; ++y)
+        for (uint x = 0; x < 4; ++x)
+        {
+            float d = depth.read(min(base + uint2(x, y), size - 1));
+            // depth = 1 - 1 / w (cleared: 1, nothing drawn); GS Z = zA + zB / w.
+            float gsz = d >= 1.0 ? 0.0 : b.zA + b.zB * (1.0 - d);
+            sum += gsz <= b.threshold + 1.0 ? 1.0 : 0.0;
+        }
+    return float4(b.maskColor.rgb * (sum / 16.0), 1.0);
+}
+
+fragment float4 bloomBlur(Quad in [[stage_in]], texture2d<float> src [[texture(0)]], constant float2 &step [[buffer(0)]])
+{
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    const float w[4] = {0.30, 0.235, 0.12, 0.05};
+    float4 c = src.sample(s, in.uv) * w[0];
+    for (int i = 1; i < 4; ++i)
+        c += (src.sample(s, in.uv + step * float(i)) + src.sample(s, in.uv - step * float(i))) * w[i];
+    return c;
+}
+
+fragment float4 bloomTemporal(Quad in [[stage_in]], texture2d<float> current [[texture(0)]], texture2d<float> previous [[texture(1)]],
+                              constant float &amount [[buffer(0)]])
+{
+    constexpr sampler s(address::clamp_to_edge, filter::nearest);
+    return mix(previous.sample(s, in.uv), current.sample(s, in.uv), amount);
+}
+
+fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[texture(0)]], constant BloomParams &b [[buffer(0)]])
+{
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    return float4(src.sample(s, in.uv).rgb * b.color.rgb * b.color.a, 1.0);
+}
 )MSL";
 
     struct Mesh
@@ -119,6 +183,10 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
         id<MTLDepthStencilState> depthState = nil;
         id<MTLTexture> color = nil, depth = nil, backgroundColor = nil;
         native_renderer::Fog fog;
+        native_renderer::Bloom bloom;
+        id<MTLTexture> bloomTex[3] = {nil, nil, nil}; // ping, pong, history
+        bool bloomHistory = false;
+        id<MTLRenderPipelineState> maskPipeline = nil, blurPipeline = nil, temporalPipeline = nil, compositePipeline = nil;
         uint32_t width = 0, height = 0;
         std::unordered_map<uint64_t, Mesh> meshes;
         std::unordered_map<uint64_t, id<MTLTexture>> textures;
@@ -172,6 +240,33 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
             blend.blendingEnabled = NO;
             opaque = [device newRenderPipelineStateWithDescriptor:desc error:&error];
             [desc release];
+            auto fullscreen = [&](NSString *fragment, bool add) -> id<MTLRenderPipelineState>
+            {
+                MTLRenderPipelineDescriptor *d = [[MTLRenderPipelineDescriptor alloc] init];
+                d.vertexFunction = [library newFunctionWithName:@"fullscreenVertex"];
+                d.fragmentFunction = [library newFunctionWithName:fragment];
+                d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+                if (add)
+                {
+                    d.colorAttachments[0].blendingEnabled = YES;
+                    d.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
+                    d.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOne;
+                    d.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorZero;
+                    d.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+                }
+                NSError *e = nil;
+                id<MTLRenderPipelineState> state = [device newRenderPipelineStateWithDescriptor:d error:&e];
+                [d.vertexFunction release];
+                [d.fragmentFunction release];
+                [d release];
+                if (!state)
+                    std::cerr << "[native] bloom pipeline failed: " << [[e localizedDescription] UTF8String] << std::endl;
+                return state;
+            };
+            maskPipeline = fullscreen(@"bloomMask", false);
+            blurPipeline = fullscreen(@"bloomBlur", false);
+            temporalPipeline = fullscreen(@"bloomTemporal", false);
+            compositePipeline = fullscreen(@"bloomComposite", true);
             [library release];
             if (!pipeline)
             {
@@ -205,9 +300,19 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
             cd.storageMode = MTLStorageModePrivate;
             backgroundColor = [device newTextureWithDescriptor:cd];
             MTLTextureDescriptor *dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:w height:h mipmapped:NO];
-            dd.usage = MTLTextureUsageRenderTarget;
+            dd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
             dd.storageMode = MTLStorageModePrivate;
             depth = [device newTextureWithDescriptor:dd];
+            for (id<MTLTexture> &t : bloomTex)
+            {
+                [t release];
+                MTLTextureDescriptor *bd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                              width:std::max(w / 4u, 1u) height:std::max(h / 4u, 1u) mipmapped:NO];
+                bd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+                bd.storageMode = MTLStorageModePrivate;
+                t = [device newTextureWithDescriptor:bd];
+            }
+            bloomHistory = false;
             width = w;
             height = h;
         }
@@ -220,17 +325,17 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
                 std::stable_sort(draws.begin(), draws.end(), [](const Draw &a, const Draw &b) { return a.state.order < b.state.order; });
                 id<MTLCommandBuffer> commands = [queue commandBuffer];
                 const bool fogOn = fog.enabled && fog.width > 0.0f;
-                auto pass = [&](id<MTLTexture> target, bool backgroundOnly)
+                auto pass = [&](id<MTLTexture> target, bool backgroundOnly, uint32_t fromOrder = 0, uint32_t toOrder = ~0u, bool load = false)
                 {
                     MTLRenderPassDescriptor *desc = [MTLRenderPassDescriptor renderPassDescriptor];
                     desc.colorAttachments[0].texture = target;
-                    desc.colorAttachments[0].loadAction = MTLLoadActionClear;
+                    desc.colorAttachments[0].loadAction = load ? MTLLoadActionLoad : MTLLoadActionClear;
                     desc.colorAttachments[0].clearColor = MTLClearColorMake(0.08, 0.08, 0.1, 1.0);
                     desc.colorAttachments[0].storeAction = MTLStoreActionStore;
                     desc.depthAttachment.texture = depth;
-                    desc.depthAttachment.loadAction = MTLLoadActionClear;
+                    desc.depthAttachment.loadAction = load ? MTLLoadActionLoad : MTLLoadActionClear;
                     desc.depthAttachment.clearDepth = 1.0;
-                    desc.depthAttachment.storeAction = MTLStoreActionDontCare;
+                    desc.depthAttachment.storeAction = MTLStoreActionStore;
                     id<MTLRenderCommandEncoder> encoder = [commands renderCommandEncoderWithDescriptor:desc];
                     [encoder setCullMode:MTLCullModeNone];
                     if (!backgroundOnly)
@@ -239,6 +344,8 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
                     for (const Draw &d : draws)
                     {
                         if (backgroundOnly && !d.state.background)
+                            continue;
+                        if (d.state.order < fromOrder || d.state.order >= toOrder)
                             continue;
                         const int blendMode = static_cast<int>(d.state.blend);
                         const bool backdrop = d.state.screen || d.state.background;
@@ -286,7 +393,74 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
                 };
                 if (fogOn)
                     pass(backgroundColor, true); // the sky, what distance fades into
-                pass(color, false);
+                const bool bloomOn = bloom.enabled && maskPipeline && blurPipeline && temporalPipeline && compositePipeline;
+                if (!bloomOn)
+                {
+                    pass(color, false);
+                    bloomHistory = false;
+                }
+                else
+                {
+                    pass(color, false, 0, bloom.order);
+                    struct
+                    {
+                        float threshold, zA, zB, temporal;
+                        float maskColor[4];
+                        float color[4];
+                        float texel[2];
+                        float pad[2];
+                    } bp = {bloom.threshold, bloom.zA, bloom.zB, bloom.temporal,
+                            {bloom.maskColor[0], bloom.maskColor[1], bloom.maskColor[2], 1.0f},
+                            {bloom.color[0], bloom.color[1], bloom.color[2], bloom.color[3]}, {0, 0}, {0, 0}};
+                    auto quad = [&](id<MTLTexture> target, id<MTLRenderPipelineState> state, bool load, auto bind)
+                    {
+                        MTLRenderPassDescriptor *desc = [MTLRenderPassDescriptor renderPassDescriptor];
+                        desc.colorAttachments[0].texture = target;
+                        desc.colorAttachments[0].loadAction = load ? MTLLoadActionLoad : MTLLoadActionDontCare;
+                        desc.colorAttachments[0].storeAction = MTLStoreActionStore;
+                        id<MTLRenderCommandEncoder> e = [commands renderCommandEncoderWithDescriptor:desc];
+                        [e setRenderPipelineState:state];
+                        bind(e);
+                        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                        [e endEncoding];
+                    };
+                    const float lw = static_cast<float>(bloomTex[0].width), lh = static_cast<float>(bloomTex[0].height);
+                    quad(bloomTex[0], maskPipeline, false, [&](id<MTLRenderCommandEncoder> e)
+                    {
+                        [e setFragmentTexture:depth atIndex:0];
+                        [e setFragmentBytes:&bp length:sizeof(bp) atIndex:0];
+                    });
+                    for (int i = 0; i < 2; ++i)
+                    {
+                        const float stepH[2] = {1.0f / lw, 0.0f}, stepV[2] = {0.0f, 1.0f / lh};
+                        quad(bloomTex[1], blurPipeline, false, [&](id<MTLRenderCommandEncoder> e)
+                        {
+                            [e setFragmentTexture:bloomTex[0] atIndex:0];
+                            [e setFragmentBytes:stepH length:sizeof(stepH) atIndex:0];
+                        });
+                        quad(bloomTex[0], blurPipeline, false, [&](id<MTLRenderCommandEncoder> e)
+                        {
+                            [e setFragmentTexture:bloomTex[1] atIndex:0];
+                            [e setFragmentBytes:stepV length:sizeof(stepV) atIndex:0];
+                        });
+                    }
+                    // With the last frame's: bloomTex[1] = mix(history, current), kept as history.
+                    const float amount = bloomHistory ? bloom.temporal : 1.0f;
+                    quad(bloomTex[1], temporalPipeline, false, [&](id<MTLRenderCommandEncoder> e)
+                    {
+                        [e setFragmentTexture:bloomTex[0] atIndex:0];
+                        [e setFragmentTexture:bloomTex[2] atIndex:1];
+                        [e setFragmentBytes:&amount length:sizeof(amount) atIndex:0];
+                    });
+                    std::swap(bloomTex[1], bloomTex[2]);
+                    bloomHistory = true;
+                    quad(color, compositePipeline, true, [&](id<MTLRenderCommandEncoder> e)
+                    {
+                        [e setFragmentTexture:bloomTex[2] atIndex:0];
+                        [e setFragmentBytes:&bp length:sizeof(bp) atIndex:0];
+                    });
+                    pass(color, false, bloom.order, ~0u, true);
+                }
                 [commands commit];
                 [commands waitUntilCompleted];
                 std::lock_guard<std::mutex> lock(outputMutex);
@@ -378,6 +552,12 @@ namespace native_renderer
         d.state = state;
         std::memcpy(d.clip, clip, sizeof(d.clip));
         r->draws.push_back(d);
+    }
+
+    void setBloom(const Bloom &bloom)
+    {
+        if (Renderer *r = renderer())
+            r->bloom = bloom;
     }
 
     void setFog(const Fog &fog)

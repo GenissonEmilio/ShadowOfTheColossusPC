@@ -151,6 +151,21 @@ that alpha (ALPHA 0x54: (Cs - Cd) x Ad + Cd): the distance fades into the
 sky. `drawFrontFog` adds a flat colour on top (layer 0x14, colour and
 amount at 0x118b8dc..f0, set by graphSetFogParam).
 
+## Bloom (0x109e2a0, layer 0x14)
+
+A mask of what lies beyond GS Z 0x118c094 (0 in the shrine: only pixels
+with no depth, i.e. what the background buffer shows: sky and the far
+landscape) in colour 0x118c0d0 (white), reduced, blurred with 12 shifted
+sprites (+-1, 2, 3 texels; weights 0x40 / 0x20 / 0x10 at 0x118c0fc/10c/11c),
+a second round when 0x118c12c != 0, lerped with the last frame's
+(0x118c12c / 128 = 0x76), and added over the frame (ALPHA 0x48) in colour
+0x118c140 (0xaf, 0xaf, 0xa5) with alpha 0x118c14c. The parameters chase
+targets at 0x118c09c..b0 by 1/12 per frame. GS Z of a view depth w:
+camera context + 0x4a0, zA + zB / w (242.5 + 834987 / w). The native
+renderer redoes it with its own passes (quarter resolution, separable
+blur, history texture); its strength is matched by eye (the GS chain feeds
+back), SOTC_BLOOM_SCALE.
+
 Model instance opacity (modelDisp, to the microcode at packet + 0xdc):
 1 - instance[0x91] (+0x244), times 1 - instance[0x92] (+0x248) when the
 header's +0xc is set; 0 hides the instance (e.g. the dark wisps near Wander).

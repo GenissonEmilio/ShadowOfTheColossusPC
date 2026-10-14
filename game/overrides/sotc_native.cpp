@@ -437,6 +437,37 @@ namespace sotc_native
     PS2Runtime::RecompiledFunction g_zFog = nullptr;
     native_renderer::Fog g_fog;
 
+    // The bloom chain (0x109e2a0, layer 0x14; it runs in pieces, so it is
+    // seen through gsReg): a mask of what lies beyond GS Z 0x118c094 (0:
+    // only empty pixels, the sky) in colour 0x118c0d0, reduced, blurred with
+    // 12 shifted sprites (weights at 0x118c0f0/100/110), lerped with the last
+    // frame's by 0x118c12c / 128 and added over the frame in colour
+    // 0x118c140 (alpha 0x118c14c). The native renderer does the same with
+    // its own passes; the values are read when the chain ran.
+    bool g_bloomRan = false;
+
+    native_renderer::Bloom bloomParams()
+    {
+        native_renderer::Bloom b;
+        b.enabled = g_cameraContext != 0;
+        b.order = 20;
+        b.threshold = static_cast<float>(word(0x118C094u));
+        b.zA = real(g_cameraContext + 0x4A0u + 10u * 4u);
+        b.zB = real(g_cameraContext + 0x4A0u + 14u * 4u);
+        for (int i = 0; i < 3; ++i)
+            b.maskColor[i] = static_cast<float>(word(0x118C0D0u + i * 4u) & 0xFFu) / 255.0f;
+        for (int i = 0; i < 3; ++i)
+            b.color[i] = static_cast<float>(word(0x118C140u + i * 4u) & 0xFFu) / 128.0f;
+        // The add is Cs x As + Cd, As the composite colour's alpha. The GS
+        // chain feeds its result back frame after frame; the strength here
+        // is matched by eye against it (SOTC_BLOOM_SCALE overrides).
+        static const float scale = std::getenv("SOTC_BLOOM_SCALE") ? static_cast<float>(std::atof(std::getenv("SOTC_BLOOM_SCALE"))) : 0.5f;
+        b.color[3] = static_cast<float>(word(0x118C14Cu) & 0xFFu) / 128.0f * scale;
+        const uint32_t temporal = word(0x118C12Cu) & 0xFFu;
+        b.temporal = temporal ? static_cast<float>(temporal) / 128.0f : 1.0f;
+        return b;
+    }
+
     void zFogHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         g_ram = rdram;
@@ -459,6 +490,8 @@ namespace sotc_native
         flush2D();
         native_renderer::setFog(g_fog);
         g_fog = native_renderer::Fog{};
+        native_renderer::setBloom(g_bloomRan ? bloomParams() : native_renderer::Bloom{});
+        g_bloomRan = false;
         native_renderer::endFrame(512, 448);
         static const bool show = std::atoi(std::getenv("SOTC_NATIVE")) != 2; // 2: draw, keep the emulated picture
         native_renderer::setShown(show && g_frameDraws != 0);
@@ -684,6 +717,8 @@ namespace sotc_native
     {
         const uint32_t ra = GPR_U32(ctx, 31);
         gsRegCensus(ra);
+        if (ra >= 0x0109E2A0u && ra < 0x0109FB08u)
+            g_bloomRan = true;
         for (const Range &r : k2D)
         {
             if (ra < r.start || ra >= r.end)
