@@ -389,6 +389,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                     vif1_regs.tops = (dbf ? vif1_regs.base : vif1_regs.base + vif1_regs.ofst) & 0x3FFu;
                     vif1_regs.stat ^= (1u << 7);
                     ps2_stats::vu1Mscnt.fetch_add(1, std::memory_order_relaxed);
+                    ps2_stats::vu1Programs.fetch_add(1, std::memory_order_relaxed);
                     ps2_stats::vu1DirectBatches.fetch_add(1, std::memory_order_relaxed);
                     pos = end;
                     offerBatch = true;
@@ -500,6 +501,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             vif1_regs.stat ^= (1u << 7); // toggle DBF
 
             ps2_stats::vu1Mscnt.fetch_add(1, std::memory_order_relaxed);
+                    ps2_stats::vu1Programs.fetch_add(1, std::memory_order_relaxed);
             if (m_vu1MscntCallback)
                 m_vu1MscntCallback(runTop, runItop);
             offerBatch = vu1native::hasBatchFns();

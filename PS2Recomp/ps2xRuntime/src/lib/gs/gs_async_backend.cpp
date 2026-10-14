@@ -183,8 +183,11 @@ void GSAsyncBackend::workerLoop()
         lock.unlock();
         m_spaceCv.notify_all();
 
-        for (const Command &command : m_consuming.commands)
-            execute(command, m_consuming);
+        {
+            ps2_stats::TimeInto busy{ps2_stats::gsWorkerBusyUs};
+            for (const Command &command : m_consuming.commands)
+                execute(command, m_consuming);
+        }
         unflushed = true;
         m_consuming.commands.clear();
         m_consuming.bytes.clear();
@@ -197,6 +200,7 @@ void GSAsyncBackend::workerLoop()
 
 void GSAsyncBackend::execute(const Command &command, const Chunk &chunk)
 {
+    ps2_stats::TimeInto kindTime{ps2_stats::gsKindUs[static_cast<int>(command.kind) % 10]};
     switch (command.kind)
     {
     case Kind::Draw:

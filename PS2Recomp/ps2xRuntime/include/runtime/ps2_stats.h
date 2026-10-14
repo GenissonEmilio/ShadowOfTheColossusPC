@@ -11,6 +11,7 @@ namespace ps2_stats
     inline std::atomic<uint64_t> vu1Mscal{0};
     inline std::atomic<uint64_t> vu1Xgkick{0};
     inline std::atomic<uint64_t> vu1Mscnt{0};
+    inline std::atomic<uint64_t> vu1Programs{0}; // VU1 program starts, ever (3D drawn)
     inline std::atomic<uint64_t> vu1DirectBatches{0}; // VIF1 batches drawn without VU1
     inline std::atomic<uint64_t> vifMpg{0};
     inline std::atomic<uint64_t> vu1Instr{0};
@@ -39,6 +40,9 @@ namespace ps2_stats
     inline std::atomic<uint64_t> tlKickVu1IdleUs{0}, tlDoneVu1IdleUs{0}; // the VU1 thread's idle time so far, at kick and at its last job
     // Time threads spent waiting on the GS backend: queue full, drain (all done).
     inline std::atomic<uint64_t> gsSpaceWaitUs{0}, gsDrainWaitUs{0}, gsDrains{0};
+    inline std::atomic<uint64_t> gsWorkerBusyUs{0}; // the GS backend thread running commands
+    inline std::atomic<uint64_t> gsKindUs[10]{};    // ... by command kind (GSAsyncBackend::Kind)
+    inline std::atomic<uint64_t> gsXferUs[3]{};     // GS HW BeginTransfer: queue flush, GPU write-backs, the software GS
     struct TimeInto
     {
         std::atomic<uint64_t> &total;

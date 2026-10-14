@@ -2921,14 +2921,37 @@ void PS2Runtime::run()
                           const uint64_t vu1 = ps2_stats::tlVu1Us.exchange(0), vu1Idle = ps2_stats::tlVu1IdleUs.exchange(0),
                                          gs = ps2_stats::tlGsUs.exchange(0), rest = ps2_stats::tlRestUs.exchange(0);
                           const uint64_t space = ps2_stats::gsSpaceWaitUs.exchange(0), drains = ps2_stats::gsDrainWaitUs.exchange(0),
-                                         drainCount = ps2_stats::gsDrains.exchange(0);
+                                         drainCount = ps2_stats::gsDrains.exchange(0), gsBusy = ps2_stats::gsWorkerBusyUs.exchange(0);
+                          static const char *const kKinds[] = {"draw", "clut", "xfer", "upload", "texflush", "wvram", "clear", "present", "vu"};
+                          std::string kinds;
+                          for (int k = 0; k < 9; ++k)
+                          {
+                              const uint64_t us = ps2_stats::gsKindUs[k].exchange(0);
+                              if (n && us / n >= 100)
+                              {
+                                  char part[48];
+                                  std::snprintf(part, sizeof(part), " %s=%.1f", kKinds[k], us / 1000.0 / n);
+                                  kinds += part;
+                              }
+                          }
+                          for (int k = 0; k < 3; ++k)
+                          {
+                              static const char *const kParts[] = {"xferFlush", "xferHw", "xferSoft"};
+                              const uint64_t us = ps2_stats::gsXferUs[k].exchange(0);
+                              if (n)
+                              {
+                                  char part[48];
+                                  std::snprintf(part, sizeof(part), " %s=%.1f", kParts[k], us / 1000.0 / n);
+                                  kinds += part;
+                              }
+                          }
                           if (n == 0)
                               return std::string();
-                          char text[192];
-                          std::snprintf(text, sizeof(text), " tl=%.1f(idle %.1f)/%.1f/%.1f gsWait(space %.1f drain %.1f x%.1f)", vu1 / 1000.0 / n,
+                          char text[256];
+                          std::snprintf(text, sizeof(text), " tl=%.1f(idle %.1f)/%.1f/%.1f gsWait(space %.1f drain %.1f x%.1f) gsBusy=%.1f", vu1 / 1000.0 / n,
                                         vu1Idle / 1000.0 / n, gs / 1000.0 / n, rest / 1000.0 / n, space / 1000.0 / n, drains / 1000.0 / n,
-                                        static_cast<double>(drainCount) / n);
-                          return std::string(text);
+                                        static_cast<double>(drainCount) / n, gsBusy / 1000.0 / n);
+                          return std::string(text) + " gsKinds(" + kinds + " )";
                       }()
                       << [this]
                       {

@@ -164,13 +164,17 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
     // guest RAM word to hold the value (WAIT presses nothing: an anchor for
     // the "+<n>v" entries after it), e.g. "@d7d824=0:WAIT;+300v:START:12".
     // SNAP saves the next presented frame as snap_<entry>.ppm (GPU backend,
-    // PS2X_SNAPSHOT_DIR).
+    // PS2X_SNAPSHOT_DIR). "+<n>v@<k>" starts n VBlanks after entry k's start.
+    // A start of "@3d" waits for 3D after a loading
+    // screen: the first VBlank with VU1 programs after 60 without any.
     struct ScriptEntry
     {
         double at = 0.0;        // start (seconds or frames), or VBlanks after the previous entry's start
         bool afterPrevious = false;
+        int anchor = -1;        // "+<n>v@<k>": n VBlanks after entry k's start instead of the previous one's
         bool atVblank = false;  // start at an absolute guest VBlank ("<n>v")
         bool onMemory = false;  // start when the word at memoryAddress holds memoryValue
+        bool on3d = false;      // start at 3D after a loading screen ("@3d")
         uint32_t memoryAddress = 0, memoryValue = 0;
         uint16_t mask = 0;
         double duration = 0.0;
@@ -206,7 +210,8 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
                     continue;
                 ScriptEntry e;
                 e.afterPrevious = !at.empty() && at[0] == '+';
-                e.onMemory = !at.empty() && at[0] == '@';
+                e.on3d = at == "@3d";
+                e.onMemory = !e.on3d && !at.empty() && at[0] == '@';
                 if (e.onMemory)
                 {
                     const size_t eq = at.find('=');
@@ -215,6 +220,9 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
                 }
                 else
                 {
+                    const size_t atSign = at.find('@');
+                    if (e.afterPrevious && atSign != std::string::npos)
+                        e.anchor = std::atoi(at.c_str() + atSign + 1);
                     e.at = std::atof(at.c_str() + (e.afterPrevious ? 1 : 0));
                     e.atVblank = !e.afterPrevious && !at.empty() && at.back() == 'v';
                 }
@@ -243,7 +251,22 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
             {
                 const ScriptEntry *previous = i > 0 ? &script[i - 1] : nullptr;
                 bool due = false;
-                if (e.onMemory)
+                if (e.on3d)
+                {
+                    // VBlanks in a row without a VU1 program (a loading screen), then one with.
+                    static uint64_t lastPrograms = 0, lastVblank = 0, quietVblanks = 0;
+                    const uint64_t programs = ps2_stats::vu1Programs.load(std::memory_order_relaxed);
+                    if (vblank != lastVblank)
+                    {
+                        const bool drew = programs != lastPrograms;
+                        if (previous == nullptr || previous->state != 0)
+                            due = drew && quietVblanks >= 60u;
+                        quietVblanks = drew ? 0u : quietVblanks + (vblank - lastVblank);
+                        lastPrograms = programs;
+                        lastVblank = vblank;
+                    }
+                }
+                else if (e.onMemory)
                 {
                     // In script order: only once the entries before it started.
                     uint32_t word = 0;
@@ -252,9 +275,13 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
                     due = g_scriptRam && (previous == nullptr || previous->state != 0) && word == e.memoryValue;
                 }
                 else
+                {
+                    if (e.afterPrevious && e.anchor >= 0 && static_cast<size_t>(e.anchor) < script.size())
+                        previous = &script[static_cast<size_t>(e.anchor)];
                     due = e.afterPrevious ? (previous && previous->state != 0 && vblank >= previous->startVblank + static_cast<uint64_t>(e.at))
                           : e.atVblank  ? static_cast<double>(vblank) >= e.at
                                         : now >= e.at;
+                }
                 if (!due)
                     continue;
                 e.state = 1;

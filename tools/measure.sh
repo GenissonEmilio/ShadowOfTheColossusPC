@@ -14,16 +14,17 @@ SECS=${2:-210}
 OUT=shots/$LABEL
 # Timed in VBlanks ("v"), the game's own clock (the intro, the menus and
 # Wander move by it): the menus from guest VBlank 2560 (START ends the intro
-# demo), the rest from the wake-up cutscene starting (0xd7d824 drops to 0;
-# the save in memcards/Mcd001.ps2, shrine with 1 colossus defeated, loads in
-# real time). Title -> Load Game -> the save; START 10 s into the cutscene
+# demo), the rest from the wake-up cutscene starting (the first 3D after the
+# loading screen; the save in memcards/Mcd001.ps2, shrine with 1 colossus
+# defeated, loads in real time). Title -> Load Game -> the save; START 10 s into the cutscene
 # skips it; Wander stands at the altar (SNAP 7-9, the pictures compared run
 # to run); then a turn and a 15 s walk (SNAP 12-14, to look at; the same
 # place only with SOTC_FRAME_INTERVAL).
 [ -f memcards/Mcd001.ps2 ] || { echo "needs the SotC save in memcards/Mcd001.ps2" >&2; exit 1; }
 IN="2560v:START:12;+760v:START:12"                          # entries 0, 1: intro, Load Game
-IN="$IN;+150v:CROSS:8;+150v:CROSS:8;+300v:CROSS:8"           # 2-4: the save, Yes (again if the card was slow)
-IN="$IN;@d7d824=0:WAIT;+600v:START:12"                       # 5, 6: cutscene, skipped
+IN="$IN;+150v:CROSS:8;+150v:CROSS:8"                         # 2, 3: the save, Yes
+IN="$IN;@3d:WAIT;+300v@3:CROSS:8"                            # 4: the cutscene (3D after the loading screen); 5: Yes again (late card prompt)
+IN="$IN;+600v@4:START:12"                                    # 6: 10 s into the cutscene, skipped
 IN="$IN;+700v:SNAP;+60v:SNAP;+60v:SNAP"                      # 7-9: standing
 IN="$IN;+1080v:LS_LEFT:60v;+60v:LS_UP:900v"                  # 10, 11: turn, walk
 IN="$IN;+300v:SNAP;+300v:SNAP;+600v:SNAP"                    # 12-14: walk pictures
