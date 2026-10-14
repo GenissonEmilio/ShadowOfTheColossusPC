@@ -6,6 +6,7 @@
 #include <vector>
 #include <cstdlib>
 #include "runtime/ps2_pad.h"
+#include "runtime/ps2_stats.h"
 #include "ps2_host_backend.h"
 #include <cstring>
 
@@ -144,6 +145,9 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
 
     // PS2X_INPUT_SCRIPT="<sec>:<BUTTON>:<duration>;..." scripted presses for testing.
     // Besides buttons, LS_UP/LS_DOWN/LS_LEFT/LS_RIGHT push the left stick.
+    // PS2X_INPUT_CLOCK=frames: times and durations count game frames instead
+    // of seconds, so the run is the same at any speed (the pad itself is read
+    // every VBlank: a press shorter than a slow frame would be lost).
     static constexpr uint16_t kStickUp = 0xF001u, kStickDown = 0xF002u, kStickLeft = 0xF003u, kStickRight = 0xF004u;
     static const std::vector<std::tuple<double, uint16_t, double>> script = []
     {
@@ -173,9 +177,14 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
         }
         return out;
     }();
+    static const bool frameClock = []
+    {
+        const char *env = std::getenv("PS2X_INPUT_CLOCK");
+        return env && std::strcmp(env, "frames") == 0;
+    }();
     if (!script.empty())
     {
-        const double now = GetTime();
+        const double now = frameClock ? static_cast<double>(ps2_stats::vif1Chains.load(std::memory_order_relaxed)) : GetTime();
         for (const auto &[at, mask, duration] : script)
         {
             if (!(now >= at && now < at + duration))

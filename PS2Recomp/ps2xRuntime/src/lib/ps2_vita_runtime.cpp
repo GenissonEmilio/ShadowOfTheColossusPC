@@ -3,6 +3,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <malloc.h>
 #include <new>
@@ -60,6 +61,23 @@ namespace
             std::setvbuf(stdout, nullptr, _IOLBF, 0);
             std::setvbuf(stderr, nullptr, _IONBF, 0);
             std::fputs("[vita] log started\n", stdout);
+            // The Vita has no environment: ux0:data/celosia/env.txt holds
+            // KEY=VALUE lines (the PS2X_* switches of a scripted run).
+            if (FILE *env = std::fopen("ux0:data/celosia/env.txt", "r"))
+            {
+                char line[4096];
+                while (std::fgets(line, sizeof(line), env))
+                {
+                    line[std::strcspn(line, "\r\n")] = '\0';
+                    char *eq = std::strchr(line, '=');
+                    if (line[0] == '#' || !eq)
+                        continue;
+                    *eq = '\0';
+                    setenv(line, eq + 1, 1);
+                    std::fprintf(stdout, "[vita] env %s=%s\n", line, eq + 1);
+                }
+                std::fclose(env);
+            }
             // An uncaught exception (bad_alloc...) aborts without a word on
             // the Vita: say what it was and how full the heap is first.
             std::set_terminate([]

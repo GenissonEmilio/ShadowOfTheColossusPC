@@ -2,6 +2,7 @@
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/gs/gs_direct_frame.h"
 #include "runtime/host_menu.h"
+#include "runtime/ps2_stats.h"
 #include "runtime/ps2_thread_load.h"
 
 #include <algorithm>
@@ -2520,6 +2521,61 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
     uint32_t presentNext = 0;
     std::array<uint64_t, 4> lastPresentKey{};
 
+    // PS2X_SNAPSHOT_FRAMES=<n>,<n>,...: save the first picture shown from
+    // game frame n on, as <PS2X_SNAPSHOT_DIR>/gameframe_<n>.ppm (same moment of a
+    // PS2X_INPUT_CLOCK=frames run on any platform and speed).
+    void snapshotIfDue(GLuint fbo, uint32_t width, uint32_t height)
+    {
+        static const std::vector<uint64_t> frames = []
+        {
+            std::vector<uint64_t> out;
+            if (const char *env = std::getenv("PS2X_SNAPSHOT_FRAMES"))
+                for (const char *p = env; *p;)
+                {
+                    char *end = nullptr;
+                    const uint64_t n = std::strtoull(p, &end, 10);
+                    if (end == p)
+                        break;
+                    out.push_back(n);
+                    p = *end ? end + 1 : end;
+                }
+            std::sort(out.begin(), out.end());
+            return out;
+        }();
+        static size_t next = 0;
+        const uint64_t now = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
+        if (next >= frames.size() || now < frames[next])
+            return;
+        while (next + 1 < frames.size() && now >= frames[next + 1])
+            ++next; // missed ones are named by the last due
+        const uint64_t at = frames[next++];
+        std::vector<uint8_t> rgba(static_cast<size_t>(width) * height * 4u);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+        const char *dir = std::getenv("PS2X_SNAPSHOT_DIR");
+#if defined(PS2X_GS_HW_VITA)
+        if (!dir)
+            dir = "ux0:data/celosia/shots";
+#endif
+        if (!dir)
+            return;
+        const std::string path = std::string(dir) + "/gameframe_" + std::to_string(at) + ".ppm";
+        if (FILE *f = std::fopen(path.c_str(), "wb"))
+        {
+            std::fprintf(f, "P6\n%u %u\n255\n", width, height);
+            std::vector<uint8_t> row(static_cast<size_t>(width) * 3u);
+            for (uint32_t y = 0; y < height; ++y)
+            {
+                const uint32_t srcY = blitFlip ? height - 1u - y : y;
+                for (uint32_t x = 0; x < width; ++x)
+                    std::memcpy(&row[x * 3u], &rgba[(static_cast<size_t>(srcY) * width + x) * 4u], 3);
+                std::fwrite(row.data(), 1, row.size(), f);
+            }
+            std::fclose(f);
+            std::cerr << "[snapshot] frame=" << at << " now=" << now << " " << path << std::endl;
+        }
+    }
+
     // Returns whether it handled the request; frame stays empty when the
     // picture did not change (no new frame).
     bool presentDirect(const GSPresentationRequest &request, PresentationFrame &frame)
@@ -2588,6 +2644,7 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
             slot.height = height;
         }
         blitRect(framebuffer(rt, nullptr), slot.fbo, rt.height, slot.height, dbx, dby, 0, 0, width, height);
+        snapshotIfDue(slot.fbo, width, height);
         GSDirectFrame direct;
         direct.texture = slot.texture;
 #if defined(PS2X_GS_HW_VITA)
