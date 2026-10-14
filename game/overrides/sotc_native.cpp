@@ -14,8 +14,10 @@
 // +0x14 pixels, +0x18 CLUT, +0x1c format | log2 width << 16 | log2 height
 // << 20; byte +0x1f bit 0: level 0 uploaded as PSMCT32, W/2 x H/2 (8-bit)
 // or W/2 x H/4 (4-bit), so the pixels are in GS block order).
-// Not yet: lighting (lit batches carry no colour), materials, skinned
-// characters, the second texture and mip levels.
+// Skinned parts (characters) are posed on the CPU every frame from the bone
+// palette in their instance chain (readPalette).
+// Not yet: lighting (lit batches carry no colour), the second texture and
+// mip levels.
 
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
@@ -30,6 +32,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <unordered_map>
 #include <vector>
 
 namespace sotc_native
@@ -54,57 +57,66 @@ namespace sotc_native
         return v;
     }
 
-    // The packet's world batches as one triangle list (strips unrolled).
-    void buildMesh(uint32_t addr, uint32_t size, std::vector<native_renderer::Vertex> &out)
+    // A vertex as the batch gives it: model space, or bind pose with up to
+    // three bones (palette matrices) and weights.
+    struct BatchVertex
     {
-        struct In
-        {
-            float x, y, z;
-            float u, v;
-            uint8_t r, g, b, a;
-        };
-        std::vector<In> strip;
-        auto flush = [&]
-        {
-            for (size_t i = 2; i < strip.size(); ++i)
-            {
-                const In *t[3] = {&strip[i - 2], &strip[i - 1], &strip[i]};
-                const float ux = t[1]->x - t[0]->x, uy = t[1]->y - t[0]->y, uz = t[1]->z - t[0]->z;
-                const float vx = t[2]->x - t[0]->x, vy = t[2]->y - t[0]->y, vz = t[2]->z - t[0]->z;
-                float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
-                const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
-                if (len <= 0.0f)
-                    continue; // degenerate (strip joins)
-                nx /= len;
-                ny /= len;
-                nz /= len;
-                for (const In *v : t)
-                    out.push_back({v->x, v->y, v->z, nx, ny, nz, v->u, v->v, v->r, v->g, v->b, v->a});
-            }
-            strip.clear();
-        };
+        float x, y, z;
+        float u, v;
+        uint8_t r, g, b, a;
+        uint8_t bones;
+        uint8_t bone[3];
+        float weight[3];
+    };
+    using Strip = std::vector<BatchVertex>;
+
+    // The packet's batches, one triangle strip each (they end in MSCNT).
+    // STCYCL n+1 interleaves n fields per vertex; each UNPACK's address is
+    // its field: 0 GIF tag, 1 position (V3-32), then by format
+    //   V2-16 ST, V4-8 colour (unlit)
+    //   V4-16 two ST pairs (two textures), V4-8 colour
+    //   V3-32 normal, V2-16 ST, V4-8 colour (lit)
+    //   V4-16 normal, V2-16 ST, V4-8 colour, V4-32 skin (skinned)
+    // Skin: w = bone count, x/y/z = bone index + weight (the fraction; one
+    // bone: full weight); the bone is palette matrix n (VU1 qwords 4n..4n+3).
+    void readBatches(uint32_t addr, uint32_t size, std::vector<Strip> &out)
+    {
         const uint32_t end = addr + size;
         uint32_t p = addr;
-        uint32_t positions = 0, colours = 0, uvs = 0, count = 0;
+        uint32_t positions = 0, colours = 0, uvs = 0, pairs = 0, skin = 0, count = 0;
         while (p < end)
         {
             const uint32_t code = word(p);
             p += 4;
-            const uint32_t cmd = (code >> 24) & 0x7Fu, num = (code >> 16) & 0xFFu;
+            const uint32_t cmd = (code >> 24) & 0x7Fu, num = (code >> 16) & 0xFFu, field = code & 0x3FFu;
             uint32_t words = 0;
             if ((cmd & 0x60u) == 0x60u)
             {
                 const uint32_t vn = (cmd >> 2) & 3u, vl = cmd & 3u, n = num ? num : 256u;
                 words = (n * (vn + 1u) * (32u >> vl) + 31u) / 32u;
-                if ((cmd & 0x6Fu) == 0x68u) // V3-32 positions
+                switch (cmd & 0x6Fu)
                 {
-                    positions = p;
-                    count = n;
-                }
-                else if ((cmd & 0x6Fu) == 0x6Eu) // V4-8 colours
+                case 0x68u: // V3-32: position at field 1 (a normal elsewhere)
+                    if (field == 1u)
+                    {
+                        positions = p;
+                        count = n;
+                    }
+                    break;
+                case 0x6Eu:
                     colours = p;
-                else if ((cmd & 0x6Fu) == 0x65u) // V2-16 ST, 12-bit fraction (VIF ROW taken as 0)
+                    break;
+                case 0x65u: // ST, 12-bit fraction (VIF ROW taken as 0)
                     uvs = p;
+                    break;
+                case 0x6Du: // two ST pairs, or a normal
+                    pairs = p;
+                    break;
+                case 0x6Cu:
+                    if (field != 0u)
+                        skin = p;
+                    break;
+                }
             }
             else if (cmd == 0x20u)
                 words = 1;
@@ -118,15 +130,14 @@ namespace sotc_native
             {
                 if (positions)
                 {
+                    Strip strip(count);
                     for (uint32_t i = 0; i < count; ++i)
                     {
-                        In v{real(positions + i * 12u), real(positions + i * 12u + 4u), real(positions + i * 12u + 8u), 0.0f, 0.0f, 128, 128, 128, 128};
-                        if (uvs)
-                        {
-                            const uint32_t st = word(uvs + i * 4u);
-                            v.u = static_cast<int16_t>(st & 0xFFFFu) / 4096.0f;
-                            v.v = static_cast<int16_t>(st >> 16) / 4096.0f;
-                        }
+                        BatchVertex &v = strip[i];
+                        v = {real(positions + i * 12u), real(positions + i * 12u + 4u), real(positions + i * 12u + 8u), 0.0f, 0.0f, 128, 128, 128, 128, 0, {0, 0, 0}, {0.0f, 0.0f, 0.0f}};
+                        const uint32_t st = uvs ? word(uvs + i * 4u) : (pairs ? word(pairs + i * 8u) : 0u);
+                        v.u = static_cast<int16_t>(st & 0xFFFFu) / 4096.0f;
+                        v.v = static_cast<int16_t>(st >> 16) / 4096.0f;
                         if (colours)
                         {
                             const uint32_t c = word(colours + i * 4u);
@@ -135,14 +146,74 @@ namespace sotc_native
                             v.b = static_cast<uint8_t>(c >> 16);
                             v.a = static_cast<uint8_t>(c >> 24);
                         }
-                        strip.push_back(v);
+                        if (skin)
+                        {
+                            const uint32_t q = skin + i * 16u;
+                            v.bones = static_cast<uint8_t>(std::min(word(q + 12u), 3u));
+                            for (uint32_t k = 0; k < v.bones; ++k)
+                            {
+                                const float packed = real(q + k * 4u);
+                                const float bone = std::floor(packed);
+                                v.bone[k] = static_cast<uint8_t>(std::clamp(bone, 0.0f, 255.0f));
+                                v.weight[k] = v.bones == 1 ? 1.0f : packed - bone;
+                            }
+                        }
                     }
-                    flush();
+                    out.push_back(std::move(strip));
                 }
-                positions = colours = uvs = count = 0;
+                positions = colours = uvs = pairs = skin = count = 0;
             }
             p += words * 4u;
         }
+    }
+
+    // Strips as a triangle list with face normals; `place` maps a batch
+    // vertex to the mesh's space.
+    template <typename Place>
+    void triangulate(const std::vector<Strip> &strips, Place place, std::vector<native_renderer::Vertex> &out)
+    {
+        std::vector<native_renderer::Vertex> placed;
+        for (const Strip &strip : strips)
+        {
+            placed.resize(strip.size());
+            for (size_t i = 0; i < strip.size(); ++i)
+            {
+                const BatchVertex &v = strip[i];
+                native_renderer::Vertex &o = placed[i];
+                place(v, o.x, o.y, o.z);
+                o.u = v.u;
+                o.v = v.v;
+                o.r = v.r;
+                o.g = v.g;
+                o.b = v.b;
+                o.a = v.a;
+            }
+            for (size_t i = 2; i < placed.size(); ++i)
+            {
+                native_renderer::Vertex t[3] = {placed[i - 2], placed[i - 1], placed[i]};
+                const float ux = t[1].x - t[0].x, uy = t[1].y - t[0].y, uz = t[1].z - t[0].z;
+                const float vx = t[2].x - t[0].x, vy = t[2].y - t[0].y, vz = t[2].z - t[0].z;
+                float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+                const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+                if (!(len > 0.0f))
+                    continue; // degenerate (strip joins)
+                for (native_renderer::Vertex &v : t)
+                {
+                    v.nx = nx / len;
+                    v.ny = ny / len;
+                    v.nz = nz / len;
+                    out.push_back(v);
+                }
+            }
+        }
+    }
+
+    bool skinned(const std::vector<Strip> &strips)
+    {
+        for (const Strip &strip : strips)
+            if (!strip.empty() && strip[0].bones)
+                return true;
+        return false;
     }
 
     // An NTO2 texture (level 0) as RGBA8, on the GPU once under its header address.
@@ -248,21 +319,21 @@ namespace sotc_native
         return second ? 5 : 2;
     }
 
-    // modelDisp's skips: bit 28 never drawn; bit 16 (boss effect) and bit 23
+    // modelDisp's skips: bit 29 never drawn; bit 17 (boss effect) and bit 24
     // (shadow effect) only while getNowBossEffect (0x1186290) has bit 0 / 1;
-    // bit 25 not while the underwater fog (getFogUnderWater, 0x1186328) is on.
+    // bit 26 not while the underwater fog (getFogUnderWater, 0x1186328) is on.
     bool surfaceDrawn(uint32_t s)
     {
         uint64_t flags;
         std::memcpy(&flags, g_ram + ((s + 0x18u) & 0x1FFFFF8u), 8);
         const uint32_t boss = word(0x1186290u);
-        if ((flags >> 28) & 1u)
+        if ((flags >> 29) & 1u)
             return false;
-        if ((flags >> 16) & 1u)
+        if ((flags >> 17) & 1u)
             return (boss & 1u) != 0;
-        if (((flags >> 23) & 1u) && !(boss & 2u))
+        if (((flags >> 24) & 1u) && !(boss & 2u))
             return false;
-        return !(((flags >> 25) & 1u) && word(0x1186328u) != 0u);
+        return !(((flags >> 26) & 1u) && word(0x1186328u) != 0u);
     }
 
     // The ALPHA_1 register in the surface's A+D packet (+0x60): 0x48 adds.
@@ -273,6 +344,40 @@ namespace sotc_native
                 return (word(q) & 0xFFu) == 0x48u ? native_renderer::Blend::Additive : native_renderer::Blend::Normal;
         return native_renderer::Blend::Normal;
     }
+
+    // Skinned parts: their instance chain (instance + 0xc: a NEXT tag past
+    // the instance's own 15 qwords) ends in a RET packet that unpacks the
+    // bone palette to VU1 qword 0 (modelSetMatrixTransTag), each matrix
+    // bone x view (camera space, the projection comes after). Rigid parts
+    // upload one matrix there (5 qwords). False when there is no palette.
+    bool readPalette(uint32_t instance, std::vector<float> &vu)
+    {
+        const uint32_t own = word(instance + 0xCu);
+        if (((word(own) >> 28) & 7u) != 2u)
+            return false;
+        const uint32_t ret = word(own + 4u), qwc = word(ret) & 0xFFFFu;
+        if (qwc <= 5u)
+            return false;
+        vu.assign(1024u * 4u, 0.0f);
+        const uint32_t end = ret + 16u + qwc * 16u;
+        for (uint32_t p = ret + 8u; p < end;)
+        {
+            const uint32_t code = word(p);
+            p += 4;
+            const uint32_t cmd = (code >> 24) & 0x7Fu;
+            if ((cmd & 0x6Fu) != 0x6Cu)
+                continue; // NOP / STCYCL / MSCAL: one word
+            const uint32_t n = ((code >> 16) & 0xFFu) ? ((code >> 16) & 0xFFu) : 256u, at = code & 0x3FFu;
+            for (uint32_t q = 0; q < n && at + q < 1024u; ++q)
+                for (uint32_t k = 0; k < 4u; ++k)
+                    vu[(at + q) * 4u + k] = real(p + q * 16u + k * 4u);
+            p += n * 16u;
+        }
+        return true;
+    }
+
+    std::unordered_map<uint64_t, std::vector<Strip>> g_skinnedPackets; // bind pose, by packet
+    uint64_t g_skinnedDraws = 0;                                       // this frame's skinned meshes
 
     void endFrame()
     {
@@ -299,6 +404,7 @@ namespace sotc_native
             native_renderer::beginFrame();
             g_frame = frame;
             g_frameDraws = 0;
+            g_skinnedDraws = 0;
         }
         const uint32_t instance = GPR_U32(ctx, 4), matrix = GPR_U32(ctx, 5);
         float model[16];
@@ -330,6 +436,12 @@ namespace sotc_native
         const uint32_t table = word(header + 0x30u + lod * 4u);
         const uint32_t packets = word(header + 0x60u), count = word(header + 0x64u);
         static std::vector<native_renderer::Vertex> vertices;
+        static std::vector<Strip> strips;
+        static std::vector<float> palette;
+        const bool hasPalette = readPalette(instance, palette);
+        float projection[16];
+        for (int i = 0; i < 16; ++i)
+            projection[i] = real(g_cameraContext + 0x40u + i * 4u);
         for (uint32_t k = 0; k < count; ++k)
         {
             const uint32_t pk = packets + k * 32u;
@@ -347,17 +459,49 @@ namespace sotc_native
                 continue;
             const uint32_t size = word(pk), data = word(pk + 16u);
             const uint64_t id = (static_cast<uint64_t>(size) << 32) | data;
-            if (!native_renderer::hasMesh(id))
+            auto skinnedPacket = g_skinnedPackets.find(id);
+            if (skinnedPacket == g_skinnedPackets.end() && !native_renderer::hasMesh(id))
             {
+                strips.clear();
+                readBatches(data, size, strips);
+                if (skinned(strips))
+                    skinnedPacket = g_skinnedPackets.emplace(id, std::move(strips)).first;
+                else
+                {
+                    vertices.clear();
+                    triangulate(strips, [](const BatchVertex &v, float &x, float &y, float &z) { x = v.x; y = v.y; z = v.z; }, vertices);
+                    native_renderer::uploadMesh(id, vertices.data(), static_cast<uint32_t>(vertices.size()));
+                }
+            }
+            uint64_t mesh = id;
+            const float *transform = clip;
+            if (skinnedPacket != g_skinnedPackets.end())
+            {
+                if (!hasPalette)
+                    continue;
+                // Posed on the CPU (camera space), one mesh per draw this frame.
                 vertices.clear();
-                buildMesh(data, size, vertices);
-                native_renderer::uploadMesh(id, vertices.data(), static_cast<uint32_t>(vertices.size()));
+                triangulate(skinnedPacket->second, [](const BatchVertex &v, float &x, float &y, float &z)
+                {
+                    x = y = z = 0.0f;
+                    for (uint32_t b = 0; b < v.bones; ++b)
+                    {
+                        const float *m = &palette[(v.bone[b] * 4u % 1024u) * 4u];
+                        const float w = v.weight[b];
+                        x += w * (m[0] * v.x + m[4] * v.y + m[8] * v.z + m[12]);
+                        y += w * (m[1] * v.x + m[5] * v.y + m[9] * v.z + m[13]);
+                        z += w * (m[2] * v.x + m[6] * v.y + m[10] * v.z + m[14]);
+                    }
+                }, vertices);
+                mesh = (1ull << 63) | g_skinnedDraws++;
+                native_renderer::uploadMesh(mesh, vertices.data(), static_cast<uint32_t>(vertices.size()));
+                transform = projection;
             }
             native_renderer::DrawState state;
             state.texture = surfaceTexture(header, surface);
             state.blend = surfaceBlend(s);
             state.order = surfaceLayer(header, s, fading);
-            native_renderer::draw(id, clip, state);
+            native_renderer::draw(mesh, transform, state);
             ++g_frameDraws;
         }
     }

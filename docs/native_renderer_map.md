@@ -35,10 +35,11 @@ texture mode (1 one texture, 2 two), +0x2c / +0x3c texture indices, +0x60
 GS register packet (A+D: TEX0, ALPHA, TEST...), +0xc0 second-pass registers,
 +0x10c alpha.
 
-Surface flags read by `modelDisp` (bit n of the u64 at +0x18): 28 never
-drawn; 16 boss-effect shell (drawn only while `getNowBossEffect`, the word
-at 0x1186290, has bit 0; it wraps Wander); 23 shadow effect (bit 1 of the
-same word); 25 hidden while the underwater fog (word at 0x1186328) is on.
+Surface flags read by `modelDisp` (bit n of the u64 at +0x18):
+29 never
+drawn; 17 boss effect (drawn only while `getNowBossEffect`, the word at
+0x1186290, has bit 0); 24 shadow effect (bit 1 of the same word); 26 hidden
+while the underwater fog (word at 0x1186328) is on.
 Layer (`modelGetDlLayer`): 0x1020000 -> 8, bit 23 -> 10, 25 -> 16, 9 -> 17,
 10 -> 12/13, 14 -> 1, 15 -> 18, else 2/3 (5/6 for the second owner), the
 odd one when bit 8 is set or the instance fades (+0x244 > 0). Blending:
@@ -59,6 +60,23 @@ from the per-surface packet). Callers: the object display functions
 0x10F3B58 / 0x10F3DE8 (they also call `shadowDisp`). Instance setup:
 `modelInitDispModelClass` (from 0x10EF9D0): lights (`setLight`), unit
 matrix, specularity, the layer mask (+0x96 words).
+
+Batch formats (STCYCL n+1: n fields per vertex; the UNPACK address is the
+field): 0 GIF tag, 1 position V3-32, then V2-16 ST + V4-8 colour (unlit
+scenery, ~90%); V4-16 two ST pairs + V4-8 (two textures); V3-32 normal +
+V2-16 + V4-8 (lit); V4-16 normal + V2-16 + V4-8 + V4-32 skin (skinned).
+Skin: w = bone count, x/y/z = bone index + weight in the fraction (one bone:
+full weight).
+
+Characters are not one model: Wander is ~24 `modelDisp` calls (body,
+limbs, hair, clothes), each a model of its own. The instance chain
+(instance + 0xc) is a NEXT tag past the instance's 15 qwords (lights,
+colours) to a RET packet: rigid parts unpack one matrix to VU1 qword 0,
+skinned parts the bone palette (up to ~75 matrices, `modelSetMatrixTransTag`),
+each bone x view, in camera space. Their clip transform is the projection
+alone: camera context + 0x40 (camera + 0x5a0 = that x view).
+
+`modelClipSkin` only picks the LOD of skinned models.
 
 Skinned characters: `modelClipSkin` (0x1098450); 0x1098CC0 selects 14
 microcodes (characters).
