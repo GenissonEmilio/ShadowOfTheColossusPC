@@ -2914,6 +2914,22 @@ void PS2Runtime::run()
                       << " gameFps=" << (statChains - lastStatChains) / 5.0
                       << " shownFps=" << ps2_stats::presentedFrames.exchange(0) / 5.0
                       << " frames=" << statChains
+                      << []
+                      {
+                          // Frame timeline averages (ms): vu1 (its idle part) / gs tail / rest, and GS backend waits.
+                          const uint64_t n = ps2_stats::tlFrames.exchange(0);
+                          const uint64_t vu1 = ps2_stats::tlVu1Us.exchange(0), vu1Idle = ps2_stats::tlVu1IdleUs.exchange(0),
+                                         gs = ps2_stats::tlGsUs.exchange(0), rest = ps2_stats::tlRestUs.exchange(0);
+                          const uint64_t space = ps2_stats::gsSpaceWaitUs.exchange(0), drains = ps2_stats::gsDrainWaitUs.exchange(0),
+                                         drainCount = ps2_stats::gsDrains.exchange(0);
+                          if (n == 0)
+                              return std::string();
+                          char text[192];
+                          std::snprintf(text, sizeof(text), " tl=%.1f(idle %.1f)/%.1f/%.1f gsWait(space %.1f drain %.1f x%.1f)", vu1 / 1000.0 / n,
+                                        vu1Idle / 1000.0 / n, gs / 1000.0 / n, rest / 1000.0 / n, space / 1000.0 / n, drains / 1000.0 / n,
+                                        static_cast<double>(drainCount) / n);
+                          return std::string(text);
+                      }()
                       << [this]
                       {
                           // PS2X_STATS_CLOCK=<addr>:<ticks per second>: speed of a guest

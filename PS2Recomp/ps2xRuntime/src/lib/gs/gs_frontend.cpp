@@ -9,6 +9,7 @@
 #include "ps2_log.h"
 #include "runtime/ps2_memory.h"
 #include "ThreadNaming.h"
+#include "runtime/ps2_stats.h"
 #include "runtime/ps2_thread_load.h"
 #include "ps2_runtime_macros.h"
 #include <atomic>
@@ -1715,6 +1716,7 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
             m_backend->Flush();
             m_backend->Sync(GSSyncReason::Finish);
         }
+        ps2_stats::tlFinishUs.store(ps2_stats::nowUs(), std::memory_order_relaxed);
         if (m_privRegs)
             m_privRegs->csr.fetch_or(0x2);
         break;

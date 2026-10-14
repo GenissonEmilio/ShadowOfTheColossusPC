@@ -309,6 +309,8 @@ void PS2Memory::mtvuWorkerLoop()
         if (m_gifArbiter)
             m_gifArbiter->drain();
         GSAsyncBackend::PublishThreadStaged();
+        ps2_stats::tlVu1DoneUs.store(ps2_stats::nowUs(), std::memory_order_relaxed);
+        ps2_stats::tlDoneVu1IdleUs.store(ps2_load::waitUs[ps2_load::kVu1].load(std::memory_order_relaxed), std::memory_order_relaxed);
         if (m_mtvuJobEndHook)
             m_mtvuJobEndHook();
         lock.lock();
@@ -1733,7 +1735,10 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     }
 
                     if (channelBase == 0x10009000u)
+                    {
                         ps2_stats::vif1Chains.fetch_add(1, std::memory_order_relaxed);
+                        ps2_stats::frameKicked(ps2_stats::nowUs(), ps2_load::waitUs[ps2_load::kVu1].load(std::memory_order_relaxed));
+                    }
                     static const bool traceChains = std::getenv("PS2X_TRACE_DMA") != nullptr;
                     if (traceChains && channelBase == 0x10009000u)
                     {

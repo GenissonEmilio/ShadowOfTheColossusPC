@@ -17,16 +17,16 @@ OUT=shots/$LABEL
 # demo), the rest from the wake-up cutscene starting (0xd7d824 drops to 0;
 # the save in memcards/Mcd001.ps2, shrine with 1 colossus defeated, loads in
 # real time). Title -> Load Game -> the save; START 10 s into the cutscene
-# skips it; Wander stands at the altar (SNAP 6-8, the pictures compared run
-# to run); then a turn and a 15 s walk (SNAP 11-13, to look at; the same
+# skips it; Wander stands at the altar (SNAP 7-9, the pictures compared run
+# to run); then a turn and a 15 s walk (SNAP 12-14, to look at; the same
 # place only with SOTC_FRAME_INTERVAL).
 [ -f memcards/Mcd001.ps2 ] || { echo "needs the SotC save in memcards/Mcd001.ps2" >&2; exit 1; }
-IN="2560v:START:12;+760v:START:12"                          # entries 0, 1: intro, title
-IN="$IN;+150v:CROSS:8;+150v:CROSS:8"                         # 2, 3: Load Game, the save
-IN="$IN;@d7d824=0:WAIT;+600v:START:12"                       # 4, 5: cutscene, skipped
-IN="$IN;+700v:SNAP;+60v:SNAP;+60v:SNAP"                      # 6-8: standing
-IN="$IN;+1080v:LS_LEFT:60v;+60v:LS_UP:900v"                  # 9, 10: turn, walk
-IN="$IN;+300v:SNAP;+300v:SNAP;+600v:SNAP"                    # 11-13: walk pictures
+IN="2560v:START:12;+760v:START:12"                          # entries 0, 1: intro, Load Game
+IN="$IN;+150v:CROSS:8;+150v:CROSS:8;+300v:CROSS:8"           # 2-4: the save, Yes (again if the card was slow)
+IN="$IN;@d7d824=0:WAIT;+600v:START:12"                       # 5, 6: cutscene, skipped
+IN="$IN;+700v:SNAP;+60v:SNAP;+60v:SNAP"                      # 7-9: standing
+IN="$IN;+1080v:LS_LEFT:60v;+60v:LS_UP:900v"                  # 10, 11: turn, walk
+IN="$IN;+300v:SNAP;+300v:SNAP;+600v:SNAP"                    # 12-14: walk pictures
 rm -rf "$OUT" build/measure-mc && mkdir -p "$OUT" build/measure-mc
 cp memcards/Mcd001.ps2 build/measure-mc/
 PS2X_MEMCARD_DIR=$PWD/build/measure-mc \
@@ -34,7 +34,7 @@ PS2X_GS_HW=${PS2X_GS_HW:-1} PS2X_STATS=1 PS2X_INPUT_CLOCK=frames PS2X_INPUT_SCRI
     ./celosia autotest "$SECS" 100000 >/dev/null 2>&1
 cp logs/autotest.log "$OUT/run.log"
 mv shots/run/gameframe_*.ppm shots/run/snap_*.ppm "$OUT/" 2>/dev/null # autotest saves to shots/run
-for n in 11 12 13; do [ -f "$OUT/snap_$n.ppm" ] && mv "$OUT/snap_$n.ppm" "$OUT/look_$n.ppm"; done
+for n in 12 13 14; do [ -f "$OUT/snap_$n.ppm" ] && mv "$OUT/snap_$n.ppm" "$OUT/look_$n.ppm"; done
 python3 - "$OUT/run.log" "$LABEL" <<'EOF'
 import re, sys
 log = open(sys.argv[1], errors='ignore').read()
@@ -42,9 +42,9 @@ log = open(sys.argv[1], errors='ignore').read()
 entry = {int(i): (int(f), int(v)) for i, f, v in re.findall(r'\[input\] entry (\d+) pressed at frame (\d+) vblank (\d+)', log)}
 released = {int(i): (int(f), int(v)) for i, f, v in re.findall(r'\[input\] entry (\d+) released at frame (\d+) vblank (\d+)', log)}
 never = (10**9, 10**9)
-# Sections: menus (by frame), Wander standing (SNAP 6 -> the turn), the walk.
-sections = [('title', (300, 0), (1650, 0)), ('idle', entry.get(6, never), entry.get(9, never)),
-            ('walk', entry.get(10, never), released.get(10, never))]
+# Sections: menus (by frame), Wander standing (SNAP 7 -> the turn), the walk.
+sections = [('title', (300, 0), (1650, 0)), ('idle', entry.get(7, never), entry.get(10, never)),
+            ('walk', entry.get(11, never), released.get(11, never))]
 fps = {}
 for name, a, b in sections:
     if name != 'title' and b != never and b[1] > a[1]:
@@ -88,6 +88,8 @@ def ms(name):
     return ' '.join('%s=%.1f' % (k, v * 0.05 / frames[name] * 1000.0) for k, v in busy[name].items())
 total = max(end - 300, 1)
 cnt = ' '.join('%s/frame=%d' % (k, v / total) for k, v in counters.items())
-done = 'route done' if 13 in entry else 'route NOT done (frame %d)' % end
+done = 'route done' if 14 in entry else 'route NOT done (frame %d)' % end
+if 14 in entry and not counters.get('direct'):
+    done = 'route NOT valid: no 3D drawn (stuck loading?)'
 print('%-14s fps: %s | ms/frame idle: %s | walk: %s | %s | %s' % (sys.argv[2], fpsText, ms('idle'), ms('walk'), cnt, done))
 EOF

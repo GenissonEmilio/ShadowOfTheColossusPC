@@ -68,6 +68,7 @@ void GSAsyncBackend::publishStaged()
     if (m_staged.empty())
         return;
     ps2_load::Wait waiting;
+    ps2_stats::TimeInto spaceWait{ps2_stats::gsSpaceWaitUs};
     std::unique_lock<std::mutex> lock(m_queueMutex);
     m_spaceCv.wait(lock, [this]
                    { return m_producing.commands.size() < kMaxQueuedCommands; });
@@ -110,6 +111,7 @@ void GSAsyncBackend::enqueue(Command &&command, const uint8_t *data, uint32_t si
     if (waitForSpace && m_producing.commands.size() >= kMaxQueuedCommands)
     {
         ps2_load::Wait waiting;
+        ps2_stats::TimeInto spaceWait{ps2_stats::gsSpaceWaitUs};
         m_spaceCv.wait(lock, [this]
                        { return m_producing.commands.size() < kMaxQueuedCommands; });
     }
@@ -135,6 +137,8 @@ void GSAsyncBackend::drain() const
     std::unique_lock<std::mutex> lock(m_queueMutex);
     const uint64_t target = m_enqueued;
     ps2_load::Wait waiting;
+    ps2_stats::TimeInto drainWait{ps2_stats::gsDrainWaitUs};
+    ps2_stats::gsDrains.fetch_add(1, std::memory_order_relaxed);
     m_doneCv.wait(lock, [this, target]
                   { return m_completed >= target; });
 }
