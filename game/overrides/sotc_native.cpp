@@ -16,8 +16,9 @@
 // or W/2 x H/4 (4-bit), so the pixels are in GS block order).
 // Skinned parts (characters) are posed on the CPU every frame from the bone
 // palette in their instance chain (readPalette).
-// Not yet: lighting (lit batches carry no colour), the second texture and
-// mip levels.
+// Lit batches (normals) are lit per vertex as the VU1's lit microcode does,
+// from the lights in the instance's own packet.
+// Not yet: the second texture and mip levels.
 
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
@@ -33,6 +34,7 @@
 #include <cstring>
 #include <iostream>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace sotc_native
@@ -63,6 +65,7 @@ namespace sotc_native
     {
         float x, y, z;
         float u, v;
+        float nx, ny, nz; // lit batches
         uint8_t r, g, b, a;
         uint8_t bones;
         uint8_t bone[3];
@@ -83,7 +86,7 @@ namespace sotc_native
     {
         const uint32_t end = addr + size;
         uint32_t p = addr;
-        uint32_t positions = 0, colours = 0, uvs = 0, pairs = 0, skin = 0, count = 0;
+        uint32_t positions = 0, normals = 0, colours = 0, uvs = 0, pairs = 0, skin = 0, count = 0;
         while (p < end)
         {
             const uint32_t code = word(p);
@@ -102,6 +105,8 @@ namespace sotc_native
                         positions = p;
                         count = n;
                     }
+                    else
+                        normals = p;
                     break;
                 case 0x6Eu:
                     colours = p;
@@ -134,8 +139,22 @@ namespace sotc_native
                     for (uint32_t i = 0; i < count; ++i)
                     {
                         BatchVertex &v = strip[i];
-                        v = {real(positions + i * 12u), real(positions + i * 12u + 4u), real(positions + i * 12u + 8u), 0.0f, 0.0f, 128, 128, 128, 128, 0, {0, 0, 0}, {0.0f, 0.0f, 0.0f}};
+                        v = {real(positions + i * 12u), real(positions + i * 12u + 4u), real(positions + i * 12u + 8u), 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 128, 128, 128, 128, 0, {0, 0, 0}, {0.0f, 0.0f, 0.0f}};
+                        // V4-16 is the normal when the ST comes apart (V2-16), else two ST pairs.
                         const uint32_t st = uvs ? word(uvs + i * 4u) : (pairs ? word(pairs + i * 8u) : 0u);
+                        if (normals)
+                        {
+                            v.nx = real(normals + i * 12u);
+                            v.ny = real(normals + i * 12u + 4u);
+                            v.nz = real(normals + i * 12u + 8u);
+                        }
+                        else if (pairs && uvs)
+                        {
+                            const uint32_t xy = word(pairs + i * 8u), z = word(pairs + i * 8u + 4u);
+                            v.nx = static_cast<int16_t>(xy & 0xFFFFu) / 4096.0f;
+                            v.ny = static_cast<int16_t>(xy >> 16) / 4096.0f;
+                            v.nz = static_cast<int16_t>(z & 0xFFFFu) / 4096.0f;
+                        }
                         v.u = static_cast<int16_t>(st & 0xFFFFu) / 4096.0f;
                         v.v = static_cast<int16_t>(st >> 16) / 4096.0f;
                         if (colours)
@@ -161,14 +180,22 @@ namespace sotc_native
                     }
                     out.push_back(std::move(strip));
                 }
-                positions = colours = uvs = pairs = skin = count = 0;
+                positions = normals = colours = uvs = pairs = skin = count = 0;
             }
             p += words * 4u;
         }
     }
 
-    // Strips as a triangle list with face normals; `place` maps a batch
-    // vertex to the mesh's space.
+    bool lit(const std::vector<Strip> &strips)
+    {
+        for (const Strip &strip : strips)
+            if (!strip.empty() && (strip[0].nx != 0.0f || strip[0].ny != 0.0f || strip[0].nz != 0.0f))
+                return true;
+        return false;
+    }
+
+    // Strips as a triangle list; `place` maps a batch vertex (position,
+    // normal) to the mesh's space. Unlit strips get face normals.
     template <typename Place>
     void triangulate(const std::vector<Strip> &strips, Place place, std::vector<native_renderer::Vertex> &out)
     {
@@ -180,7 +207,7 @@ namespace sotc_native
             {
                 const BatchVertex &v = strip[i];
                 native_renderer::Vertex &o = placed[i];
-                place(v, o.x, o.y, o.z);
+                place(v, o);
                 o.u = v.u;
                 o.v = v.v;
                 o.r = v.r;
@@ -199,9 +226,12 @@ namespace sotc_native
                     continue; // degenerate (strip joins)
                 for (native_renderer::Vertex &v : t)
                 {
-                    v.nx = nx / len;
-                    v.ny = ny / len;
-                    v.nz = nz / len;
+                    if (v.nx == 0.0f && v.ny == 0.0f && v.nz == 0.0f)
+                    {
+                        v.nx = nx / len;
+                        v.ny = ny / len;
+                        v.nz = nz / len;
+                    }
                     out.push_back(v);
                 }
             }
@@ -377,6 +407,7 @@ namespace sotc_native
     }
 
     std::unordered_map<uint64_t, std::vector<Strip>> g_skinnedPackets; // bind pose, by packet
+    std::unordered_set<uint64_t> g_litPackets;                        // packets with normals
     uint64_t g_skinnedDraws = 0;                                       // this frame's skinned meshes
 
     void endFrame()
@@ -464,12 +495,24 @@ namespace sotc_native
             {
                 strips.clear();
                 readBatches(data, size, strips);
+                if (skinned(strips) && lit(strips))
+                    g_litPackets.insert(id);
                 if (skinned(strips))
                     skinnedPacket = g_skinnedPackets.emplace(id, std::move(strips)).first;
                 else
                 {
                     vertices.clear();
-                    triangulate(strips, [](const BatchVertex &v, float &x, float &y, float &z) { x = v.x; y = v.y; z = v.z; }, vertices);
+                    if (lit(strips))
+                        g_litPackets.insert(id);
+                    triangulate(strips, [](const BatchVertex &v, native_renderer::Vertex &o)
+                    {
+                        o.x = v.x;
+                        o.y = v.y;
+                        o.z = v.z;
+                        o.nx = v.nx;
+                        o.ny = v.ny;
+                        o.nz = v.nz;
+                    }, vertices);
                     native_renderer::uploadMesh(id, vertices.data(), static_cast<uint32_t>(vertices.size()));
                 }
             }
@@ -481,16 +524,19 @@ namespace sotc_native
                     continue;
                 // Posed on the CPU (camera space), one mesh per draw this frame.
                 vertices.clear();
-                triangulate(skinnedPacket->second, [](const BatchVertex &v, float &x, float &y, float &z)
+                triangulate(skinnedPacket->second, [](const BatchVertex &v, native_renderer::Vertex &o)
                 {
-                    x = y = z = 0.0f;
+                    o.x = o.y = o.z = o.nx = o.ny = o.nz = 0.0f;
                     for (uint32_t b = 0; b < v.bones; ++b)
                     {
                         const float *m = &palette[(v.bone[b] * 4u % 1024u) * 4u];
                         const float w = v.weight[b];
-                        x += w * (m[0] * v.x + m[4] * v.y + m[8] * v.z + m[12]);
-                        y += w * (m[1] * v.x + m[5] * v.y + m[9] * v.z + m[13]);
-                        z += w * (m[2] * v.x + m[6] * v.y + m[10] * v.z + m[14]);
+                        o.x += w * (m[0] * v.x + m[4] * v.y + m[8] * v.z + m[12]);
+                        o.y += w * (m[1] * v.x + m[5] * v.y + m[9] * v.z + m[13]);
+                        o.z += w * (m[2] * v.x + m[6] * v.y + m[10] * v.z + m[14]);
+                        o.nx += w * (m[0] * v.nx + m[4] * v.ny + m[8] * v.nz);
+                        o.ny += w * (m[1] * v.nx + m[5] * v.ny + m[9] * v.nz);
+                        o.nz += w * (m[2] * v.nx + m[6] * v.ny + m[10] * v.nz);
                     }
                 }, vertices);
                 mesh = (1ull << 63) | g_skinnedDraws++;
@@ -501,6 +547,15 @@ namespace sotc_native
             state.texture = surfaceTexture(header, surface);
             state.blend = surfaceBlend(s);
             state.order = surfaceLayer(header, s, fading);
+            if (g_litPackets.count(id))
+            {
+                // The instance's lights (its own 15 qwords, unpacked to VU1
+                // 0x3d8): the light matrix, then colours and ambient.
+                state.lit = true;
+                const uint32_t own = word(instance + 0xCu);
+                for (uint32_t i = 0; i < 32u; ++i)
+                    state.light[i] = real(own + 0x10u + i * 4u);
+            }
             native_renderer::draw(mesh, transform, state);
             ++g_frameDraws;
         }

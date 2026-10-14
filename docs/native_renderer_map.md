@@ -76,6 +76,13 @@ skinned parts the bone palette (up to ~75 matrices, `modelSetMatrixTransTag`),
 each bone x view, in camera space. Their clip transform is the projection
 alone: camera context + 0x40 (camera + 0x5a0 = that x view).
 
+The instance's own 14 qwords (to VU1 0x3d8) start with its lights, as the
+lit microcode (loop 0x1818) uses them: qwords 1-4 the light matrix L
+(columns: normal x, y, z, 1), 5-8 the colour matrix C (light 0-2 colours,
+ambient); d = max(0, L x (n, 1)), d.w = 1, vertex colour x= C x d (0x80 =
+1, clamped to 255). Skinned normals go through the bone matrices (camera
+space) with the same lights.
+
 `modelClipSkin` only picks the LOD of skinned models.
 
 Skinned characters: `modelClipSkin` (0x1098450); 0x1098CC0 selects 14

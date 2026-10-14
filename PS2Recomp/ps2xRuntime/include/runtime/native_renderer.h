@@ -13,7 +13,7 @@ namespace native_renderer
     struct Vertex
     {
         float x, y, z;    // model space
-        float nx, ny, nz; // face normal, model space
+        float nx, ny, nz; // normal (lit draws), model space
         float u, v;       // texture coordinates (repeat)
         uint8_t r, g, b, a; // 0x80 = 1.0, as the PS2's
     };
@@ -42,6 +42,12 @@ namespace native_renderer
         uint64_t texture = 0; // 0: none
         Blend blend = Blend::Normal;
         uint32_t order = 0;   // draws go in this order (stable), like the game's display list layers
+        // Lit draws (the VU1's lit microcode): d = max(0, L x (n, 1)), with
+        // L the columns light[0..15]; colour = C x (d.xyz, 1), C the columns
+        // light[16..31] (three light colours, then ambient); it scales the
+        // vertex colour.
+        bool lit = false;
+        float light[32] = {};
     };
     void draw(uint64_t mesh, const float clip[16], const DrawState &state);
     void endFrame(uint32_t width, uint32_t height);

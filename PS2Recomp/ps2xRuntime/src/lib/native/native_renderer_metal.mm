@@ -33,7 +33,14 @@ struct VOut
     float4 color;
 };
 
-vertex VOut nativeVertex(VIn in [[stage_in]], constant float4x4 &clip [[buffer(1)]])
+struct Light
+{
+    float4x4 directions; // columns: the normal's x, y, z, 1
+    float4x4 colours;    // columns: light 0, 1, 2, ambient
+    int lit;
+};
+
+vertex VOut nativeVertex(VIn in [[stage_in]], constant float4x4 &clip [[buffer(1)]], constant Light &light [[buffer(2)]])
 {
     VOut out;
     float4 c = clip * float4(in.position, 1.0);
@@ -42,22 +49,19 @@ vertex VOut nativeVertex(VIn in [[stage_in]], constant float4x4 &clip [[buffer(1
     out.normal = in.normal;
     out.uv = in.uv;
     out.color = float4(in.color) / 128.0; // 0x80 = 1.0
+    if (light.lit != 0)
+    {
+        float4 d = max(light.directions * float4(in.normal, 1.0), 0.0);
+        d.w = 1.0;
+        out.color.rgb = min(out.color.rgb * (light.colours * d).rgb, 255.0 / 128.0);
+    }
     return out;
 }
 
 fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], constant int &textured [[buffer(0)]])
 {
     constexpr sampler repeatLinear(address::repeat, filter::linear);
-    // Vertex colour; the VU lights some surfaces, which carry none yet:
-    // shaded by the face normal meanwhile.
-    float3 shade = float3(1.0);
-    if (!any(in.color.rgb > 0.0))
-    {
-        float3 n = normalize(in.normal);
-        shade = float3(0.45 + 0.55 * abs(dot(n, normalize(float3(0.3, 0.8, 0.5)))));
-    }
-    else
-        shade = in.color.rgb;
+    float3 shade = in.color.rgb;
     float4 t = textured != 0 ? tex.sample(repeatLinear, in.uv) : float4(1.0);
     float alpha = saturate(t.a * (textured != 0 ? 2.0 : 1.0) * in.color.a); // texture alpha 0x80 = opaque
     if (alpha < 0.02)
@@ -207,6 +211,15 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
                         continue;
                     [encoder setVertexBuffer:it->second.buffer offset:0 atIndex:0];
                     [encoder setVertexBytes:d.clip length:sizeof(d.clip) atIndex:1];
+                    struct
+                    {
+                        float light[32];
+                        int lit;
+                        int pad[3];
+                    } light;
+                    std::memcpy(light.light, d.state.light, sizeof(light.light));
+                    light.lit = d.state.lit ? 1 : 0;
+                    [encoder setVertexBytes:&light length:sizeof(light) atIndex:2];
                     auto tex = d.state.texture ? textures.find(d.state.texture) : textures.end();
                     const int textured = tex != textures.end() ? 1 : 0;
                     if (textured)
