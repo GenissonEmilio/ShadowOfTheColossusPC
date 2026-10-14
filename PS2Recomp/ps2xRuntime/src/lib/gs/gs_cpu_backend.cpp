@@ -1159,10 +1159,12 @@ namespace
         {
             if (state.prim.fst)
             {
-                p.su0 = static_cast<float>(v0.u >> 4);
-                p.sv0 = static_cast<float>(v0.v >> 4);
-                p.su1 = static_cast<float>(v1.u >> 4);
-                p.sv1 = static_cast<float>(v1.v >> 4);
+                // UV are 12.4 fixed point: keep the fraction (SotC's bloom
+                // passes put sprites at texel centres with .5 UVs).
+                p.su0 = static_cast<float>(v0.u) / 16.0f;
+                p.sv0 = static_cast<float>(v0.v) / 16.0f;
+                p.su1 = static_cast<float>(v1.u) / 16.0f;
+                p.sv1 = static_cast<float>(v1.v) / 16.0f;
             }
             else
             {
@@ -2493,10 +2495,10 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
         float u0f, v0f, u1f, v1f;
         if (state.prim.fst)
         {
-            u0f = static_cast<float>(v0.u >> 4);
-            v0f = static_cast<float>(v0.v >> 4);
-            u1f = static_cast<float>(v1.u >> 4);
-            v1f = static_cast<float>(v1.v >> 4);
+            u0f = static_cast<float>(v0.u) / 16.0f; // 12.4 fixed point
+            v0f = static_cast<float>(v0.v) / 16.0f;
+            u1f = static_cast<float>(v1.u) / 16.0f;
+            v1f = static_cast<float>(v1.v) / 16.0f;
         }
         else
         {
