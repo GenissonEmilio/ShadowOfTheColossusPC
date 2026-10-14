@@ -519,6 +519,30 @@ namespace sotc_native
         if (g_frame == 0)
             return;
         flush2D();
+        // The GS vertex fog (every world batch has FGE): F = base + scale / w
+        // from getFogFactor0/1 (0x1089b70/bb0), the colour as
+        // graphSetFogParam last set FOGCOL (0x118b8dc/e0/e4).
+        {
+            const float nearD = real(0x12147DCu), farD = real(0x12147E0u), nearR = real(0x12147E4u), farR = real(0x12147E8u), k = real(0x12147ECu);
+            if (farD != nearD)
+            {
+                g_fog.vertexFog = true;
+                g_fog.scale = farD * nearD * (nearR - farR) / (farD - nearD);
+                // getFogFactor1 is twice the line through (near, nearRate) and
+                // (far, farRate) in 1 / w; the picture matches the line.
+                g_fog.base = ((farR - nearR) * (farD + nearD) / (farD - nearD) + farR + nearR) * k * 0.5f;
+                for (int i = 0; i < 3; ++i)
+                    g_fog.colour[i] = static_cast<float>(word(0x118B8DCu + i * 4u) & 0xFFu) / 255.0f;
+            }
+            static const bool log = std::getenv("SOTC_NATIVE_LOG") != nullptr;
+            static uint64_t logged = 0;
+            if (log && g_frame >= logged + 300u)
+            {
+                logged = g_frame;
+                std::fprintf(stderr, "[native-vfog] frame %llu near %g far %g rates %g %g k %g -> base %g scale %g colour %u %u %u\n", (unsigned long long)g_frame,
+                             nearD, farD, nearR, farR, k, g_fog.base, g_fog.scale, word(0x118B8DCu), word(0x118B8E0u), word(0x118B8E4u));
+            }
+        }
         native_renderer::setFog(g_fog);
         g_fog = native_renderer::Fog{};
         native_renderer::setBloom(g_bloomRan ? bloomParams() : native_renderer::Bloom{});

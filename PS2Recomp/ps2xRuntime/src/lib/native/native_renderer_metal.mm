@@ -32,6 +32,7 @@ struct VOut
     float2 uv;
     float4 color;
     float depth; // w
+    float fog;   // GS vertex fog factor, 1: none
 };
 
 struct FogParams
@@ -39,6 +40,9 @@ struct FogParams
     float start, width, steps;
     int fogged;
     float2 size;
+    int vertexFog;
+    float base, scale;
+    float3 colour;
 };
 
 struct Light
@@ -49,13 +53,15 @@ struct Light
     float opacity;
 };
 
-vertex VOut nativeVertex(VIn in [[stage_in]], constant float4x4 &clip [[buffer(1)]], constant Light &light [[buffer(2)]])
+vertex VOut nativeVertex(VIn in [[stage_in]], constant float4x4 &clip [[buffer(1)]], constant Light &light [[buffer(2)]],
+                         constant FogParams &fog [[buffer(3)]])
 {
     VOut out;
     float4 c = clip * float4(in.position, 1.0);
     // Depth from w (near plane at w = 1): z / w = 1 - 1 / w.
     out.position = float4(c.x, c.y, c.w - 1.0, c.w);
     out.depth = c.w;
+    out.fog = fog.vertexFog != 0 ? clamp(fog.base + fog.scale / max(c.w, 1e-3), 0.0, 255.0) / 255.0 : 1.0;
     out.normal = in.normal;
     out.uv = in.uv;
     out.color = float4(in.color) / 128.0; // 0x80 = 1.0
@@ -79,6 +85,7 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
     if (alpha < 0.02)
         discard_fragment();
     float3 rgb = saturate(t.rgb * shade);
+    rgb = mix(fog.colour, rgb, in.fog);
     if (fog.fogged != 0)
     {
         // SotC's zFog: the scene fades into the background image (the sky)
@@ -394,9 +401,16 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                             float start, width, steps;
                             int fogged;
                             float size[2];
+                            int vertexFog;
+                            float base, scale;
+                            float pad[3];
+                            float colour[4];
                         } fp = {fog.start, fog.width, static_cast<float>(fog.steps), (!backgroundOnly && fogOn && d.state.fogged) ? 1 : 0,
-                                {static_cast<float>(w), static_cast<float>(h)}};
+                                {static_cast<float>(w), static_cast<float>(h)},
+                                (fog.vertexFog && !d.state.screen && !d.state.background) ? 1 : 0, fog.base, fog.scale, {0, 0, 0},
+                                {fog.colour[0], fog.colour[1], fog.colour[2], 0}};
                         [encoder setFragmentBytes:&fp length:sizeof(fp) atIndex:1];
+                        [encoder setVertexBytes:&fp length:sizeof(fp) atIndex:3];
                         [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:it->second.count];
                     }
                     [encoder endEncoding];

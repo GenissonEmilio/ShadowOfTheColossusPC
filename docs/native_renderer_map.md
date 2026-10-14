@@ -165,6 +165,16 @@ that alpha (ALPHA 0x54: (Cs - Cd) x Ad + Cd): the distance fades into the
 sky. `drawFrontFog` adds a flat colour on top (layer 0x14, colour and
 amount at 0x118b8dc..f0, set by graphSetFogParam).
 
+## Vertex fog (GS FOG)
+
+Every world batch's GIF tag has FGE: the microcode writes F = vf17.w +
+vf17.x / w per vertex and the GS mixes the colour with FOGCOL by F / 255.
+The factors are getFogFactor0/1 (0x1089b70/bb0) from near/far distances
+and rates at 0x12147dc..ec; the picture matches the line through (near,
+nearRate) and (far, farRate) in 1 / w, which is half of getFogFactor1's
+base. FOGCOL is graphSetFogParam's colour (0x118b8dc/e0/e4). The opening
+canyon is mostly this fog (dark blue grey); the sky (layer 1) is not fogged.
+
 ## Bloom (0x109e2a0, layer 0x14)
 
 A mask of what lies beyond GS Z 0x118c094 (0 in the shrine: only pixels

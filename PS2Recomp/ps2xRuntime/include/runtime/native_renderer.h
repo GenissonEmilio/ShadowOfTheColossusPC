@@ -65,6 +65,11 @@ namespace native_renderer
         bool enabled = false;
         float start = 0.0f, width = 1.0f;
         int steps = 0; // 0: smooth
+        // The GS's per-vertex fog on 3D draws: F = clamp(base + scale / w,
+        // 0, 255); colour = mix(fogColour, colour, F / 255).
+        bool vertexFog = false;
+        float base = 255.0f, scale = 0.0f;
+        float colour[3] = {0, 0, 0}; // 0..1
     };
     void setFog(const Fog &fog);
 
