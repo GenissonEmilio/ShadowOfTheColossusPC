@@ -430,9 +430,11 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         [e setFragmentTexture:depth atIndex:0];
                         [e setFragmentBytes:&bp length:sizeof(bp) atIndex:0];
                     });
-                    for (int i = 0; i < 2; ++i)
+                    // The GS chain reduces the mask in stages before blurring: a wide glow.
+                    for (int i = 0; i < 3; ++i)
                     {
-                        const float stepH[2] = {1.0f / lw, 0.0f}, stepV[2] = {0.0f, 1.0f / lh};
+                        const float spread = 1.0f + static_cast<float>(i);
+                        const float stepH[2] = {spread / lw, 0.0f}, stepV[2] = {0.0f, spread / lh};
                         quad(bloomTex[1], blurPipeline, false, [&](id<MTLRenderCommandEncoder> e)
                         {
                             [e setFragmentTexture:bloomTex[0] atIndex:0];
