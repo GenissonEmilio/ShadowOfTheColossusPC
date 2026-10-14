@@ -122,8 +122,56 @@ namespace
         }
     }
 
+    // KERNEL 0x1ad270 is SotC's idle thread: it loops iosRecvMsg(0x1fc870,
+    // 0, 0) (a poll whose result it drops; iosWaitIdleThread's message) and
+    // reads the CD clock every 1e6 turns (the queue has no buffer: the poll
+    // returns 0 either way). After each poll, when no other thread can run
+    // (a sender it woke is ready), wait on the host for an event instead of
+    // spinning: on the Vita the spin took a core from VU1 and GS.
+    constexpr uint32_t kIosRecvMsg = 0x001B1138u;
+    constexpr uint32_t kIdleQueue = 0x001FC870u;
+    PS2Runtime::RecompiledFunction g_iosRecvMsg = nullptr;
+
+    void iosRecvMsgHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const bool idlePoll = GPR_U32(ctx, 4) == kIdleQueue && GPR_U32(ctx, 6) == 0u;
+        g_iosRecvMsg(rdram, ctx, runtime);
+        if (idlePoll)
+            runtime->eeScheduler().idleWait();
+    }
+
+    // SotC's frame loop: the main thread blocks sending to queue 0x26d9a8;
+    // its GP thread, at each VBlank once the GS has finished the previous
+    // frame, calls 0x1c8078, which receives that message and lets the next
+    // frame start. Nothing caps the rate (60, 30, 20... as drawing allows).
+    // SOTC_FRAME_INTERVAL=<n>: release a frame only n VBlanks after the
+    // previous one at the earliest (2 = steady 30 fps).
+    constexpr uint32_t kGpReleaseFrame = 0x001C8078u;
+    PS2Runtime::RecompiledFunction g_gpReleaseFrame = nullptr;
+
+    void gpReleaseFrameHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static const uint64_t interval = std::strtoull(std::getenv("SOTC_FRAME_INTERVAL"), nullptr, 10);
+        static uint64_t lastRelease = 0;
+        const uint64_t tick = runtime->eeScheduler().currentVSyncTick();
+        if (tick < lastRelease + interval)
+            return; // the GP thread calls again at the next VBlank
+        lastRelease = tick;
+        g_gpReleaseFrame(rdram, ctx, runtime);
+    }
+
     void applySotcOverrides(PS2Runtime &runtime)
     {
+        if (std::getenv("SOTC_FRAME_INTERVAL") && runtime.hasFunction(kGpReleaseFrame))
+        {
+            g_gpReleaseFrame = runtime.lookupFunction(kGpReleaseFrame);
+            runtime.registerFunction(kGpReleaseFrame, gpReleaseFrameHook);
+        }
+        if (!std::getenv("SOTC_IDLE_SPIN") && runtime.hasFunction(kIosRecvMsg))
+        {
+            g_iosRecvMsg = runtime.lookupFunction(kIosRecvMsg);
+            runtime.registerFunction(kIosRecvMsg, iosRecvMsgHook);
+        }
         if (std::getenv("SOTC_DUMP_SPRITE_PACKETS") && runtime.hasFunction(kSpriteDrawSprite))
         {
             g_spriteDrawSprite = runtime.lookupFunction(kSpriteDrawSprite);

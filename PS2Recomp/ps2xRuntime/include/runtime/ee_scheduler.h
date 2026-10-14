@@ -366,6 +366,12 @@ public:
     // depend on host speed.
     void enableHostClockSync();
     void syncCyclesToHostClock();
+    // For a game's busy idle loop (a guest thread that polls while nothing
+    // else can run): with host clock sync on and no other thread ready, wait
+    // on the host until an event or the next deadline (at most 1 ms), then
+    // let real time move the cycle counter. The guest sees the same polling,
+    // only without burning a host core.
+    void idleWait();
     [[nodiscard]] EeKernelSnapshot snapshot() const;
     void publishSnapshot();
 

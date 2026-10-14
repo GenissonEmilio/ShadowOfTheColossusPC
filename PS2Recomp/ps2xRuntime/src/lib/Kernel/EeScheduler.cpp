@@ -2310,6 +2310,38 @@ void EeScheduler::syncCyclesToHostClock()
     }
 }
 
+void EeScheduler::idleWait()
+{
+    assertExecutor();
+    if (!m_hostClockSync || !m_pendingInvocations.empty() || m_pendingEeTimerInterrupts != 0u)
+        return;
+    for (const auto &queue : m_readyQueues)
+        if (!queue.empty())
+            return;
+    {
+        std::unique_lock lock(m_eventMutex);
+        if (!m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
+            return;
+        // A deadline due by cycles is processed first. Host deadlines can lag
+        // real time after a slow stretch (each VBlank is scheduled from the
+        // previous one): those only pace, so they do not shorten the wait.
+        const auto now = std::chrono::steady_clock::now();
+        auto until = now + std::chrono::milliseconds(1);
+        for (const ScheduledEvent &item : m_deadlines)
+        {
+            if (item.deadlineCycle <= m_eeCycle)
+                return;
+            if (item.hostDeadline > now)
+                until = std::min(until, item.hostDeadline);
+        }
+        ps2_load::Wait idle;
+        m_eventCv.wait_until(lock, until, [this]()
+                             { return !m_events.empty() || m_stopRequested.load(std::memory_order_acquire); });
+    }
+    syncCyclesToHostClock();
+    m_checkpointPending.store(true, std::memory_order_release);
+}
+
 void EeScheduler::enableHostClockSync()
 {
     if (std::getenv("PS2X_NO_HOST_SYNC")) // diagnostics: time from executed cycles only
