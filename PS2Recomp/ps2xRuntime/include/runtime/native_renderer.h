@@ -37,6 +37,7 @@ namespace native_renderer
         Normal,   // Cs x As + Cd x (1 - As), alpha = texture x vertex (0x80 = 1)
         Additive, // Cs x As + Cd
         Opaque,   // no blending (alpha still cuts out)
+        Subtract, // Cd - Cs x As
     };
     struct DrawState
     {
@@ -50,6 +51,8 @@ namespace native_renderer
         float opacity = 1.0f; // scales the alpha
         bool background = false; // also drawn into the background image (what distance fades to)
         bool fogged = false;     // fades to the background image with distance (setFog)
+        bool writeDepth = false; // write depth even when additive (a second pass follows)
+        bool overlay = false; // a second pass over the same geometry: depth equal passes, no depth write
         bool screen = false; // 2D: positions already in clip space, no depth test or write
         bool lit = false;
         float light[32] = {};

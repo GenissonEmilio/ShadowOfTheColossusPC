@@ -34,6 +34,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -67,6 +68,7 @@ namespace sotc_native
     {
         float x, y, z;
         float u, v;
+        float u2, v2;     // the second texture's (two-texture surfaces)
         float nx, ny, nz; // lit batches
         uint8_t r, g, b, a;
         uint8_t bones;
@@ -141,9 +143,15 @@ namespace sotc_native
                     for (uint32_t i = 0; i < count; ++i)
                     {
                         BatchVertex &v = strip[i];
-                        v = {real(positions + i * 12u), real(positions + i * 12u + 4u), real(positions + i * 12u + 8u), 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 128, 128, 128, 128, 0, {0, 0, 0}, {0.0f, 0.0f, 0.0f}};
+                        v = {real(positions + i * 12u), real(positions + i * 12u + 4u), real(positions + i * 12u + 8u), 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 128, 128, 128, 128, 0, {0, 0, 0}, {0.0f, 0.0f, 0.0f}};
                         // V4-16 is the normal when the ST comes apart (V2-16), else two ST pairs.
                         const uint32_t st = uvs ? word(uvs + i * 4u) : (pairs ? word(pairs + i * 8u) : 0u);
+                        if (pairs && !uvs) // the second texture's pair
+                        {
+                            const uint32_t st2 = word(pairs + i * 8u + 4u);
+                            v.u2 = static_cast<int16_t>(st2 & 0xFFFFu) / 4096.0f;
+                            v.v2 = static_cast<int16_t>(st2 >> 16) / 4096.0f;
+                        }
                         if (normals)
                         {
                             v.nx = real(normals + i * 12u);
@@ -199,7 +207,7 @@ namespace sotc_native
     // Strips as a triangle list; `place` maps a batch vertex (position,
     // normal) to the mesh's space. Unlit strips get face normals.
     template <typename Place>
-    void triangulate(const std::vector<Strip> &strips, Place place, std::vector<native_renderer::Vertex> &out)
+    void triangulate(const std::vector<Strip> &strips, Place place, std::vector<native_renderer::Vertex> &out, bool secondTexture = false)
     {
         std::vector<native_renderer::Vertex> placed;
         for (const Strip &strip : strips)
@@ -210,8 +218,8 @@ namespace sotc_native
                 const BatchVertex &v = strip[i];
                 native_renderer::Vertex &o = placed[i];
                 place(v, o);
-                o.u = v.u;
-                o.v = v.v;
+                o.u = secondTexture ? v.u2 : v.u;
+                o.v = secondTexture ? v.v2 : v.v;
                 o.r = v.r;
                 o.g = v.g;
                 o.b = v.b;
@@ -272,7 +280,14 @@ namespace sotc_native
         if (native_renderer::hasTexture(key))
             return key;
         if ((psm != 0x13u && psm != 0x14u) || width > 1024u || height > 1024u)
+        {
+            static const bool log = std::getenv("SOTC_NATIVE_LOG") != nullptr;
+            static std::set<uint32_t> seen;
+            if (log && seen.insert(header).second)
+                std::fprintf(stderr, "[native-tex] header %08x psm %02x %ux%u format %08x swizzled %u\n", header, psm, width, height, format,
+                             g_ram[(header + 0x1Fu) & 0x1FFFFFFu] & 1u);
             return 0;
+        }
         const uint32_t pixels = header + word(header + 0x14u), clut = header + word(header + 0x18u);
         const bool swizzled = (g_ram[(header + 0x1Fu) & 0x1FFFFFFu] & 1u) != 0u;
         const uint32_t entries = psm == 0x14u ? 16u : 256u;
@@ -327,10 +342,11 @@ namespace sotc_native
         return key;
     }
 
-    uint64_t surfaceTexture(uint32_t header, uint32_t surface)
+    // The surface's texture: +0x2c, or +0x3c for the second (texture mode 2).
+    uint64_t surfaceTexture(uint32_t header, uint32_t surface, uint32_t field = 0x2Cu)
     {
         const uint32_t s = word(header + 0x50u) + surface * 0x120u;
-        const uint32_t index = word(s + 0x2Cu);
+        const uint32_t index = word(s + field);
         if (index >= word(header + 0x44u))
             return 0;
         const uint32_t object = word(word(header + 0x40u) + index * 0x20u + 0x10u);
@@ -382,12 +398,19 @@ namespace sotc_native
         return !(((flags >> 26) & 1u) && word(0x1186328u) != 0u);
     }
 
-    // The ALPHA_1 register in the surface's A+D packet (+0x60): 0x48 adds.
-    native_renderer::Blend surfaceBlend(uint32_t s)
+    // ALPHA_1 (0x42, first pass) or ALPHA_2 (0x43, the second texture's
+    // pass) in the surface's A+D packet (+0x60): 0x44 blends, 0x48 adds,
+    // 0x42 subtracts (Cd - Cs x As).
+    native_renderer::Blend surfaceBlend(uint32_t s, uint32_t reg = 0x42u)
     {
         for (uint32_t q = s + 0x60u; q < s + 0xC0u; q += 16u)
-            if (word(q + 8u) == 0x42u)
-                return (word(q) & 0xFFu) == 0x48u ? native_renderer::Blend::Additive : native_renderer::Blend::Normal;
+            if (word(q + 8u) == reg)
+                switch (word(q) & 0xFFu)
+                {
+                case 0x48u: return native_renderer::Blend::Additive;
+                case 0x42u: return native_renderer::Blend::Subtract;
+                default: return native_renderer::Blend::Normal;
+                }
         return native_renderer::Blend::Normal;
     }
 
@@ -473,6 +496,14 @@ namespace sotc_native
         g_ram = rdram;
         const int32_t slices = static_cast<int32_t>(word(0x118C46Cu));
         const float width = real(0x118C470u), margin = real(0x118C474u), farDistance = real(0x118C480u);
+        static const bool log = std::getenv("SOTC_NATIVE_LOG") != nullptr;
+        static uint64_t logged = 0;
+        if (log && g_frame >= logged + 300u)
+        {
+            logged = g_frame;
+            std::fprintf(stderr, "[native-fog] frame %llu slices %d width %g margin %g far %g c478 %g c47c %g near %g\n", (unsigned long long)g_frame, slices, width, margin,
+                         farDistance, real(0x118C478u), real(0x118C47Cu), real(0x118C484u));
+        }
         if (slices > 0 && width > 0.0f)
         {
             g_fog.enabled = true;
@@ -844,7 +875,7 @@ namespace sotc_native
                     vertices.clear();
                     if (lit(strips))
                         g_litPackets.insert(id);
-                    triangulate(strips, [](const BatchVertex &v, native_renderer::Vertex &o)
+                    const auto place = [](const BatchVertex &v, native_renderer::Vertex &o)
                     {
                         o.x = v.x;
                         o.y = v.y;
@@ -852,8 +883,15 @@ namespace sotc_native
                         o.nx = v.nx;
                         o.ny = v.ny;
                         o.nz = v.nz;
-                    }, vertices);
+                    };
+                    triangulate(strips, place, vertices);
                     native_renderer::uploadMesh(id, vertices.data(), static_cast<uint32_t>(vertices.size()));
+                    if (word(s + 0x1Cu) == 2u) // two textures: the second pass's mesh, with the second coordinates
+                    {
+                        vertices.clear();
+                        triangulate(strips, place, vertices, true);
+                        native_renderer::uploadMesh(id ^ (1ull << 61), vertices.data(), static_cast<uint32_t>(vertices.size()));
+                    }
                 }
             }
             uint64_t mesh = id;
@@ -883,6 +921,22 @@ namespace sotc_native
                 native_renderer::uploadMesh(mesh, vertices.data(), static_cast<uint32_t>(vertices.size()));
                 transform = projection;
             }
+            static const bool logPasses = std::getenv("SOTC_NATIVE_LOG") != nullptr;
+            if (logPasses)
+            {
+                uint64_t f;
+                std::memcpy(&f, g_ram + ((s + 0x18u) & 0x1FFFFF8u), 8);
+                static std::set<uint64_t> seen;
+                if ((f & 0x2000200u) && seen.insert((static_cast<uint64_t>(header) << 32) | surface).second)
+                {
+                    uint32_t alphaReg = 0;
+                    for (uint32_t q = s + 0x60u; q < s + 0xC0u; q += 16u)
+                        if (word(q + 8u) == 0x42u)
+                            alphaReg = word(q);
+                    std::fprintf(stderr, "[native-pass] header %08x surface %u flags %016llx alpha %02x layer %u texmode %u opacity %g\n", header, surface,
+                                 (unsigned long long)f, alphaReg & 0xFFu, surfaceLayer(header, s, fading), word(s + 0x1Cu), opacity);
+                }
+            }
             native_renderer::DrawState state;
             state.texture = surfaceTexture(header, surface);
             state.blend = surfaceBlend(s);
@@ -899,8 +953,23 @@ namespace sotc_native
                 for (uint32_t i = 0; i < 32u; ++i)
                     state.light[i] = real(own + 0x10u + i * 4u);
             }
+            const bool twoTextures = word(s + 0x1Cu) == 2u && mesh == id;
+            if (twoTextures)
+                state.writeDepth = true;
             native_renderer::draw(mesh, transform, state);
             ++g_frameDraws;
+            if (twoTextures)
+            {
+                // The microcode draws the batch again with the second texture
+                // and coordinates, blended by ALPHA_2 (context 2).
+                native_renderer::DrawState second = state;
+                second.texture = surfaceTexture(header, surface, 0x3Cu);
+                second.blend = surfaceBlend(s, 0x43u);
+                second.writeDepth = false;
+                second.overlay = true;
+                native_renderer::draw(id ^ (1ull << 61), transform, second);
+                ++g_frameDraws;
+            }
         }
     }
 }

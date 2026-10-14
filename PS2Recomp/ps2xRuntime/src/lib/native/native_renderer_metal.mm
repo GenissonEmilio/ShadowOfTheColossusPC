@@ -178,6 +178,8 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
         id<MTLRenderPipelineState> pipeline = nil;  // normal blend
         id<MTLRenderPipelineState> additive = nil;
         id<MTLRenderPipelineState> opaque = nil;
+        id<MTLRenderPipelineState> subtract = nil;
+        id<MTLDepthStencilState> depthEqualReadOnly = nil;
         id<MTLDepthStencilState> depthOff = nil;
         id<MTLDepthStencilState> depthReadOnly = nil;
         id<MTLDepthStencilState> depthState = nil;
@@ -237,6 +239,9 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
             pipeline = [device newRenderPipelineStateWithDescriptor:desc error:&error];
             blend.destinationRGBBlendFactor = MTLBlendFactorOne;
             additive = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+            blend.rgbBlendOperation = MTLBlendOperationReverseSubtract;
+            subtract = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+            blend.rgbBlendOperation = MTLBlendOperationAdd;
             blend.blendingEnabled = NO;
             opaque = [device newRenderPipelineStateWithDescriptor:desc error:&error];
             [desc release];
@@ -279,6 +284,8 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
             depthState = [device newDepthStencilStateWithDescriptor:depthDesc];
             depthDesc.depthWriteEnabled = NO;
             depthReadOnly = [device newDepthStencilStateWithDescriptor:depthDesc];
+            depthDesc.depthCompareFunction = MTLCompareFunctionLessEqual;
+            depthEqualReadOnly = [device newDepthStencilStateWithDescriptor:depthDesc];
             depthDesc.depthCompareFunction = MTLCompareFunctionAlways;
             depthOff = [device newDepthStencilStateWithDescriptor:depthDesc];
             [depthDesc release];
@@ -349,13 +356,16 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                             continue;
                         const int blendMode = static_cast<int>(d.state.blend);
                         const bool backdrop = d.state.screen || d.state.background;
-                        const int mode = blendMode | (backdrop ? 4 : 0);
+                        const int mode = blendMode | (backdrop ? 8 : 0) | (d.state.overlay ? 16 : 0) | (d.state.writeDepth ? 32 : 0);
                         if (mode != bound)
                         {
-                            [encoder setRenderPipelineState:blendMode == 1 ? additive : (blendMode == 2 ? opaque : pipeline)];
+                            [encoder setRenderPipelineState:blendMode == 1 ? additive : (blendMode == 2 ? opaque : (blendMode == 3 ? subtract : pipeline))];
                             // Additive glows do not hide what is drawn after them; 2D and the
-                            // background (the sky, a small dome drawn first) ignore depth.
-                            [encoder setDepthStencilState:backdrop ? depthOff : (blendMode == 1 ? depthReadOnly : depthState)];
+                            // background (the sky, a small dome drawn first) ignore depth; a
+                            // second pass lands on its first.
+                            [encoder setDepthStencilState:backdrop ? depthOff
+                                                                   : (d.state.overlay ? depthEqualReadOnly
+                                                                                      : (blendMode == 1 && !d.state.writeDepth ? depthReadOnly : depthState))];
                             bound = mode;
                         }
                         auto it = meshes.find(d.mesh);

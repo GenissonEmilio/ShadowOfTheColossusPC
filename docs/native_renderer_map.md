@@ -61,6 +61,12 @@ from the per-surface packet). Callers: the object display functions
 `modelInitDispModelClass` (from 0x10EF9D0): lights (`setLight`), unit
 matrix, specularity, the layer mask (+0x96 words).
 
+Two-texture surfaces (+0x1c = 2; textures +0x2c and +0x3c; batches with
+V4-16 holding both ST pairs): the microcode draws each batch twice, the
+GIF tags at +0xc0 selecting context 1 then 2: the first texture blended by
+ALPHA_1, then the second by ALPHA_2 (0x44 blend, 0x48 add, 0x42 subtract
+Cd - Cs x As: carvings and dirt darkened onto a lit base).
+
 Batch formats (STCYCL n+1: n fields per vertex; the UNPACK address is the
 field): 0 GIF tag, 1 position V3-32, then V2-16 ST + V4-8 colour (unlit
 scenery, ~90%); V4-16 two ST pairs + V4-8 (two textures); V3-32 normal +
