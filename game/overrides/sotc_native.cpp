@@ -9,14 +9,23 @@
 // and per packet its world batches (VIF: GIF tag, V3-32 positions, V2-16 ST,
 // V4-8 colours, each batch ending in MSCNT; triangle strips). The matrix is
 // camera (camera context + 0x5a0) x model (modelDisp's second argument).
-// Not yet: textures, lighting (lit batches carry no colour), materials,
-// skinned characters.
+// Textures: the surface's index (+0x2c) into the model's table (+0x40,
+// 0x20 each; +0x10 the texture object, whose +0x20 is the "NTO2" header:
+// +0x14 pixels, +0x18 CLUT, +0x1c format | log2 width << 16 | log2 height
+// << 20; byte +0x1f bit 0: level 0 uploaded as PSMCT32, W/2 x H/2 (8-bit)
+// or W/2 x H/4 (4-bit), so the pixels are in GS block order).
+// Not yet: lighting (lit batches carry no colour), materials, skinned
+// characters, the second texture and mip levels.
 
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/native_renderer.h"
+#include "runtime/gs/ps2_gs_psmct32.h"
+#include "runtime/gs/ps2_gs_psmt4.h"
+#include "runtime/gs/ps2_gs_psmt8.h"
 #include "runtime/ps2_stats.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -51,6 +60,7 @@ namespace sotc_native
         struct In
         {
             float x, y, z;
+            float u, v;
             uint8_t r, g, b, a;
         };
         std::vector<In> strip;
@@ -69,13 +79,13 @@ namespace sotc_native
                 ny /= len;
                 nz /= len;
                 for (const In *v : t)
-                    out.push_back({v->x, v->y, v->z, nx, ny, nz, v->r, v->g, v->b, v->a});
+                    out.push_back({v->x, v->y, v->z, nx, ny, nz, v->u, v->v, v->r, v->g, v->b, v->a});
             }
             strip.clear();
         };
         const uint32_t end = addr + size;
         uint32_t p = addr;
-        uint32_t positions = 0, colours = 0, count = 0;
+        uint32_t positions = 0, colours = 0, uvs = 0, count = 0;
         while (p < end)
         {
             const uint32_t code = word(p);
@@ -93,6 +103,8 @@ namespace sotc_native
                 }
                 else if ((cmd & 0x6Fu) == 0x6Eu) // V4-8 colours
                     colours = p;
+                else if ((cmd & 0x6Fu) == 0x65u) // V2-16 ST, 12-bit fraction (VIF ROW taken as 0)
+                    uvs = p;
             }
             else if (cmd == 0x20u)
                 words = 1;
@@ -108,7 +120,13 @@ namespace sotc_native
                 {
                     for (uint32_t i = 0; i < count; ++i)
                     {
-                        In v{real(positions + i * 12u), real(positions + i * 12u + 4u), real(positions + i * 12u + 8u), 128, 128, 128, 128};
+                        In v{real(positions + i * 12u), real(positions + i * 12u + 4u), real(positions + i * 12u + 8u), 0.0f, 0.0f, 128, 128, 128, 128};
+                        if (uvs)
+                        {
+                            const uint32_t st = word(uvs + i * 4u);
+                            v.u = static_cast<int16_t>(st & 0xFFFFu) / 4096.0f;
+                            v.v = static_cast<int16_t>(st >> 16) / 4096.0f;
+                        }
                         if (colours)
                         {
                             const uint32_t c = word(colours + i * 4u);
@@ -121,10 +139,85 @@ namespace sotc_native
                     }
                     flush();
                 }
-                positions = colours = count = 0;
+                positions = colours = uvs = count = 0;
             }
             p += words * 4u;
         }
+    }
+
+    // An NTO2 texture (level 0) as RGBA8, on the GPU once under its header address.
+    uint64_t texture(uint32_t header)
+    {
+        if (!header || word(header) != 0x324F544Eu) // "NTO2"
+            return 0;
+        if (native_renderer::hasTexture(header))
+            return header;
+        const uint32_t format = word(header + 0x1Cu), psm = format & 0x3Fu;
+        const uint32_t width = 1u << ((format >> 16) & 0xFu), height = 1u << ((format >> 20) & 0xFu);
+        if ((psm != 0x13u && psm != 0x14u) || width > 1024u || height > 1024u)
+            return 0;
+        const uint32_t pixels = header + word(header + 0x14u), clut = header + word(header + 0x18u);
+        const bool swizzled = (g_ram[(header + 0x1Fu) & 0x1FFFFFFu] & 1u) != 0u;
+        const uint32_t entries = psm == 0x14u ? 16u : 256u;
+        uint32_t palette[256];
+        for (uint32_t i = 0; i < entries; ++i)
+        {
+            // CSM1: of every 32 entries, 8-15 and 16-23 are swapped.
+            const uint32_t from = entries == 256u ? ((i & ~0x18u) | ((i & 8u) << 1) | ((i & 16u) >> 1)) : i;
+            palette[i] = word(clut + from * 4u);
+        }
+        std::vector<uint8_t> scratch;
+        if (swizzled)
+        {
+            // Uploaded as PSMCT32 and read back as 8/4-bit: replay that.
+            const uint32_t cw = width / 2u, ch = psm == 0x13u ? height / 2u : height / 4u;
+            scratch.assign(static_cast<size_t>(width) * height + 0x4000u, 0);
+            const uint32_t bw32 = std::max<uint32_t>(cw / 64u, 1u);
+            for (uint32_t i = 0; i < cw * ch; ++i)
+            {
+                const uint32_t a = GSPSMCT32::addrPSMCT32(0, bw32, i % cw, i / cw);
+                if (a + 4u <= scratch.size())
+                    std::memcpy(&scratch[a], g_ram + ((pixels + i * 4u) & 0x1FFFFFFu), 4);
+            }
+        }
+        const uint32_t tbw = std::max<uint32_t>(width / 64u, 2u);
+        std::vector<uint8_t> rgba(static_cast<size_t>(width) * height * 4u);
+        for (uint32_t y = 0; y < height; ++y)
+            for (uint32_t x = 0; x < width; ++x)
+            {
+                uint32_t index;
+                if (swizzled && psm == 0x14u)
+                {
+                    const uint32_t n = GSPSMT4::addrPSMT4(0, tbw, x, y);
+                    const uint8_t b = (n >> 1) < scratch.size() ? scratch[n >> 1] : 0;
+                    index = (n & 1u) ? (b >> 4) : (b & 15u);
+                }
+                else if (swizzled)
+                {
+                    const uint32_t a = GSPSMT8::addrPSMT8(0, tbw, x, y);
+                    index = a < scratch.size() ? scratch[a] : 0u;
+                }
+                else if (psm == 0x14u)
+                {
+                    const uint8_t b = g_ram[(pixels + (y * width + x) / 2u) & 0x1FFFFFFu];
+                    index = (x & 1u) ? (b >> 4) : (b & 15u);
+                }
+                else
+                    index = g_ram[(pixels + y * width + x) & 0x1FFFFFFu];
+                std::memcpy(&rgba[(static_cast<size_t>(y) * width + x) * 4u], &palette[index & (entries - 1u)], 4);
+            }
+        native_renderer::uploadTexture(header, width, height, rgba.data());
+        return header;
+    }
+
+    uint64_t surfaceTexture(uint32_t header, uint32_t surface)
+    {
+        const uint32_t s = word(header + 0x50u) + surface * 0x120u;
+        const uint32_t index = word(s + 0x2Cu);
+        if (index >= word(header + 0x44u))
+            return 0;
+        const uint32_t object = word(word(header + 0x40u) + index * 0x20u + 0x10u);
+        return object ? texture(word(object + 0x20u)) : 0;
     }
 
     void endFrame()
@@ -202,7 +295,7 @@ namespace sotc_native
                 buildMesh(data, size, vertices);
                 native_renderer::uploadMesh(id, vertices.data(), static_cast<uint32_t>(vertices.size()));
             }
-            native_renderer::draw(id, clip);
+            native_renderer::draw(id, clip, surfaceTexture(header, word(pk + 8u)));
             ++g_frameDraws;
         }
     }

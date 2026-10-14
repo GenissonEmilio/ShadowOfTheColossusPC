@@ -20,6 +20,7 @@ struct VIn
 {
     float3 position [[attribute(0)]];
     float3 normal [[attribute(1)]];
+    float2 uv [[attribute(3)]];
     uchar4 color [[attribute(2)]];
 };
 
@@ -27,6 +28,7 @@ struct VOut
 {
     float4 position [[position]];
     float3 normal;
+    float2 uv;
     float4 color;
 };
 
@@ -37,18 +39,29 @@ vertex VOut nativeVertex(VIn in [[stage_in]], constant float4x4 &clip [[buffer(1
     // Depth from w (near plane at w = 1): z / w = 1 - 1 / w.
     out.position = float4(c.x, c.y, c.w - 1.0, c.w);
     out.normal = in.normal;
-    out.color = float4(in.color) / 255.0;
+    out.uv = in.uv;
+    out.color = float4(in.color) / 128.0; // 0x80 = 1.0
     return out;
 }
 
-fragment float4 nativeFragment(VOut in [[stage_in]])
+fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], constant int &textured [[buffer(0)]])
 {
-    // Unlit stand-in: vertex colour (grey when the game lights it on the
-    // VU) shaded by the face normal.
-    float3 base = any(in.color.rgb > 0.0) ? in.color.rgb * 2.0 : float3(0.55);
-    float3 n = normalize(in.normal);
-    float light = 0.35 + 0.65 * abs(dot(n, normalize(float3(0.3, 0.8, 0.5))));
-    return float4(saturate(base * light), 1.0);
+    constexpr sampler repeatLinear(address::repeat, filter::linear);
+    // Vertex colour; the VU lights some surfaces, which carry none yet:
+    // shaded by the face normal meanwhile.
+    float3 shade = float3(1.0);
+    if (!any(in.color.rgb > 0.0))
+    {
+        float3 n = normalize(in.normal);
+        shade = float3(0.45 + 0.55 * abs(dot(n, normalize(float3(0.3, 0.8, 0.5)))));
+    }
+    else
+        shade = in.color.rgb;
+    float4 t = textured != 0 ? tex.sample(repeatLinear, in.uv) : float4(1.0);
+    float alpha = t.a * 2.0 * in.color.a; // texture alpha 0x80 = opaque
+    if (textured != 0 && alpha < 0.25)
+        discard_fragment();
+    return float4(saturate(t.rgb * shade), 1.0);
 }
 )MSL";
 
@@ -61,6 +74,7 @@ fragment float4 nativeFragment(VOut in [[stage_in]])
     struct Draw
     {
         uint64_t mesh;
+        uint64_t texture;
         float clip[16];
     };
 
@@ -73,6 +87,7 @@ fragment float4 nativeFragment(VOut in [[stage_in]])
         id<MTLTexture> color = nil, depth = nil;
         uint32_t width = 0, height = 0;
         std::unordered_map<uint64_t, Mesh> meshes;
+        std::unordered_map<uint64_t, id<MTLTexture>> textures;
         std::vector<Draw> draws;
 
         std::mutex outputMutex;
@@ -100,6 +115,8 @@ fragment float4 nativeFragment(VOut in [[stage_in]])
             layout.attributes[1].offset = offsetof(native_renderer::Vertex, nx);
             layout.attributes[2].format = MTLVertexFormatUChar4;
             layout.attributes[2].offset = offsetof(native_renderer::Vertex, r);
+            layout.attributes[3].format = MTLVertexFormatFloat2;
+            layout.attributes[3].offset = offsetof(native_renderer::Vertex, u);
             layout.layouts[0].stride = sizeof(native_renderer::Vertex);
             MTLRenderPipelineDescriptor *desc = [[MTLRenderPipelineDescriptor alloc] init];
             desc.vertexFunction = [library newFunctionWithName:@"nativeVertex"];
@@ -167,6 +184,11 @@ fragment float4 nativeFragment(VOut in [[stage_in]])
                         continue;
                     [encoder setVertexBuffer:it->second.buffer offset:0 atIndex:0];
                     [encoder setVertexBytes:d.clip length:sizeof(d.clip) atIndex:1];
+                    auto tex = d.texture ? textures.find(d.texture) : textures.end();
+                    const int textured = tex != textures.end() ? 1 : 0;
+                    if (textured)
+                        [encoder setFragmentTexture:tex->second atIndex:0];
+                    [encoder setFragmentBytes:&textured length:sizeof(textured) atIndex:0];
                     [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:it->second.count];
                 }
                 [encoder endEncoding];
@@ -223,19 +245,42 @@ namespace native_renderer
         mesh.count = count;
     }
 
+    bool hasTexture(uint64_t id)
+    {
+        Renderer *r = renderer();
+        return r && r->textures.count(id) != 0;
+    }
+
+    void uploadTexture(uint64_t key, uint32_t width, uint32_t height, const uint8_t *rgba)
+    {
+        Renderer *r = renderer();
+        if (!r || !width || !height)
+            return;
+        MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:width height:height mipmapped:NO];
+        desc.usage = MTLTextureUsageShaderRead;
+        desc.storageMode = MTLStorageModeShared;
+        id<MTLTexture> texture = [r->device newTextureWithDescriptor:desc];
+        [texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:rgba bytesPerRow:width * 4u];
+        auto it = r->textures.find(key);
+        if (it != r->textures.end())
+            [it->second release];
+        r->textures[key] = texture;
+    }
+
     void beginFrame()
     {
         if (Renderer *r = renderer())
             r->draws.clear();
     }
 
-    void draw(uint64_t mesh, const float clip[16])
+    void draw(uint64_t mesh, const float clip[16], uint64_t texture)
     {
         Renderer *r = renderer();
         if (!r)
             return;
         Draw d;
         d.mesh = mesh;
+        d.texture = texture;
         std::memcpy(d.clip, clip, sizeof(d.clip));
         r->draws.push_back(d);
     }

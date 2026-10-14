@@ -208,3 +208,68 @@ def zbuffer_render(calls, w=256, h=224, only=None):
     im = Image.new('RGB', (w, h))
     im.putdata(color)
     return im
+
+# ---- GS swizzle (from runtime/gs/ps2_gs_psm*.h) -------------------------------
+BLOCK32 = [[0, 1, 4, 5, 16, 17, 20, 21], [2, 3, 6, 7, 18, 19, 22, 23], [8, 9, 12, 13, 24, 25, 28, 29], [10, 11, 14, 15, 26, 27, 30, 31]]
+COLUMN32 = [[0, 1, 4, 5, 8, 9, 12, 13], [2, 3, 6, 7, 10, 11, 14, 15], [16, 17, 20, 21, 24, 25, 28, 29], [18, 19, 22, 23, 26, 27, 30, 31],
+            [32, 33, 36, 37, 40, 41, 44, 45], [34, 35, 38, 39, 42, 43, 46, 47], [48, 49, 52, 53, 56, 57, 60, 61], [50, 51, 54, 55, 58, 59, 62, 63]]
+
+def addr32(bw, x, y):
+    page = (y >> 5) * max(bw, 1) + (x >> 6)
+    return (page << 13) + BLOCK32[(y >> 3) & 3][(x >> 3) & 7] * 256 + COLUMN32[y & 7][x & 7] * 4
+
+def _c_table(path, name):
+    import re, os
+    text = open(os.path.join(os.path.dirname(__file__), '..', 'PS2Recomp/ps2xRuntime/include/runtime/gs', path)).read()
+    body = text[text.index(name):]
+    body = body[body.index('=') + 1:body.index('};')]
+    return [[int(v) for v in re.findall(r'\d+', row)] for row in re.findall(r'\{([^{}]*)\}', body)]
+
+BLOCK4 = _c_table('ps2_gs_psmt4.h', 'blockTable4'); COLUMN4 = _c_table('ps2_gs_psmt4.h', 'columnTable4')
+BLOCK8 = _c_table('ps2_gs_psmt8.h', 'blockTable8'); COLUMN8 = _c_table('ps2_gs_psmt8.h', 'columnTable8')
+
+def addr4(bw, x, y):  # nibble address
+    page = (y >> 7) * max(bw >> 1, 1) + (x >> 7)
+    return (page << 14) + BLOCK4[(y >> 4) & 7][(x >> 5) & 3] * 512 + COLUMN4[y & 15][x & 31]
+
+def addr8(bw, x, y):
+    page = (y >> 6) * max(bw >> 1, 1) + (x >> 7)
+    return (page << 13) + BLOCK8[(y >> 4) & 3][(x >> 4) & 7] * 256 + COLUMN8[y & 15][x & 15]
+
+def texture(header):
+    """An NTO2 texture as RGBA rows (level 0). Swizzled data (uploaded as 32-bit) is unswizzled."""
+    w0 = u32(header + 0x1c)
+    psm, W, H = w0 & 0x3f, 1 << ((w0 >> 16) & 0xf), 1 << ((w0 >> 20) & 0xf)
+    pix, clut = header + u32(header + 0x14), header + u32(header + 0x18)
+    swizzled = (ram[(header + 0x1f) & 0x1FFFFFF] & 1) != 0
+    entries = 16 if psm in (0x14, 0x24, 0x2c) else 256
+    pal = [tuple(ram[(clut + 4 * i + k) & 0x1FFFFFF] for k in range(4)) for i in range(entries)]
+    if entries == 256:  # CSM1: entries 8-15 and 16-23 of each 32 swapped
+        pal = [pal[(i & ~0x18) | ((i & 8) << 1) | ((i & 16) >> 1)] for i in range(256)]
+    out = []
+    if swizzled and psm in (0x13, 0x14):
+        # The game uploads it as PSMCT32 (W/2 x H/2 for 8-bit, W/2 x H/4 for 4-bit) and reads it back as 8/4-bit.
+        cw, ch = W // 2, (H // 2 if psm == 0x13 else H // 4)
+        mem = bytearray(max(1 << 20, cw * ch * 8))
+        for i in range(cw * ch):
+            a = addr32(max(cw // 64, 1), i % cw, i // cw)
+            mem[a:a + 4] = ram[(pix + 4 * i) & 0x1FFFFFF:((pix + 4 * i) & 0x1FFFFFF) + 4]
+        tbw = max(W // 64, 2)
+        for y in range(H):
+            for x in range(W):
+                if psm == 0x14:
+                    n = addr4(tbw, x, y); b = mem[n >> 1]; idx = (b >> 4) if n & 1 else (b & 15)
+                else:
+                    idx = mem[addr8(tbw, x, y)]
+                out.append(pal[idx])
+    else:
+        for y in range(H):
+            for x in range(W):
+                if psm == 0x14:
+                    b = ram[(pix + (y * W + x) // 2) & 0x1FFFFFF]; idx = (b >> 4) if x & 1 else (b & 15)
+                elif psm == 0x13:
+                    idx = ram[(pix + y * W + x) & 0x1FFFFFF]
+                else:
+                    idx = 0
+                out.append(pal[idx])
+    return W, H, out
