@@ -197,7 +197,12 @@ and 13, a third to layer 1 (sky). `reflectionBegin` (0x109ad58) opens layer
 12 by pointing FRAME/ZBUF at an off-screen buffer (cleared to the sky
 colour): layers 12/13 hold the mirrored world, layers 14/15 come back to the
 screen and sample that buffer. `refractionBegin` uses layer 19,
-`waterRefractionBegin` layer 9, both with buffers of their own. Drawing
+`waterRefractionBegin` layer 9, both with buffers of their own.
+Reflecting surfaces (flags 0x2200) are drawn again in layer 15 by
+microcode 1 with the colour their per-surface pass packet unpacks to VU
+0x3f3 (header +0x14 [1], 0x40 each, +0x20 a CALL to the constants; e.g.
+33, 48, 46, 128); natively they sample the mirror image at their own screen
+position (planar reflection). Drawing
 layers 12/13 on the screen gave the grey curtains over the shrine and the
 pit (they are the walls seen in a mirror, from a different camera).
 

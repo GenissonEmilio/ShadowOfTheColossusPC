@@ -78,10 +78,18 @@ vertex VOut nativeVertex(VIn in [[stage_in]], constant float4x4 &clip [[buffer(1
 }
 
 fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], texture2d<float> background [[texture(1)]],
+                               texture2d<float> reflection [[texture(2)]],
                                constant int &textured [[buffer(0)]], constant FogParams &fog [[buffer(1)]])
 {
     constexpr sampler repeatLinear(address::repeat, filter::linear);
     float3 shade = in.color.rgb;
+    if (textured == 2)
+    {
+        // The mirrored world at this pixel, tinted (debug.w < 0: the tint's alpha).
+        constexpr sampler clampLinear(address::clamp_to_edge, filter::linear);
+        float3 r = reflection.sample(clampLinear, in.position.xy / fog.size).rgb;
+        return float4(saturate(r * fog.debug.rgb), -fog.debug.w);
+    }
     float4 t = textured != 0 ? tex.sample(repeatLinear, in.uv) : float4(1.0);
     float alpha = saturate(t.a * (textured != 0 ? 2.0 : 1.0) * in.color.a); // texture alpha 0x80 = opaque
     if (alpha < 0.02)
@@ -209,6 +217,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
         id<MTLDepthStencilState> depthState = nil;
         id<MTLTexture> color = nil, depth = nil, backgroundColor = nil;
         id<MTLTexture> backgroundSmall = nil; // bgEnd's 256 x 256 copy of the background
+        id<MTLTexture> reflectionColor = nil, reflectionDepth = nil; // the mirrored world, 256 x 256
         id<MTLRenderPipelineState> copySmall = nil, backdrop = nil;
         native_renderer::Fog fog;
         native_renderer::Bloom bloom;
@@ -392,6 +401,18 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
             cd.storageMode = MTLStorageModePrivate;
             backgroundColor = [device newTextureWithDescriptor:cd];
             [backgroundSmall release];
+            [reflectionColor release];
+            [reflectionDepth release];
+            {
+                MTLTextureDescriptor *rd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:256 height:256 mipmapped:NO];
+                rd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+                rd.storageMode = MTLStorageModePrivate;
+                reflectionColor = [device newTextureWithDescriptor:rd];
+                MTLTextureDescriptor *rz = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8 width:256 height:256 mipmapped:NO];
+                rz.usage = MTLTextureUsageRenderTarget;
+                rz.storageMode = MTLStorageModePrivate;
+                reflectionDepth = [device newTextureWithDescriptor:rz];
+            }
             {
                 MTLTextureDescriptor *sd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:256 height:256 mipmapped:NO];
                 sd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
@@ -424,13 +445,24 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                 std::stable_sort(draws.begin(), draws.end(), [](const Draw &a, const Draw &b) { return a.state.order < b.state.order; });
                 id<MTLCommandBuffer> commands = [queue commandBuffer];
                 const bool fogOn = fog.enabled && fog.width > 0.0f;
-                auto pass = [&](id<MTLTexture> target, bool backgroundOnly, uint32_t fromOrder = 0, uint32_t toOrder = ~0u, bool load = false)
+                // The mirrored world first, when this frame has any.
+                bool haveMirror = false;
+                for (const Draw &d : draws)
+                    if (d.state.reflectionSource)
+                    {
+                        haveMirror = true;
+                        break;
+                    }
+                auto pass = [&](id<MTLTexture> target, bool backgroundOnly, uint32_t fromOrder = 0, uint32_t toOrder = ~0u, bool load = false,
+                                bool mirror = false)
                 {
                     MTLRenderPassDescriptor *desc = [MTLRenderPassDescriptor renderPassDescriptor];
                     desc.colorAttachments[0].texture = target;
                     desc.colorAttachments[0].loadAction = load ? MTLLoadActionLoad : MTLLoadActionClear;
-                    desc.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0); // the PS2 frame starts black
+                    // The PS2 frame starts black; the mirror image is cleared to the fog colour.
+                    desc.colorAttachments[0].clearColor = mirror ? MTLClearColorMake(fog.colour[0], fog.colour[1], fog.colour[2], 1.0) : MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
                     desc.colorAttachments[0].storeAction = MTLStoreActionStore;
+                    id<MTLTexture> depth = mirror ? reflectionDepth : this->depth;
                     desc.depthAttachment.texture = depth;
                     desc.depthAttachment.loadAction = load ? MTLLoadActionLoad : MTLLoadActionClear;
                     desc.depthAttachment.clearDepth = 1.0;
@@ -443,7 +475,9 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     [encoder setCullMode:MTLCullModeNone];
                     if (!backgroundOnly)
                         [encoder setFragmentTexture:backgroundSmall atIndex:1];
-                    if (!backgroundOnly && !load && fogOn && backdrop)
+                    if (!mirror)
+                        [encoder setFragmentTexture:reflectionColor atIndex:2];
+                    if (!mirror && !backgroundOnly && !load && fogOn && backdrop)
                     {
                         // The background as the PS2 shows it: bgEnd's reduced copy,
                         // stretched back (bgDraw), under everything.
@@ -473,6 +507,10 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     for (const Draw &d : draws)
                     {
                         if (backgroundOnly && !d.state.background)
+                            continue;
+                        if (mirror != d.state.reflectionSource)
+                            continue;
+                        if (d.state.reflectionSample && !haveMirror)
                             continue;
                         if (!backgroundOnly && fogOn && d.state.background)
                             continue; // shown through the backdrop
@@ -545,7 +583,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         light.opacity = d.state.opacity;
                         [encoder setVertexBytes:&light length:sizeof(light) atIndex:2];
                         auto tex = d.state.texture ? textures.find(d.state.texture) : textures.end();
-                        const int textured = tex != textures.end() ? 1 : 0;
+                        const int textured = d.state.reflectionSample ? 2 : (tex != textures.end() ? 1 : 0);
                         if (textured)
                             [encoder setFragmentTexture:tex->second atIndex:0];
                         [encoder setFragmentBytes:&textured length:sizeof(textured) atIndex:0];
@@ -565,6 +603,12 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                                 {fog.colour[0], fog.colour[1], fog.colour[2], 0},
                                 {static_cast<float>(d.state.debugColour & 0xFFu) / 255.0f, static_cast<float>((d.state.debugColour >> 8) & 0xFFu) / 255.0f,
                                  static_cast<float>((d.state.debugColour >> 16) & 0xFFu) / 255.0f, d.state.debugColour ? 1.0f : 0.0f}};
+                        if (d.state.reflectionSample)
+                        {
+                            for (int k = 0; k < 3; ++k)
+                                fp.debug[k] = d.state.reflectionTint[k];
+                            fp.debug[3] = -d.state.reflectionTint[3];
+                        }
                         [encoder setFragmentBytes:&fp length:sizeof(fp) atIndex:1];
                         [encoder setVertexBytes:&fp length:sizeof(fp) atIndex:3];
                         [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:it->second.count];
@@ -572,6 +616,8 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     resolveShadows();
                     [encoder endEncoding];
                 };
+                if (haveMirror)
+                    pass(reflectionColor, false, 0, ~0u, false, true);
                 if (fogOn && copySmall)
                 {
                     pass(backgroundColor, true); // the sky, what distance fades into

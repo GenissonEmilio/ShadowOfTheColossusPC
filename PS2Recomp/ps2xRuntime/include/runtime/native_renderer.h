@@ -60,6 +60,13 @@ namespace native_renderer
         // `shadow` (0..1).
         bool shadowVolume = false;
         float shadow = 0.5f;
+        // Planar reflections: reflectionSource draws (the game's mirrored
+        // geometry) go to an off-screen image; a reflectionSample draw shows
+        // that image at its own screen position, times reflectionTint
+        // (0..1, alpha the blend amount), instead of its texture.
+        bool reflectionSource = false;
+        bool reflectionSample = false;
+        float reflectionTint[4] = {1, 1, 1, 1};
         uint32_t debugColour = 0; // non-zero: drawn flat in this RGB (who drew what)
         bool lit = false;
         float light[32] = {};

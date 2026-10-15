@@ -235,7 +235,7 @@ cmd_autotest() {
     rm -rf "$ROOT/shots/run" && mkdir -p "$ROOT/shots/run"
     (cd "$ROOT" &&
         PS2X_INPUT_SCRIPT=${PS2X_INPUT_SCRIPT:-"11:DOWN:0.3;12:CROSS:0.3"} \
-        PS2X_SNAPSHOT_DIR=shots/run PS2X_SNAPSHOT_SECONDS=${2:-5} \
+        PS2X_SNAPSHOT_DIR=shots/run PS2X_SNAPSHOT_SECONDS=${2:-5} PS2X_NO_SPU2_AUDIO=${PS2X_NO_SPU2_AUDIO:-1} \
         PS2X_VU1_DUMP_MISSING=$VU1_DUMPS PS2X_MEMCARD_DIR=${PS2X_MEMCARD_DIR:-$BUILD/autotest-memcards} \
         exec "$RUNNER" "$DISC/$BOOT") >"$LOGS/autotest.log" 2>&1 &
     pid=$!

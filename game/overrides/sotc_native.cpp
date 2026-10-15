@@ -1203,7 +1203,8 @@ namespace sotc_native
             // the camera context's +0x520 matrix and sampled by the reflecting
             // surfaces (layers 14/15). Never on the screen; not rendered yet.
             const uint32_t layer = surfaceLayer(header, s, fading);
-            if (layer == 12u || layer == 13u)
+            static const bool noReflect = std::getenv("SOTC_NATIVE_NOREFLECT") != nullptr;
+            if ((layer == 12u || layer == 13u) && noReflect)
                 continue;
             if ((skipLayers >> (layer & 31u)) & 1u)
                 continue;
@@ -1252,6 +1253,7 @@ namespace sotc_native
                     g_haveViewLights = true;
                 }
             }
+            state.reflectionSource = layer == 12u || layer == 13u;
             const bool twoTextures = word(s + 0x1Cu) == 2u && mesh == id && !state.debugColour;
             if (twoTextures)
                 state.writeDepth = true;
@@ -1268,6 +1270,30 @@ namespace sotc_native
                 second.writeDepth = false;
                 second.overlay = true;
                 native_renderer::draw(id ^ (1ull << 61), transform, second);
+                ++g_frameDraws;
+            }
+            // Reflecting surfaces (flags 0x2200, modelDisp): again in layer 15,
+            // showing the mirror image (layers 12/13, reflectionBegin) at their
+            // own screen position, in the colour their pass packet unpacks to
+            // VU 0x3f3 (the per-surface packets at header +0x14 [1], 0x40 each).
+            uint64_t sflags;
+            std::memcpy(&sflags, g_ram + ((s + 0x18u) & 0x1FFFFF8u), 8);
+            if ((sflags & 0x2200u) == 0x2200u && !noReflect && !state.debugColour)
+            {
+                const uint32_t rec = word(word(header + 0x14u) + 4u) + surface * 0x40u + 0x20u;
+                const uint32_t data = word(rec + 4u); // CALL target: its VU constants
+                native_renderer::DrawState refl = state;
+                refl.reflectionSource = false;
+                refl.reflectionSample = true;
+                refl.overlay = true;
+                refl.writeDepth = false;
+                refl.blend = native_renderer::Blend::Normal;
+                refl.order = 15;
+                static const float tintAlpha = std::getenv("SOTC_REFLECT_ALPHA") ? static_cast<float>(std::atof(std::getenv("SOTC_REFLECT_ALPHA"))) : 1.0f;
+                for (int c = 0; c < 3; ++c)
+                    refl.reflectionTint[c] = std::clamp(real(data + 0x30u + c * 4u) / 128.0f, 0.0f, 2.0f);
+                refl.reflectionTint[3] = tintAlpha;
+                native_renderer::draw(mesh, transform, refl);
                 ++g_frameDraws;
             }
         }
