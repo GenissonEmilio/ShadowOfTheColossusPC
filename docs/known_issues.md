@@ -48,5 +48,9 @@ equal near white); in the opening like a factor. Ruled out (each switched off
 on its side, the gap stayed): vertex fog, bloom, depth of field, the game's
 screenBlur and shadows, the display merge (PMODE 0x8023 blends the frame with
 itself). The opening's models are mostly unlit (vertex colour x texture).
-Not yet checked: the GS texture function and CLUT path against the native
-decode on one surface, per draw.
+Also matching in the opening: the fog colour (FOGCOL 30 40 45, the same
+in the GS and natively) and F per vertex (z 3650 -> w 245 -> F 132.6
+natively, 132 in the GS stream); switching the native lighting off changes
+nothing; the unlit models' instance factor (VU 991) is 1. Not yet checked:
+the GS texture function and CLUT path against the native decode on one
+surface, per draw.
