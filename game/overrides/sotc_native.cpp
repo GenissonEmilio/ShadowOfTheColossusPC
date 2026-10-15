@@ -938,8 +938,10 @@ namespace sotc_native
         syncFrame(rdram);
         const uint32_t chain = GPR_U32(ctx, 4), model = GPR_U32(ctx, 5);
         g_shadowDisp(rdram, ctx, runtime);
+        // Experimental (it darkened the whole screen): SOTC_NATIVE_SHADOWS=1.
+        static const bool shadows = std::getenv("SOTC_NATIVE_SHADOWS") != nullptr;
         static const bool idColours = std::getenv("SOTC_NATIVE_IDCOLOR") != nullptr;
-        if (idColours || !model || !g_cameraContext || ((word(chain) >> 28) & 7u) != 2u)
+        if (!shadows || idColours || !model || !g_cameraContext || ((word(chain) >> 28) & 7u) != 2u)
             return;
         const uint32_t ret = word(chain + 4u);
         if ((word(ret) & 0xFFFFu) != 5u) // one matrix: rigid
