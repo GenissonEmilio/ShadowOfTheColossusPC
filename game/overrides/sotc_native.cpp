@@ -902,6 +902,32 @@ namespace sotc_native
         ++g_frameDraws;
     }
 
+    // ---- Shadows: shadowDisp -------------------------------------------------
+    constexpr uint32_t kShadowDisp = 0x0109E0E8u;
+    PS2Runtime::RecompiledFunction g_shadowDisp = nullptr;
+
+    void shadowDispHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        syncFrame(rdram);
+        const uint32_t chain = GPR_U32(ctx, 4), model = GPR_U32(ctx, 5);
+        static int logged = 0;
+        if (std::getenv("SOTC_NATIVE_LOG") && model && logged++ < 2)
+        {
+            const uint32_t tag = word(model + 0x1Cu);
+            std::fprintf(stderr, "[shadow] chain %08x model %08x tag %08x %08x %08x %08x\n", chain, model, word(tag), word(tag + 4u), word(tag + 8u), word(tag + 12u));
+            std::fprintf(stderr, "[shadow] chain qwords:");
+            for (uint32_t q = 0; q < 4u; ++q)
+                std::fprintf(stderr, " %08x %08x %08x %08x |", word(chain + q * 16u), word(chain + q * 16u + 4u), word(chain + q * 16u + 8u), word(chain + q * 16u + 12u));
+            std::fprintf(stderr, "\n");
+            const uint32_t data = word(tag + 4u), qwc = word(tag) & 0xFFFFu;
+            std::fprintf(stderr, "[shadow] data %08x qwc %u\n", data, qwc);
+            for (uint32_t q = 0; q < 24u && q < qwc; ++q)
+                std::fprintf(stderr, "[shadow]   %03x %08x %08x %08x %08x  %g %g %g %g\n", q, word(data + q * 16u), word(data + q * 16u + 4u), word(data + q * 16u + 8u),
+                             word(data + q * 16u + 12u), real(data + q * 16u), real(data + q * 16u + 4u), real(data + q * 16u + 8u), real(data + q * 16u + 12u));
+        }
+        g_shadowDisp(rdram, ctx, runtime);
+    }
+
     void modelDispHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         syncFrame(rdram);
@@ -1120,6 +1146,11 @@ void installSotcNative(PS2Runtime &runtime)
         runtime.registerFunction(kPushLayer, pushLayerHook);
         g_popLayer = runtime.lookupFunction(kPopLayer);
         runtime.registerFunction(kPopLayer, popLayerHook);
+    }
+    if (runtime.hasFunction(kShadowDisp))
+    {
+        g_shadowDisp = runtime.lookupFunction(kShadowDisp);
+        runtime.registerFunction(kShadowDisp, shadowDispHook);
     }
     if (runtime.hasFunction(kMeshDisp))
     {
