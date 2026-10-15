@@ -213,7 +213,7 @@
   "status": "partial",
   "since": "2026-10-14",
   "commit": "1dc09bf",
-  "note": "own passes, strength matched by eye"
+  "note": "own passes; strength 0.4 measured against the emulated picture"
  },
  {
   "map": "renderer",
@@ -231,7 +231,7 @@
   "status": "partial",
   "since": "2026-10-14",
   "commit": "b095ec1",
-  "note": "stencil volumes, off by default"
+  "note": "rigid shadow volumes work but barely show; the characters' skinned shadow (microcode 9) is not done; off by default"
  },
  {
   "map": "renderer",

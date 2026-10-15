@@ -495,7 +495,7 @@ namespace sotc_native
         // The add is Cs x As + Cd, As the composite colour's alpha. The GS
         // chain feeds its result back frame after frame; the strength here
         // is matched by eye against it (SOTC_BLOOM_SCALE overrides).
-        static const float scale = std::getenv("SOTC_BLOOM_SCALE") ? static_cast<float>(std::atof(std::getenv("SOTC_BLOOM_SCALE"))) : 0.65f;
+        static const float scale = std::getenv("SOTC_BLOOM_SCALE") ? static_cast<float>(std::atof(std::getenv("SOTC_BLOOM_SCALE"))) : 0.4f;
         b.color[3] = static_cast<float>(word(0x118C14Cu) & 0xFFu) / 128.0f * scale;
         const uint32_t temporal = word(0x118C12Cu) & 0xFFu;
         b.temporal = temporal ? static_cast<float>(temporal) / 128.0f : 1.0f;
