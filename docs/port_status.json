@@ -239,7 +239,7 @@
   "feature": "Reflections",
   "status": "partial",
   "since": "2026-10-15",
-  "commit": "",
+  "commit": "0fd00e9",
   "note": "mirrored layers 12/13 drawn off-screen, sampled by the 0x2200 surfaces in layer 15; tint alpha matched by measurement"
  },
  {
