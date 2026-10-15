@@ -96,11 +96,11 @@ struct GSMetalRaster::Impl
             MTLFunctionConstantValues *values = [[MTLFunctionConstantValues new] autorelease];
             const uint32_t constants[6] = {
                 static_cast<uint32_t>(key & 1u),
-                static_cast<uint32_t>((key >> 1) & 0x1FFFu),
+                static_cast<uint32_t>(((key >> 1) & 0x1FFFu) | ((key >> 63) << 13)),
                 static_cast<uint32_t>((key >> 14) & 0x3Fu),
                 static_cast<uint32_t>((key >> 20) & 0x3Fu),
                 static_cast<uint32_t>((key >> 26) & 0x3Fu),
-                static_cast<uint32_t>(key >> 32),
+                static_cast<uint32_t>((key >> 32) & 0x7FFFFFFFu),
             };
             for (NSUInteger i = 0; i < 6; ++i)
                 [values setConstantValue:&constants[i] type:MTLDataTypeUInt atIndex:i];
@@ -234,11 +234,12 @@ uint64_t GSMetalRaster::pipelineKey(uint32_t kind, const GSGpuState &st)
     uint32_t flags = tme ? 1u : 0u;
     if (tme)
         flags |= (st.fst << 1) | (st.linear << 2) | (st.tcc << 9) | ((st.tfx & 3u) << 10);
-    flags |= (st.iip << 3) | (st.fge << 4) | (st.abe << 5) | (st.pabe << 6) | (st.zmask << 7) | (st.fba << 8);
+    flags |= (st.iip << 3) | (st.fge << 4) | (st.abe << 5) | (st.pabe << 6) | (st.zmask << 7) | ((st.fba & 1u) << 8);
     flags |= (st.fbmsk != 0u ? 1u : 0u) << 12;
     return static_cast<uint64_t>(kind & 1u) | (static_cast<uint64_t>(flags) << 1) |
            (static_cast<uint64_t>(st.fpsm & 0x3Fu) << 14) | (static_cast<uint64_t>(usesZ ? st.zpsm & 0x3Fu : 0u) << 20) |
-           (static_cast<uint64_t>(tme ? st.tpsm & 0x3Fu : 0u) << 26) | (static_cast<uint64_t>(st.test & 0x7F00Fu) << 32);
+           (static_cast<uint64_t>(tme ? st.tpsm & 0x3Fu : 0u) << 26) | (static_cast<uint64_t>(st.test & 0x7F00Fu) << 32) |
+           (static_cast<uint64_t>((st.fba >> 1) & 1u) << 63); // COLCLAMP off: the blend wraps (FC_FLAGS bit 13)
 }
 
 void GSMetalRaster::draw(const GSGpuPrim *prims, const uint64_t *keys, size_t primCount,

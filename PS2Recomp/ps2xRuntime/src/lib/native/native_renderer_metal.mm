@@ -213,6 +213,30 @@ fragment float4 shadowDarken(Quad in [[stage_in]], constant float &amount [[buff
     return float4(0.0, 0.0, 0.0, amount);
 }
 
+// Soft shadows (shadowDraw): the counted pixels as a mask, reduced 4 x 4,
+// blurred, and the picture darkened by it.
+fragment float4 shadowMaskWrite(Quad in [[stage_in]])
+{
+    return float4(1.0);
+}
+
+fragment float4 shadowReduce(Quad in [[stage_in]], texture2d<float> mask [[texture(0)]])
+{
+    float sum = 0.0;
+    uint2 size = uint2(mask.get_width(), mask.get_height());
+    uint2 base = uint2(in.uv * float2(size)) & ~uint2(3);
+    for (uint y = 0; y < 4; ++y)
+        for (uint x = 0; x < 4; ++x)
+            sum += mask.read(min(base + uint2(x, y), size - 1)).r;
+    return float4(float3(sum / 16.0), 1.0);
+}
+
+fragment float4 shadowSoft(Quad in [[stage_in]], texture2d<float> mask [[texture(0)]], constant float &amount [[buffer(0)]])
+{
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    return float4(0.0, 0.0, 0.0, saturate(mask.sample(s, in.uv).r * amount));
+}
+
 fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[texture(0)]], constant BloomParams &b [[buffer(0)]])
 {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
@@ -242,6 +266,8 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
         id<MTLRenderPipelineState> opaque = nil;
         id<MTLRenderPipelineState> subtract = nil;
         id<MTLRenderPipelineState> volume = nil, darken = nil; // shadows
+        id<MTLRenderPipelineState> shadowMaskPipeline = nil, shadowReducePipeline = nil, shadowSoftPipeline = nil;
+        id<MTLTexture> shadowMask = nil; // full size: the counted pixels
         id<MTLDepthStencilState> volumeState = nil, shadowedState = nil;
         id<MTLDepthStencilState> depthEqualReadOnly = nil;
         id<MTLDepthStencilState> depthOff = nil;
@@ -332,6 +358,10 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                 blend.sourceAlphaBlendFactor = MTLBlendFactorZero;
                 blend.destinationAlphaBlendFactor = MTLBlendFactorOne;
                 darken = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+                [desc.fragmentFunction release];
+                desc.fragmentFunction = [library newFunctionWithName:@"shadowMaskWrite"];
+                blend.blendingEnabled = NO;
+                shadowMaskPipeline = [device newRenderPipelineStateWithDescriptor:desc error:&error];
                 [desc.vertexFunction release];
                 [desc.fragmentFunction release];
                 desc.vertexFunction = savedVertex;
@@ -368,6 +398,24 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
             temporalPipeline = fullscreen(@"bloomTemporal", false);
             compositePipeline = fullscreen(@"bloomComposite", true);
             copySmall = fullscreen(@"copyTexture", false);
+            shadowReducePipeline = fullscreen(@"shadowReduce", false);
+            {
+                // Cd x (1 - As): the darkening by the soft mask.
+                MTLRenderPipelineDescriptor *d = [[MTLRenderPipelineDescriptor alloc] init];
+                d.vertexFunction = [library newFunctionWithName:@"fullscreenVertex"];
+                d.fragmentFunction = [library newFunctionWithName:@"shadowSoft"];
+                d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+                d.colorAttachments[0].blendingEnabled = YES;
+                d.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorZero;
+                d.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+                d.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorZero;
+                d.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+                NSError *e = nil;
+                shadowSoftPipeline = [device newRenderPipelineStateWithDescriptor:d error:&e];
+                [d.vertexFunction release];
+                [d.fragmentFunction release];
+                [d release];
+            }
             {
                 // Cs x As + Cd x (1 - As); As may exceed 1 (GS alpha above 0x80).
                 MTLRenderPipelineDescriptor *d = [[MTLRenderPipelineDescriptor alloc] init];
@@ -499,6 +547,13 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
             dd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
             dd.storageMode = MTLStorageModePrivate;
             depth = [device newTextureWithDescriptor:dd];
+            [shadowMask release];
+            {
+                MTLTextureDescriptor *md = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
+                md.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+                md.storageMode = MTLStorageModePrivate;
+                shadowMask = [device newTextureWithDescriptor:md];
+            }
             for (id<MTLTexture> &t : bloomTex)
             {
                 [t release];
@@ -529,6 +584,19 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         haveMirror = true;
                         break;
                     }
+                // Shadows as shadowDraw makes them: the volumes' count is kept
+                // until the layer after theirs, then blurred and darkened by.
+                static const bool hardShadows = std::getenv("SOTC_SHADOW_HARD") != nullptr; // debugging
+                uint32_t softOrder = 0;
+                float softAmount = 0.0f;
+                if (!hardShadows && shadowMaskPipeline && shadowReducePipeline && shadowSoftPipeline && blurPipeline)
+                    for (const Draw &d : draws)
+                        if (d.state.shadowVolume)
+                        {
+                            softOrder = std::max(softOrder, d.state.order + 1u);
+                            softAmount = d.state.shadow;
+                        }
+                const bool softShadows = softOrder != 0;
                 auto pass = [&](id<MTLTexture> target, bool backgroundOnly, uint32_t fromOrder = 0, uint32_t toOrder = ~0u, bool load = false,
                                 bool mirror = false)
                 {
@@ -574,6 +642,11 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     {
                         if (!shadowAmount)
                             return;
+                        if (softShadows) // resolved by doShadow, the count kept
+                        {
+                            shadowAmount = 0.0f;
+                            return;
+                        }
                         [encoder setRenderPipelineState:darken];
                         [encoder setDepthStencilState:shadowedState];
                         [encoder setStencilReferenceValue:0];
@@ -607,6 +680,9 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                                 continue;
                             [encoder setRenderPipelineState:volume];
                             [encoder setDepthStencilState:volumeState];
+                            // The GS does not cut at the near plane: the caps microcode 8
+                            // puts at z = 0.1 stay, nearer than everything.
+                            [encoder setDepthClipMode:MTLDepthClipModeClamp];
                             [encoder setVertexBuffer:it->second.buffer offset:0 atIndex:0];
                             [encoder setVertexBytes:d.clip length:sizeof(d.clip) atIndex:1];
                             struct
@@ -627,6 +703,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                             const int untextured = 0;
                             [encoder setFragmentBytes:&untextured length:sizeof(untextured) atIndex:0];
                             [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:it->second.count];
+                            [encoder setDepthClipMode:MTLDepthClipModeClip];
                             shadowOrder = d.state.order;
                             shadowAmount = d.state.shadow;
                             bound = -1;
@@ -854,13 +931,70 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         });
                     }
                 };
+                auto doShadow = [&]
+                {
+                    MTLRenderPassDescriptor *desc = [MTLRenderPassDescriptor renderPassDescriptor];
+                    desc.colorAttachments[0].texture = shadowMask;
+                    desc.colorAttachments[0].loadAction = MTLLoadActionClear;
+                    desc.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
+                    desc.colorAttachments[0].storeAction = MTLStoreActionStore;
+                    desc.depthAttachment.texture = depth;
+                    desc.depthAttachment.loadAction = MTLLoadActionLoad;
+                    desc.depthAttachment.storeAction = MTLStoreActionStore;
+                    desc.stencilAttachment.texture = depth;
+                    desc.stencilAttachment.loadAction = MTLLoadActionLoad;
+                    desc.stencilAttachment.storeAction = MTLStoreActionStore;
+                    id<MTLRenderCommandEncoder> e = [commands renderCommandEncoderWithDescriptor:desc];
+                    [e setRenderPipelineState:shadowMaskPipeline];
+                    [e setDepthStencilState:shadowedState]; // where the count is not 0; clears it
+                    [e setStencilReferenceValue:0];
+                    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                    [e endEncoding];
+                    auto quad = [&](id<MTLTexture> target, id<MTLRenderPipelineState> state, bool load, auto bind)
+                    {
+                        MTLRenderPassDescriptor *qd = [MTLRenderPassDescriptor renderPassDescriptor];
+                        qd.colorAttachments[0].texture = target;
+                        qd.colorAttachments[0].loadAction = load ? MTLLoadActionLoad : MTLLoadActionDontCare;
+                        qd.colorAttachments[0].storeAction = MTLStoreActionStore;
+                        id<MTLRenderCommandEncoder> q = [commands renderCommandEncoderWithDescriptor:qd];
+                        [q setRenderPipelineState:state];
+                        bind(q);
+                        [q drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                        [q endEncoding];
+                    };
+                    // bloomTex[0..1] are free outside the bloom.
+                    quad(bloomTex[0], shadowReducePipeline, false, [&](id<MTLRenderCommandEncoder> q) { [q setFragmentTexture:shadowMask atIndex:0]; });
+                    static const int rounds = std::getenv("SOTC_SHADOW_BLUR") ? std::atoi(std::getenv("SOTC_SHADOW_BLUR")) : 1;
+                    const float lw = static_cast<float>(bloomTex[0].width), lh = static_cast<float>(bloomTex[0].height);
+                    for (int i = 0; i < rounds; ++i)
+                    {
+                        const float stepH[2] = {1.0f / lw, 0.0f}, stepV[2] = {0.0f, 1.0f / lh};
+                        quad(bloomTex[1], blurPipeline, false, [&](id<MTLRenderCommandEncoder> q)
+                        {
+                            [q setFragmentTexture:bloomTex[0] atIndex:0];
+                            [q setFragmentBytes:stepH length:sizeof(stepH) atIndex:0];
+                        });
+                        quad(bloomTex[0], blurPipeline, false, [&](id<MTLRenderCommandEncoder> q)
+                        {
+                            [q setFragmentTexture:bloomTex[1] atIndex:0];
+                            [q setFragmentBytes:stepV length:sizeof(stepV) atIndex:0];
+                        });
+                    }
+                    quad(color, shadowSoftPipeline, true, [&](id<MTLRenderCommandEncoder> q)
+                    {
+                        [q setFragmentTexture:bloomTex[0] atIndex:0];
+                        [q setFragmentBytes:&softAmount length:sizeof(softAmount) atIndex:0];
+                    });
+                };
                 // The 3D and 2D by layer, cut where an effect reads the picture so far.
                 struct Event
                 {
                     uint32_t order;
-                    int blur; // -1: the bloom, -2: the glow composite
+                    int blur; // -1: the bloom, -2: the glow composite, -3: the shadows
                 };
                 std::vector<Event> events;
+                if (softShadows)
+                    events.push_back({softOrder, -3});
                 if (glow.enabled)
                     events.push_back({glow.order, -2});
                 if (bloomOn)
@@ -877,7 +1011,9 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     pass(color, false, from, ev.order, loaded);
                     loaded = true;
                     from = ev.order;
-                    if (ev.blur == -2)
+                    if (ev.blur == -3)
+                        doShadow();
+                    else if (ev.blur == -2)
                         doGlow();
                     else if (ev.blur < 0)
                         doBloom();

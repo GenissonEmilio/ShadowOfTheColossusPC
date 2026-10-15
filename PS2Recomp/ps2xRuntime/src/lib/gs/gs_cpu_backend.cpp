@@ -1200,6 +1200,10 @@ namespace
         st.abe = state.prim.abe ? 1u : 0u;
         st.pabe = state.pabe ? 1u : 0u;
         st.fba = ((ctx.fba & 1u) != 0u && ctx.frame.psm != GS_PSM_CT24) ? 1u : 0u;
+        // Bit 1: COLCLAMP off, the blend's result wraps modulo 256 (SotC's
+        // shadow volumes count +1 / 255 per face that way).
+        if ((state.colclamp & 1u) == 0u && state.prim.abe)
+            st.fba |= 2u;
         st.fge = state.prim.fge ? 1u : 0u;
         st.fogR = state.fogR;
         st.fogG = state.fogG;

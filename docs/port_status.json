@@ -228,10 +228,10 @@
   "map": "renderer",
   "area": "Effects",
   "feature": "Shadows",
-  "status": "partial",
-  "since": "2026-10-14",
-  "commit": "b095ec1",
-  "note": "rigid shadow volumes work but barely show; the characters' skinned shadow (microcode 9) is not done; off by default"
+  "status": "native",
+  "since": "2026-10-15",
+  "commit": "",
+  "note": "stencil volumes (rigid and skinned paths), soft as shadowDraw: mask reduced, blurred, darkened; on by default"
  },
  {
   "map": "renderer",
@@ -421,5 +421,14 @@
   "since": "2026-10-15",
   "commit": "",
   "note": "blurred-copy composite redone, opt-in: the PS2's blurred buffer is darker than the picture, cause not found"
+ },
+ {
+  "map": "hardware",
+  "area": "Graphics",
+  "feature": "GS COLCLAMP wrap",
+  "status": "native",
+  "since": "2026-10-15",
+  "commit": "",
+  "note": "emulated GS fix: blends wrap modulo 256 when COLCLAMP is off (the shadow count)"
  }
 ]

@@ -75,6 +75,7 @@ namespace sotc_native
         uint8_t bones;
         uint8_t bone[3];
         float weight[3];
+        uint32_t skin[4]; // the skin qword as it came (shadow models read it their own way)
     };
     using Strip = std::vector<BatchVertex>;
 
@@ -179,6 +180,8 @@ namespace sotc_native
                         if (skin)
                         {
                             const uint32_t q = skin + i * 16u;
+                            for (uint32_t k = 0; k < 4u; ++k)
+                                v.skin[k] = word(q + k * 4u);
                             v.bones = static_cast<uint8_t>(std::min(word(q + 12u), 3u));
                             for (uint32_t k = 0; k < v.bones; ++k)
                             {
@@ -430,9 +433,13 @@ namespace sotc_native
     // bone palette to VU1 qword 0 (modelSetMatrixTransTag), each matrix
     // bone x view (camera space, the projection comes after). Rigid parts
     // upload one matrix there (5 qwords). False when there is no palette.
+    bool readChainPalette(uint32_t own, std::vector<float> &vu);
     bool readPalette(uint32_t instance, std::vector<float> &vu)
     {
-        const uint32_t own = word(instance + 0xCu);
+        return readChainPalette(word(instance + 0xCu), vu);
+    }
+    bool readChainPalette(uint32_t own, std::vector<float> &vu)
+    {
         if (((word(own) >> 28) & 7u) != 2u)
             return false;
         const uint32_t ret = word(own + 4u), qwc = word(ret) & 0xFFFFu;
@@ -980,25 +987,38 @@ namespace sotc_native
     // rows (VU 984-986), and draws each triangle's prism, its faces counted
     // up or down by their facing on a buffer the game then darkens
     // (shadowDraw; ALPHA 0x64 FIX 0x40: half). Skinned shadow models
-    // (microcode 9) are not done yet.
+    // (shadowDisp's t2 set: microcode 5 loads the instance's bone palette,
+    // microcode 9 draws) carry a second qword per vertex: x/y/z = bone index
+    // + weight (the fraction), w = n; the vertex is the sum over the first
+    // n + 1 components of weight x (palette matrix index, camera space).
     std::vector<native_renderer::Vertex> g_volume;
+    constexpr float kShadowNear = 0.1f;
 
     void shadowDispHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         syncFrame(rdram);
         const uint32_t chain = GPR_U32(ctx, 4), model = GPR_U32(ctx, 5);
+        const bool skinnedShadow = GPR_U32(ctx, 10) != 0u;
         g_shadowDisp(rdram, ctx, runtime);
-        // Experimental (it darkened the whole screen): SOTC_NATIVE_SHADOWS=1.
-        static const bool shadows = std::getenv("SOTC_NATIVE_SHADOWS") != nullptr;
+        static const bool shadows = std::getenv("SOTC_NATIVE_NOSHADOWS") == nullptr;
         static const bool idColours = std::getenv("SOTC_NATIVE_IDCOLOR") != nullptr;
         if (!shadows || idColours || !model || !g_cameraContext || ((word(chain) >> 28) & 7u) != 2u)
             return;
         const uint32_t ret = word(chain + 4u);
-        if ((word(ret) & 0xFFFFu) != 5u) // one matrix: rigid
-            return;
+        static std::vector<float> palette;
         float m[16];
-        for (int i = 0; i < 16; ++i)
-            m[i] = real(ret + 16u + i * 4u);
+        if (skinnedShadow)
+        {
+            if (!readChainPalette(chain, palette))
+                return;
+        }
+        else
+        {
+            if ((word(ret) & 0xFFFFu) != 5u) // one matrix: rigid
+                return;
+            for (int i = 0; i < 16; ++i)
+                m[i] = real(ret + 16u + i * 4u);
+        }
         const float d[3] = {real(chain + 16u + 12u), real(chain + 32u + 12u), real(chain + 48u + 12u)};
         const uint32_t tag = word(model + 0x1Cu);
         static std::vector<Strip> strips;
@@ -1006,8 +1026,24 @@ namespace sotc_native
         readBatches(word(tag + 4u), (word(tag) & 0xFFFFu) * 16u, strips);
         auto toCamera = [&](const BatchVertex &v, float out[3])
         {
-            for (int r = 0; r < 3; ++r)
-                out[r] = m[r] * v.x + m[4 + r] * v.y + m[8 + r] * v.z + m[12 + r];
+            if (!skinnedShadow)
+            {
+                for (int r = 0; r < 3; ++r)
+                    out[r] = m[r] * v.x + m[4 + r] * v.y + m[8 + r] * v.z + m[12 + r];
+                return;
+            }
+            out[0] = out[1] = out[2] = 0.0f;
+            const uint32_t n = std::min(v.skin[3] & 0xFFFFu, 3u);
+            for (uint32_t k = 0; k <= n; ++k)
+            {
+                float packed;
+                std::memcpy(&packed, &v.skin[k], 4);
+                const float index = std::trunc(packed);
+                const float *b = &palette[(static_cast<uint32_t>(static_cast<int32_t>(index)) * 4u % 1024u) * 4u];
+                const float w = packed - index;
+                for (int r = 0; r < 3; ++r)
+                    out[r] += w * (b[r] * v.x + b[4 + r] * v.y + b[8 + r] * v.z + b[12 + r]);
+            }
         };
         auto put = [&](const float *p)
         {
@@ -1015,6 +1051,7 @@ namespace sotc_native
             v.x = p[0];
             v.y = p[1];
             v.z = p[2];
+            v.r = v.g = v.b = v.a = 0x80; // the shared fragment stage drops alpha 0
             g_volume.push_back(v);
         };
         g_volume.clear();
@@ -1032,11 +1069,30 @@ namespace sotc_native
                     continue; // degenerate (strip joins) or edge-on
                 if (facing > 0.0f)
                     std::swap(b, c); // the near face looks away from the extrusion
-                const float *near[3] = {a, b, c};
+                // Each extrusion edge cut at z = 0.1 as microcode 8 does, so
+                // the far cap stays in front of the camera; a triangle with
+                // an edge wholly behind it is dropped.
+                float *near[3] = {a, b, c};
                 float far[3][3];
+                bool behind = false;
                 for (int k = 0; k < 3; ++k)
+                {
                     for (int r = 0; r < 3; ++r)
                         far[k][r] = near[k][r] + d[r];
+                    const float zn = near[k][2], zf = far[k][2];
+                    if (zn <= kShadowNear && zf <= kShadowNear)
+                        behind = true;
+                    else if (zf < kShadowNear || zn < kShadowNear)
+                    {
+                        float *out = zf < kShadowNear ? far[k] : near[k];
+                        const float *in = zf < kShadowNear ? near[k] : far[k];
+                        const float t = (in[2] - kShadowNear) / (in[2] - out[2]);
+                        for (int r = 0; r < 3; ++r)
+                            out[r] = in[r] + (out[r] - in[r]) * t;
+                    }
+                }
+                if (behind)
+                    continue;
                 // Closed prism, faces outwards: near (a, b, c), far reversed, sides.
                 put(a), put(b), put(c);
                 put(far[0]), put(far[2]), put(far[1]);
@@ -1055,8 +1111,16 @@ namespace sotc_native
         const uint64_t mesh = (1ull << 59) | g_skinnedDraws++;
         native_renderer::uploadMesh(mesh, g_volume.data(), static_cast<uint32_t>(g_volume.size()));
         native_renderer::DrawState state;
+        if (std::getenv("SOTC_SHADOW_SHOW")) // debugging: the volumes in red
+        {
+            state.debugColour = 0x0000FFu;
+            state.order = 15;
+            native_renderer::draw(mesh, projection, state);
+            return;
+        }
         state.shadowVolume = true;
-        state.shadow = 0.5f;
+        static const float amount = std::getenv("SOTC_SHADOW_AMOUNT") ? std::strtof(std::getenv("SOTC_SHADOW_AMOUNT"), nullptr) : 0.5f;
+        state.shadow = amount;
         state.order = 7; // after the opaque world, before the transparent layers
         native_renderer::draw(mesh, projection, state);
     }

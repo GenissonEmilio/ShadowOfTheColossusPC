@@ -103,12 +103,23 @@ ST(Q), colour as floats (0x80 = 1). Each row joins the next as a strip. The
 texture is whatever the caller requested just before.
 
 Shadows: `shadowDisp(instance chain, shadow model)` (0x109e0e8, layer 3 or
-7) chains the character's bone palette, then the shadow model's data
-(`shadowModelInit`: REF of model +0x10, size +0x14) through microcode 8
-(9 for the other skin path): a shadow volume microcode (face tests,
-silhouette edges extruded away from the light). `shadowDraw` then turns the
-marked pixels into a soft darkening (sprites, blur, ALPHA 0x64 FIX 0x40).
-Natively this wants stencil shadow volumes.
+7; t2 = 0: microcode 0 + 8, rigid; t2 != 0: microcode 5 + 9, skinned, the
+second qword per vertex x/y/z = bone + weight, w = n, n + 1 bones). In the
+route only Wander's sword has one (model 0x33dfc0, V3-32 strips). Microcode
+8 takes each triangle to camera space (VU 972, the chain's RET matrix),
+extrudes it by the w of VU 984-986 (the chain's qwords 1-3), cuts each
+extrusion edge at z = 0.1 and draws the prism into its own buffer with
+colour 1 or 255 by screen facing, ALPHA 0x68 (add) and COLCLAMP 0: a
+stencil count modulo 256 against the scene's Z. `shadowDraw` reduces that
+buffer (256 -> 128 -> 256) and darkens the picture by it.
+
+Natively: stencil volumes (front +1, back -1, depth clamped so the caps at
+z = 0.1 stay), the counted pixels reduced 4 x 4, blurred and darkened by
+0.5 (`SOTC_SHADOW_AMOUNT`; `SOTC_SHADOW_HARD` darkens without the blur,
+`SOTC_SHADOW_SHOW` draws the volumes flat, `SOTC_NATIVE_NOSHADOWS` turns
+them off). The emulated GS used to clamp where COLCLAMP 0 wraps, which
+turned the sword's thin shadow into a dark wedge wherever the volume's back
+faces showed; it wraps now.
 
 VIF ROW: every ST unpack (V2-16, and the two-texture V4-16) uses STMOD 1
 (offset), and some chain outside the model packets sets ROW to small values

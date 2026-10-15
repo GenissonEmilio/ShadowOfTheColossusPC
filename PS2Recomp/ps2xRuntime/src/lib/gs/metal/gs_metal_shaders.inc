@@ -556,9 +556,18 @@ inline void writePixel(thread const GpuState &st, device uchar *target, constant
             const int3 B = st.bsel == 0u ? cs : (st.bsel == 1u ? cd : int3(0));
             const int3 D = st.dsel == 0u ? cs : (st.dsel == 1u ? cd : int3(0));
             const int3 o = ((A - B) * ca >> 7) + D;
-            r = clampU8(o.x);
-            g = clampU8(o.y);
-            b = clampU8(o.z);
+            if (((FC_FLAGS >> 13) & 1u) != 0u) // COLCLAMP off: modulo 256
+            {
+                r = uint(o.x) & 0xFFu;
+                g = uint(o.y) & 0xFFu;
+                b = uint(o.z) & 0xFFu;
+            }
+            else
+            {
+                r = clampU8(o.x);
+                g = clampU8(o.y);
+                b = clampU8(o.z);
+            }
         }
         if (writeAlpha && st.fba != 0u)
             a |= 0x80u;
