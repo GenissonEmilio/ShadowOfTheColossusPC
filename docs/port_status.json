@@ -185,7 +185,7 @@
   "feature": "Immediate gl* drawing",
   "status": "partial",
   "since": "2026-10-15",
-  "commit": "",
+  "commit": "75efe01",
   "note": "glEnd's A+D packet read into the 2D path (the opening's ribbon); drawn without a depth test (SOTC_NATIVE_NOGL)"
  },
  {
