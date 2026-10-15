@@ -399,7 +399,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     MTLRenderPassDescriptor *desc = [MTLRenderPassDescriptor renderPassDescriptor];
                     desc.colorAttachments[0].texture = target;
                     desc.colorAttachments[0].loadAction = load ? MTLLoadActionLoad : MTLLoadActionClear;
-                    desc.colorAttachments[0].clearColor = MTLClearColorMake(0.08, 0.08, 0.1, 1.0);
+                    desc.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0); // the PS2 frame starts black
                     desc.colorAttachments[0].storeAction = MTLStoreActionStore;
                     desc.depthAttachment.texture = depth;
                     desc.depthAttachment.loadAction = load ? MTLLoadActionLoad : MTLLoadActionClear;
@@ -482,7 +482,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                             // second pass lands on its first.
                             [encoder setDepthStencilState:backdrop ? depthOff
                                                                    : (d.state.overlay ? depthEqualReadOnly
-                                                                                      : (blendMode == 1 && !d.state.writeDepth ? depthReadOnly : depthState))];
+                                                                                      : depthState)]; // the GS writes Z for every primitive, additive ones too
                             bound = mode;
                         }
                         auto it = meshes.find(d.mesh);

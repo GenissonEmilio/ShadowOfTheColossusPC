@@ -47,6 +47,7 @@ namespace sotc_native
     uint32_t g_cameraContext = 0;
     uint64_t g_frame = 0;
     uint32_t g_frameDraws = 0;
+    uint32_t g_modelDraws = 0; // 3D draws this frame
 
     const uint8_t *g_ram = nullptr;
     uint32_t word(uint32_t addr)
@@ -557,7 +558,10 @@ namespace sotc_native
         }
         native_renderer::setFog(g_fog);
         g_fog = native_renderer::Fog{};
-        native_renderer::setBloom(g_bloomRan ? bloomParams() : native_renderer::Bloom{});
+        // Without 3D this frame (loading, menus over black) the bloom mask would
+        // take the empty screen for sky and glow all over it.
+        native_renderer::setBloom(g_bloomRan && g_modelDraws ? bloomParams() : native_renderer::Bloom{});
+        g_modelDraws = 0;
         g_bloomRan = false;
         native_renderer::endFrame(512, 448);
         static const bool show = std::atoi(std::getenv("SOTC_NATIVE")) != 2; // 2: draw, keep the emulated picture
@@ -1189,17 +1193,19 @@ namespace sotc_native
             state.blend = surfaceBlend(s);
             state.order = surfaceLayer(header, s, fading);
             state.opacity = opacity;
-            static const bool idColours = std::getenv("SOTC_NATIVE_IDCOLOR") != nullptr; // debugging: who drew what
-            if (idColours)
+            // Debugging: who drew what. SOTC_NATIVE_IDCOLOR=1 every model, =<n> > 1
+            // only surfaces in layers >= n (the rest drawn as usual).
+            static const int idFrom = std::getenv("SOTC_NATIVE_IDCOLOR") ? std::max(1, std::atoi(std::getenv("SOTC_NATIVE_IDCOLOR"))) : 0;
+            if (idFrom && (idFrom == 1 || static_cast<int>(state.order) >= idFrom))
             {
-                uint32_t h = header * 2654435761u;
+                uint32_t h = (header ^ (surface * 0x9E37u)) * 2654435761u;
                 h ^= h >> 13;
                 state.debugColour = (h & 0xFFFFFFu) | 0x101010u;
                 state.blend = native_renderer::Blend::Opaque;
-                static std::set<uint32_t> told;
-                if (told.insert(header).second)
-                    std::fprintf(stderr, "[native-id] %06x header %08x layer %u blend %d tex %d\n", state.debugColour & 0xFFFFFFu, header, state.order,
-                                 static_cast<int>(state.blend), state.texture ? 1 : 0);
+                static std::set<uint64_t> told;
+                if (told.insert((static_cast<uint64_t>(header) << 16) | surface).second)
+                    std::fprintf(stderr, "[native-id] %06x header %08x layer %u blend %d tex %08llx surface %u flags %08x\n", state.debugColour & 0xFFFFFFu, header, state.order,
+                                 static_cast<int>(surfaceBlend(s)), static_cast<unsigned long long>(state.texture), surface, word(s + 0x18u));
             }
             state.background = state.order == 1u;            // the sky
             state.fogged = state.order == 2u || state.order == 3u; // drawn before zFog
@@ -1222,6 +1228,7 @@ namespace sotc_native
                 state.writeDepth = true;
             native_renderer::draw(mesh, transform, state);
             ++g_frameDraws;
+            ++g_modelDraws;
             if (twoTextures)
             {
                 // The microcode draws the batch again with the second texture
