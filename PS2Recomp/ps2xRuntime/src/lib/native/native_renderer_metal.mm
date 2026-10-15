@@ -161,6 +161,11 @@ fragment float4 bloomTemporal(Quad in [[stage_in]], texture2d<float> current [[t
     return mix(previous.sample(s, in.uv), current.sample(s, in.uv), amount);
 }
 
+fragment float4 shadowDarken(Quad in [[stage_in]], constant float &amount [[buffer(0)]])
+{
+    return float4(0.0, 0.0, 0.0, amount);
+}
+
 fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[texture(0)]], constant BloomParams &b [[buffer(0)]])
 {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
@@ -189,6 +194,8 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
         id<MTLRenderPipelineState> additive = nil;
         id<MTLRenderPipelineState> opaque = nil;
         id<MTLRenderPipelineState> subtract = nil;
+        id<MTLRenderPipelineState> volume = nil, darken = nil; // shadows
+        id<MTLDepthStencilState> volumeState = nil, shadowedState = nil;
         id<MTLDepthStencilState> depthEqualReadOnly = nil;
         id<MTLDepthStencilState> depthOff = nil;
         id<MTLDepthStencilState> depthReadOnly = nil;
@@ -237,7 +244,8 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
             desc.fragmentFunction = [library newFunctionWithName:@"nativeFragment"];
             desc.vertexDescriptor = layout;
             desc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
-            desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+            desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+            desc.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
             auto blend = desc.colorAttachments[0];
             blend.blendingEnabled = YES;
             blend.rgbBlendOperation = MTLBlendOperationAdd;
@@ -254,6 +262,29 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
             blend.rgbBlendOperation = MTLBlendOperationAdd;
             blend.blendingEnabled = NO;
             opaque = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+            blend.writeMask = MTLColorWriteMaskNone;
+            volume = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+            blend.writeMask = MTLColorWriteMaskAll;
+            {
+                // The darkening of the shadowed pixels: Cd x (1 - amount).
+                id<MTLFunction> savedVertex = desc.vertexFunction, savedFragment = desc.fragmentFunction;
+                MTLVertexDescriptor *savedLayout = [desc.vertexDescriptor retain];
+                desc.vertexFunction = [library newFunctionWithName:@"fullscreenVertex"];
+                desc.fragmentFunction = [library newFunctionWithName:@"shadowDarken"];
+                desc.vertexDescriptor = nil;
+                blend.blendingEnabled = YES;
+                blend.sourceRGBBlendFactor = MTLBlendFactorZero;
+                blend.destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+                blend.sourceAlphaBlendFactor = MTLBlendFactorZero;
+                blend.destinationAlphaBlendFactor = MTLBlendFactorOne;
+                darken = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+                [desc.vertexFunction release];
+                [desc.fragmentFunction release];
+                desc.vertexFunction = savedVertex;
+                desc.fragmentFunction = savedFragment;
+                desc.vertexDescriptor = savedLayout;
+                [savedLayout release];
+            }
             [desc release];
             auto fullscreen = [&](NSString *fragment, bool add) -> id<MTLRenderPipelineState>
             {
@@ -298,6 +329,27 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
             depthEqualReadOnly = [device newDepthStencilStateWithDescriptor:depthDesc];
             depthDesc.depthCompareFunction = MTLCompareFunctionAlways;
             depthOff = [device newDepthStencilStateWithDescriptor:depthDesc];
+            {
+                // Shadow volumes: the count where the faces pass the depth test.
+                MTLStencilDescriptor *front = [[MTLStencilDescriptor alloc] init], *back = [[MTLStencilDescriptor alloc] init];
+                front.stencilCompareFunction = back.stencilCompareFunction = MTLCompareFunctionAlways;
+                front.depthStencilPassOperation = MTLStencilOperationIncrementWrap;
+                back.depthStencilPassOperation = MTLStencilOperationDecrementWrap;
+                depthDesc.depthCompareFunction = MTLCompareFunctionLess;
+                depthDesc.depthWriteEnabled = NO;
+                depthDesc.frontFaceStencil = front;
+                depthDesc.backFaceStencil = back;
+                volumeState = [device newDepthStencilStateWithDescriptor:depthDesc];
+                // The darkening: where the count is not 0; it clears the count.
+                front.stencilCompareFunction = back.stencilCompareFunction = MTLCompareFunctionNotEqual;
+                front.depthStencilPassOperation = back.depthStencilPassOperation = MTLStencilOperationZero;
+                depthDesc.depthCompareFunction = MTLCompareFunctionAlways;
+                depthDesc.frontFaceStencil = front;
+                depthDesc.backFaceStencil = back;
+                shadowedState = [device newDepthStencilStateWithDescriptor:depthDesc];
+                [front release];
+                [back release];
+            }
             [depthDesc release];
             return true;
         }
@@ -316,7 +368,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
             cd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
             cd.storageMode = MTLStorageModePrivate;
             backgroundColor = [device newTextureWithDescriptor:cd];
-            MTLTextureDescriptor *dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:w height:h mipmapped:NO];
+            MTLTextureDescriptor *dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8 width:w height:h mipmapped:NO];
             dd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
             dd.storageMode = MTLStorageModePrivate;
             depth = [device newTextureWithDescriptor:dd];
@@ -353,17 +405,72 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     desc.depthAttachment.loadAction = load ? MTLLoadActionLoad : MTLLoadActionClear;
                     desc.depthAttachment.clearDepth = 1.0;
                     desc.depthAttachment.storeAction = MTLStoreActionStore;
+                    desc.stencilAttachment.texture = depth;
+                    desc.stencilAttachment.loadAction = load ? MTLLoadActionLoad : MTLLoadActionClear;
+                    desc.stencilAttachment.clearStencil = 0;
+                    desc.stencilAttachment.storeAction = MTLStoreActionStore;
                     id<MTLRenderCommandEncoder> encoder = [commands renderCommandEncoderWithDescriptor:desc];
                     [encoder setCullMode:MTLCullModeNone];
                     if (!backgroundOnly)
                         [encoder setFragmentTexture:backgroundColor atIndex:1];
                     int bound = -1;
+                    // Shadow volumes counted so far, waiting for their darkening.
+                    uint32_t shadowOrder = 0;
+                    float shadowAmount = 0.0f;
+                    auto resolveShadows = [&]
+                    {
+                        if (!shadowAmount)
+                            return;
+                        [encoder setRenderPipelineState:darken];
+                        [encoder setDepthStencilState:shadowedState];
+                        [encoder setStencilReferenceValue:0];
+                        [encoder setFragmentBytes:&shadowAmount length:sizeof(shadowAmount) atIndex:0];
+                        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                        shadowAmount = 0.0f;
+                        bound = -1;
+                    };
                     for (const Draw &d : draws)
                     {
                         if (backgroundOnly && !d.state.background)
                             continue;
                         if (d.state.order < fromOrder || d.state.order >= toOrder)
                             continue;
+                        if (shadowAmount && d.state.order > shadowOrder)
+                            resolveShadows();
+                        if (d.state.shadowVolume)
+                        {
+                            if (backgroundOnly)
+                                continue;
+                            auto it = meshes.find(d.mesh);
+                            if (it == meshes.end() || it->second.count == 0)
+                                continue;
+                            [encoder setRenderPipelineState:volume];
+                            [encoder setDepthStencilState:volumeState];
+                            [encoder setVertexBuffer:it->second.buffer offset:0 atIndex:0];
+                            [encoder setVertexBytes:d.clip length:sizeof(d.clip) atIndex:1];
+                            struct
+                            {
+                                float light[32];
+                                int lit;
+                                float opacity;
+                                int pad[2];
+                            } none = {};
+                            none.opacity = 1.0f;
+                            [encoder setVertexBytes:&none length:sizeof(none) atIndex:2];
+                            struct
+                            {
+                                float values[24];
+                            } nofog = {};
+                            [encoder setVertexBytes:&nofog length:sizeof(nofog) atIndex:3];
+                            [encoder setFragmentBytes:&nofog length:sizeof(nofog) atIndex:1];
+                            const int untextured = 0;
+                            [encoder setFragmentBytes:&untextured length:sizeof(untextured) atIndex:0];
+                            [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:it->second.count];
+                            shadowOrder = d.state.order;
+                            shadowAmount = d.state.shadow;
+                            bound = -1;
+                            continue;
+                        }
                         const int blendMode = static_cast<int>(d.state.blend);
                         const bool backdrop = d.state.screen || d.state.background;
                         const int mode = blendMode | (backdrop ? 8 : 0) | (d.state.overlay ? 16 : 0) | (d.state.writeDepth ? 32 : 0);
@@ -419,6 +526,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         [encoder setVertexBytes:&fp length:sizeof(fp) atIndex:3];
                         [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:it->second.count];
                     }
+                    resolveShadows();
                     [encoder endEncoding];
                 };
                 if (fogOn)

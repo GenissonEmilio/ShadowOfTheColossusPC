@@ -639,6 +639,13 @@ namespace sotc_native
         Assembler &a = g_2d;
         if (a.batch.empty())
             return;
+        static const bool idColours = std::getenv("SOTC_NATIVE_IDCOLOR") != nullptr; // only the models then
+        if (idColours)
+        {
+            a.batch.clear();
+            a.batchKey = ~0ull;
+            return;
+        }
         const uint64_t mesh = (1ull << 62) | g_skinnedDraws++;
         native_renderer::uploadMesh(mesh, a.batch.data(), static_cast<uint32_t>(a.batch.size()));
         native_renderer::DrawState state;
@@ -916,33 +923,90 @@ namespace sotc_native
     constexpr uint32_t kShadowDisp = 0x0109E0E8u;
     PS2Runtime::RecompiledFunction g_shadowDisp = nullptr;
 
+    // shadowDisp(instance chain, shadow model) (0x109e0e8): microcode 8 takes
+    // the shadow model's triangles (V3-32 strips, the REF at model + 0x1c)
+    // to camera space by the instance's matrix (its chain's RET packet),
+    // extrudes each vertex by the vector in the w of the instance's light
+    // rows (VU 984-986), and draws each triangle's prism, its faces counted
+    // up or down by their facing on a buffer the game then darkens
+    // (shadowDraw; ALPHA 0x64 FIX 0x40: half). Skinned shadow models
+    // (microcode 9) are not done yet.
+    std::vector<native_renderer::Vertex> g_volume;
+
     void shadowDispHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         syncFrame(rdram);
         const uint32_t chain = GPR_U32(ctx, 4), model = GPR_U32(ctx, 5);
-        static int logged = 0;
-        if (std::getenv("SOTC_NATIVE_LOG") && model && logged++ < 2)
-        {
-            const uint32_t tag = word(model + 0x1Cu);
-            std::fprintf(stderr, "[shadow] chain %08x model %08x tag %08x %08x %08x %08x\n", chain, model, word(tag), word(tag + 4u), word(tag + 8u), word(tag + 12u));
-            std::fprintf(stderr, "[shadow] chain qwords:");
-            for (uint32_t q = 0; q < 4u; ++q)
-                std::fprintf(stderr, " %08x %08x %08x %08x |", word(chain + q * 16u), word(chain + q * 16u + 4u), word(chain + q * 16u + 8u), word(chain + q * 16u + 12u));
-            std::fprintf(stderr, "\n");
-            {
-                const uint32_t ret = word(chain + 4u), rq = word(ret) & 0xFFFFu;
-                std::fprintf(stderr, "[shadow] ret %08x tag %08x qwc %u\n", ret, word(ret), rq);
-                for (uint32_t q = 0; q <= rq && q < 12u; ++q)
-                    std::fprintf(stderr, "[shadow]   r%02x %08x %08x %08x %08x  %g %g %g %g\n", q, word(ret + q * 16u), word(ret + q * 16u + 4u), word(ret + q * 16u + 8u),
-                                 word(ret + q * 16u + 12u), real(ret + q * 16u), real(ret + q * 16u + 4u), real(ret + q * 16u + 8u), real(ret + q * 16u + 12u));
-            }
-            const uint32_t data = word(tag + 4u), qwc = word(tag) & 0xFFFFu;
-            std::fprintf(stderr, "[shadow] data %08x qwc %u\n", data, qwc);
-            for (uint32_t q = 0; q < 24u && q < qwc; ++q)
-                std::fprintf(stderr, "[shadow]   %03x %08x %08x %08x %08x  %g %g %g %g\n", q, word(data + q * 16u), word(data + q * 16u + 4u), word(data + q * 16u + 8u),
-                             word(data + q * 16u + 12u), real(data + q * 16u), real(data + q * 16u + 4u), real(data + q * 16u + 8u), real(data + q * 16u + 12u));
-        }
         g_shadowDisp(rdram, ctx, runtime);
+        static const bool idColours = std::getenv("SOTC_NATIVE_IDCOLOR") != nullptr;
+        if (idColours || !model || !g_cameraContext || ((word(chain) >> 28) & 7u) != 2u)
+            return;
+        const uint32_t ret = word(chain + 4u);
+        if ((word(ret) & 0xFFFFu) != 5u) // one matrix: rigid
+            return;
+        float m[16];
+        for (int i = 0; i < 16; ++i)
+            m[i] = real(ret + 16u + i * 4u);
+        const float d[3] = {real(chain + 16u + 12u), real(chain + 32u + 12u), real(chain + 48u + 12u)};
+        const uint32_t tag = word(model + 0x1Cu);
+        static std::vector<Strip> strips;
+        strips.clear();
+        readBatches(word(tag + 4u), (word(tag) & 0xFFFFu) * 16u, strips);
+        auto toCamera = [&](const BatchVertex &v, float out[3])
+        {
+            for (int r = 0; r < 3; ++r)
+                out[r] = m[r] * v.x + m[4 + r] * v.y + m[8 + r] * v.z + m[12 + r];
+        };
+        auto put = [&](const float *p)
+        {
+            native_renderer::Vertex v{};
+            v.x = p[0];
+            v.y = p[1];
+            v.z = p[2];
+            g_volume.push_back(v);
+        };
+        g_volume.clear();
+        for (const Strip &strip : strips)
+            for (size_t i = 2; i < strip.size(); ++i)
+            {
+                float a[3], b[3], c[3];
+                toCamera(strip[i - 2], a);
+                toCamera(strip[i - 1], b);
+                toCamera(strip[i], c);
+                const float u[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]}, w[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+                const float n[3] = {u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]};
+                const float facing = n[0] * d[0] + n[1] * d[1] + n[2] * d[2];
+                if (facing == 0.0f)
+                    continue; // degenerate (strip joins) or edge-on
+                if (facing > 0.0f)
+                    std::swap(b, c); // the near face looks away from the extrusion
+                const float *near[3] = {a, b, c};
+                float far[3][3];
+                for (int k = 0; k < 3; ++k)
+                    for (int r = 0; r < 3; ++r)
+                        far[k][r] = near[k][r] + d[r];
+                // Closed prism, faces outwards: near (a, b, c), far reversed, sides.
+                put(a), put(b), put(c);
+                put(far[0]), put(far[2]), put(far[1]);
+                for (int k = 0; k < 3; ++k)
+                {
+                    const int l = (k + 1) % 3;
+                    put(near[k]), put(far[k]), put(far[l]);
+                    put(near[k]), put(far[l]), put(near[l]);
+                }
+            }
+        if (g_volume.empty())
+            return;
+        float projection[16];
+        for (int i = 0; i < 16; ++i)
+            projection[i] = real(g_cameraContext + 0x40u + i * 4u);
+        const uint64_t mesh = (1ull << 59) | g_skinnedDraws++;
+        native_renderer::uploadMesh(mesh, g_volume.data(), static_cast<uint32_t>(g_volume.size()));
+        native_renderer::DrawState state;
+        state.shadowVolume = true;
+        state.shadow = 0.5f;
+        state.order = 7; // after the opaque world, before the transparent layers
+        native_renderer::draw(mesh, projection, state);
     }
 
     void modelDispHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1097,6 +1161,20 @@ namespace sotc_native
                                  (unsigned long long)f, alphaReg & 0xFFu, surfaceLayer(header, s, fading), word(s + 0x1Cu), opacity);
                 }
             }
+            static const uint32_t skipLayers = [] // debugging: SOTC_NATIVE_SKIPLAYERS=12,18
+            {
+                uint32_t mask = 0;
+                if (const char *env = std::getenv("SOTC_NATIVE_SKIPLAYERS"))
+                    for (const char *p = env; *p;)
+                    {
+                        mask |= 1u << (std::strtoul(p, const_cast<char **>(&p), 10) & 31u);
+                        if (*p)
+                            ++p;
+                    }
+                return mask;
+            }();
+            if ((skipLayers >> (surfaceLayer(header, s, fading) & 31u)) & 1u)
+                continue;
             native_renderer::DrawState state;
             state.texture = surfaceTexture(header, surface);
             state.blend = surfaceBlend(s);
@@ -1108,6 +1186,7 @@ namespace sotc_native
                 uint32_t h = header * 2654435761u;
                 h ^= h >> 13;
                 state.debugColour = (h & 0xFFFFFFu) | 0x101010u;
+                state.blend = native_renderer::Blend::Opaque;
                 static std::set<uint32_t> told;
                 if (told.insert(header).second)
                     std::fprintf(stderr, "[native-id] %06x header %08x layer %u blend %d tex %d\n", state.debugColour & 0xFFFFFFu, header, state.order,
@@ -1129,7 +1208,7 @@ namespace sotc_native
                     g_haveViewLights = true;
                 }
             }
-            const bool twoTextures = word(s + 0x1Cu) == 2u && mesh == id;
+            const bool twoTextures = word(s + 0x1Cu) == 2u && mesh == id && !state.debugColour;
             if (twoTextures)
                 state.writeDepth = true;
             native_renderer::draw(mesh, transform, state);

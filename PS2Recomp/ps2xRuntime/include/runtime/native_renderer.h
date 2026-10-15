@@ -54,6 +54,12 @@ namespace native_renderer
         bool writeDepth = false; // write depth even when additive (a second pass follows)
         bool overlay = false; // a second pass over the same geometry: depth equal passes, no depth write
         bool screen = false; // 2D: positions already in clip space, no depth test or write
+        // A shadow volume: no colour; its faces count on the stencil (front +1,
+        // back -1) where they pass the depth test, and before the first draw
+        // of a later layer the pixels with a non-zero count are darkened by
+        // `shadow` (0..1).
+        bool shadowVolume = false;
+        float shadow = 0.5f;
         uint32_t debugColour = 0; // non-zero: drawn flat in this RGB (who drew what)
         bool lit = false;
         float light[32] = {};
