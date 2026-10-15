@@ -230,7 +230,7 @@
   "feature": "Shadows",
   "status": "native",
   "since": "2026-10-15",
-  "commit": "",
+  "commit": "0c3a518",
   "note": "stencil volumes (rigid and skinned paths), soft as shadowDraw: mask reduced, blurred, darkened; on by default"
  },
  {
@@ -428,7 +428,7 @@
   "feature": "GS COLCLAMP wrap",
   "status": "native",
   "since": "2026-10-15",
-  "commit": "",
+  "commit": "0c3a518",
   "note": "emulated GS fix: blends wrap modulo 256 when COLCLAMP is off (the shadow count)"
  }
 ]
