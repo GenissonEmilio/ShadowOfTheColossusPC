@@ -273,10 +273,10 @@
   "map": "renderer",
   "area": "Effects",
   "feature": "Screen blur",
-  "status": "emulated",
-  "since": "",
+  "status": "partial",
+  "since": "2026-10-15",
   "commit": "",
-  "note": "screenBlur and the radial blur"
+  "note": "screenBlur (zoom/turn blur, the soft resample of cutscenes) redone; the radial blur of other effects not yet"
  },
  {
   "map": "renderer",

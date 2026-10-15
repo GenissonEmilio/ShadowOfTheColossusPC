@@ -1157,6 +1157,12 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
         vtx.u = m_curU;
         vtx.v = m_curV;
         vtx.fog = f;
+        {
+            static const bool log = std::getenv("PS2X_LOG_FOGF") != nullptr;
+            static uint64_t n = 0;
+            if (log && (++n % 50000u) == 0u)
+                std::fprintf(stderr, "[fogf] z %.0f f %u\n", vtx.z, static_cast<unsigned>(f));
+        }
         vertexKick(!adk);
         break;
     }
@@ -1228,6 +1234,12 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
         vtx.u = m_curU;
         vtx.v = m_curV;
         vtx.fog = static_cast<uint8_t>((hi >> 36) & 0xFF);
+        {
+            static const bool log = std::getenv("PS2X_LOG_FOGF") != nullptr;
+            static uint64_t n = 0;
+            if (log && (++n % 50000u) == 0u)
+                std::fprintf(stderr, "[fogf] z %.0f f %u\n", vtx.z, vtx.fog);
+        }
         vertexKick(false);
         break;
     }
@@ -1645,6 +1657,15 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
         m_fogR = static_cast<uint8_t>(value & 0xFFu);
         m_fogG = static_cast<uint8_t>((value >> 8) & 0xFFu);
         m_fogB = static_cast<uint8_t>((value >> 16) & 0xFFu);
+        {
+            static const bool log = std::getenv("PS2X_LOG_FOGCOL") != nullptr;
+            static uint64_t last = ~0ull;
+            if (log && value != last)
+            {
+                last = value;
+                std::fprintf(stderr, "[fogcol] %u %u %u\n", m_fogR, m_fogG, m_fogB);
+            }
+        }
         break;
     case GS_REG_TEXFLUSH:
         if (m_backend)

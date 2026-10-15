@@ -560,6 +560,10 @@ namespace sotc_native
                              nearD, farD, nearR, farR, k, g_fog.base, g_fog.scale, word(0x118B8DCu), word(0x118B8E0u), word(0x118B8E4u));
             }
         }
+        if (std::getenv("SOTC_NATIVE_LOG") && g_frame % 120u == 0u)
+            std::fprintf(stderr, "[dof] frame %llu on %u rounds %d slices %d focus %g colour %08x %08x %08x %08x\n", (unsigned long long)g_frame, word(0x11862D0u),
+                         static_cast<int32_t>(word(0x11862D4u)), static_cast<int32_t>(word(0x11862D8u)), static_cast<float>(static_cast<int32_t>(word(0x11862DCu))),
+                         word(0x11862E0u), word(0x11862E4u), word(0x11862E8u), word(0x11862ECu));
         if (std::getenv("SOTC_NATIVE_LOG") && g_frame % 60u == 0u)
             std::fprintf(stderr, "[native-frame] %llu zfog %d start %g width %g vfog %d models %u\n", (unsigned long long)g_frame, g_fog.enabled ? 1 : 0,
                          g_fog.start, g_fog.width, g_fog.vertexFog ? 1 : 0, g_modelDraws);
@@ -1169,6 +1173,30 @@ namespace sotc_native
         ++g_frameDraws;
     }
 
+    // ---- screenBlur (0x108a780) -------------------------------------------
+    constexpr uint32_t kScreenBlur = 0x0108A780u;
+    PS2Runtime::RecompiledFunction g_screenBlur = nullptr;
+    void screenBlurHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        syncFrame(rdram);
+        static int n = 0;
+        if (std::getenv("SOTC_NATIVE_LOG") && n++ < 30)
+            std::fprintf(stderr, "[sblur] frame %llu angle %g scale %g layer %u w %d a1 %d steps %d a3 %d t0 %d\n", (unsigned long long)g_frame, ctx->f[12], ctx->f[13],
+                         GPR_U32(ctx, 4), static_cast<int32_t>(GPR_U32(ctx, 5)), static_cast<int32_t>(GPR_U32(ctx, 6)), static_cast<int32_t>(GPR_U32(ctx, 7)),
+                         static_cast<int32_t>(GPR_U32(ctx, 8)), static_cast<int32_t>(GPR_U32(ctx, 9)));
+        native_renderer::ScreenBlur b;
+        b.angle = ctx->f[12];
+        b.scale = ctx->f[13];
+        b.order = GPR_U32(ctx, 4);
+        b.steps = static_cast<int32_t>(GPR_U32(ctx, 7));
+        b.dx = static_cast<float>(static_cast<int32_t>(GPR_U32(ctx, 8)));
+        b.dy = static_cast<float>(static_cast<int32_t>(GPR_U32(ctx, 9)));
+        static const bool off = std::getenv("SOTC_NATIVE_NOSBLUR") != nullptr;
+        if (!off && b.steps > 0 && b.steps < 64)
+            native_renderer::addScreenBlur(b);
+        g_screenBlur(rdram, ctx, runtime);
+    }
+
     void modelDispHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         syncFrame(rdram);
@@ -1473,6 +1501,11 @@ void installSotcNative(PS2Runtime &runtime)
         runtime.registerFunction(kPtclVtx, ptclVtxHook);
         g_ptclMat = runtime.lookupFunction(kPtclMat);
         runtime.registerFunction(kPtclMat, ptclMatHook);
+    }
+    if (runtime.hasFunction(kScreenBlur))
+    {
+        g_screenBlur = runtime.lookupFunction(kScreenBlur);
+        runtime.registerFunction(kScreenBlur, screenBlurHook);
     }
     if (runtime.hasFunction(kMeshDisp))
     {

@@ -5,6 +5,7 @@
 #import <Metal/Metal.h>
 
 #include <algorithm>
+#include <cmath>
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
@@ -96,6 +97,8 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
         discard_fragment();
     if (fog.debug.w > 0.0)
         return float4(fog.debug.rgb, 1.0);
+    if (fog.steps < -0.5) // debugging: the vertex fog factor and depth
+        return float4(in.fog, saturate(in.depth / 100.0), 0.0, 1.0);
     float3 rgb = saturate(t.rgb * shade);
     rgb = mix(fog.colour, rgb, in.fog);
     if (fog.fogged != 0)
@@ -170,6 +173,29 @@ fragment float4 bloomTemporal(Quad in [[stage_in]], texture2d<float> current [[t
     return mix(previous.sample(s, in.uv), current.sample(s, in.uv), amount);
 }
 
+struct BlurCopy
+{
+    float scale, angle, alpha, pad;
+    float2 offset; // NDC
+};
+
+vertex Quad blurCopyVertex(uint id [[vertex_id]], constant BlurCopy &b [[buffer(0)]])
+{
+    const float2 corner[6] = {float2(-1, -1), float2(1, -1), float2(-1, 1), float2(1, -1), float2(1, 1), float2(-1, 1)};
+    float2 c = corner[id] * b.scale;
+    float s = sin(b.angle), k = cos(b.angle);
+    Quad q;
+    q.position = float4(float2(c.x * k - c.y * s, c.x * s + c.y * k) + b.offset, 0.0, 1.0);
+    q.uv = float2(corner[id].x * 0.5 + 0.5, 0.5 - corner[id].y * 0.5);
+    return q;
+}
+
+fragment float4 blurCopyFragment(Quad in [[stage_in]], texture2d<float> src [[texture(0)]], constant BlurCopy &b [[buffer(0)]])
+{
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    return float4(src.sample(s, in.uv).rgb, b.alpha);
+}
+
 fragment float4 copyTexture(Quad in [[stage_in]], texture2d<float> src [[texture(0)]])
 {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
@@ -219,6 +245,9 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
         id<MTLTexture> backgroundSmall = nil; // bgEnd's 256 x 256 copy of the background
         id<MTLTexture> reflectionColor = nil, reflectionDepth = nil; // the mirrored world, 256 x 256
         id<MTLRenderPipelineState> copySmall = nil, backdrop = nil;
+        id<MTLRenderPipelineState> blurCopy = nil;
+        id<MTLTexture> snapshot = nil; // the picture so far, for screenBlur
+        std::vector<native_renderer::ScreenBlur> blurs;
         native_renderer::Fog fog;
         native_renderer::Bloom bloom;
         id<MTLTexture> bloomTex[3] = {nil, nil, nil}; // ping, pong, history
@@ -334,6 +363,22 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
             copySmall = fullscreen(@"copyTexture", false);
             {
                 MTLRenderPipelineDescriptor *d = [[MTLRenderPipelineDescriptor alloc] init];
+                d.vertexFunction = [library newFunctionWithName:@"blurCopyVertex"];
+                d.fragmentFunction = [library newFunctionWithName:@"blurCopyFragment"];
+                d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+                d.colorAttachments[0].blendingEnabled = YES;
+                d.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+                d.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+                d.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorZero;
+                d.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+                NSError *e = nil;
+                blurCopy = [device newRenderPipelineStateWithDescriptor:d error:&e];
+                [d.vertexFunction release];
+                [d.fragmentFunction release];
+                [d release];
+            }
+            {
+                MTLRenderPipelineDescriptor *d = [[MTLRenderPipelineDescriptor alloc] init];
                 d.vertexFunction = [library newFunctionWithName:@"fullscreenVertex"];
                 d.fragmentFunction = [library newFunctionWithName:@"copyTexture"];
                 d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
@@ -397,6 +442,13 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
             cd.usage = MTLTextureUsageRenderTarget;
             cd.storageMode = MTLStorageModeShared;
             color = [device newTextureWithDescriptor:cd];
+            [snapshot release];
+            {
+                MTLTextureDescriptor *sd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
+                sd.usage = MTLTextureUsageShaderRead;
+                sd.storageMode = MTLStorageModePrivate;
+                snapshot = [device newTextureWithDescriptor:sd];
+            }
             cd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
             cd.storageMode = MTLStorageModePrivate;
             backgroundColor = [device newTextureWithDescriptor:cd];
@@ -487,6 +539,8 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
                     }
                     static const bool additiveZ = std::getenv("SOTC_NATIVE_ADDZ") != nullptr; // debugging
+                    static const bool showFog = std::getenv("SOTC_NATIVE_SHOWFOG") != nullptr; // debugging
+                    static const bool noOverlayFog = std::getenv("SOTC_FOG_NO_OVERLAY") != nullptr; // debugging
                     static const bool bgFog = std::getenv("SOTC_NATIVE_NOBGFOG") == nullptr; // every batch has FGE, the sky too
                     int bound = -1;
                     // Shadow volumes counted so far, waiting for their darkening.
@@ -597,9 +651,9 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                             float pad[3];
                             float colour[4];
                             float debug[4];
-                        } fp = {fog.start, fog.width, static_cast<float>(fog.steps), (!backgroundOnly && fogOn && d.state.fogged) ? 1 : 0,
+                        } fp = {fog.start, fog.width, (showFog && !d.state.screen) ? -1.0f : static_cast<float>(fog.steps), (!backgroundOnly && fogOn && d.state.fogged) ? 1 : 0,
                                 {static_cast<float>(w), static_cast<float>(h)},
-                                (fog.vertexFog && !d.state.screen && (!d.state.background || bgFog)) ? 1 : 0, fog.base, fog.scale, {0, 0, 0},
+                                (fog.vertexFog && !d.state.screen && (!d.state.background || bgFog) && !(d.state.overlay && noOverlayFog)) ? 1 : 0, fog.base, fog.scale, {0, 0, 0},
                                 {fog.colour[0], fog.colour[1], fog.colour[2], 0},
                                 {static_cast<float>(d.state.debugColour & 0xFFu) / 255.0f, static_cast<float>((d.state.debugColour >> 8) & 0xFFu) / 255.0f,
                                  static_cast<float>((d.state.debugColour >> 16) & 0xFFu) / 255.0f, d.state.debugColour ? 1.0f : 0.0f}};
@@ -633,14 +687,8 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     [e endEncoding];
                 }
                 const bool bloomOn = bloom.enabled && maskPipeline && blurPipeline && temporalPipeline && compositePipeline;
-                if (!bloomOn)
+                auto doBloom = [&]
                 {
-                    pass(color, false);
-                    bloomHistory = false;
-                }
-                else
-                {
-                    pass(color, false, 0, bloom.order);
                     struct
                     {
                         float threshold, zA, zB, temporal;
@@ -670,9 +718,11 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         [e setFragmentBytes:&bp length:sizeof(bp) atIndex:0];
                     });
                     // The GS chain reduces the mask in stages before blurring: a wide glow.
-                    for (int i = 0; i < 3; ++i)
+                    static const int rounds = std::getenv("SOTC_BLOOM_ROUNDS") ? std::atoi(std::getenv("SOTC_BLOOM_ROUNDS")) : 3;
+                    static const float spreadGrow = std::getenv("SOTC_BLOOM_SPREAD") ? static_cast<float>(std::atof(std::getenv("SOTC_BLOOM_SPREAD"))) : 1.0f;
+                    for (int i = 0; i < rounds; ++i)
                     {
-                        const float spread = 1.0f + static_cast<float>(i);
+                        const float spread = 1.0f + spreadGrow * static_cast<float>(i);
                         const float stepH[2] = {spread / lw, 0.0f}, stepV[2] = {0.0f, spread / lh};
                         quad(bloomTex[1], blurPipeline, false, [&](id<MTLRenderCommandEncoder> e)
                         {
@@ -700,8 +750,63 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         [e setFragmentTexture:bloomTex[2] atIndex:0];
                         [e setFragmentBytes:&bp length:sizeof(bp) atIndex:0];
                     });
-                    pass(color, false, bloom.order, ~0u, true);
+                };
+                auto doBlur = [&](const native_renderer::ScreenBlur &b)
+                {
+                    if (!blurCopy || b.steps <= 0)
+                        return;
+                    id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+                    [blit copyFromTexture:color toTexture:snapshot];
+                    [blit endEncoding];
+                    MTLRenderPassDescriptor *desc = [MTLRenderPassDescriptor renderPassDescriptor];
+                    desc.colorAttachments[0].texture = color;
+                    desc.colorAttachments[0].loadAction = MTLLoadActionLoad;
+                    desc.colorAttachments[0].storeAction = MTLStoreActionStore;
+                    id<MTLRenderCommandEncoder> e = [commands renderCommandEncoderWithDescriptor:desc];
+                    [e setRenderPipelineState:blurCopy];
+                    [e setFragmentTexture:snapshot atIndex:0];
+                    for (int i = 0; i < b.steps; ++i)
+                    {
+                        const float f = static_cast<float>(b.steps - i) / static_cast<float>(b.steps);
+                        struct
+                        {
+                            float scale, angle, alpha, pad;
+                            float offset[2];
+                        } u = {(b.scale - 1.0f) * f + 1.0f, std::fabs(b.angle) >= 0.01570796f ? -b.angle * f : 0.0f, 1.0f / static_cast<float>(i + 1), 0.0f,
+                               {b.dx * f / (static_cast<float>(w) * 0.5f), -b.dy * f / (static_cast<float>(h) * 0.5f)}};
+                        [e setVertexBytes:&u length:sizeof(u) atIndex:0];
+                        [e setFragmentBytes:&u length:sizeof(u) atIndex:0];
+                        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+                    }
+                    [e endEncoding];
+                };
+                // The 3D and 2D by layer, cut where an effect reads the picture so far.
+                struct Event
+                {
+                    uint32_t order;
+                    int blur; // -1: the bloom
+                };
+                std::vector<Event> events;
+                if (bloomOn)
+                    events.push_back({bloom.order, -1});
+                else
+                    bloomHistory = false;
+                for (size_t i = 0; i < blurs.size(); ++i)
+                    events.push_back({blurs[i].order, static_cast<int>(i)});
+                std::stable_sort(events.begin(), events.end(), [](const Event &x, const Event &y) { return x.order < y.order; });
+                uint32_t from = 0;
+                bool loaded = false;
+                for (const Event &ev : events)
+                {
+                    pass(color, false, from, ev.order, loaded);
+                    loaded = true;
+                    from = ev.order;
+                    if (ev.blur < 0)
+                        doBloom();
+                    else
+                        doBlur(blurs[static_cast<size_t>(ev.blur)]);
                 }
+                pass(color, false, from, ~0u, loaded);
                 [commands commit];
                 [commands waitUntilCompleted];
                 std::lock_guard<std::mutex> lock(outputMutex);
@@ -780,7 +885,10 @@ namespace native_renderer
     void beginFrame()
     {
         if (Renderer *r = renderer())
+        {
             r->draws.clear();
+            r->blurs.clear();
+        }
     }
 
     void draw(uint64_t mesh, const float clip[16], const DrawState &state)
@@ -793,6 +901,12 @@ namespace native_renderer
         d.state = state;
         std::memcpy(d.clip, clip, sizeof(d.clip));
         r->draws.push_back(d);
+    }
+
+    void addScreenBlur(const ScreenBlur &blur)
+    {
+        if (Renderer *r = renderer())
+            r->blurs.push_back(blur);
     }
 
     void setBloom(const Bloom &bloom)

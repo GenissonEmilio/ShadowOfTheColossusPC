@@ -101,6 +101,19 @@ namespace native_renderer
         float temporal = 1.0f;
     };
     void setBloom(const Bloom &bloom);
+
+    // SotC's screenBlur: at display list layer `order`, the picture so far is
+    // drawn over itself `steps` times, copy i scaled from `scale` towards 1,
+    // turned by `angle` (radians, the same fraction), shifted by (dx, dy)
+    // pixels (same fraction), with alpha 1 / (i + 1): the average of the
+    // copies. Cleared each frame by beginFrame.
+    struct ScreenBlur
+    {
+        uint32_t order = 0;
+        float angle = 0.0f, scale = 1.0f, dx = 0.0f, dy = 0.0f;
+        int steps = 0;
+    };
+    void addScreenBlur(const ScreenBlur &blur);
     void endFrame(uint32_t width, uint32_t height);
 
     // Shown instead of the emulated picture (the emulator's present path asks).

@@ -215,6 +215,16 @@ position (planar reflection). Drawing
 layers 12/13 on the screen gave the grey curtains over the shrine and the
 pit (they are the walls seen in a mirror, from a different camera).
 
+## screenBlur (0x108a780)
+
+screenBlur(angle f12, scale f13, layer a0, copy width a1, a2, steps a3,
+dx t0, dy t1): the picture so far is copied (bilinear) and drawn back
+`steps` times, copy i scaled (scale - 1) x (n - i) / n + 1, turned by
+-angle x the same fraction (only past 0.0157 rad), shifted by (dx, dy) x
+the same fraction, alpha 128 / (i + 1): the average of the copies. In the
+cutscenes it runs every frame near identity (scale 0.99998), which only
+softens the picture; larger values give the zoom blurs.
+
 ## Bloom (0x109e2a0, layer 0x14)
 
 A mask of what lies beyond GS Z 0x118c094 (0 in the shrine: only pixels
