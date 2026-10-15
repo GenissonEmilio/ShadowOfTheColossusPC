@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include "ps2_debug_panel.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
@@ -2206,7 +2207,14 @@ void PS2DebugPanel::draw(PS2Runtime &runtime)
         return;
     }
 
-    if (IsKeyPressed(KEY_F1))
+    static bool initialised = false;
+    if (!initialised)
+    {
+        initialised = true;
+        if (std::getenv("PS2X_DEBUG_UI"))
+            m_visible = true;
+    }
+    if (IsKeyPressed(KEY_F12)) // F1 is the player's settings menu
     {
         toggleVisible();
     }

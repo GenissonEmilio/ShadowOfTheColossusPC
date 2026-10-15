@@ -180,7 +180,12 @@ int main(int argc, char *argv[])
         std::string elfName = pathObj.filename().string();
         std::string normalizedId = normalizeGameId(elfName);
 
-        std::string windowTitle = "PS2-Recomp | ";
+        // Which renderer draws: the native one (game overrides, SOTC_NATIVE=1)
+        // or the emulated PS2 GS (software, or the GPU with PS2X_GS_HW=1).
+        const char *native = std::getenv("SOTC_NATIVE");
+        std::string windowTitle = (native && std::atoi(native) == 1) ? "Celosia Native (Metal) | "
+                                  : std::getenv("PS2X_GS_HW")             ? "Celosia (emulated GS, GPU) | "
+                                                                          : "Celosia (emulated GS) | ";
         const char *gameName = getGameName(normalizedId);
 
 #if !defined(PLATFORM_VITA)
