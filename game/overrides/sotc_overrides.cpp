@@ -1,4 +1,9 @@
 // Shadow of the Colossus (SCUS-97472) runtime overrides.
+#include <cstdio>
+#include <utility>
+#include <algorithm>
+#include <cmath>
+#include <map>
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "game_overrides.h"
@@ -271,6 +276,148 @@ namespace
         }
     }
 
+    // SOTC_MATH_CHECK=1: the game's math functions checked against the host's
+    // on every call; mismatches (|error| > 1e-3) are counted by function and
+    // caller and listed every 600 calls of the worst one.
+    struct MathCheck
+    {
+        uint32_t addr;
+        const char *name;
+        int args;      // float arguments (f12, f13)
+        double (*ref)(double, double);
+        PS2Runtime::RecompiledFunction original;
+    };
+    MathCheck g_math[] = {
+        {0x001BDF00u, "iosGetSinf", 1, [](double a, double) { return std::sin(a); }, nullptr},
+        {0x001BE020u, "iosGetCosf", 1, [](double a, double) { return std::cos(a); }, nullptr},
+        {0x001BE138u, "iosGetTanf", 1, [](double a, double) { return std::tan(a); }, nullptr},
+        {0x001BE260u, "iosGetACosf", 1, [](double a, double) { return std::acos(std::clamp(a, -1.0, 1.0)); }, nullptr},
+        {0x001BE388u, "iosGetACosfExact", 1, [](double a, double) { return std::acos(std::clamp(a, -1.0, 1.0)); }, nullptr},
+        {0x001BE3E0u, "iosGetASinfExact", 1, [](double a, double) { return std::asin(std::clamp(a, -1.0, 1.0)); }, nullptr},
+        {0x001BE440u, "iosGetATanfExact", 1, [](double a, double) { return std::atan(a); }, nullptr},
+        {0x001DD538u, "atanf", 1, [](double a, double) { return std::atan(a); }, nullptr},
+        {0x001DD7C8u, "cosf", 1, [](double a, double) { return std::cos(a); }, nullptr},
+        {0x001DD8C8u, "sinf", 1, [](double a, double) { return std::sin(a); }, nullptr},
+        {0x001DD9C8u, "acosf", 1, [](double a, double) { return std::acos(std::clamp(a, -1.0, 1.0)); }, nullptr},
+        {0x001DD9E0u, "asinf", 1, [](double a, double) { return std::asin(std::clamp(a, -1.0, 1.0)); }, nullptr},
+        {0x001DD9F8u, "atan2f", 2, [](double y, double x) { return std::atan2(y, x); }, nullptr},
+        {0x001DDA40u, "sqrtf", 1, [](double a, double) { return a < 0 ? 0.0 : std::sqrt(a); }, nullptr},
+    };
+    constexpr int kMath = static_cast<int>(sizeof(g_math) / sizeof(g_math[0]));
+    std::map<std::pair<int, uint32_t>, std::pair<uint64_t, double>> g_mathBad; // (fn, ra) -> (count, worst)
+    std::array<uint64_t, 32> g_mathCalls{};
+
+    template <int I>
+    void mathCheckHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        MathCheck &m = g_math[I];
+        const float a = ctx->f[12], b = ctx->f[13];
+        const uint32_t ra = GPR_U32(ctx, 31);
+        m.original(rdram, ctx, runtime);
+        const double want = m.ref(a, b), got = ctx->f[0];
+        ++g_mathCalls[I];
+        if (std::isfinite(want) && !(std::fabs(got - want) <= 1e-3))
+        {
+            auto &e = g_mathBad[{I, ra}];
+            ++e.first;
+            if (!(std::fabs(got - want) <= std::fabs(e.second)))
+            {
+                e.second = got - want;
+                std::fprintf(stderr, "[math] %s(%g%s%g) = %g, want %g (ra %08x)\n", m.name, a, m.args > 1 ? ", " : "", m.args > 1 ? b : 0.0f, got, want, ra);
+            }
+        }
+        if (g_mathCalls[I] % 20000u == 0u)
+        {
+            std::string line = "[math] calls:";
+            for (int k = 0; k < kMath; ++k)
+                line += std::string(" ") + g_math[k].name + "=" + std::to_string(g_mathCalls[k]);
+            line += " | bad:";
+            for (auto &[key, v] : g_mathBad)
+            {
+                char item[96];
+                std::snprintf(item, sizeof(item), " %s@%08x x%llu (worst %+.3g)", g_math[key.first].name, key.second, (unsigned long long)v.first, v.second);
+                line += item;
+            }
+            std::fprintf(stderr, "%s\n", line.c_str());
+        }
+    }
+
+    // GAMEUTIL_get_yaw_pitch_by_direction(yaw*, pitch*, dir*) (0x10816c0): the
+    // angles it stores, checked against atan2 of the direction (the sword aims
+    // through it). Its inner calls tail-jump, so only the stored result counts.
+    constexpr uint32_t kYawPitchEnd = 0x010817C8u;
+    PS2Runtime::RecompiledFunction g_yawPitch = nullptr, g_yawPitchEnd = nullptr;
+    struct PendingYawPitch { uint32_t yaw, pitch; float x, y, z; uint32_t ra; };
+    std::map<uint32_t, PendingYawPitch> g_pendingYawPitch; // by direction pointer
+
+    void yawPitchHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        auto rf = [rdram](uint32_t a) { float v; std::memcpy(&v, rdram + (a & 0x1FFFFFCu), 4); return v; };
+        const uint32_t pdir = GPR_U32(ctx, 6);
+        g_pendingYawPitch[pdir] = {GPR_U32(ctx, 4), GPR_U32(ctx, 5), rf(pdir), rf(pdir + 4u), rf(pdir + 8u), GPR_U32(ctx, 31)};
+        g_yawPitch(rdram, ctx, runtime);
+    }
+
+    // Its last call: by then the angles are stored.
+    void yawPitchEndHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        auto rf = [rdram](uint32_t a) { float v; std::memcpy(&v, rdram + (a & 0x1FFFFFCu), 4); return v; };
+        auto it = g_pendingYawPitch.find(GPR_U32(ctx, 4));
+        if (it != g_pendingYawPitch.end())
+        {
+            const PendingYawPitch p = it->second;
+            g_pendingYawPitch.erase(it);
+            const double yaw = rf(p.yaw), pitch = rf(p.pitch);
+            const double hyp = std::sqrt(double(p.x) * p.x + double(p.z) * p.z), len = std::sqrt(hyp * hyp + double(p.y) * p.y);
+            if (len > 1e-6 && hyp > 1e-6)
+            {
+                const double wantYaw = std::atan2(double(p.x), double(p.z)), wantPitch = std::atan2(double(p.y), hyp);
+                static uint64_t calls = 0, badYaw = 0, badPitch = 0;
+                ++calls;
+                const bool by = std::fabs(std::remainder(yaw - wantYaw, 2 * M_PI)) > 2e-3;
+                const bool bp = std::fabs(pitch - wantPitch) > 2e-3;
+                badYaw += by;
+                badPitch += bp;
+                static int printed = 0;
+                if ((by || bp) && printed++ < 40)
+                    std::fprintf(stderr, "[yawpitch] dir (%g %g %g) -> yaw %g (want %g) pitch %g (want %g) ra %08x\n", p.x, p.y, p.z, yaw, wantYaw, pitch, wantPitch, p.ra);
+                if (calls % 5000u == 0u)
+                    std::fprintf(stderr, "[yawpitch] calls %llu bad yaw %llu bad pitch %llu\n", (unsigned long long)calls, (unsigned long long)badYaw, (unsigned long long)badPitch);
+            }
+        }
+        g_yawPitchEnd(rdram, ctx, runtime);
+    }
+
+    // doit_aim_angle_interp_cntrl (0x10848b8): its arguments, to see the
+    // time step and rates the aim interpolation runs with.
+    PS2Runtime::RecompiledFunction g_aimInterp = nullptr;
+    void aimInterpHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static uint64_t n = 0;
+        if (n++ % 15u == 0u && n < 4000u)
+        {
+            auto rf = [rdram](uint32_t a) { float v; std::memcpy(&v, rdram + (a & 0x1FFFFFCu), 4); return v; };
+            auto rw = [rdram](uint32_t a) { uint32_t v; std::memcpy(&v, rdram + (a & 0x1FFFFFCu), 4); return v; };
+            const uint32_t st = GPR_U32(ctx, 4);
+            std::fprintf(stderr, "[aim] a0 %08x a1 %08x a2 %08x a3 %08x f12 %g f13 %g f14 %g f15 %g | st[0]=%u rate %g max %g cur %g ra %08x\n",
+                         GPR_U32(ctx, 4), GPR_U32(ctx, 5), GPR_U32(ctx, 6), GPR_U32(ctx, 7), ctx->f[12], ctx->f[13], ctx->f[14], ctx->f[15],
+                         rw(st), rf(st + 4u), rf(st + 8u), rf(st + 12u), GPR_U32(ctx, 31));
+        }
+        g_aimInterp(rdram, ctx, runtime);
+    }
+
+    template <int... I>
+    void installMathCheck(PS2Runtime &runtime, std::integer_sequence<int, I...>)
+    {
+        const PS2Runtime::RecompiledFunction hooks[] = {mathCheckHook<I>...};
+        for (int i = 0; i < kMath; ++i)
+            if (runtime.hasFunction(g_math[i].addr))
+            {
+                g_math[i].original = runtime.lookupFunction(g_math[i].addr);
+                runtime.registerFunction(g_math[i].addr, hooks[i]);
+            }
+    }
+
     // SOTC_DUMP_SPRITE_PACKETS=1: dump the display-list bytes spriteDrawSprite emits.
     constexpr uint32_t kSpriteDrawSprite = 0x010A32B8u;
     constexpr uint32_t kDlAllocPtr = 0x002132E8u; // iosAllocPacketPtrPath1UnCachedA cursor
@@ -370,6 +517,15 @@ namespace
         installCallTracing(runtime);
         installCensus(runtime);
         installSotcNative(runtime);
+        if (std::getenv("SOTC_MATH_CHECK") && runtime.hasFunction(0x010816C0u))
+        {
+            g_yawPitch = runtime.lookupFunction(0x010816C0u);
+            runtime.registerFunction(0x010816C0u, yawPitchHook);
+            g_aimInterp = runtime.lookupFunction(0x010848B8u);
+            runtime.registerFunction(0x010848B8u, aimInterpHook);
+            g_yawPitchEnd = runtime.lookupFunction(kYawPitchEnd);
+            runtime.registerFunction(kYawPitchEnd, yawPitchEndHook);
+        }
         if (std::getenv("SOTC_MODEL_DUMP") && runtime.hasFunction(kModelDisp) && runtime.hasFunction(kGetCameraContext))
         {
             g_modelDispOriginal = runtime.lookupFunction(kModelDisp);
