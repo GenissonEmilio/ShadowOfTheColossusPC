@@ -284,7 +284,7 @@
   "feature": "Depth of field",
   "status": "native",
   "since": "2026-10-15",
-  "commit": "",
+  "commit": "ae4246f",
   "note": "256 x 256 blurred copy laid over the pixels beyond the focus in slices by GS Z, as depthOfField (SOTC_NATIVE_NODOF)"
  },
  {
