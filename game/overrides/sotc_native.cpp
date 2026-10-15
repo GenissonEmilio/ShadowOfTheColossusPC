@@ -1545,6 +1545,25 @@ namespace sotc_native
                 refl.reflectionTint[3] = tintAlpha;
                 native_renderer::draw(mesh, transform, refl);
                 ++g_frameDraws;
+                // And first in layer 9 the same way, showing the picture as it
+                // was before that layer (waterRefractionBegin's reduced copy).
+                static const bool noRefract = std::getenv("SOTC_NATIVE_NOREFRACT") != nullptr;
+                static const float refractAlpha = std::getenv("SOTC_REFRACT_ALPHA") ? static_cast<float>(std::atof(std::getenv("SOTC_REFRACT_ALPHA"))) : 1.0f;
+                if (!noRefract)
+                {
+                    native_renderer::DrawState refr = refl;
+                    refr.reflectionSample = false;
+                    refr.refractionSample = true;
+                    refr.order = 9;
+                    refr.reflectionTint[3] = refractAlpha;
+                    if (std::getenv("SOTC_REFRACT_SHOW")) // debugging: where it lands, in red
+                    {
+                        refr.reflectionTint[0] = 4.0f;
+                        refr.reflectionTint[1] = refr.reflectionTint[2] = 0.0f;
+                    }
+                    native_renderer::draw(mesh, transform, refr);
+                    ++g_frameDraws;
+                }
             }
         }
     }

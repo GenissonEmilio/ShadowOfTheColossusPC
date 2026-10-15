@@ -246,10 +246,10 @@
   "map": "renderer",
   "area": "Effects",
   "feature": "Water refraction",
-  "status": "emulated",
-  "since": "",
+  "status": "native",
+  "since": "2026-10-15",
   "commit": "",
-  "note": "waterRefractionBegin"
+  "note": "layer 9: the 0x2200 surfaces show the picture before that layer, reduced 256 -> 128 -> 256; the layer 15 reflection covers it (alpha 1, as on the PS2)"
  },
  {
   "map": "renderer",

@@ -79,11 +79,18 @@ vertex VOut nativeVertex(VIn in [[stage_in]], constant float4x4 &clip [[buffer(1
 }
 
 fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], texture2d<float> background [[texture(1)]],
-                               texture2d<float> reflection [[texture(2)]],
+                               texture2d<float> reflection [[texture(2)]], texture2d<float> refraction [[texture(3)]],
                                constant int &textured [[buffer(0)]], constant FogParams &fog [[buffer(1)]])
 {
     constexpr sampler repeatLinear(address::repeat, filter::linear);
     float3 shade = in.color.rgb;
+    if (textured == 3)
+    {
+        // The picture so far at this pixel (waterRefractionBegin's reduced copy), tinted.
+        constexpr sampler clampLinear(address::clamp_to_edge, filter::linear);
+        float3 r = refraction.sample(clampLinear, in.position.xy / fog.size).rgb;
+        return float4(saturate(r * fog.debug.rgb), -fog.debug.w);
+    }
     if (textured == 2)
     {
         // The mirrored world at this pixel, tinted (debug.w < 0: the tint's alpha).
@@ -276,6 +283,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
         id<MTLTexture> color = nil, depth = nil, backgroundColor = nil;
         id<MTLTexture> backgroundSmall = nil; // bgEnd's 256 x 256 copy of the background
         id<MTLTexture> reflectionColor = nil, reflectionDepth = nil; // the mirrored world, 256 x 256
+        id<MTLTexture> refractionColor = nil, refractionHalf = nil;  // the picture before layer 9, 256 x 256 (via 128 x 128)
         id<MTLRenderPipelineState> copySmall = nil, backdrop = nil;
         id<MTLRenderPipelineState> blurCopy = nil, tintOver = nil;
         native_renderer::GlowComposite glow;
@@ -525,6 +533,15 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
             cd.storageMode = MTLStorageModePrivate;
             backgroundColor = [device newTextureWithDescriptor:cd];
             [backgroundSmall release];
+            [refractionColor release];
+            [refractionHalf release];
+            for (uint32_t size : {256u, 128u})
+            {
+                MTLTextureDescriptor *fd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:size height:size mipmapped:NO];
+                fd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+                fd.storageMode = MTLStorageModePrivate;
+                (size == 256u ? refractionColor : refractionHalf) = [device newTextureWithDescriptor:fd];
+            }
             [reflectionColor release];
             [reflectionDepth release];
             {
@@ -621,6 +638,8 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         [encoder setFragmentTexture:backgroundSmall atIndex:1];
                     if (!mirror)
                         [encoder setFragmentTexture:reflectionColor atIndex:2];
+                    if (!mirror)
+                        [encoder setFragmentTexture:refractionColor atIndex:3];
                     if (!mirror && !backgroundOnly && !load && fogOn && backdrop)
                     {
                         // The background as the PS2 shows it: bgEnd's reduced copy,
@@ -740,7 +759,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         light.opacity = d.state.opacity;
                         [encoder setVertexBytes:&light length:sizeof(light) atIndex:2];
                         auto tex = d.state.texture ? textures.find(d.state.texture) : textures.end();
-                        const int textured = d.state.reflectionSample ? 2 : (tex != textures.end() ? 1 : 0);
+                        const int textured = d.state.reflectionSample ? 2 : (d.state.refractionSample ? 3 : (tex != textures.end() ? 1 : 0));
                         if (textured)
                             [encoder setFragmentTexture:tex->second atIndex:0];
                         [encoder setFragmentBytes:&textured length:sizeof(textured) atIndex:0];
@@ -760,7 +779,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                                 {fog.colour[0], fog.colour[1], fog.colour[2], 0},
                                 {static_cast<float>(d.state.debugColour & 0xFFu) / 255.0f, static_cast<float>((d.state.debugColour >> 8) & 0xFFu) / 255.0f,
                                  static_cast<float>((d.state.debugColour >> 16) & 0xFFu) / 255.0f, d.state.debugColour ? 1.0f : 0.0f}};
-                        if (d.state.reflectionSample)
+                        if (d.state.reflectionSample || d.state.refractionSample)
                         {
                             for (int k = 0; k < 3; ++k)
                                 fp.debug[k] = d.state.reflectionTint[k];
@@ -986,15 +1005,50 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         [q setFragmentBytes:&softAmount length:sizeof(softAmount) atIndex:0];
                     });
                 };
+                // waterRefractionBegin (layer 9): the picture so far reduced to
+                // 256 x 256, to 128 x 128 and back (bilinear: a blur), which the
+                // water surfaces then show at their screen position.
+                bool haveRefraction = false;
+                for (const Draw &d : draws)
+                    if (d.state.refractionSample)
+                    {
+                        haveRefraction = true;
+                        break;
+                    }
+                auto doRefraction = [&]
+                {
+                    if (!copySmall)
+                        return;
+                    id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+                    [blit copyFromTexture:color toTexture:snapshot];
+                    [blit endEncoding];
+                    auto copy = [&](id<MTLTexture> from, id<MTLTexture> to)
+                    {
+                        MTLRenderPassDescriptor *qd = [MTLRenderPassDescriptor renderPassDescriptor];
+                        qd.colorAttachments[0].texture = to;
+                        qd.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+                        qd.colorAttachments[0].storeAction = MTLStoreActionStore;
+                        id<MTLRenderCommandEncoder> q = [commands renderCommandEncoderWithDescriptor:qd];
+                        [q setRenderPipelineState:copySmall];
+                        [q setFragmentTexture:from atIndex:0];
+                        [q drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                        [q endEncoding];
+                    };
+                    copy(snapshot, refractionColor);
+                    copy(refractionColor, refractionHalf);
+                    copy(refractionHalf, refractionColor);
+                };
                 // The 3D and 2D by layer, cut where an effect reads the picture so far.
                 struct Event
                 {
                     uint32_t order;
-                    int blur; // -1: the bloom, -2: the glow composite, -3: the shadows
+                    int blur; // -1: the bloom, -2: the glow composite, -3: the shadows, -4: the refraction copy
                 };
                 std::vector<Event> events;
                 if (softShadows)
                     events.push_back({softOrder, -3});
+                if (haveRefraction)
+                    events.push_back({9u, -4});
                 if (glow.enabled)
                     events.push_back({glow.order, -2});
                 if (bloomOn)
@@ -1011,7 +1065,9 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     pass(color, false, from, ev.order, loaded);
                     loaded = true;
                     from = ev.order;
-                    if (ev.blur == -3)
+                    if (ev.blur == -4)
+                        doRefraction();
+                    else if (ev.blur == -3)
                         doShadow();
                     else if (ev.blur == -2)
                         doGlow();

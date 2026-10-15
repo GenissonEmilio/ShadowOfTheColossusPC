@@ -121,6 +121,15 @@ them off). The emulated GS used to clamp where COLCLAMP 0 wraps, which
 turned the sword's thin shadow into a dark wedge wherever the volume's back
 faces showed; it wraps now.
 
+Water refraction: `waterRefractionBegin` (layer 9) copies the picture so
+far to 256 x 256, to 128 x 128 and back (a blur) and leaves TEX0 on it; the
+0x2200 surfaces are drawn there (and again in layer 15 on the reflection)
+with the per-surface packet (header +0x14 [1] + s x 0x40 + 0x20), tint at
+the CALL target +0x30 (alpha 128). Both passes blend ALPHA 0x44 at alpha 1,
+so the reflection covers the refraction where both land. Natively:
+`refractionSample` draws at layer 9 (`SOTC_NATIVE_NOREFRACT`,
+`SOTC_REFRACT_SHOW` paints them red).
+
 VIF ROW: every ST unpack (V2-16, and the two-texture V4-16) uses STMOD 1
 (offset), and some chain outside the model packets sets ROW to small values
 that change every frame (texture scrolling; PS2X_LOG_STROW=1 lists them).

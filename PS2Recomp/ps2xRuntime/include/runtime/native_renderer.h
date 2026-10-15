@@ -67,6 +67,10 @@ namespace native_renderer
         bool reflectionSource = false;
         bool reflectionSample = false;
         float reflectionTint[4] = {1, 1, 1, 1};
+        // Water refraction: shows the picture as it was before layer 9,
+        // reduced and blurred, at its own screen position, times
+        // reflectionTint (the same packet's).
+        bool refractionSample = false;
         uint32_t debugColour = 0; // non-zero: drawn flat in this RGB (who drew what)
         bool lit = false;
         float light[32] = {};
