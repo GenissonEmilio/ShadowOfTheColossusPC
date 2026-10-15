@@ -115,6 +115,15 @@ VIF ROW: every ST unpack (V2-16, and the two-texture V4-16) uses STMOD 1
 that change every frame (texture scrolling; PS2X_LOG_STROW=1 lists them).
 The native renderer still takes ROW as 0.
 
+Particles (`ptclman*`, microcode 7): an environment packet (type, a
+matrix, the ST extent `vec`, fog factors, VU 18..27), a material packet
+(ALPHA by its argument: 1 adds, 2 subtracts, else blends) and vertex
+packets of 48-byte particles: position + size, colour 0..1, sin/cos of the
+rotation. The microcode expands each into a rotated square (s = size x
+0.7071; A = (k.x sin, k.y cos) s, B = (-cos, k.y sin) s, k at 0x118bfe0;
+type 1 along the billboard axes from *0x118bff4, 2/4/5 by the matrix),
+type 4 as a lit fan around the centre, type 3 a streak between two points.
+
 ## Other systems that append chains or microcode
 
 - `mesh*` (0x109a4d8-): `meshDisp`, `meshDispInstance`, `meshTransMatrix`,

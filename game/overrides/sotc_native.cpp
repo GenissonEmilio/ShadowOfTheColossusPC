@@ -1034,6 +1034,141 @@ namespace sotc_native
         native_renderer::draw(mesh, projection, state);
     }
 
+    // ---- Particles (ptclman*) ------------------------------------------------
+    constexpr uint32_t kPtclEnv = 0x0109A280u, kPtclMat = 0x01099E00u, kPtclVtx = 0x01099F38u;
+    PS2Runtime::RecompiledFunction g_ptclEnv = nullptr, g_ptclMat = nullptr, g_ptclVtx = nullptr;
+
+    // The particle microcode (VU1 microcode 7) expands each particle (48
+    // bytes: position + size, colour 0..1, sin/cos of its rotation) into a
+    // rotated square: s = size x 0.7071, A = (k.x sin, k.y cos) s,
+    // B = (-cos, k.y sin) s with k = VU23 (0x118bfe0); type 1 orients A/B by
+    // the billboard axes (VU 0..2 from *0x118bff4, transposed, x k), types
+    // 2/4/5 by the environment matrix (ptclmanBuildEnvPacket's); corners
+    // p+B, p+A, p-A, p-B with ST (0,0) (vec.x,0) (0,vec.y) (vec.x,vec.y),
+    // vec = the env packet's (VU24). Type 4 is a fan around p (a lit puff).
+    // Colour x255, alpha x128 (0x80 = 1). The blend is the material
+    // packet's: 1 adds, 2 subtracts, else blends.
+    struct ParticleEnv
+    {
+        uint32_t type = 0;
+        float m[16];
+        float vec[2] = {1, 1};
+        float k[3] = {1, 1, 1};
+        float axes[3][3];
+        float fade = 1.0f;
+    } g_ptclEnvState;
+    uint32_t g_ptclBlend = 0;
+
+    void ptclMatHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_ptclBlend = GPR_U32(ctx, 4);
+        g_ptclMat(rdram, ctx, runtime);
+    }
+
+    void ptclEnvHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        syncFrame(rdram);
+        ParticleEnv &e = g_ptclEnvState;
+        const uint32_t vec = GPR_U32(ctx, 4), mat = GPR_U32(ctx, 6);
+        e.type = GPR_U32(ctx, 5);
+        e.fade = ctx->f[12];
+        for (int i = 0; i < 16; ++i)
+            e.m[i] = real(mat + i * 4u);
+        e.vec[0] = real(vec);
+        e.vec[1] = real(vec + 4u);
+        for (int i = 0; i < 3; ++i)
+            e.k[i] = real(0x118BFE0u + i * 4u);
+        const uint32_t consts = word(0x118BFF4u);
+        // vf9..11: row i of the constants' first three qwords, transposed, times k.
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                e.axes[c][r] = consts ? e.k[c] * real(consts + r * 16u + c * 4u) : 0.0f;
+        g_ptclEnv(rdram, ctx, runtime);
+    }
+
+    void ptclVtxHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        syncFrame(rdram);
+        const uint32_t a = GPR_U32(ctx, 4), count = GPR_U32(ctx, 5);
+        const uint32_t header = g_requested, layer = g_layers.empty() ? 18u : g_layers.back();
+        g_ptclVtx(rdram, ctx, runtime);
+        static const bool off = std::getenv("SOTC_NATIVE_NOPTCL") != nullptr;
+        const ParticleEnv &e = g_ptclEnvState;
+        if (off || !g_cameraContext || count == 0u || count > 4096u || !(e.type == 1u || e.type == 2u || e.type == 4u || e.type == 5u))
+            return;
+        static std::vector<native_renderer::Vertex> tris;
+        tris.clear();
+        auto mul3 = [&](const float *dir, float x, float y, float out[3])
+        {
+            for (int r = 0; r < 3; ++r)
+                out[r] = dir == nullptr ? 0.0f : 0.0f;
+            if (e.type == 1u)
+                for (int r = 0; r < 3; ++r)
+                    out[r] = e.axes[0][r] * x + e.axes[1][r] * y;
+            else
+                for (int r = 0; r < 3; ++r)
+                    out[r] = e.m[r] * x + e.m[4 + r] * y;
+        };
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            const uint32_t q = a + i * 48u;
+            const float p[3] = {real(q), real(q + 4u), real(q + 8u)};
+            const float sz = real(q + 12u) * 0.70710677f;
+            const float sn = real(q + 32u), cs = real(q + 36u);
+            float A[3], B[3];
+            mul3(A, e.k[0] * sn * sz, e.k[1] * cs * sz, A);
+            mul3(B, -cs * sz, e.k[1] * sn * sz, B);
+            native_renderer::Vertex v{};
+            v.nz = 1.0f;
+            auto col = [&](native_renderer::Vertex &o, float scale)
+            {
+                o.r = static_cast<uint8_t>(std::clamp(real(q + 16u) * 255.0f * scale, 0.0f, 255.0f));
+                o.g = static_cast<uint8_t>(std::clamp(real(q + 20u) * 255.0f * scale, 0.0f, 255.0f));
+                o.b = static_cast<uint8_t>(std::clamp(real(q + 24u) * 255.0f * scale, 0.0f, 255.0f));
+                o.a = static_cast<uint8_t>(std::clamp(real(q + 28u) * 128.0f, 0.0f, 255.0f));
+            };
+            auto at = [&](const float *o, float sign, float u, float vv)
+            {
+                native_renderer::Vertex c = v;
+                c.x = p[0] + sign * o[0];
+                c.y = p[1] + sign * o[1];
+                c.z = p[2] + sign * o[2];
+                c.u = u;
+                c.v = vv;
+                col(c, e.type == 4u ? 0.75f : 1.0f);
+                return c;
+            };
+            const native_renderer::Vertex v16 = at(B, 1, 0, 0), v17 = at(A, 1, e.vec[0], 0), v18 = at(A, -1, 0, e.vec[1]), v19 = at(B, -1, e.vec[0], e.vec[1]);
+            if (e.type == 4u)
+            {
+                native_renderer::Vertex c = v;
+                c.x = p[0];
+                c.y = p[1];
+                c.z = p[2];
+                c.u = e.vec[0] * 0.5f;
+                c.v = e.vec[1] * 0.5f;
+                col(c, 0.75f);
+                tris.insert(tris.end(), {c, v16, v17, c, v17, v19, c, v19, v18, c, v18, v16});
+            }
+            else
+                tris.insert(tris.end(), {v16, v17, v18, v17, v19, v18});
+        }
+        if (tris.empty())
+            return;
+        float camera[16];
+        for (int i = 0; i < 16; ++i)
+            camera[i] = real(g_cameraContext + 0x5A0u + i * 4u);
+        const uint64_t mesh = (1ull << 58) | g_skinnedDraws++;
+        native_renderer::uploadMesh(mesh, tris.data(), static_cast<uint32_t>(tris.size()));
+        native_renderer::DrawState state;
+        state.texture = texture(header);
+        state.blend = g_ptclBlend == 1u ? native_renderer::Blend::Additive : (g_ptclBlend == 2u ? native_renderer::Blend::Subtract : native_renderer::Blend::Normal);
+        state.order = layer;
+        state.fogged = false;
+        native_renderer::draw(mesh, camera, state);
+        ++g_frameDraws;
+    }
+
     void modelDispHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         syncFrame(rdram);
@@ -1329,6 +1464,15 @@ void installSotcNative(PS2Runtime &runtime)
     {
         g_shadowDisp = runtime.lookupFunction(kShadowDisp);
         runtime.registerFunction(kShadowDisp, shadowDispHook);
+    }
+    if (runtime.hasFunction(kPtclEnv) && runtime.hasFunction(kPtclVtx))
+    {
+        g_ptclEnv = runtime.lookupFunction(kPtclEnv);
+        runtime.registerFunction(kPtclEnv, ptclEnvHook);
+        g_ptclVtx = runtime.lookupFunction(kPtclVtx);
+        runtime.registerFunction(kPtclVtx, ptclVtxHook);
+        g_ptclMat = runtime.lookupFunction(kPtclMat);
+        runtime.registerFunction(kPtclMat, ptclMatHook);
     }
     if (runtime.hasFunction(kMeshDisp))
     {
