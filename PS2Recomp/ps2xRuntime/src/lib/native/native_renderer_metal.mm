@@ -453,6 +453,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
                     }
                     static const bool additiveZ = std::getenv("SOTC_NATIVE_ADDZ") != nullptr; // debugging
+                    static const bool bgFog = std::getenv("SOTC_NATIVE_NOBGFOG") == nullptr; // every batch has FGE, the sky too
                     int bound = -1;
                     // Shadow volumes counted so far, waiting for their darkening.
                     uint32_t shadowOrder = 0;
@@ -560,7 +561,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                             float debug[4];
                         } fp = {fog.start, fog.width, static_cast<float>(fog.steps), (!backgroundOnly && fogOn && d.state.fogged) ? 1 : 0,
                                 {static_cast<float>(w), static_cast<float>(h)},
-                                (fog.vertexFog && !d.state.screen && !d.state.background) ? 1 : 0, fog.base, fog.scale, {0, 0, 0},
+                                (fog.vertexFog && !d.state.screen && (!d.state.background || bgFog)) ? 1 : 0, fog.base, fog.scale, {0, 0, 0},
                                 {fog.colour[0], fog.colour[1], fog.colour[2], 0},
                                 {static_cast<float>(d.state.debugColour & 0xFFu) / 255.0f, static_cast<float>((d.state.debugColour >> 8) & 0xFFu) / 255.0f,
                                  static_cast<float>((d.state.debugColour >> 16) & 0xFFu) / 255.0f, d.state.debugColour ? 1.0f : 0.0f}};

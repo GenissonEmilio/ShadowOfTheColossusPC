@@ -542,11 +542,12 @@ namespace sotc_native
             static const bool noVFog = std::getenv("SOTC_NATIVE_NOVFOG") != nullptr; // debugging
             if (!noVFog && farD != nearD)
             {
+                static const float baseScale = std::getenv("SOTC_FOG_BASE_SCALE") ? static_cast<float>(std::atof(std::getenv("SOTC_FOG_BASE_SCALE"))) : 1.0f;
                 g_fog.vertexFog = true;
                 g_fog.scale = farD * nearD * (nearR - farR) / (farD - nearD);
-                // getFogFactor1 is twice the line through (near, nearRate) and
-                // (far, farRate) in 1 / w; the picture matches the line.
-                g_fog.base = ((farR - nearR) * (farD + nearD) / (farD - nearD) + farR + nearR) * k * 0.5f;
+                // The camera packet of every layer (0x1098e20) carries these
+                // two values for the microcode: F = factor1 + factor0 / w.
+                g_fog.base = ((farR - nearR) * (farD + nearD) / (farD - nearD) + farR + nearR) * k * baseScale;
                 for (int i = 0; i < 3; ++i)
                     g_fog.colour[i] = static_cast<float>(word(0x118B8DCu + i * 4u) & 0xFFu) / 255.0f;
             }
@@ -562,6 +563,18 @@ namespace sotc_native
         if (std::getenv("SOTC_NATIVE_LOG") && g_frame % 60u == 0u)
             std::fprintf(stderr, "[native-frame] %llu zfog %d start %g width %g vfog %d models %u\n", (unsigned long long)g_frame, g_fog.enabled ? 1 : 0,
                          g_fog.start, g_fog.width, g_fog.vertexFog ? 1 : 0, g_modelDraws);
+        if (std::getenv("SOTC_NATIVE_LOG") && g_frame % 120u == 0u)
+        {
+            const uint32_t table = word(0x118BFCCu);
+            for (uint32_t layer : {1u, 2u, 3u})
+            {
+                const uint32_t pk = table ? word(table + layer * 4u) : 0u;
+                if (pk)
+                    std::fprintf(stderr, "[layerfog] frame %llu layer %u q22 %g %g q23 %g %g q24 %g %g q25 %g %g\n", (unsigned long long)g_frame, layer,
+                                 real(pk + 0x110u), real(pk + 0x114u), real(pk + 0x118u), real(pk + 0x11Cu), real(pk + 0x120u), real(pk + 0x124u),
+                                 real(pk + 0x128u), real(pk + 0x12Cu));
+            }
+        }
         native_renderer::setFog(g_fog);
         g_fog = native_renderer::Fog{};
         // Without 3D this frame (loading, menus over black) the bloom mask would
@@ -1214,6 +1227,16 @@ namespace sotc_native
                                  static_cast<int>(surfaceBlend(s)), static_cast<unsigned long long>(state.texture), surface, word(s + 0x18u));
             }
             state.background = state.order == 1u;            // the sky
+            static const bool logMat = std::getenv("SOTC_NATIVE_LOGMAT") != nullptr;
+            if (logMat && k == 0u)
+            {
+                static int n = 0;
+                const uint32_t own = word(instance + 0xCu), ret = word(own + 4u);
+                if (n++ < 200 && (word(ret) & 0xFFFFu) == 5u)
+                    std::fprintf(stderr, "[mat] layer %u header %08x mine %g %g %g %g | %g %g %g %g || vu %g %g %g %g | %g %g %g %g\n", state.order, header,
+                                 clip[0], clip[1], clip[3], clip[12], clip[5], clip[13], clip[14], clip[15],
+                                 real(ret + 16u), real(ret + 20u), real(ret + 28u), real(ret + 64u), real(ret + 36u), real(ret + 68u), real(ret + 72u), real(ret + 76u));
+            }
             state.fogged = state.order == 2u || state.order == 3u; // drawn before zFog
             if (g_litPackets.count(id))
             {
