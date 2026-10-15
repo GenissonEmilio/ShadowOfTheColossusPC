@@ -1,3 +1,6 @@
+#include <cstdio>
+#include <cmath>
+#include <algorithm>
 #include "runtime/host_menu.h"
 #include <map>
 #include <sstream>
@@ -99,10 +102,42 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
         float ly = GetGamepadAxisMovement(kGamepad, GAMEPAD_AXIS_LEFT_Y);
         float rx = GetGamepadAxisMovement(kGamepad, GAMEPAD_AXIS_RIGHT_X);
         float ry = GetGamepadAxisMovement(kGamepad, GAMEPAD_AXIS_RIGHT_Y);
-        data[6] = static_cast<uint8_t>(128 + lx * 127);
-        data[7] = static_cast<uint8_t>(128 + ly * 127);
-        data[4] = static_cast<uint8_t>(128 + rx * 127);
-        data[5] = static_cast<uint8_t>(128 + ry * 127);
+        // A modern stick at rest reads a few percent off centre and never
+        // still; the DualShock 2 came back to 0x80. Games aim with the raw
+        // values (SotC's sword follows them every frame), so a radial dead
+        // zone rescaled to the full range: PS2X_STICK_DEADZONE (0..0.9, 0.18).
+        static const float deadZone = []
+        {
+            const char *env = std::getenv("PS2X_STICK_DEADZONE");
+            const float v = env ? static_cast<float>(std::atof(env)) : 0.18f;
+            return std::clamp(v, 0.0f, 0.9f);
+        }();
+        auto shape = [](float &x, float &y)
+        {
+            const float m = std::sqrt(x * x + y * y);
+            if (m <= deadZone)
+            {
+                x = y = 0.0f;
+                return;
+            }
+            const float scale = std::min(1.0f, (m - deadZone) / (1.0f - deadZone)) / m;
+            x *= scale;
+            y *= scale;
+        };
+        static const bool logAxes = std::getenv("PS2X_LOG_PAD") != nullptr;
+        if (logAxes)
+        {
+            static int every = 0;
+            if (++every % 30 == 0)
+                std::fprintf(stderr, "[pad] raw L %+.3f %+.3f R %+.3f %+.3f\n", lx, ly, rx, ry);
+        }
+        shape(lx, ly);
+        shape(rx, ry);
+        auto toByte = [](float v) { return static_cast<uint8_t>(std::clamp(128.0f + v * 127.5f, 0.0f, 255.0f)); };
+        data[6] = toByte(lx);
+        data[7] = toByte(ly);
+        data[4] = toByte(rx);
+        data[5] = toByte(ry);
     }
 
     // Keyboard, laid out like an arcade panel (works alongside a gamepad):
