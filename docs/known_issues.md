@@ -38,3 +38,15 @@ reduced, blurred copy over the frame twice (alpha 0x11862c4, then 0x11862c0
 = 160: overshoot) tinted by 0x11862b0..b8; on the PS2 that blurred buffer
 must be darker than the picture (its alpha, or the copy's colour). The
 native composite (SOTC_NATIVE_GLOW=1) does not darken yet.
+
+## Native: brighter than the emulated picture, most in the opening
+
+Measured 2026-10-15 at the same game frame: emulated / native mean
+brightness about 0.68 in the opening, 0.84 in the shrine, 0.95 on the plain.
+In the shrine it looks like an offset (native mid tones about 16 higher,
+equal near white); in the opening like a factor. Ruled out (each switched off
+on its side, the gap stayed): vertex fog, bloom, depth of field, the game's
+screenBlur and shadows, the display merge (PMODE 0x8023 blends the frame with
+itself). The opening's models are mostly unlit (vertex colour x texture).
+Not yet checked: the GS texture function and CLUT path against the native
+decode on one surface, per draw.

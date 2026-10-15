@@ -209,6 +209,29 @@ fragment float4 tintComposite(Quad in [[stage_in]], texture2d<float> src [[textu
     return float4(saturate(src.sample(s, in.uv).rgb * tint.rgb), tint.a);
 }
 
+struct DofParams
+{
+    float zA, zB;
+    uint focusZ;
+    int slices;
+};
+
+// depthOfField's slices: the blurred copy where the GS Z is at most
+// focusZ >> i, each pass blending by (i + 1) / slices over the last.
+fragment float4 dofComposite(Quad in [[stage_in]], texture2d<float> blurred [[texture(0)]], depth2d<float> depth [[texture(1)]],
+                             constant DofParams &p [[buffer(0)]])
+{
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    uint2 size = uint2(depth.get_width(), depth.get_height());
+    float d = depth.read(min(uint2(in.position.xy), size - 1));
+    float gsz = d >= 1.0 ? 0.0 : p.zA + p.zB * (1.0 - d);
+    float keep = 1.0; // the share of the picture left
+    for (int i = 0; i < p.slices; ++i)
+        if (gsz <= float(p.focusZ >> uint(i)))
+            keep *= 1.0 - float(i + 1) / float(p.slices);
+    return float4(blurred.sample(s, in.uv).rgb, 1.0 - keep);
+}
+
 fragment float4 copyTexture(Quad in [[stage_in]], texture2d<float> src [[texture(0)]])
 {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
@@ -287,6 +310,8 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
         id<MTLRenderPipelineState> copySmall = nil, backdrop = nil;
         id<MTLRenderPipelineState> blurCopy = nil, tintOver = nil;
         native_renderer::GlowComposite glow;
+        native_renderer::DepthOfField dof;
+        id<MTLRenderPipelineState> dofPipeline = nil;
         id<MTLTexture> snapshot = nil; // the picture so far, for screenBlur
         std::vector<native_renderer::ScreenBlur> blurs;
         native_renderer::Fog fog;
@@ -407,6 +432,24 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
             compositePipeline = fullscreen(@"bloomComposite", true);
             copySmall = fullscreen(@"copyTexture", false);
             shadowReducePipeline = fullscreen(@"shadowReduce", false);
+            {
+                MTLRenderPipelineDescriptor *d = [[MTLRenderPipelineDescriptor alloc] init];
+                d.vertexFunction = [library newFunctionWithName:@"fullscreenVertex"];
+                d.fragmentFunction = [library newFunctionWithName:@"dofComposite"];
+                d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+                d.colorAttachments[0].blendingEnabled = YES;
+                d.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+                d.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+                d.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorZero;
+                d.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+                NSError *e = nil;
+                dofPipeline = [device newRenderPipelineStateWithDescriptor:d error:&e];
+                if (!dofPipeline)
+                    std::cerr << "[native] dof pipeline failed: " << [[e localizedDescription] UTF8String] << std::endl;
+                [d.vertexFunction release];
+                [d.fragmentFunction release];
+                [d release];
+            }
             {
                 // Cd x (1 - As): the darkening by the soft mask.
                 MTLRenderPipelineDescriptor *d = [[MTLRenderPipelineDescriptor alloc] init];
@@ -1038,13 +1081,54 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     copy(refractionColor, refractionHalf);
                     copy(refractionHalf, refractionColor);
                 };
+                auto doDof = [&]
+                {
+                    if (!copySmall || !dofPipeline)
+                        return;
+                    id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+                    [blit copyFromTexture:color toTexture:snapshot];
+                    [blit endEncoding];
+                    auto quad = [&](id<MTLTexture> to, id<MTLRenderPipelineState> state, bool load, auto bind)
+                    {
+                        MTLRenderPassDescriptor *qd = [MTLRenderPassDescriptor renderPassDescriptor];
+                        qd.colorAttachments[0].texture = to;
+                        qd.colorAttachments[0].loadAction = load ? MTLLoadActionLoad : MTLLoadActionDontCare;
+                        qd.colorAttachments[0].storeAction = MTLStoreActionStore;
+                        id<MTLRenderCommandEncoder> q = [commands renderCommandEncoderWithDescriptor:qd];
+                        [q setRenderPipelineState:state];
+                        bind(q);
+                        [q drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                        [q endEncoding];
+                    };
+                    // refractionColor / refractionHalf are free after layer 9.
+                    quad(refractionColor, copySmall, false, [&](id<MTLRenderCommandEncoder> q) { [q setFragmentTexture:snapshot atIndex:0]; });
+                    for (int i = 0; i < dof.rounds; ++i)
+                    {
+                        quad(refractionHalf, copySmall, false, [&](id<MTLRenderCommandEncoder> q) { [q setFragmentTexture:refractionColor atIndex:0]; });
+                        quad(refractionColor, copySmall, false, [&](id<MTLRenderCommandEncoder> q) { [q setFragmentTexture:refractionHalf atIndex:0]; });
+                    }
+                    struct
+                    {
+                        float zA, zB;
+                        uint32_t focusZ;
+                        int32_t slices;
+                    } p = {dof.zA, dof.zB, dof.focusZ, dof.slices};
+                    quad(color, dofPipeline, true, [&](id<MTLRenderCommandEncoder> q)
+                    {
+                        [q setFragmentTexture:refractionColor atIndex:0];
+                        [q setFragmentTexture:depth atIndex:1];
+                        [q setFragmentBytes:&p length:sizeof(p) atIndex:0];
+                    });
+                };
                 // The 3D and 2D by layer, cut where an effect reads the picture so far.
                 struct Event
                 {
                     uint32_t order;
-                    int blur; // -1: the bloom, -2: the glow composite, -3: the shadows, -4: the refraction copy
+                    int blur; // -1: the bloom, -2: the glow composite, -3: the shadows, -4: the refraction copy, -5: the depth of field
                 };
                 std::vector<Event> events;
+                if (dof.enabled && dof.slices > 0)
+                    events.push_back({dof.order, -5});
                 if (softShadows)
                     events.push_back({softOrder, -3});
                 if (haveRefraction)
@@ -1065,7 +1149,9 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     pass(color, false, from, ev.order, loaded);
                     loaded = true;
                     from = ev.order;
-                    if (ev.blur == -4)
+                    if (ev.blur == -5)
+                        doDof();
+                    else if (ev.blur == -4)
                         doRefraction();
                     else if (ev.blur == -3)
                         doShadow();
@@ -1171,6 +1257,12 @@ namespace native_renderer
         d.state = state;
         std::memcpy(d.clip, clip, sizeof(d.clip));
         r->draws.push_back(d);
+    }
+
+    void setDepthOfField(const DepthOfField &dof)
+    {
+        if (Renderer *r = renderer())
+            r->dof = dof;
     }
 
     void setGlowComposite(const GlowComposite &glow)

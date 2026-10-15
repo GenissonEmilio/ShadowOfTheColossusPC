@@ -132,6 +132,20 @@ namespace native_renderer
         float amountA = 0.0f, amountB = 0.0f;
     };
     void setGlowComposite(const GlowComposite &glow);
+
+    // SotC's depthOfField (layer 20): the picture reduced to 256 x 256 and
+    // blurred `rounds` times (256 -> 128 -> 256) is laid over the pixels
+    // beyond the focus in `slices` passes: pass i where the GS Z (zA + zB / w,
+    // empty pixels 0) is at most focusZ >> i, alpha (i + 1) / slices.
+    struct DepthOfField
+    {
+        bool enabled = false;
+        uint32_t order = 20;
+        float zA = 0.0f, zB = 0.0f;
+        uint32_t focusZ = 0;
+        int slices = 0, rounds = 0;
+    };
+    void setDepthOfField(const DepthOfField &dof);
     void endFrame(uint32_t width, uint32_t height);
 
     // Shown instead of the emulated picture (the emulator's present path asks).

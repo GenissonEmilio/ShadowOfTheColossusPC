@@ -139,6 +139,13 @@ depth test). In the opening: a textured ribbon at layer 23 (0x10f4724).
 The solar flare mode 2 (0x109fb08, `solarFlare` when *0x118c090 == 2) only
 runs in the first boot frames; mode 1 is the bloom chain.
 
+Depth of field: `depthOfField` (0x10874e8, layer 20, while 0x11862d0 is
+set) copies the picture to 256 x 256 (rounds 0x11862d4 of 256 -> 128 ->
+256), then lays it over the frame in 0x11862d8 slices: sprite i at GS Z =
+focusZ >> i (focus 0x11862dc taken through the camera's 0x4a0 matrix),
+ZTST GEQUAL, alpha (0x80 / slices) x (i + 1). Natively: `setDepthOfField`,
+one pass reading the depth (`SOTC_NATIVE_NODOF`).
+
 VIF ROW: every ST unpack (V2-16, and the two-texture V4-16) uses STMOD 1
 (offset), and some chain outside the model packets sets ROW to small values
 that change every frame (texture scrolling; PS2X_LOG_STROW=1 lists them).

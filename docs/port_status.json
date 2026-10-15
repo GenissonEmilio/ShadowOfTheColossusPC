@@ -186,7 +186,7 @@
   "status": "partial",
   "since": "2026-10-15",
   "commit": "75efe01",
-  "note": "glEnd's A+D packet read into the 2D path (the opening's ribbon); drawn without a depth test (SOTC_NATIVE_NOGL)"
+  "note": "glEnd's A+D packet read into the 2D path; the bird's heat-haze trail (samples a screen copy) and bossDeathEffect's off-screen fan are left out"
  },
  {
   "map": "renderer",
@@ -282,10 +282,10 @@
   "map": "renderer",
   "area": "Effects",
   "feature": "Depth of field",
-  "status": "emulated",
-  "since": "",
+  "status": "native",
+  "since": "2026-10-15",
   "commit": "",
-  "note": "depthOfField"
+  "note": "256 x 256 blurred copy laid over the pixels beyond the focus in slices by GS Z, as depthOfField (SOTC_NATIVE_NODOF)"
  },
  {
   "map": "renderer",

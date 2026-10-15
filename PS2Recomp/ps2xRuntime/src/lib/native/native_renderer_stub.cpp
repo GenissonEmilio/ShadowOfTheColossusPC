@@ -17,6 +17,7 @@ namespace native_renderer
     void setBloom(const Bloom &) {}
     void addScreenBlur(const ScreenBlur &) {}
     void setGlowComposite(const GlowComposite &) {}
+    void setDepthOfField(const DepthOfField &) {}
     void endFrame(uint32_t, uint32_t) {}
     void setShown(bool) {}
     bool shown() { return false; }

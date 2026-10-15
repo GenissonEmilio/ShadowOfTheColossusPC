@@ -609,6 +609,26 @@ namespace sotc_native
             gc.amountB = static_cast<float>(static_cast<int32_t>(word(0x11862C0u))) / 128.0f * alphaScale;
             native_renderer::setGlowComposite(gc);
         }
+        {
+            // depthOfField (0x10874e8, on while 0x11862d0 is set): focus
+            // distance 0x11862dc taken to GS Z by the camera's 0x4a0 matrix,
+            // slices 0x11862d8, blur rounds 0x11862d4.
+            native_renderer::DepthOfField dof;
+            static const bool off = std::getenv("SOTC_NATIVE_NODOF") != nullptr;
+            if (!off && g_cameraContext && word(0x11862D0u) != 0u && g_modelDraws != 0u)
+            {
+                const float focus = static_cast<float>(static_cast<int32_t>(word(0x11862DCu)));
+                const uint32_t m = g_cameraContext + 0x4A0u;
+                const float w = real(m + 11u * 4u) * focus + real(m + 15u * 4u);
+                dof.enabled = w != 0.0f;
+                dof.zA = real(m + 10u * 4u);
+                dof.zB = real(m + 14u * 4u);
+                dof.focusZ = dof.enabled ? static_cast<uint32_t>(std::max(0.0f, (real(m + 10u * 4u) * focus + real(m + 14u * 4u)) / w)) : 0u;
+                dof.slices = std::clamp(static_cast<int32_t>(word(0x11862D8u)), 0, 8);
+                dof.rounds = std::clamp(static_cast<int32_t>(word(0x11862D4u)), 0, 4);
+            }
+            native_renderer::setDepthOfField(dof);
+        }
         native_renderer::setFog(g_fog);
         g_fog = native_renderer::Fog{};
         // Without 3D this frame (loading, menus over black) the bloom mask would
@@ -883,7 +903,12 @@ namespace sotc_native
         syncFrame(rdram);
         static const bool off = std::getenv("SOTC_NATIVE_NOGL") != nullptr;
         const uint32_t start = word(0x01186398u), end = word(0x01186394u);
-        if (!off && start && end > start + 0x20u && end - start < 0x100000u && word(0x0118B5B0u) == 0u)
+        // Not drawn here: bossDeathEffectBegin's fan goes to an off-screen
+        // buffer; 0x10f3fb0's strips sample a copy of the screen (a heat
+        // haze trail behind the bird) that the 2D path does not have.
+        const uint32_t ra = GPR_U32(ctx, 31);
+        const bool offScreen = (ra >= 0x01085640u && ra < 0x01085E40u) || (ra >= 0x010F3FB0u && ra < 0x010F4890u);
+        if (!off && !offScreen && start && end > start + 0x20u && end - start < 0x100000u && word(0x0118B5B0u) == 0u)
         {
             static const bool log = std::getenv("SOTC_NATIVE_LOG") != nullptr;
             if (log)
