@@ -758,8 +758,13 @@ namespace sotc_native
         }
         else
         {
-            o.u = a.s;
-            o.v = a.t;
+            // ST / Q (RGBAQ's high word; the sprites give 1).
+            float q;
+            const uint32_t qBits = static_cast<uint32_t>(a.rgbaq >> 32);
+            std::memcpy(&q, &qBits, 4);
+            const float k = (q != 0.0f && std::isfinite(q)) ? 1.0f / q : 1.0f;
+            o.u = a.s * k;
+            o.v = a.t * k;
         }
         std::vector<native_renderer::Vertex> &v = a.strip;
         v.push_back(o);
@@ -844,6 +849,60 @@ namespace sotc_native
         since = g_frame;
     }
 
+    // One GS register write of a 2D draw, as gsReg or an A+D packet gives it.
+    void feed2D(uint32_t reg, uint64_t value)
+    {
+        Assembler &a = g_2d;
+        a.layer = g_layers.empty() ? 25u : g_layers.back();
+        a.header = g_requested;
+        switch (reg)
+        {
+        case 0x00u: a.prim = value; a.strip.clear(); break;
+        case 0x01u: a.rgbaq = value; break;
+        case 0x02u:
+            std::memcpy(&a.s, &value, 4);
+            std::memcpy(&a.t, reinterpret_cast<const uint8_t *>(&value) + 4, 4);
+            break;
+        case 0x03u: a.u = value & 0x3FFFu; a.v = (value >> 16) & 0x3FFFu; break;
+        case 0x04u: case 0x05u: vertex2D(value, true); break;   // XYZF2, XYZ2
+        case 0x0Cu: case 0x0Du: vertex2D(value, false); break;  // XYZF3, XYZ3: no drawing kick
+        case 0x42u: a.alpha = value; break;
+        }
+    }
+
+    // The gl* immediate API (glBeginWithDlLayerNo .. glEnd) builds a GIF
+    // packet on the CPU: at *0x1186398 a DMA tag, a GIF tag (+0x10, A+D),
+    // then (value, register) pairs up to *0x1186394: TEST, PRIM, and per
+    // vertex RGBAQ, ST or UV, XYZ2 already in screen space. glEnd chains it
+    // in the layer glBegin pushed; here the pairs go through the 2D path.
+    constexpr uint32_t kGlEnd = 0x0108D060u;
+    PS2Runtime::RecompiledFunction g_glEnd = nullptr;
+
+    void glEndHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        syncFrame(rdram);
+        static const bool off = std::getenv("SOTC_NATIVE_NOGL") != nullptr;
+        const uint32_t start = word(0x01186398u), end = word(0x01186394u);
+        if (!off && start && end > start + 0x20u && end - start < 0x100000u && word(0x0118B5B0u) == 0u)
+        {
+            static const bool log = std::getenv("SOTC_NATIVE_LOG") != nullptr;
+            if (log)
+            {
+                static std::set<uint64_t> seen;
+                const uint32_t layer = g_layers.empty() ? 25u : g_layers.back();
+                if (seen.insert((static_cast<uint64_t>(GPR_U32(ctx, 31)) << 8) | layer).second)
+                    std::fprintf(stderr, "[gl] ra %08x layer %u qwords %u\n", GPR_U32(ctx, 31), layer, (end - start) / 16u - 2u);
+            }
+            for (uint32_t q = start + 0x20u; q + 16u <= end; q += 16u)
+            {
+                uint64_t value;
+                std::memcpy(&value, g_ram + (q & 0x1FFFFF0u), 8);
+                feed2D(word(q + 8u) & 0xFFu, value);
+            }
+        }
+        g_glEnd(rdram, ctx, runtime);
+    }
+
     void gsRegHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t ra = GPR_U32(ctx, 31);
@@ -855,23 +914,7 @@ namespace sotc_native
             if (ra < r.start || ra >= r.end)
                 continue;
             syncFrame(rdram);
-            Assembler &a = g_2d;
-            a.layer = g_layers.empty() ? 25u : g_layers.back();
-            a.header = g_requested;
-            const uint64_t value = GPR_U64(ctx, 5);
-            switch (GPR_U32(ctx, 4) & 0xFFu)
-            {
-            case 0x00u: a.prim = value; a.strip.clear(); break;
-            case 0x01u: a.rgbaq = value; break;
-            case 0x02u:
-                std::memcpy(&a.s, &value, 4);
-                std::memcpy(&a.t, reinterpret_cast<const uint8_t *>(&value) + 4, 4);
-                break;
-            case 0x03u: a.u = value & 0x3FFFu; a.v = (value >> 16) & 0x3FFFu; break;
-            case 0x04u: case 0x05u: vertex2D(value, true); break;   // XYZF2, XYZ2
-            case 0x0Cu: case 0x0Du: vertex2D(value, false); break;  // XYZF3, XYZ3: no drawing kick
-            case 0x42u: a.alpha = value; break;
-            }
+            feed2D(GPR_U32(ctx, 4) & 0xFFu, GPR_U64(ctx, 5));
             break;
         }
         g_gsReg(rdram, ctx, runtime);
@@ -1593,6 +1636,11 @@ void installSotcNative(PS2Runtime &runtime)
         runtime.registerFunction(kPushLayer, pushLayerHook);
         g_popLayer = runtime.lookupFunction(kPopLayer);
         runtime.registerFunction(kPopLayer, popLayerHook);
+        if (runtime.hasFunction(kGlEnd))
+        {
+            g_glEnd = runtime.lookupFunction(kGlEnd);
+            runtime.registerFunction(kGlEnd, glEndHook);
+        }
     }
     if (runtime.hasFunction(kShadowDisp))
     {

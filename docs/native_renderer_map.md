@@ -130,6 +130,15 @@ so the reflection covers the refraction where both land. Natively:
 `refractionSample` draws at layer 9 (`SOTC_NATIVE_NOREFRACT`,
 `SOTC_REFRACT_SHOW` paints them red).
 
+Immediate gl* (glBeginWithDlLayerNo 0x108bb38 .. glEnd 0x108d060): a GIF
+packet built on the CPU at *0x1186398 (DMA tag, GIF tag A+D at +0x10,
+then (value, register) pairs to *0x1186394: TEST, PRIM, per vertex RGBAQ,
+ST or UV, XYZ2/XYZF2 in screen space), chained by glEnd in the layer
+glBegin pushed. Natively glEnd's pairs go through the 2D assembler (no
+depth test). In the opening: a textured ribbon at layer 23 (0x10f4724).
+The solar flare mode 2 (0x109fb08, `solarFlare` when *0x118c090 == 2) only
+runs in the first boot frames; mode 1 is the bloom chain.
+
 VIF ROW: every ST unpack (V2-16, and the two-texture V4-16) uses STMOD 1
 (offset), and some chain outside the model packets sets ROW to small values
 that change every frame (texture scrolling; PS2X_LOG_STROW=1 lists them).

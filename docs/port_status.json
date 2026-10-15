@@ -183,10 +183,10 @@
   "map": "renderer",
   "area": "2D",
   "feature": "Immediate gl* drawing",
-  "status": "emulated",
-  "since": "",
+  "status": "partial",
+  "since": "2026-10-15",
   "commit": "",
-  "note": "glBegin / glVertex, used in the opening"
+  "note": "glEnd's A+D packet read into the 2D path (the opening's ribbon); drawn without a depth test (SOTC_NATIVE_NOGL)"
  },
  {
   "map": "renderer",
