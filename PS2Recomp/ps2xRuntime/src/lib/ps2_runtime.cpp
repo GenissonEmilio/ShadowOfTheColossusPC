@@ -7,6 +7,7 @@
 #include "runtime/ps2_stats.h"
 #include "runtime/ps2_vu1_native.h"
 #include "ps2_runtime.h"
+#include "runtime/native_renderer.h"
 #include "runtime/host_menu.h"
 #include "runtime/gs/gs_direct_frame.h"
 #include "ps2_log.h"
@@ -3130,9 +3131,20 @@ void PS2Runtime::run()
                     nextSnapshot += snapshotPeriod;
                 Image shot = LoadImageFromTexture(g_directFrame.id ? g_directFrame : frameTex);
                 ImageCrop(&shot, Rectangle{0.0f, 0.0f, static_cast<float>(presentWidth), static_cast<float>(presentHeight)});
-                const std::string path = std::string(snapshotDir) + "/frame_" + std::to_string(snapshotIndex++) + ".png";
+                const std::string path = std::string(snapshotDir) + "/frame_" + std::to_string(snapshotIndex) + ".png";
                 ExportImage(shot, path.c_str());
                 UnloadImage(shot);
+                // The native renderer's picture of the same moment, when it
+                // draws without being shown (SOTC_NATIVE=2): both from one run.
+                std::vector<uint8_t> nativeRgba;
+                uint32_t nativeW = 0, nativeH = 0;
+                if (!native_renderer::shown() && native_renderer::latestFrame(nativeRgba, nativeW, nativeH))
+                {
+                    Image native{nativeRgba.data(), static_cast<int>(nativeW), static_cast<int>(nativeH), 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+                    const std::string nativePath = std::string(snapshotDir) + "/native_" + std::to_string(snapshotIndex) + ".png";
+                    ExportImage(native, nativePath.c_str());
+                }
+                ++snapshotIndex;
             }
         }
 

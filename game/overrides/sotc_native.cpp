@@ -504,7 +504,8 @@ namespace sotc_native
             std::fprintf(stderr, "[native-fog] frame %llu slices %d width %g margin %g far %g c478 %g c47c %g near %g\n", (unsigned long long)g_frame, slices, width, margin,
                          farDistance, real(0x118C478u), real(0x118C47Cu), real(0x118C484u));
         }
-        if (slices > 0 && width > 0.0f)
+        static const bool noZFog = std::getenv("SOTC_NATIVE_NOZFOG") != nullptr; // debugging: no distance fade
+        if (!noZFog && slices > 0 && width > 0.0f)
         {
             g_fog.enabled = true;
             g_fog.width = width;
@@ -524,7 +525,8 @@ namespace sotc_native
         // graphSetFogParam last set FOGCOL (0x118b8dc/e0/e4).
         {
             const float nearD = real(0x12147DCu), farD = real(0x12147E0u), nearR = real(0x12147E4u), farR = real(0x12147E8u), k = real(0x12147ECu);
-            if (farD != nearD)
+            static const bool noVFog = std::getenv("SOTC_NATIVE_NOVFOG") != nullptr; // debugging
+            if (!noVFog && farD != nearD)
             {
                 g_fog.vertexFog = true;
                 g_fog.scale = farD * nearD * (nearR - farR) / (farD - nearD);
@@ -924,13 +926,26 @@ namespace sotc_native
             }
 
         const uint32_t header = word(word(instance) + 0x20u);
+        static const uint32_t skipHeader = std::getenv("SOTC_NATIVE_SKIP") ? static_cast<uint32_t>(std::strtoul(std::getenv("SOTC_NATIVE_SKIP"), nullptr, 16)) : 0u; // debugging
+        if (header == skipHeader)
+            return;
         const bool fading = real(instance + 0x244u) > 0.0f; // modelDisp: param_1[0x91]
         // modelDisp's instance opacity (the microcode's, at its packet + 0xdc).
         float opacity = 1.0f - real(instance + 0x244u);
         if (word(header + 0xCu) != 0u)
             opacity *= 1.0f - real(instance + 0x248u);
         if (!(opacity > 0.0f))
+        {
+            static const bool log = std::getenv("SOTC_NATIVE_LOG") != nullptr;
+            static uint64_t logged = 0;
+            if (log && g_frame >= logged + 120u)
+            {
+                logged = g_frame;
+                std::fprintf(stderr, "[native-hidden] frame %llu header %08x f91 %g f92 %g hc %08x\n", (unsigned long long)g_frame, header,
+                             real(instance + 0x244u), real(instance + 0x248u), word(header + 0xCu));
+            }
             return;
+        }
         opacity = std::min(opacity, 1.0f);
         uint64_t lodWord;
         std::memcpy(&lodWord, rdram + ((instance + 0x250u) & 0x1FFFFF8u), 8);

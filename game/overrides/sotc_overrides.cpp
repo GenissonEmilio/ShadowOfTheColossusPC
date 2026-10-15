@@ -105,6 +105,9 @@ namespace
         {0x0108e530u, "glBegin"}, {0x0108bb38u, "glBeginWithDlLayerNo"}, {0x0108d060u, "glEnd"}, {0x0108ea20u, "glVertex2f"},
         {0x0108eb28u, "glVertex3f"}, {0x0108ebc0u, "glVertex3fv"}, {0x0108ec08u, "glVertex4f"}, {0x01090bd8u, "kPrintfScale"},
         {0x01090d28u, "kPrintfAsSprite"}, {0x01090ff8u, "kprintfContext"}, {0x010910b0u, "kprintfContextCentering"},
+        // model system siblings that chain packets
+        {0x01097510u, "m97510"}, {0x01097640u, "m97640"}, {0x01097688u, "m97688"}, {0x01097798u, "m97798"},
+        {0x01097928u, "m97928"}, {0x01097b70u, "m97b70"}, {0x01097d88u, "m97d88"}, {0x01097f88u, "m97f88"},
     };
     constexpr int kCensusCount = static_cast<int>(sizeof(kCensus) / sizeof(kCensus[0]));
     std::array<PS2Runtime::RecompiledFunction, kCensusCount> g_censusOriginal{};
