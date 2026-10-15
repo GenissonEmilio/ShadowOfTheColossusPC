@@ -412,5 +412,14 @@
   "since": "2026-10-02",
   "commit": "ec4b26d",
   "note": "own scheduler for the game's threads"
+ },
+ {
+  "map": "renderer",
+  "area": "Effects",
+  "feature": "Cutscene glow (bossDeathEffect)",
+  "status": "partial",
+  "since": "2026-10-15",
+  "commit": "",
+  "note": "blurred-copy composite redone, opt-in: the PS2's blurred buffer is darker than the picture, cause not found"
  }
 ]

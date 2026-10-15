@@ -114,6 +114,20 @@ namespace native_renderer
         int steps = 0;
     };
     void addScreenBlur(const ScreenBlur &blur);
+
+    // SotC's bossDeathEffectEnd (the dark, soft look of some cutscenes): at
+    // layer `order` the picture so far, reduced and blurred `rounds` times,
+    // is blended over it twice: in `tint` (0x80 = 1) with alpha amountA,
+    // then amountB (0x80 = 1; above 1 overshoots, as the GS does).
+    struct GlowComposite
+    {
+        bool enabled = false;
+        uint32_t order = 8;
+        int rounds = 2;
+        float tint[3] = {1, 1, 1};
+        float amountA = 0.0f, amountB = 0.0f;
+    };
+    void setGlowComposite(const GlowComposite &glow);
     void endFrame(uint32_t width, uint32_t height);
 
     // Shown instead of the emulated picture (the emulator's present path asks).

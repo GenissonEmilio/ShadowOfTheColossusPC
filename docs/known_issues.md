@@ -27,3 +27,14 @@ Not yet checked:
 Note: a hook around a recompiled function that calls others sees its result
 too early (the function runs in pieces the dispatcher continues), so the
 SOTC_MATH_CHECK results for sinf/cosf/atanf/acos* are not evidence.
+
+## Native: cutscene walls brighter than on the PS2
+
+In the shrine cutscenes (bossDeathEffect active: word 0x1186290 != 0) the
+emulated picture has darker walls and Wander as a blurred ghost. The vertex
+fog is not the cause: the native F matches base + scale / w pixel for pixel
+and the emulated GIF stream carries the same F. bossDeathEffectEnd blends a
+reduced, blurred copy over the frame twice (alpha 0x11862c4, then 0x11862c0
+= 160: overshoot) tinted by 0x11862b0..b8; on the PS2 that blurred buffer
+must be darker than the picture (its alpha, or the copy's colour). The
+native composite (SOTC_NATIVE_GLOW=1) does not darken yet.

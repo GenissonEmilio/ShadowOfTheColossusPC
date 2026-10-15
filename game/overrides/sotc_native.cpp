@@ -560,6 +560,10 @@ namespace sotc_native
                              nearD, farD, nearR, farR, k, g_fog.base, g_fog.scale, word(0x118B8DCu), word(0x118B8E0u), word(0x118B8E4u));
             }
         }
+        if (std::getenv("SOTC_NATIVE_LOG") && g_frame % 60u == 0u)
+            std::fprintf(stderr, "[bossfx] frame %llu flags %08x a0 %d b0 %d b4 %d b8 %d bc %d c0 %d c4 %d 298 %g\n", (unsigned long long)g_frame, word(0x1186290u),
+                         static_cast<int32_t>(word(0x11862A0u)), static_cast<int32_t>(word(0x11862B0u)), static_cast<int32_t>(word(0x11862B4u)), static_cast<int32_t>(word(0x11862B8u)),
+                         static_cast<int32_t>(word(0x11862BCu)), static_cast<int32_t>(word(0x11862C0u)), static_cast<int32_t>(word(0x11862C4u)), real(0x1186298u));
         if (std::getenv("SOTC_NATIVE_LOG") && g_frame % 120u == 0u)
             std::fprintf(stderr, "[dof] frame %llu on %u rounds %d slices %d focus %g colour %08x %08x %08x %08x\n", (unsigned long long)g_frame, word(0x11862D0u),
                          static_cast<int32_t>(word(0x11862D4u)), static_cast<int32_t>(word(0x11862D8u)), static_cast<float>(static_cast<int32_t>(word(0x11862DCu))),
@@ -578,6 +582,25 @@ namespace sotc_native
                                  real(pk + 0x110u), real(pk + 0x114u), real(pk + 0x118u), real(pk + 0x11Cu), real(pk + 0x120u), real(pk + 0x124u),
                                  real(pk + 0x128u), real(pk + 0x12Cu));
             }
+        }
+        {
+            // bossDeathEffectEnd ran this frame when the effect word (0x1186290)
+            // has a bit set; its tint, amounts and blur rounds at 0x11862a0..c4.
+            native_renderer::GlowComposite gc;
+            // Opt-in (SOTC_NATIVE_GLOW=1): the GS blurred buffer is darker than
+            // the picture (walls darken, Wander turns to a blurred ghost) for a
+            // reason not found yet; this composite only softens and brightens.
+            static const bool on = std::getenv("SOTC_NATIVE_GLOW") != nullptr;
+            gc.enabled = on && word(0x1186290u) != 0u && g_modelDraws != 0u;
+            gc.order = 8;
+            gc.rounds = std::clamp(static_cast<int32_t>(word(0x11862A0u)), 0, 6);
+            static const float tintScale = std::getenv("SOTC_GLOW_TINT") ? static_cast<float>(std::atof(std::getenv("SOTC_GLOW_TINT"))) : 0.5f;
+            static const float alphaScale = std::getenv("SOTC_GLOW_ALPHA") ? static_cast<float>(std::atof(std::getenv("SOTC_GLOW_ALPHA"))) : 0.5f;
+            for (int i = 0; i < 3; ++i)
+                gc.tint[i] = static_cast<float>(static_cast<int32_t>(word(0x11862B0u + i * 4u))) / 128.0f * tintScale;
+            gc.amountA = static_cast<float>(static_cast<int32_t>(word(0x11862C4u))) / 128.0f * alphaScale;
+            gc.amountB = static_cast<float>(static_cast<int32_t>(word(0x11862C0u))) / 128.0f * alphaScale;
+            native_renderer::setGlowComposite(gc);
         }
         native_renderer::setFog(g_fog);
         g_fog = native_renderer::Fog{};

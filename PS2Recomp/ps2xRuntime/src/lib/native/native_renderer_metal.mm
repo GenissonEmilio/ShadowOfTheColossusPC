@@ -34,7 +34,7 @@ struct VOut
     float2 uv;
     float4 color;
     float depth; // w
-    float fog;   // GS vertex fog factor, 1: none
+    float fog [[center_no_perspective]]; // GS vertex fog factor, 1: none; linear on the screen as the GS interpolates it
 };
 
 struct FogParams
@@ -196,6 +196,12 @@ fragment float4 blurCopyFragment(Quad in [[stage_in]], texture2d<float> src [[te
     return float4(src.sample(s, in.uv).rgb, b.alpha);
 }
 
+fragment float4 tintComposite(Quad in [[stage_in]], texture2d<float> src [[texture(0)]], constant float4 &tint [[buffer(0)]])
+{
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    return float4(saturate(src.sample(s, in.uv).rgb * tint.rgb), tint.a);
+}
+
 fragment float4 copyTexture(Quad in [[stage_in]], texture2d<float> src [[texture(0)]])
 {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
@@ -245,7 +251,8 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
         id<MTLTexture> backgroundSmall = nil; // bgEnd's 256 x 256 copy of the background
         id<MTLTexture> reflectionColor = nil, reflectionDepth = nil; // the mirrored world, 256 x 256
         id<MTLRenderPipelineState> copySmall = nil, backdrop = nil;
-        id<MTLRenderPipelineState> blurCopy = nil;
+        id<MTLRenderPipelineState> blurCopy = nil, tintOver = nil;
+        native_renderer::GlowComposite glow;
         id<MTLTexture> snapshot = nil; // the picture so far, for screenBlur
         std::vector<native_renderer::ScreenBlur> blurs;
         native_renderer::Fog fog;
@@ -361,6 +368,23 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
             temporalPipeline = fullscreen(@"bloomTemporal", false);
             compositePipeline = fullscreen(@"bloomComposite", true);
             copySmall = fullscreen(@"copyTexture", false);
+            {
+                // Cs x As + Cd x (1 - As); As may exceed 1 (GS alpha above 0x80).
+                MTLRenderPipelineDescriptor *d = [[MTLRenderPipelineDescriptor alloc] init];
+                d.vertexFunction = [library newFunctionWithName:@"fullscreenVertex"];
+                d.fragmentFunction = [library newFunctionWithName:@"tintComposite"];
+                d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+                d.colorAttachments[0].blendingEnabled = YES;
+                d.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+                d.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+                d.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorZero;
+                d.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+                NSError *e = nil;
+                tintOver = [device newRenderPipelineStateWithDescriptor:d error:&e];
+                [d.vertexFunction release];
+                [d.fragmentFunction release];
+                [d release];
+            }
             {
                 MTLRenderPipelineDescriptor *d = [[MTLRenderPipelineDescriptor alloc] init];
                 d.vertexFunction = [library newFunctionWithName:@"blurCopyVertex"];
@@ -564,6 +588,8 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                             continue;
                         if (mirror != d.state.reflectionSource)
                             continue;
+                        if (showFog && !backgroundOnly && (d.state.screen || d.state.order > 6u))
+                            continue; // debugging: only the opaque world
                         if (d.state.reflectionSample && !haveMirror)
                             continue;
                         if (!backgroundOnly && fogOn && d.state.background)
@@ -780,13 +806,63 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     }
                     [e endEncoding];
                 };
+                auto doGlow = [&]
+                {
+                    if (!tintOver || !copySmall || !blurPipeline)
+                        return;
+                    auto quad = [&](id<MTLTexture> target, id<MTLRenderPipelineState> state, bool load, auto bind)
+                    {
+                        MTLRenderPassDescriptor *desc = [MTLRenderPassDescriptor renderPassDescriptor];
+                        desc.colorAttachments[0].texture = target;
+                        desc.colorAttachments[0].loadAction = load ? MTLLoadActionLoad : MTLLoadActionDontCare;
+                        desc.colorAttachments[0].storeAction = MTLStoreActionStore;
+                        id<MTLRenderCommandEncoder> e = [commands renderCommandEncoderWithDescriptor:desc];
+                        [e setRenderPipelineState:state];
+                        bind(e);
+                        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                        [e endEncoding];
+                    };
+                    // bloomTex[0..1] are free outside the bloom: reduce, blur, blend back.
+                    id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+                    [blit copyFromTexture:color toTexture:snapshot];
+                    [blit endEncoding];
+                    quad(bloomTex[0], copySmall, false, [&](id<MTLRenderCommandEncoder> e) { [e setFragmentTexture:snapshot atIndex:0]; });
+                    const float lw = static_cast<float>(bloomTex[0].width), lh = static_cast<float>(bloomTex[0].height);
+                    for (int i = 0; i < glow.rounds; ++i)
+                    {
+                        const float stepH[2] = {1.0f / lw, 0.0f}, stepV[2] = {0.0f, 1.0f / lh};
+                        quad(bloomTex[1], blurPipeline, false, [&](id<MTLRenderCommandEncoder> e)
+                        {
+                            [e setFragmentTexture:bloomTex[0] atIndex:0];
+                            [e setFragmentBytes:stepH length:sizeof(stepH) atIndex:0];
+                        });
+                        quad(bloomTex[0], blurPipeline, false, [&](id<MTLRenderCommandEncoder> e)
+                        {
+                            [e setFragmentTexture:bloomTex[1] atIndex:0];
+                            [e setFragmentBytes:stepV length:sizeof(stepV) atIndex:0];
+                        });
+                    }
+                    for (float amount : {glow.amountA, glow.amountB})
+                    {
+                        if (!(amount > 0.0f))
+                            continue;
+                        const float tint[4] = {glow.tint[0], glow.tint[1], glow.tint[2], amount};
+                        quad(color, tintOver, true, [&](id<MTLRenderCommandEncoder> e)
+                        {
+                            [e setFragmentTexture:bloomTex[0] atIndex:0];
+                            [e setFragmentBytes:tint length:sizeof(tint) atIndex:0];
+                        });
+                    }
+                };
                 // The 3D and 2D by layer, cut where an effect reads the picture so far.
                 struct Event
                 {
                     uint32_t order;
-                    int blur; // -1: the bloom
+                    int blur; // -1: the bloom, -2: the glow composite
                 };
                 std::vector<Event> events;
+                if (glow.enabled)
+                    events.push_back({glow.order, -2});
                 if (bloomOn)
                     events.push_back({bloom.order, -1});
                 else
@@ -801,7 +877,9 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     pass(color, false, from, ev.order, loaded);
                     loaded = true;
                     from = ev.order;
-                    if (ev.blur < 0)
+                    if (ev.blur == -2)
+                        doGlow();
+                    else if (ev.blur < 0)
                         doBloom();
                     else
                         doBlur(blurs[static_cast<size_t>(ev.blur)]);
@@ -901,6 +979,12 @@ namespace native_renderer
         d.state = state;
         std::memcpy(d.clip, clip, sizeof(d.clip));
         r->draws.push_back(d);
+    }
+
+    void setGlowComposite(const GlowComposite &glow)
+    {
+        if (Renderer *r = renderer())
+            r->glow = glow;
     }
 
     void addScreenBlur(const ScreenBlur &blur)
