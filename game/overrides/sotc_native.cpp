@@ -1173,7 +1173,14 @@ namespace sotc_native
                     }
                 return mask;
             }();
-            if ((skipLayers >> (surfaceLayer(header, s, fading) & 31u)) & 1u)
+            // Layers 12/13 are the reflection pass (reflectionBegin): the world
+            // seen in a mirror, drawn by the game into a buffer of its own with
+            // the camera context's +0x520 matrix and sampled by the reflecting
+            // surfaces (layers 14/15). Never on the screen; not rendered yet.
+            const uint32_t layer = surfaceLayer(header, s, fading);
+            if (layer == 12u || layer == 13u)
+                continue;
+            if ((skipLayers >> (layer & 31u)) & 1u)
                 continue;
             native_renderer::DrawState state;
             state.texture = surfaceTexture(header, surface);

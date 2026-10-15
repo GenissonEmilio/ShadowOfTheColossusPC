@@ -188,6 +188,19 @@ nearRate) and (far, farRate) in 1 / w, which is half of getFogFactor1's
 base. FOGCOL is graphSetFogParam's colour (0x118b8dc/e0/e4). The opening
 canyon is mostly this fog (dark blue grey); the sky (layer 1) is not fogged.
 
+## Layers that do not go to the screen
+
+`0x1098e20` (from modelSetEnviroment) chains a camera packet (VU 0x3c0:
+camera context +0x4a0 / +0x220 / +0x260 / +0x1a0, fog factors) to layers
+2, 3, 5, 6, 8, 9, 10, 14, 15, 17, 18, a second one with +0x520 to layers 12
+and 13, a third to layer 1 (sky). `reflectionBegin` (0x109ad58) opens layer
+12 by pointing FRAME/ZBUF at an off-screen buffer (cleared to the sky
+colour): layers 12/13 hold the mirrored world, layers 14/15 come back to the
+screen and sample that buffer. `refractionBegin` uses layer 19,
+`waterRefractionBegin` layer 9, both with buffers of their own. Drawing
+layers 12/13 on the screen gave the grey curtains over the shrine and the
+pit (they are the walls seen in a mirror, from a different camera).
+
 ## Bloom (0x109e2a0, layer 0x14)
 
 A mask of what lies beyond GS Z 0x118c094 (0 in the shrine: only pixels
