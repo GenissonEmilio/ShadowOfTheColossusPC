@@ -54,6 +54,7 @@ struct Light
     float4x4 colours;    // columns: light 0, 1, 2, ambient
     int lit;
     float opacity;
+    float2 uvOffset; // VIF ROW: texture scrolling
 };
 
 vertex VOut nativeVertex(VIn in [[stage_in]], constant float4x4 &clip [[buffer(1)]], constant Light &light [[buffer(2)]],
@@ -66,7 +67,7 @@ vertex VOut nativeVertex(VIn in [[stage_in]], constant float4x4 &clip [[buffer(1
     out.depth = c.w;
     out.fog = fog.vertexFog != 0 ? clamp(fog.base + fog.scale / max(c.w, 1e-3), 0.0, 255.0) / 255.0 : 1.0;
     out.normal = in.normal;
-    out.uv = in.uv;
+    out.uv = in.uv + light.uvOffset;
     out.color = float4(in.color) / 128.0; // 0x80 = 1.0
     out.color.a *= light.opacity;
     if (light.lit != 0)
@@ -795,11 +796,13 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                             float light[32];
                             int lit;
                             float opacity;
-                            int pad[2];
+                            float uvOffset[2];
                         } light;
                         std::memcpy(light.light, d.state.light, sizeof(light.light));
                         light.lit = d.state.lit ? 1 : 0;
                         light.opacity = d.state.opacity;
+                        light.uvOffset[0] = d.state.uvOffset[0];
+                        light.uvOffset[1] = d.state.uvOffset[1];
                         [encoder setVertexBytes:&light length:sizeof(light) atIndex:2];
                         auto tex = d.state.texture ? textures.find(d.state.texture) : textures.end();
                         const int textured = d.state.reflectionSample ? 2 : (d.state.refractionSample ? 3 : (tex != textures.end() ? 1 : 0));

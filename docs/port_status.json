@@ -102,10 +102,10 @@
   "map": "renderer",
   "area": "3D models",
   "feature": "Scrolling texture coordinates",
-  "status": "emulated",
-  "since": "",
+  "status": "native",
+  "since": "2026-10-15",
   "commit": "",
-  "note": "VIF ROW taken as 0"
+  "note": "the STROW texTransResolve builds per texture: 16-bit row at *(NTO2 +0xc), +4, added to S/T (SOTC_NATIVE_NOROW)"
  },
  {
   "map": "renderer",

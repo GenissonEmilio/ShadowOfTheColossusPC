@@ -49,6 +49,7 @@ namespace native_renderer
         // light[16..31] (three light colours, then ambient); it scales the
         // vertex colour.
         float opacity = 1.0f; // scales the alpha
+        float uvOffset[2] = {0.0f, 0.0f}; // added to the texture coordinates (VIF ROW scrolling)
         bool background = false; // also drawn into the background image (what distance fades to)
         bool fogged = false;     // fades to the background image with distance (setFog)
         bool writeDepth = false; // write depth even when additive (a second pass follows)

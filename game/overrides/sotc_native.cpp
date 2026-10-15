@@ -412,6 +412,29 @@ namespace sotc_native
         return !(((flags >> 26) & 1u) && word(0x1186328u) != 0u);
     }
 
+    // Texture scrolling: texTransResolve puts a VIF STROW in each texture's
+    // transfer packet, the row the 16-bit values at *(NTO2 header +0xc) and
+    // +4, which the game moves every frame. The ST unpacks use STMOD 1, so
+    // the row adds to S and T (12-bit fraction).
+    bool surfaceRow(uint32_t header, uint32_t surface, float offset[2], uint32_t field = 0x2Cu)
+    {
+        const uint32_t s = word(header + 0x50u) + surface * 0x120u;
+        const uint32_t index = word(s + field);
+        if (index >= word(header + 0x44u))
+            return false;
+        const uint32_t object = word(word(header + 0x40u) + index * 0x20u + 0x10u);
+        const uint32_t nto2 = object ? word(object + 0x20u) : 0u;
+        const uint32_t scroll = nto2 ? word(nto2 + 0xCu) : 0u;
+        if (!scroll)
+            return false;
+        uint32_t pair;
+        std::memcpy(&pair, g_ram + (scroll & 0x1FFFFFCu), 4);
+        const int32_t r0 = static_cast<int32_t>(pair & 0xFFFFu), r1 = static_cast<int32_t>(word(scroll + 4u) & 0xFFFFu);
+        offset[0] = static_cast<float>(r0) / 4096.0f;
+        offset[1] = static_cast<float>(r1) / 4096.0f;
+        return r0 != 0 || r1 != 0;
+    }
+
     // ALPHA_1 (0x42, first pass) or ALPHA_2 (0x43, the second texture's
     // pass) in the surface's A+D packet (+0x60): 0x44 blends, 0x48 adds,
     // 0x42 subtracts (Cd - Cs x As).
@@ -1531,6 +1554,13 @@ namespace sotc_native
             state.blend = surfaceBlend(s);
             state.order = surfaceLayer(header, s, fading);
             state.opacity = opacity;
+            static const bool noRow = std::getenv("SOTC_NATIVE_NOROW") != nullptr;
+            if (!noRow && surfaceRow(header, surface, state.uvOffset) && std::getenv("SOTC_NATIVE_LOG"))
+            {
+                static std::set<uint64_t> told;
+                if (told.insert((static_cast<uint64_t>(header) << 16) | surface).second)
+                    std::fprintf(stderr, "[row] header %08x surface %u layer %u offset %g %g\n", header, surface, surfaceLayer(header, s, fading), state.uvOffset[0], state.uvOffset[1]);
+            }
             // Debugging: who drew what. SOTC_NATIVE_IDCOLOR=1 every model, =<n> > 1
             // only surfaces in layers >= n (the rest drawn as usual).
             static const int idFrom = std::getenv("SOTC_NATIVE_IDCOLOR") ? std::max(1, std::atoi(std::getenv("SOTC_NATIVE_IDCOLOR"))) : 0;
@@ -1584,6 +1614,7 @@ namespace sotc_native
                 // and coordinates, blended by ALPHA_2 (context 2).
                 native_renderer::DrawState second = state;
                 second.texture = surfaceTexture(header, surface, 0x3Cu);
+                second.uvOffset[0] = second.uvOffset[1] = 0.0f; // the second pair takes ROW z / w (0)
                 second.blend = surfaceBlend(s, 0x43u);
                 second.writeDepth = false;
                 second.overlay = true;

@@ -147,9 +147,13 @@ ZTST GEQUAL, alpha (0x80 / slices) x (i + 1). Natively: `setDepthOfField`,
 one pass reading the depth (`SOTC_NATIVE_NODOF`).
 
 VIF ROW: every ST unpack (V2-16, and the two-texture V4-16) uses STMOD 1
-(offset), and some chain outside the model packets sets ROW to small values
-that change every frame (texture scrolling; PS2X_LOG_STROW=1 lists them).
-The native renderer still takes ROW as 0.
+(offset). texTransResolve builds, for each requested texture, a RET packet
+(DMA 0x6000000c, FLUSHE, STROW, DIRECT 7 with the GS texture registers) in
+the display list; the STROW's row is the 16-bit pair at *(NTO2 header
++0xc) and +4, which the game moves every frame (water, clouds; layer 1 sky
+too). Natively the row / 4096 is added to S and T per draw
+(`DrawState::uvOffset`, `SOTC_NATIVE_NOROW`); the second texture's pair
+takes ROW z / w, 0.
 
 Particles (`ptclman*`, microcode 7): an environment packet (type, a
 matrix, the ST extent `vec`, fog factors, VU 18..27), a material packet

@@ -530,7 +530,9 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 if (log && logged < 60 && (vif1_regs.row[0] | vif1_regs.row[1] | vif1_regs.row[2] | vif1_regs.row[3]))
                 {
                     ++logged;
-                    std::fprintf(stderr, "[strow] %08x %08x %08x %08x\n", vif1_regs.row[0], vif1_regs.row[1], vif1_regs.row[2], vif1_regs.row[3]);
+                    const ptrdiff_t at = (data + pos) - m_rdram;
+                    std::fprintf(stderr, "[strow] %08x %08x %08x %08x at %08lx\n", vif1_regs.row[0], vif1_regs.row[1], vif1_regs.row[2], vif1_regs.row[3],
+                                 (at >= 0 && at < 0x2000000) ? static_cast<unsigned long>(at) : 0ul);
                 }
             }
             pos += 16;
