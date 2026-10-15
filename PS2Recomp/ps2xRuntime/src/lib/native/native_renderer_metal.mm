@@ -43,6 +43,7 @@ struct FogParams
     int vertexFog;
     float base, scale;
     float3 colour;
+    float4 debug; // w > 0: flat debug colour
 };
 
 struct Light
@@ -84,6 +85,8 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
     float alpha = saturate(t.a * (textured != 0 ? 2.0 : 1.0) * in.color.a); // texture alpha 0x80 = opaque
     if (alpha < 0.02)
         discard_fragment();
+    if (fog.debug.w > 0.0)
+        return float4(fog.debug.rgb, 1.0);
     float3 rgb = saturate(t.rgb * shade);
     rgb = mix(fog.colour, rgb, in.fog);
     if (fog.fogged != 0)
@@ -405,10 +408,13 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                             float base, scale;
                             float pad[3];
                             float colour[4];
+                            float debug[4];
                         } fp = {fog.start, fog.width, static_cast<float>(fog.steps), (!backgroundOnly && fogOn && d.state.fogged) ? 1 : 0,
                                 {static_cast<float>(w), static_cast<float>(h)},
                                 (fog.vertexFog && !d.state.screen && !d.state.background) ? 1 : 0, fog.base, fog.scale, {0, 0, 0},
-                                {fog.colour[0], fog.colour[1], fog.colour[2], 0}};
+                                {fog.colour[0], fog.colour[1], fog.colour[2], 0},
+                                {static_cast<float>(d.state.debugColour & 0xFFu) / 255.0f, static_cast<float>((d.state.debugColour >> 8) & 0xFFu) / 255.0f,
+                                 static_cast<float>((d.state.debugColour >> 16) & 0xFFu) / 255.0f, d.state.debugColour ? 1.0f : 0.0f}};
                         [encoder setFragmentBytes:&fp length:sizeof(fp) atIndex:1];
                         [encoder setVertexBytes:&fp length:sizeof(fp) atIndex:3];
                         [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:it->second.count];

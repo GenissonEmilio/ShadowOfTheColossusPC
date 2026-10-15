@@ -3122,10 +3122,21 @@ void PS2Runtime::run()
                 return std::pair<double, int>{std::atof(env), colon ? std::atoi(colon + 1) : 60};
             }();
             static int burstLeft = burst.second;
-            const bool burstShot = burstLeft > 0 && GetTime() >= burst.first;
-            if (burstShot)
+            // PS2X_SNAPSHOT_FRAMES=<n>: instead of seconds, one picture every n
+            // game frames (display lists sent), so a run is sampled evenly.
+            static const uint64_t everyFrames = std::getenv("PS2X_SNAPSHOT_FRAMES") ? std::strtoull(std::getenv("PS2X_SNAPSHOT_FRAMES"), nullptr, 10) : 0u;
+            static uint64_t nextFrameShot = everyFrames;
+            const uint64_t gameFrame = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
+            bool frameShot = false;
+            if (everyFrames && gameFrame >= nextFrameShot)
+            {
+                frameShot = true;
+                nextFrameShot = (gameFrame / everyFrames + 1u) * everyFrames;
+            }
+            const bool burstShot = (burstLeft > 0 && GetTime() >= burst.first) || frameShot;
+            if (burstShot && !frameShot)
                 --burstLeft;
-            if (burstShot || GetTime() >= nextSnapshot)
+            if (burstShot || (!everyFrames && GetTime() >= nextSnapshot))
             {
                 if (!burstShot)
                     nextSnapshot += snapshotPeriod;
@@ -3143,6 +3154,11 @@ void PS2Runtime::run()
                     Image native{nativeRgba.data(), static_cast<int>(nativeW), static_cast<int>(nativeH), 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
                     const std::string nativePath = std::string(snapshotDir) + "/native_" + std::to_string(snapshotIndex) + ".png";
                     ExportImage(native, nativePath.c_str());
+                }
+                if (FILE *index = std::fopen((std::string(snapshotDir) + "/index.txt").c_str(), snapshotIndex ? "a" : "w"))
+                {
+                    std::fprintf(index, "%d %llu\n", snapshotIndex, static_cast<unsigned long long>(ps2_stats::vif1Chains.load(std::memory_order_relaxed)));
+                    std::fclose(index);
                 }
                 ++snapshotIndex;
             }

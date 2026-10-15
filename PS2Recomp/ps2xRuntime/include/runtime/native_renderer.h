@@ -54,6 +54,7 @@ namespace native_renderer
         bool writeDepth = false; // write depth even when additive (a second pass follows)
         bool overlay = false; // a second pass over the same geometry: depth equal passes, no depth write
         bool screen = false; // 2D: positions already in clip space, no depth test or write
+        uint32_t debugColour = 0; // non-zero: drawn flat in this RGB (who drew what)
         bool lit = false;
         float light[32] = {};
     };

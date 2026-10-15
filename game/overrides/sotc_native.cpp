@@ -279,6 +279,16 @@ namespace sotc_native
                              sample(header + word(header + 0x18u), psm == 0x14u ? 64u : 1024u, 16u) * 31u ^ format;
         if (native_renderer::hasTexture(key))
             return key;
+        if (psm == 0x00u && width <= 1024u && height <= 1024u)
+        {
+            // PSMCT32: the pixels themselves, uploaded row by row (alpha 0x80 = opaque).
+            const uint32_t pixels = header + word(header + 0x14u);
+            std::vector<uint8_t> rgba(static_cast<size_t>(width) * height * 4u);
+            for (uint32_t i = 0; i < width * height; ++i)
+                std::memcpy(&rgba[i * 4u], g_ram + ((pixels + i * 4u) & 0x1FFFFFFu), 4);
+            native_renderer::uploadTexture(key, width, height, rgba.data());
+            return key;
+        }
         if ((psm != 0x13u && psm != 0x14u) || width > 1024u || height > 1024u)
         {
             static const bool log = std::getenv("SOTC_NATIVE_LOG") != nullptr;
@@ -919,6 +929,13 @@ namespace sotc_native
             for (uint32_t q = 0; q < 4u; ++q)
                 std::fprintf(stderr, " %08x %08x %08x %08x |", word(chain + q * 16u), word(chain + q * 16u + 4u), word(chain + q * 16u + 8u), word(chain + q * 16u + 12u));
             std::fprintf(stderr, "\n");
+            {
+                const uint32_t ret = word(chain + 4u), rq = word(ret) & 0xFFFFu;
+                std::fprintf(stderr, "[shadow] ret %08x tag %08x qwc %u\n", ret, word(ret), rq);
+                for (uint32_t q = 0; q <= rq && q < 12u; ++q)
+                    std::fprintf(stderr, "[shadow]   r%02x %08x %08x %08x %08x  %g %g %g %g\n", q, word(ret + q * 16u), word(ret + q * 16u + 4u), word(ret + q * 16u + 8u),
+                                 word(ret + q * 16u + 12u), real(ret + q * 16u), real(ret + q * 16u + 4u), real(ret + q * 16u + 8u), real(ret + q * 16u + 12u));
+            }
             const uint32_t data = word(tag + 4u), qwc = word(tag) & 0xFFFFu;
             std::fprintf(stderr, "[shadow] data %08x qwc %u\n", data, qwc);
             for (uint32_t q = 0; q < 24u && q < qwc; ++q)
@@ -1085,6 +1102,17 @@ namespace sotc_native
             state.blend = surfaceBlend(s);
             state.order = surfaceLayer(header, s, fading);
             state.opacity = opacity;
+            static const bool idColours = std::getenv("SOTC_NATIVE_IDCOLOR") != nullptr; // debugging: who drew what
+            if (idColours)
+            {
+                uint32_t h = header * 2654435761u;
+                h ^= h >> 13;
+                state.debugColour = (h & 0xFFFFFFu) | 0x101010u;
+                static std::set<uint32_t> told;
+                if (told.insert(header).second)
+                    std::fprintf(stderr, "[native-id] %06x header %08x layer %u blend %d tex %d\n", state.debugColour & 0xFFFFFFu, header, state.order,
+                                 static_cast<int>(state.blend), state.texture ? 1 : 0);
+            }
             state.background = state.order == 1u;            // the sky
             state.fogged = state.order == 2u || state.order == 3u; // drawn before zFog
             if (g_litPackets.count(id))
