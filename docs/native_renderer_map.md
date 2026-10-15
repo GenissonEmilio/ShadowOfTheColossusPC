@@ -102,6 +102,19 @@ per row an UNPACK and columns x 4 qwords: world position, normal (world),
 ST(Q), colour as floats (0x80 = 1). Each row joins the next as a strip. The
 texture is whatever the caller requested just before.
 
+Shadows: `shadowDisp(instance chain, shadow model)` (0x109e0e8, layer 3 or
+7) chains the character's bone palette, then the shadow model's data
+(`shadowModelInit`: REF of model +0x10, size +0x14) through microcode 8
+(9 for the other skin path): a shadow volume microcode (face tests,
+silhouette edges extruded away from the light). `shadowDraw` then turns the
+marked pixels into a soft darkening (sprites, blur, ALPHA 0x64 FIX 0x40).
+Natively this wants stencil shadow volumes.
+
+VIF ROW: every ST unpack (V2-16, and the two-texture V4-16) uses STMOD 1
+(offset), and some chain outside the model packets sets ROW to small values
+that change every frame (texture scrolling; PS2X_LOG_STROW=1 lists them).
+The native renderer still takes ROW as 0.
+
 ## Other systems that append chains or microcode
 
 - `mesh*` (0x109a4d8-): `meshDisp`, `meshDispInstance`, `meshTransMatrix`,

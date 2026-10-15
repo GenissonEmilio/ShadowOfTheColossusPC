@@ -1,3 +1,4 @@
+#include <cstdio>
 #include "runtime/ps2_stats.h"
 // Based on Blackline Interactive implementation
 #include "runtime/ps2_memory.h"
@@ -522,6 +523,16 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             if (pos + 16 > sizeBytes)
                 break;
             std::memcpy(vif1_regs.row, data + pos, 16);
+            {
+                // PS2X_LOG_STROW=1: distinct VIF1 ROW values (who scrolls texture coordinates).
+                static const bool log = std::getenv("PS2X_LOG_STROW") != nullptr;
+                static int logged = 0;
+                if (log && logged < 60 && (vif1_regs.row[0] | vif1_regs.row[1] | vif1_regs.row[2] | vif1_regs.row[3]))
+                {
+                    ++logged;
+                    std::fprintf(stderr, "[strow] %08x %08x %08x %08x\n", vif1_regs.row[0], vif1_regs.row[1], vif1_regs.row[2], vif1_regs.row[3]);
+                }
+            }
             pos += 16;
             continue;
         }
