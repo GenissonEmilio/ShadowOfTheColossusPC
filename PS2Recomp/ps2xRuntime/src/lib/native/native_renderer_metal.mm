@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <mutex>
@@ -161,6 +162,12 @@ fragment float4 bloomTemporal(Quad in [[stage_in]], texture2d<float> current [[t
     return mix(previous.sample(s, in.uv), current.sample(s, in.uv), amount);
 }
 
+fragment float4 copyTexture(Quad in [[stage_in]], texture2d<float> src [[texture(0)]])
+{
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    return float4(src.sample(s, in.uv).rgb, 1.0);
+}
+
 fragment float4 shadowDarken(Quad in [[stage_in]], constant float &amount [[buffer(0)]])
 {
     return float4(0.0, 0.0, 0.0, amount);
@@ -201,6 +208,8 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
         id<MTLDepthStencilState> depthReadOnly = nil;
         id<MTLDepthStencilState> depthState = nil;
         id<MTLTexture> color = nil, depth = nil, backgroundColor = nil;
+        id<MTLTexture> backgroundSmall = nil; // bgEnd's 256 x 256 copy of the background
+        id<MTLRenderPipelineState> copySmall = nil, backdrop = nil;
         native_renderer::Fog fog;
         native_renderer::Bloom bloom;
         id<MTLTexture> bloomTex[3] = {nil, nil, nil}; // ping, pong, history
@@ -313,6 +322,20 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
             blurPipeline = fullscreen(@"bloomBlur", false);
             temporalPipeline = fullscreen(@"bloomTemporal", false);
             compositePipeline = fullscreen(@"bloomComposite", true);
+            copySmall = fullscreen(@"copyTexture", false);
+            {
+                MTLRenderPipelineDescriptor *d = [[MTLRenderPipelineDescriptor alloc] init];
+                d.vertexFunction = [library newFunctionWithName:@"fullscreenVertex"];
+                d.fragmentFunction = [library newFunctionWithName:@"copyTexture"];
+                d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+                d.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+                d.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+                NSError *e = nil;
+                backdrop = [device newRenderPipelineStateWithDescriptor:d error:&e];
+                [d.vertexFunction release];
+                [d.fragmentFunction release];
+                [d release];
+            }
             [library release];
             if (!pipeline)
             {
@@ -368,6 +391,13 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
             cd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
             cd.storageMode = MTLStorageModePrivate;
             backgroundColor = [device newTextureWithDescriptor:cd];
+            [backgroundSmall release];
+            {
+                MTLTextureDescriptor *sd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:256 height:256 mipmapped:NO];
+                sd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+                sd.storageMode = MTLStorageModePrivate;
+                backgroundSmall = [device newTextureWithDescriptor:sd];
+            }
             MTLTextureDescriptor *dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8 width:w height:h mipmapped:NO];
             dd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
             dd.storageMode = MTLStorageModePrivate;
@@ -412,7 +442,17 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     id<MTLRenderCommandEncoder> encoder = [commands renderCommandEncoderWithDescriptor:desc];
                     [encoder setCullMode:MTLCullModeNone];
                     if (!backgroundOnly)
-                        [encoder setFragmentTexture:backgroundColor atIndex:1];
+                        [encoder setFragmentTexture:backgroundSmall atIndex:1];
+                    if (!backgroundOnly && !load && fogOn && backdrop)
+                    {
+                        // The background as the PS2 shows it: bgEnd's reduced copy,
+                        // stretched back (bgDraw), under everything.
+                        [encoder setRenderPipelineState:backdrop];
+                        [encoder setDepthStencilState:depthOff];
+                        [encoder setFragmentTexture:backgroundSmall atIndex:0];
+                        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                    }
+                    static const bool additiveZ = std::getenv("SOTC_NATIVE_ADDZ") != nullptr; // debugging
                     int bound = -1;
                     // Shadow volumes counted so far, waiting for their darkening.
                     uint32_t shadowOrder = 0;
@@ -433,6 +473,8 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     {
                         if (backgroundOnly && !d.state.background)
                             continue;
+                        if (!backgroundOnly && fogOn && d.state.background)
+                            continue; // shown through the backdrop
                         if (d.state.order < fromOrder || d.state.order >= toOrder)
                             continue;
                         if (shadowAmount && d.state.order > shadowOrder)
@@ -482,7 +524,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                             // second pass lands on its first.
                             [encoder setDepthStencilState:backdrop ? depthOff
                                                                    : (d.state.overlay ? depthEqualReadOnly
-                                                                                      : depthState)]; // the GS writes Z for every primitive, additive ones too
+                                                                                      : (blendMode == 1 && !d.state.writeDepth && !additiveZ ? depthReadOnly : depthState))];
                             bound = mode;
                         }
                         auto it = meshes.find(d.mesh);
@@ -529,8 +571,20 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     resolveShadows();
                     [encoder endEncoding];
                 };
-                if (fogOn)
+                if (fogOn && copySmall)
+                {
                     pass(backgroundColor, true); // the sky, what distance fades into
+                    // bgEnd: reduced to 256 x 256 (bilinear), which blurs it.
+                    MTLRenderPassDescriptor *desc = [MTLRenderPassDescriptor renderPassDescriptor];
+                    desc.colorAttachments[0].texture = backgroundSmall;
+                    desc.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+                    desc.colorAttachments[0].storeAction = MTLStoreActionStore;
+                    id<MTLRenderCommandEncoder> e = [commands renderCommandEncoderWithDescriptor:desc];
+                    [e setRenderPipelineState:copySmall];
+                    [e setFragmentTexture:backgroundColor atIndex:0];
+                    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                    [e endEncoding];
+                }
                 const bool bloomOn = bloom.enabled && maskPipeline && blurPipeline && temporalPipeline && compositePipeline;
                 if (!bloomOn)
                 {

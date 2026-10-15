@@ -515,8 +515,11 @@ namespace sotc_native
             std::fprintf(stderr, "[native-fog] frame %llu slices %d width %g margin %g far %g c478 %g c47c %g near %g\n", (unsigned long long)g_frame, slices, width, margin,
                          farDistance, real(0x118C478u), real(0x118C47Cu), real(0x118C484u));
         }
-        static const bool noZFog = std::getenv("SOTC_NATIVE_NOZFOG") != nullptr; // debugging: no distance fade
-        if (!noZFog && slices > 0 && width > 0.0f)
+        // Opt-in until it matches: measured against the emulated picture
+        // (tools/native_compare.py) it made the high views of the shrine too
+        // bright and improved nothing else.
+        static const bool zFogOn = std::getenv("SOTC_NATIVE_ZFOG") != nullptr;
+        if (zFogOn && slices > 0 && width > 0.0f)
         {
             g_fog.enabled = true;
             g_fog.width = width;
@@ -556,6 +559,9 @@ namespace sotc_native
                              nearD, farD, nearR, farR, k, g_fog.base, g_fog.scale, word(0x118B8DCu), word(0x118B8E0u), word(0x118B8E4u));
             }
         }
+        if (std::getenv("SOTC_NATIVE_LOG") && g_frame % 60u == 0u)
+            std::fprintf(stderr, "[native-frame] %llu zfog %d start %g width %g vfog %d models %u\n", (unsigned long long)g_frame, g_fog.enabled ? 1 : 0,
+                         g_fog.start, g_fog.width, g_fog.vertexFog ? 1 : 0, g_modelDraws);
         native_renderer::setFog(g_fog);
         g_fog = native_renderer::Fog{};
         // Without 3D this frame (loading, menus over black) the bloom mask would
