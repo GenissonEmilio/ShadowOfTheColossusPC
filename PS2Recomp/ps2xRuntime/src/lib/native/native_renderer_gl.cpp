@@ -1,0 +1,1169 @@
+// Native renderer on OpenGL (see runtime/native_renderer.h and the Metal
+// backend, which this follows pass for pass): GL 3.3 core with GLSL on
+// macOS (SOTC_NATIVE_GL=1, to check it against Metal), vitaGL with CG on the
+// Vita. Render targets are GL textures, so the picture is y-up: screen
+// positions come from the clip position (no gl_FragCoord), and the output is
+// flipped once when it is read back.
+//
+// Vita (vitaGL) differences: CG shaders; every framebuffer gets its own depth
+// and stencil (nothing to attach); no depth textures, so the passes that read
+// depth (bloom mask, depth of field) are left out there for now.
+#include "native_backend.h"
+
+#if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
+
+#if defined(__APPLE__)
+#define GL_SILENCE_DEPRECATION
+#include <OpenGL/gl3.h>
+#else
+#include <vitaGL.h>
+#define PS2X_NATIVE_VITA 1
+std::recursive_mutex &ps2xVitaGlMutex();
+#endif
+
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <iostream>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+namespace
+{
+    constexpr float kNearW = 0.1f;
+
+#if !defined(PS2X_NATIVE_VITA)
+    // ---- GLSL (macOS) ----
+    const char *kMainVertex = R"(#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec4 aColor;
+layout(location = 3) in vec2 aUV;
+uniform vec4 uClip[4], uDirections[4], uColours[4]; // matrix columns
+uniform vec4 uMisc;  // lit, opacity, uv offset
+uniform vec4 uFogB;  // size, vertex fog, base
+uniform vec4 uFogC;  // scale, lod K, lod scale, max lod
+out vec4 vUV;        // uv, w, fog x w (the fog factor is linear on the screen, as the GS's)
+out vec4 vColor;
+out vec4 vScreen;    // clip x, y, w
+void main()
+{
+    vec4 c = uClip[0] * aPos.x + uClip[1] * aPos.y + uClip[2] * aPos.z + uClip[3];
+    // Depth from w, near plane at w = 0.1: depth = 1 - 0.1 / w.
+    gl_Position = vec4(c.x, c.y, c.w - 0.2, c.w);
+    float fog = uFogB.z > 0.5 ? clamp(uFogB.w + uFogC.x / max(c.w, 1e-3), 0.0, 255.0) / 255.0 : 1.0;
+    vUV = vec4(aUV + uMisc.zw, c.w, fog * c.w);
+    vColor = aColor / 128.0;
+    vColor.a *= uMisc.y;
+    if (uMisc.x > 0.5)
+    {
+        vec4 d = max(uDirections[0] * aNormal.x + uDirections[1] * aNormal.y + uDirections[2] * aNormal.z + uDirections[3], 0.0);
+        d.w = 1.0;
+        vec4 light = uColours[0] * d.x + uColours[1] * d.y + uColours[2] * d.z + uColours[3];
+        vColor.rgb = min(vColor.rgb * light.rgb, vec3(255.0 / 128.0));
+    }
+    vScreen = vec4(c.x, c.y, c.w, 0.0);
+}
+)";
+
+    const char *kMainFragment = R"(#version 330 core
+in vec4 vUV;
+in vec4 vColor;
+in vec4 vScreen;
+uniform sampler2D uTex, uBackground, uReflection, uRefraction;
+uniform vec4 uFogA;      // start, width, steps, fogged
+uniform vec4 uFogC;      // scale, lod K, lod scale, max lod
+uniform vec4 uFogColour; // rgb, textured mode
+uniform vec4 uDebug;
+out vec4 oColor;
+void main()
+{
+    float textured = uFogColour.w;
+    vec2 screen = vScreen.xy / vScreen.z * 0.5 + 0.5;
+    float depth = vUV.z;
+    if (textured > 3.5)
+    {
+        vec4 c = vec4(texture(uRefraction, vUV.xy).rgb, 1.0) * vColor;
+        if (c.a < 0.02)
+            discard;
+        oColor = c;
+        return;
+    }
+    if (textured > 2.5)
+    {
+        oColor = vec4(clamp(texture(uRefraction, screen).rgb * uDebug.rgb, 0.0, 1.0), -uDebug.w);
+        return;
+    }
+    if (textured > 1.5)
+    {
+        oColor = vec4(clamp(texture(uReflection, screen).rgb * uDebug.rgb, 0.0, 1.0), -uDebug.w);
+        return;
+    }
+    float lod = uFogC.w > 0.0 ? clamp(log2(max(depth, 1e-3)) * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
+    vec4 t = textured > 0.5 ? textureLod(uTex, vUV.xy, lod) : vec4(1.0);
+    float alpha = clamp(t.a * (textured > 0.5 ? 2.0 : 1.0) * vColor.a, 0.0, 1.0);
+    if (alpha < 0.02)
+        discard;
+    if (uDebug.w > 0.0)
+    {
+        oColor = vec4(uDebug.rgb, 1.0);
+        return;
+    }
+    vec3 rgb = clamp(t.rgb * vColor.rgb, 0.0, 1.0);
+    rgb = mix(uFogColour.rgb, rgb, vUV.w / vUV.z);
+    if (uFogA.w > 0.5)
+    {
+        float f = clamp((depth - uFogA.x) / uFogA.y, 0.0, 1.0);
+        if (uFogA.z > 0.0)
+            f = floor(f * uFogA.z) / uFogA.z;
+        rgb = mix(rgb, texture(uBackground, screen).rgb, f);
+    }
+    oColor = vec4(rgb, alpha);
+}
+)";
+
+    // Full-screen passes: a triangle over the screen, uv 0..1 (y up).
+    const char *kQuadVertex = R"(#version 330 core
+layout(location = 0) in vec2 aPos;
+uniform vec4 uQuad; // blur copy: scale, angle, offset (NDC); scale 0: plain
+out vec2 vUV;
+void main()
+{
+    vec2 p = aPos;
+    if (uQuad.x != 0.0)
+    {
+        vec2 c = aPos * uQuad.x;
+        float s = sin(uQuad.y), k = cos(uQuad.y);
+        p = vec2(c.x * k - c.y * s, c.x * s + c.y * k) + uQuad.zw;
+    }
+    gl_Position = vec4(p, 0.0, 1.0);
+    vUV = aPos * 0.5 + 0.5;
+}
+)";
+
+    const char *kQuadFragment = R"(#version 330 core
+in vec2 vUV;
+uniform sampler2D uSrc, uSrc2, uDepth;
+uniform int uMode;
+uniform vec4 uA, uB, uC;
+out vec4 oColor;
+float gsZ(float d, float zA, float zB) { return d >= 1.0 ? 0.0 : zA + zB * (1.0 - d) / 0.1; }
+void main()
+{
+    if (uMode == 0) // copy
+        oColor = vec4(texture(uSrc, vUV).rgb, 1.0);
+    else if (uMode == 1) // blur: uA.xy step
+    {
+        float w0 = 0.30, w1 = 0.235, w2 = 0.12, w3 = 0.05;
+        vec4 c = texture(uSrc, vUV) * w0;
+        c += (texture(uSrc, vUV + uA.xy) + texture(uSrc, vUV - uA.xy)) * w1;
+        c += (texture(uSrc, vUV + uA.xy * 2.0) + texture(uSrc, vUV - uA.xy * 2.0)) * w2;
+        c += (texture(uSrc, vUV + uA.xy * 3.0) + texture(uSrc, vUV - uA.xy * 3.0)) * w3;
+        oColor = c;
+    }
+    else if (uMode == 2) // temporal: mix(previous, current, uA.x)
+        oColor = mix(texture(uSrc2, vUV), texture(uSrc, vUV), uA.x);
+    else if (uMode == 3) // blur copy: alpha uA.x
+        oColor = vec4(texture(uSrc, vUV).rgb, uA.x);
+    else if (uMode == 4) // tint: rgb x uA.rgb, alpha uA.a
+        oColor = vec4(clamp(texture(uSrc, vUV).rgb * uA.rgb, 0.0, 1.0), uA.a);
+    else if (uMode == 5) // shadow darken: alpha uA.x
+        oColor = vec4(0.0, 0.0, 0.0, uA.x);
+    else if (uMode == 6) // shadow mask write
+        oColor = vec4(1.0);
+    else if (uMode == 7 || uMode == 8) // 4 x 4 reduction: shadow mask (7) or bloom mask from depth (8)
+    {
+        vec2 size = uMode == 7 ? vec2(textureSize(uSrc, 0)) : vec2(textureSize(uDepth, 0));
+        ivec2 base = ivec2(vUV * size) & ~3;
+        float sum = 0.0;
+        for (int y = 0; y < 4; ++y)
+            for (int x = 0; x < 4; ++x)
+            {
+                ivec2 at = min(base + ivec2(x, y), ivec2(size) - 1);
+                if (uMode == 7)
+                    sum += texelFetch(uSrc, at, 0).r;
+                else
+                    sum += gsZ(texelFetch(uDepth, at, 0).r, uA.y, uA.z) <= uA.x + 1.0 ? 1.0 : 0.0;
+            }
+        oColor = uMode == 7 ? vec4(vec3(sum / 16.0), 1.0) : vec4(uB.rgb * (sum / 16.0), 1.0);
+    }
+    else if (uMode == 9) // soft shadow: alpha mask x uA.x
+        oColor = vec4(0.0, 0.0, 0.0, clamp(texture(uSrc, vUV).r * uA.x, 0.0, 1.0));
+    else if (uMode == 10) // bloom composite: rgb x uB.rgb x uB.a
+        oColor = vec4(texture(uSrc, vUV).rgb * uB.rgb * uB.a, 1.0);
+    else // 11: depth of field: uA = zA, zB, focusZ, slices
+    {
+        float d = texelFetch(uDepth, ivec2(vUV * vec2(textureSize(uDepth, 0))), 0).r;
+        float z = gsZ(d, uA.x, uA.y);
+        float keep = 1.0;
+        int slices = int(uA.w);
+        for (int i = 0; i < slices; ++i)
+            if (z <= float(uint(uA.z) >> uint(i)))
+                keep *= 1.0 - float(i + 1) / float(slices);
+        oColor = vec4(texture(uSrc, vUV).rgb, 1.0 - keep);
+    }
+}
+)";
+#else
+    // ---- CG (Vita): the same stages. Varyings are float4 (Vita3K pairs them by size). ----
+    const char *kMainVertex = R"(
+void main(float3 aPos, float3 aNormal, float4 aColor, float2 aUV,
+          uniform float4 uClip[4], uniform float4 uDirections[4], uniform float4 uColours[4],
+          uniform float4 uMisc, uniform float4 uFogB, uniform float4 uFogC,
+          float4 out oPosition : POSITION,
+          float4 out vUV : TEXCOORD0,
+          float4 out vColor : TEXCOORD1,
+          float4 out vScreen : TEXCOORD2)
+{
+    float4 c = uClip[0] * aPos.x + uClip[1] * aPos.y + uClip[2] * aPos.z + uClip[3];
+    oPosition = float4(c.x, c.y, c.w - 0.2, c.w);
+    float fog = uFogB.z > 0.5 ? clamp(uFogB.w + uFogC.x / max(c.w, 1e-3), 0.0, 255.0) / 255.0 : 1.0;
+    vUV = float4(aUV + uMisc.zw, c.w, fog * c.w);
+    vColor = aColor / 128.0;
+    vColor.a *= uMisc.y;
+    if (uMisc.x > 0.5)
+    {
+        float4 d = max(uDirections[0] * aNormal.x + uDirections[1] * aNormal.y + uDirections[2] * aNormal.z + uDirections[3], 0.0);
+        d.w = 1.0;
+        float4 light = uColours[0] * d.x + uColours[1] * d.y + uColours[2] * d.z + uColours[3];
+        vColor.rgb = min(vColor.rgb * light.rgb, float3(255.0 / 128.0, 255.0 / 128.0, 255.0 / 128.0));
+    }
+    vScreen = float4(c.x, c.y, c.w, 0.0);
+}
+)";
+
+    const char *kMainFragment = R"(
+float4 main(float4 vUV : TEXCOORD0, float4 vColor : TEXCOORD1, float4 vScreen : TEXCOORD2,
+            uniform sampler2D uTex, uniform sampler2D uBackground, uniform sampler2D uReflection, uniform sampler2D uRefraction,
+            uniform float4 uFogA, uniform float4 uFogC, uniform float4 uFogColour, uniform float4 uDebug) : COLOR
+{
+    float textured = uFogColour.w;
+    float2 screen = vScreen.xy / vScreen.z * 0.5 + 0.5;
+    float depth = vUV.z;
+    if (textured > 3.5)
+    {
+        float4 c = float4(tex2D(uRefraction, vUV.xy).rgb, 1.0) * vColor;
+        if (c.a < 0.02)
+            discard;
+        return c;
+    }
+    if (textured > 2.5)
+        return float4(saturate(tex2D(uRefraction, screen).rgb * uDebug.rgb), -uDebug.w);
+    if (textured > 1.5)
+        return float4(saturate(tex2D(uReflection, screen).rgb * uDebug.rgb), -uDebug.w);
+    float lod = uFogC.w > 0.0 ? clamp(log2(max(depth, 1e-3)) * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
+    float4 t = textured > 0.5 ? tex2Dlod(uTex, float4(vUV.xy, 0.0, lod)) : float4(1.0, 1.0, 1.0, 1.0);
+    float alpha = saturate(t.a * (textured > 0.5 ? 2.0 : 1.0) * vColor.a);
+    if (alpha < 0.02)
+        discard;
+    if (uDebug.w > 0.0)
+        return float4(uDebug.rgb, 1.0);
+    float3 rgb = saturate(t.rgb * vColor.rgb);
+    rgb = lerp(uFogColour.rgb, rgb, vUV.w / vUV.z);
+    if (uFogA.w > 0.5)
+    {
+        float f = saturate((depth - uFogA.x) / uFogA.y);
+        if (uFogA.z > 0.0)
+            f = floor(f * uFogA.z) / uFogA.z;
+        rgb = lerp(rgb, tex2D(uBackground, screen).rgb, f);
+    }
+    return float4(rgb, alpha);
+}
+)";
+
+    const char *kQuadVertex = R"(
+void main(float2 aPos, uniform float4 uQuad,
+          float4 out oPosition : POSITION,
+          float4 out vUV : TEXCOORD0)
+{
+    float2 p = aPos;
+    if (uQuad.x != 0.0)
+    {
+        float2 c = aPos * uQuad.x;
+        float s = sin(uQuad.y), k = cos(uQuad.y);
+        p = float2(c.x * k - c.y * s, c.x * s + c.y * k) + uQuad.zw;
+    }
+    oPosition = float4(p, 0.0, 1.0);
+    vUV = float4(aPos * 0.5 + 0.5, 0.0, 0.0);
+}
+)";
+
+    // No depth textures: the depth modes (8, 11) are not used on the Vita.
+    const char *kQuadFragment = R"(
+float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uSrc2,
+            uniform float uMode, uniform float4 uA, uniform float4 uB, uniform float4 uSize) : COLOR
+{
+    float2 uv = vUV.xy;
+    if (uMode < 0.5)
+        return float4(tex2D(uSrc, uv).rgb, 1.0);
+    if (uMode < 1.5)
+    {
+        float4 c = tex2D(uSrc, uv) * 0.30;
+        c += (tex2D(uSrc, uv + uA.xy) + tex2D(uSrc, uv - uA.xy)) * 0.235;
+        c += (tex2D(uSrc, uv + uA.xy * 2.0) + tex2D(uSrc, uv - uA.xy * 2.0)) * 0.12;
+        c += (tex2D(uSrc, uv + uA.xy * 3.0) + tex2D(uSrc, uv - uA.xy * 3.0)) * 0.05;
+        return c;
+    }
+    if (uMode < 2.5)
+        return lerp(tex2D(uSrc2, uv), tex2D(uSrc, uv), uA.x);
+    if (uMode < 3.5)
+        return float4(tex2D(uSrc, uv).rgb, uA.x);
+    if (uMode < 4.5)
+        return float4(saturate(tex2D(uSrc, uv).rgb * uA.rgb), uA.a);
+    if (uMode < 5.5)
+        return float4(0.0, 0.0, 0.0, uA.x);
+    if (uMode < 6.5)
+        return float4(1.0, 1.0, 1.0, 1.0);
+    if (uMode < 7.5)
+    {
+        // 4 x 4 reduction of the shadow mask (uSize: its texel size).
+        float2 base = floor(uv / uSize.xy / 4.0) * 4.0;
+        float sum = 0.0;
+        for (int y = 0; y < 4; ++y)
+            for (int x = 0; x < 4; ++x)
+                sum += tex2D(uSrc, (base + float2(x, y) + 0.5) * uSize.xy).r;
+        return float4(sum / 16.0, sum / 16.0, sum / 16.0, 1.0);
+    }
+    if (uMode < 9.5)
+        return float4(0.0, 0.0, 0.0, saturate(tex2D(uSrc, uv).r * uA.x));
+    return float4(tex2D(uSrc, uv).rgb * uB.rgb * uB.a, 1.0);
+}
+)";
+#endif
+
+    struct Mesh
+    {
+        GLuint buffer = 0;
+        uint32_t count = 0;
+    };
+
+    struct Texture
+    {
+        GLuint name = 0;
+    };
+
+    struct Draw
+    {
+        uint64_t mesh;
+        native_renderer::DrawState state;
+        float clip[16];
+    };
+
+    // A colour target, with the framebuffer that draws into it (and its
+    // depth/stencil when it has one).
+    struct Target
+    {
+        GLuint texture = 0, fbo = 0, depth = 0;
+        uint32_t width = 0, height = 0;
+    };
+
+    struct Renderer
+    {
+        GLuint mainProgram = 0, quadProgram = 0;
+        GLuint quadBuffer = 0, blurBuffer = 0, vao = 0;
+        std::unordered_map<std::string, GLint> mainUniforms, quadUniforms;
+        Target colorPlain; // the picture's colour alone (passes that read its depth)
+        Target color, background, backgroundSmall, reflection, refraction, refractionHalf, snapshot, shadowMask;
+        Target bloomTex[3];
+        bool bloomHistory = false;
+        uint32_t width = 0, height = 0;
+        std::unordered_map<uint64_t, Mesh> meshes;
+        std::unordered_map<uint64_t, Texture> textures;
+        std::vector<Draw> draws;
+        std::vector<native_renderer::ScreenBlur> blurs;
+        native_renderer::Fog fog;
+        native_renderer::Bloom bloom;
+        native_renderer::GlowComposite glow;
+        native_renderer::DepthOfField dof;
+
+        std::mutex outputMutex;
+        std::vector<uint8_t> output;
+        uint32_t outputWidth = 0, outputHeight = 0;
+        bool hasOutput = false;
+
+        static GLuint compile(GLenum type, const char *source)
+        {
+#if defined(PS2X_NATIVE_VITA)
+            type = type == GL_VERTEX_SHADER ? GL_CG_VERTEX_SHADER_EXT : GL_CG_FRAGMENT_SHADER_EXT;
+#endif
+            GLuint shader = glCreateShader(type);
+            glShaderSource(shader, 1, &source, nullptr);
+            glCompileShader(shader);
+            GLint ok = 0;
+            glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+            if (!ok)
+            {
+                char log[4096] = {};
+                GLsizei length = 0;
+                glGetShaderInfoLog(shader, sizeof(log), &length, log);
+                std::cerr << "[native:gl] shader error: " << std::string(log, std::min<size_t>(length, sizeof(log))) << std::endl;
+            }
+            return shader;
+        }
+
+        static GLuint program(const char *vertex, const char *fragment, std::initializer_list<const char *> attributes)
+        {
+            GLuint p = glCreateProgram();
+            glAttachShader(p, compile(GL_VERTEX_SHADER, vertex));
+            glAttachShader(p, compile(GL_FRAGMENT_SHADER, fragment));
+            GLuint index = 0;
+            for (const char *name : attributes)
+                glBindAttribLocation(p, index++, name);
+            glLinkProgram(p);
+            GLint ok = 0;
+            glGetProgramiv(p, GL_LINK_STATUS, &ok);
+            if (!ok)
+            {
+                std::cerr << "[native:gl] link failed" << std::endl;
+                return 0;
+            }
+            return p;
+        }
+
+        GLint uniform(bool main, const char *name)
+        {
+            auto &cache = main ? mainUniforms : quadUniforms;
+            auto it = cache.find(name);
+            if (it != cache.end())
+                return it->second;
+            const GLint location = glGetUniformLocation(main ? mainProgram : quadProgram, name);
+            cache.emplace(name, location);
+            return location;
+        }
+
+        bool init()
+        {
+            mainProgram = program(kMainVertex, kMainFragment, {"aPos", "aNormal", "aColor", "aUV"});
+            quadProgram = program(kQuadVertex, kQuadFragment, {"aPos"});
+            if (!mainProgram || !quadProgram)
+                return false;
+#if !defined(PS2X_NATIVE_VITA)
+            glGenVertexArrays(1, &vao);
+            glBindVertexArray(vao);
+#endif
+            const float tri[6] = {-1, -1, 3, -1, -1, 3};
+            glGenBuffers(1, &quadBuffer);
+            glBindBuffer(GL_ARRAY_BUFFER, quadBuffer);
+            glBufferData(GL_ARRAY_BUFFER, sizeof(tri), tri, GL_STATIC_DRAW);
+            const float corners[12] = {-1, -1, 1, -1, -1, 1, 1, -1, 1, 1, -1, 1};
+            glGenBuffers(1, &blurBuffer);
+            glBindBuffer(GL_ARRAY_BUFFER, blurBuffer);
+            glBufferData(GL_ARRAY_BUFFER, sizeof(corners), corners, GL_STATIC_DRAW);
+            glUseProgram(mainProgram);
+            glUniform1i(uniform(true, "uTex"), 0);
+            glUniform1i(uniform(true, "uBackground"), 1);
+            glUniform1i(uniform(true, "uReflection"), 2);
+            glUniform1i(uniform(true, "uRefraction"), 3);
+            glUseProgram(quadProgram);
+            glUniform1i(uniform(false, "uSrc"), 0);
+            glUniform1i(uniform(false, "uSrc2"), 1);
+            glUniform1i(uniform(false, "uDepth"), 2);
+            return true;
+        }
+
+        static GLuint newTexture(uint32_t w, uint32_t h, bool linear)
+        {
+            GLuint t = 0;
+            glGenTextures(1, &t);
+            glBindTexture(GL_TEXTURE_2D, t);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, static_cast<GLsizei>(w), static_cast<GLsizei>(h), 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, linear ? GL_LINEAR : GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, linear ? GL_LINEAR : GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            return t;
+        }
+
+        static void makeTarget(Target &t, uint32_t w, uint32_t h, bool depth)
+        {
+            if (t.fbo)
+                glDeleteFramebuffers(1, &t.fbo);
+            if (t.texture)
+                glDeleteTextures(1, &t.texture);
+            if (t.depth)
+                glDeleteTextures(1, &t.depth);
+            t = Target{};
+            t.width = w;
+            t.height = h;
+            t.texture = newTexture(w, h, true);
+            glGenFramebuffers(1, &t.fbo);
+            glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.texture, 0);
+#if !defined(PS2X_NATIVE_VITA)
+            if (depth)
+            {
+                // Depth = 1 - 0.1 / w, read back by the bloom mask and the depth of field.
+                glGenTextures(1, &t.depth);
+                glBindTexture(GL_TEXTURE_2D, t.depth);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH32F_STENCIL8, static_cast<GLsizei>(w), static_cast<GLsizei>(h), 0, GL_DEPTH_STENCIL,
+                             GL_FLOAT_32_UNSIGNED_INT_24_8_REV, nullptr);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, t.depth, 0);
+            }
+            if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+                std::cerr << "[native:gl] incomplete framebuffer " << w << "x" << h << std::endl;
+#else
+            (void)depth; // vitaGL gives every framebuffer its depth and stencil
+#endif
+        }
+
+        void ensureTargets(uint32_t w, uint32_t h)
+        {
+            if (color.texture && width == w && height == h)
+                return;
+            makeTarget(color, w, h, true);
+            makeTarget(background, w, h, true);
+            makeTarget(snapshot, w, h, false);
+            makeTarget(shadowMask, w, h, false);
+            makeTarget(backgroundSmall, 256, 256, false);
+            makeTarget(reflection, 256, 256, true);
+            makeTarget(refraction, 256, 256, false);
+            makeTarget(refractionHalf, 128, 128, false);
+            for (Target &t : bloomTex)
+                makeTarget(t, std::max(w / 4u, 1u), std::max(h / 4u, 1u), false);
+            if (colorPlain.fbo)
+                glDeleteFramebuffers(1, &colorPlain.fbo);
+            colorPlain = Target{};
+            colorPlain.texture = color.texture;
+            colorPlain.width = w;
+            colorPlain.height = h;
+            glGenFramebuffers(1, &colorPlain.fbo);
+            glBindFramebuffer(GL_FRAMEBUFFER, colorPlain.fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color.texture, 0);
+#if !defined(PS2X_NATIVE_VITA)
+            // The shadow mask pass tests the main picture's stencil.
+            glBindFramebuffer(GL_FRAMEBUFFER, shadowMask.fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, color.depth, 0);
+#endif
+            bloomHistory = false;
+            width = w;
+            height = h;
+        }
+
+        // Blending as the Metal pipelines set it (alpha: source kept).
+        static void setBlend(native_renderer::Blend blend)
+        {
+            switch (blend)
+            {
+            case native_renderer::Blend::Opaque:
+                glDisable(GL_BLEND);
+                return;
+            case native_renderer::Blend::Additive:
+                glEnable(GL_BLEND);
+                glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
+                glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE, GL_ONE, GL_ZERO);
+                return;
+            case native_renderer::Blend::Subtract:
+                glEnable(GL_BLEND);
+                glBlendEquationSeparate(GL_FUNC_REVERSE_SUBTRACT, GL_FUNC_ADD);
+                glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE, GL_ONE, GL_ZERO);
+                return;
+            default:
+                glEnable(GL_BLEND);
+                glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
+                glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ZERO);
+                return;
+            }
+        }
+
+        void bindTarget(const Target &t)
+        {
+            glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+            glViewport(0, 0, static_cast<GLsizei>(t.width), static_cast<GLsizei>(t.height));
+        }
+
+        static void bindTexture(int unit, GLuint texture)
+        {
+            glActiveTexture(GL_TEXTURE0 + unit);
+            glBindTexture(GL_TEXTURE_2D, texture);
+        }
+
+        // A full-screen pass into `target` with the quad program in `mode`.
+        enum class QuadBlend
+        {
+            None,
+            Add,        // Cs + Cd, alpha kept
+            Over,       // Cs x As + Cd x (1 - As), alpha kept
+            Darken,     // Cd x (1 - As)
+        };
+        void quad(const Target &target, int mode, QuadBlend blend, const float a[4] = nullptr, const float b[4] = nullptr,
+                  const float quadParams[4] = nullptr, bool corners = false)
+        {
+            bindTarget(target);
+            glUseProgram(quadProgram);
+            glDisable(GL_DEPTH_TEST);
+            glDisable(GL_CULL_FACE);
+            switch (blend)
+            {
+            case QuadBlend::None:
+                glDisable(GL_BLEND);
+                break;
+            case QuadBlend::Add:
+                glEnable(GL_BLEND);
+                glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
+                glBlendFuncSeparate(GL_ONE, GL_ONE, GL_ZERO, GL_ONE);
+                break;
+            case QuadBlend::Over:
+                glEnable(GL_BLEND);
+                glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
+                glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+                break;
+            case QuadBlend::Darken:
+                glEnable(GL_BLEND);
+                glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
+                glBlendFuncSeparate(GL_ZERO, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+                break;
+            }
+#if defined(PS2X_NATIVE_VITA)
+            glUniform1f(uniform(false, "uMode"), static_cast<float>(mode));
+#else
+            glUniform1i(uniform(false, "uMode"), mode);
+#endif
+            const float zero[4] = {0, 0, 0, 0};
+            glUniform4fv(uniform(false, "uA"), 1, a ? a : zero);
+            glUniform4fv(uniform(false, "uB"), 1, b ? b : zero);
+            glUniform4fv(uniform(false, "uQuad"), 1, quadParams ? quadParams : zero);
+            glBindBuffer(GL_ARRAY_BUFFER, corners ? blurBuffer : quadBuffer);
+            glEnableVertexAttribArray(0);
+            glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+            for (GLuint i = 1; i < 4; ++i)
+                glDisableVertexAttribArray(i);
+            glDrawArrays(GL_TRIANGLES, 0, corners ? 6 : 3);
+        }
+
+        // The colour of `from` into `to` (bilinear: reducing blurs it).
+        void copy(const Target &from, const Target &to)
+        {
+            bindTexture(0, from.texture);
+            quad(to, 0, QuadBlend::None);
+        }
+
+        void snapshotColor() { copy(color, snapshot); }
+
+        void blur(int rounds, float spreadGrow = 0.0f)
+        {
+            const float lw = static_cast<float>(bloomTex[0].width), lh = static_cast<float>(bloomTex[0].height);
+            for (int i = 0; i < rounds; ++i)
+            {
+                const float spread = 1.0f + spreadGrow * static_cast<float>(i);
+                const float h[4] = {spread / lw, 0, 0, 0}, v[4] = {0, spread / lh, 0, 0};
+                bindTexture(0, bloomTex[0].texture);
+                quad(bloomTex[1], 1, QuadBlend::None, h);
+                bindTexture(0, bloomTex[1].texture);
+                quad(bloomTex[0], 1, QuadBlend::None, v);
+            }
+        }
+
+        void render(uint32_t w, uint32_t h);
+    };
+
+    void Renderer::render(uint32_t w, uint32_t h)
+    {
+        ensureTargets(w, h);
+        std::stable_sort(draws.begin(), draws.end(), [](const Draw &a, const Draw &b) { return a.state.order < b.state.order; });
+        const bool fogOn = fog.enabled && fog.width > 0.0f;
+        bool haveMirror = false;
+        for (const Draw &d : draws)
+            if (d.state.reflectionSource)
+            {
+                haveMirror = true;
+                break;
+            }
+        static const bool hardShadows = std::getenv("SOTC_SHADOW_HARD") != nullptr;
+        uint32_t softOrder = 0;
+        float softAmount = 0.0f;
+        if (!hardShadows)
+            for (const Draw &d : draws)
+                if (d.state.shadowVolume)
+                {
+                    softOrder = std::max(softOrder, d.state.order + 1u);
+                    softAmount = d.state.shadow;
+                }
+        const bool softShadows = softOrder != 0;
+        static const bool bgFog = std::getenv("SOTC_NATIVE_NOBGFOG") == nullptr;
+
+        auto pass = [&](Target &target, bool backgroundOnly, uint32_t fromOrder = 0, uint32_t toOrder = ~0u, bool load = false, bool mirror = false)
+        {
+            bindTarget(target);
+            if (!load)
+            {
+                if (mirror)
+                    glClearColor(fog.colour[0], fog.colour[1], fog.colour[2], 1.0f);
+                else
+                    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+#if defined(PS2X_NATIVE_VITA)
+                glClearDepthf(1.0f);
+#else
+                glClearDepth(1.0);
+#endif
+                glClearStencil(0);
+                glDepthMask(GL_TRUE);
+                glStencilMask(0xFF);
+                glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+            }
+            glDisable(GL_CULL_FACE);
+            if (!mirror && !backgroundOnly && !load && fogOn)
+            {
+                // The background as the PS2 shows it: bgEnd's reduced copy, stretched back.
+                glDisable(GL_STENCIL_TEST);
+                bindTexture(0, backgroundSmall.texture);
+                quad(target, 0, QuadBlend::None);
+            }
+            glUseProgram(mainProgram);
+            if (!backgroundOnly)
+                bindTexture(1, backgroundSmall.texture);
+            if (!mirror)
+            {
+                bindTexture(2, reflection.texture);
+                bindTexture(3, refraction.texture);
+            }
+            glEnable(GL_DEPTH_TEST);
+            glDepthFunc(GL_LESS);
+            glDepthMask(GL_TRUE);
+            glDisable(GL_STENCIL_TEST);
+            uint32_t shadowOrder = 0;
+            float shadowAmount = 0.0f;
+            auto resolveShadows = [&]
+            {
+                if (!shadowAmount)
+                    return;
+                if (softShadows)
+                {
+                    shadowAmount = 0.0f;
+                    return;
+                }
+                // Darken where the count is not 0, and clear it.
+                glEnable(GL_STENCIL_TEST);
+                glStencilFunc(GL_NOTEQUAL, 0, 0xFF);
+                glStencilOp(GL_KEEP, GL_KEEP, GL_ZERO);
+                const float a[4] = {shadowAmount, 0, 0, 0};
+                quad(target, 5, QuadBlend::Darken, a);
+                glDisable(GL_STENCIL_TEST);
+                glUseProgram(mainProgram);
+                shadowAmount = 0.0f;
+            };
+            for (const Draw &d : draws)
+            {
+                if (backgroundOnly && !d.state.background)
+                    continue;
+                if (mirror != d.state.reflectionSource)
+                    continue;
+                if (d.state.reflectionSample && !haveMirror)
+                    continue;
+                if (!backgroundOnly && fogOn && d.state.background)
+                    continue;
+                if (d.state.order < fromOrder || d.state.order >= toOrder)
+                    continue;
+                if (shadowAmount && d.state.order > shadowOrder)
+                    resolveShadows();
+                auto mesh = meshes.find(d.mesh);
+                if (mesh == meshes.end() || mesh->second.count == 0)
+                    continue;
+                glBindFramebuffer(GL_FRAMEBUFFER, target.fbo);
+                glViewport(0, 0, static_cast<GLsizei>(target.width), static_cast<GLsizei>(target.height));
+                glUseProgram(mainProgram);
+                glBindBuffer(GL_ARRAY_BUFFER, mesh->second.buffer);
+                const GLsizei stride = sizeof(native_renderer::Vertex);
+                glEnableVertexAttribArray(0);
+                glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::Vertex, x)));
+                glEnableVertexAttribArray(1);
+                glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::Vertex, nx)));
+                glEnableVertexAttribArray(2);
+                glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::Vertex, r)));
+                glEnableVertexAttribArray(3);
+                glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::Vertex, u)));
+                glUniform4fv(uniform(true, "uClip"), 4, d.clip);
+                glUniform4fv(uniform(true, "uDirections"), 4, d.state.light);
+                glUniform4fv(uniform(true, "uColours"), 4, d.state.light + 16);
+                if (d.state.shadowVolume)
+                {
+                    if (backgroundOnly)
+                        continue;
+                    // The count where the faces pass the depth test: front +1, back -1.
+                    const float misc[4] = {0, 1, 0, 0}, none[4] = {0, 0, 0, 0};
+                    glUniform4fv(uniform(true, "uMisc"), 1, misc);
+                    glUniform4fv(uniform(true, "uFogB"), 1, none);
+                    glUniform4fv(uniform(true, "uFogC"), 1, none);
+                    glUniform4fv(uniform(true, "uFogA"), 1, none);
+                    glUniform4fv(uniform(true, "uFogColour"), 1, none);
+                    glUniform4fv(uniform(true, "uDebug"), 1, none);
+                    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+                    glDepthMask(GL_FALSE);
+                    glEnable(GL_DEPTH_TEST);
+                    glDepthFunc(GL_LESS);
+                    glEnable(GL_STENCIL_TEST);
+                    glStencilMask(0xFF);
+                    glStencilFuncSeparate(GL_FRONT_AND_BACK, GL_ALWAYS, 0, 0xFF);
+                    glStencilOpSeparate(GL_FRONT, GL_KEEP, GL_KEEP, GL_INCR_WRAP);
+                    glStencilOpSeparate(GL_BACK, GL_KEEP, GL_KEEP, GL_DECR_WRAP);
+#if !defined(PS2X_NATIVE_VITA)
+                    glEnable(GL_DEPTH_CLAMP); // the GS does not cut at the near plane
+#endif
+                    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(mesh->second.count));
+#if !defined(PS2X_NATIVE_VITA)
+                    glDisable(GL_DEPTH_CLAMP);
+#endif
+                    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+                    glDisable(GL_STENCIL_TEST);
+                    shadowOrder = d.state.order;
+                    shadowAmount = d.state.shadow;
+                    continue;
+                }
+                setBlend(d.state.blend);
+                const bool backdrop = d.state.screen || d.state.background;
+                if (backdrop)
+                    glDisable(GL_DEPTH_TEST);
+                else
+                {
+                    glEnable(GL_DEPTH_TEST);
+                    if (d.state.overlay)
+                    {
+                        glDepthFunc(GL_LEQUAL);
+                        glDepthMask(GL_FALSE);
+                    }
+                    else
+                    {
+                        glDepthFunc(GL_LESS);
+                        glDepthMask(d.state.blend == native_renderer::Blend::Additive && !d.state.writeDepth ? GL_FALSE : GL_TRUE);
+                    }
+                }
+                auto tex = d.state.texture ? textures.find(d.state.texture) : textures.end();
+                const int textured = d.state.reflectionSample ? 2 : (d.state.refractionSample ? 3 : (d.state.screenCopy ? 4 : (tex != textures.end() ? 1 : 0)));
+                if (textured == 1)
+                    bindTexture(0, tex->second.name);
+                const float misc[4] = {d.state.lit ? 1.0f : 0.0f, d.state.opacity, d.state.uvOffset[0], d.state.uvOffset[1]};
+                const bool vertexFog = fog.vertexFog && !d.state.screen && (!d.state.background || bgFog);
+                const float fogA[4] = {fog.start, fog.width, static_cast<float>(fog.steps), (!backgroundOnly && fogOn && d.state.fogged) ? 1.0f : 0.0f};
+                const float fogB[4] = {static_cast<float>(w), static_cast<float>(h), vertexFog ? 1.0f : 0.0f, fog.base};
+                const float fogC[4] = {fog.scale, d.state.lodK, d.state.lodScale, d.state.maxLod};
+                const float fogColour[4] = {fog.colour[0], fog.colour[1], fog.colour[2], static_cast<float>(textured)};
+                float debug[4] = {static_cast<float>(d.state.debugColour & 0xFFu) / 255.0f, static_cast<float>((d.state.debugColour >> 8) & 0xFFu) / 255.0f,
+                                  static_cast<float>((d.state.debugColour >> 16) & 0xFFu) / 255.0f, d.state.debugColour ? 1.0f : 0.0f};
+                if (d.state.reflectionSample || d.state.refractionSample)
+                {
+                    for (int k = 0; k < 3; ++k)
+                        debug[k] = d.state.reflectionTint[k];
+                    debug[3] = -d.state.reflectionTint[3];
+                }
+                glUniform4fv(uniform(true, "uMisc"), 1, misc);
+                glUniform4fv(uniform(true, "uFogA"), 1, fogA);
+                glUniform4fv(uniform(true, "uFogB"), 1, fogB);
+                glUniform4fv(uniform(true, "uFogC"), 1, fogC);
+                glUniform4fv(uniform(true, "uFogColour"), 1, fogColour);
+                glUniform4fv(uniform(true, "uDebug"), 1, debug);
+                glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(mesh->second.count));
+            }
+            resolveShadows();
+            for (GLuint i = 1; i < 4; ++i)
+                glDisableVertexAttribArray(i);
+        };
+
+        if (haveMirror)
+            pass(reflection, false, 0, ~0u, false, true);
+        if (fogOn)
+        {
+            pass(background, true);
+            copy(background, backgroundSmall); // bgEnd: reduced to 256 x 256
+        }
+#if defined(PS2X_NATIVE_VITA)
+        const bool bloomOn = false; // reads depth
+        const bool dofOn = false;
+#else
+        const bool bloomOn = bloom.enabled;
+        const bool dofOn = dof.enabled && dof.slices > 0;
+#endif
+        auto doBloom = [&]
+        {
+            const float a[4] = {bloom.threshold, bloom.zA, bloom.zB, 0};
+            const float maskColour[4] = {bloom.maskColor[0], bloom.maskColor[1], bloom.maskColor[2], 1};
+            bindTexture(2, color.depth);
+            quad(bloomTex[0], 8, QuadBlend::None, a, maskColour);
+            static const int rounds = std::getenv("SOTC_BLOOM_ROUNDS") ? std::atoi(std::getenv("SOTC_BLOOM_ROUNDS")) : 1;
+            static const float spreadGrow = std::getenv("SOTC_BLOOM_SPREAD") ? static_cast<float>(std::atof(std::getenv("SOTC_BLOOM_SPREAD"))) : 1.0f;
+            blur(rounds, spreadGrow);
+            const float amount[4] = {bloomHistory ? bloom.temporal : 1.0f, 0, 0, 0};
+            bindTexture(0, bloomTex[0].texture);
+            bindTexture(1, bloomTex[2].texture);
+            quad(bloomTex[1], 2, QuadBlend::None, amount);
+            std::swap(bloomTex[1], bloomTex[2]);
+            bloomHistory = true;
+            const float colour[4] = {bloom.color[0], bloom.color[1], bloom.color[2], bloom.color[3]};
+            bindTexture(0, bloomTex[2].texture);
+            quad(colorPlain, 10, QuadBlend::Add, nullptr, colour);
+        };
+        auto doBlur = [&](const native_renderer::ScreenBlur &b)
+        {
+            if (b.steps <= 0)
+                return;
+            snapshotColor();
+            bindTexture(0, snapshot.texture);
+            for (int i = 0; i < b.steps; ++i)
+            {
+                const float f = static_cast<float>(b.steps - i) / static_cast<float>(b.steps);
+                const float params[4] = {(b.scale - 1.0f) * f + 1.0f, std::fabs(b.angle) >= 0.01570796f ? -b.angle * f : 0.0f,
+                                         b.dx * f / (static_cast<float>(w) * 0.5f), -b.dy * f / (static_cast<float>(h) * 0.5f)};
+                const float alpha[4] = {1.0f / static_cast<float>(i + 1), 0, 0, 0};
+                quad(color, 3, QuadBlend::Over, alpha, nullptr, params, true);
+            }
+        };
+        auto doGlow = [&]
+        {
+            snapshotColor();
+            copy(snapshot, bloomTex[0]);
+            blur(glow.rounds);
+            for (float amount : {glow.amountA, glow.amountB})
+            {
+                if (!(amount > 0.0f))
+                    continue;
+                const float tint[4] = {glow.tint[0], glow.tint[1], glow.tint[2], amount};
+                bindTexture(0, bloomTex[0].texture);
+                quad(color, 4, QuadBlend::Over, tint);
+            }
+        };
+        auto doShadow = [&]
+        {
+            // The counted pixels as a mask (testing the main picture's stencil), reduced 4 x 4, blurred.
+            bindTarget(shadowMask);
+            glClearColor(0, 0, 0, 0);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glEnable(GL_STENCIL_TEST);
+            glStencilMask(0xFF);
+            glStencilFunc(GL_NOTEQUAL, 0, 0xFF);
+            glStencilOp(GL_KEEP, GL_KEEP, GL_ZERO);
+#if defined(PS2X_NATIVE_VITA)
+            // The stencil count is in the main picture's own framebuffer:
+            // write the mask over it, in its alpha... not on the Vita yet.
+            glDisable(GL_STENCIL_TEST);
+            return;
+#endif
+            {
+                bindTarget(shadowMask);
+                glUseProgram(quadProgram);
+                glDisable(GL_DEPTH_TEST);
+                glDisable(GL_BLEND);
+#if defined(PS2X_NATIVE_VITA)
+                glUniform1f(uniform(false, "uMode"), 6.0f);
+#else
+                glUniform1i(uniform(false, "uMode"), 6);
+#endif
+                const float zero[4] = {0, 0, 0, 0};
+                glUniform4fv(uniform(false, "uQuad"), 1, zero);
+                glBindBuffer(GL_ARRAY_BUFFER, quadBuffer);
+                glEnableVertexAttribArray(0);
+                glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+                glDrawArrays(GL_TRIANGLES, 0, 3);
+            }
+            glDisable(GL_STENCIL_TEST);
+            bindTexture(0, shadowMask.texture);
+            quad(bloomTex[0], 7, QuadBlend::None);
+            static const int rounds = std::getenv("SOTC_SHADOW_BLUR") ? std::atoi(std::getenv("SOTC_SHADOW_BLUR")) : 1;
+            blur(rounds);
+            const float amount[4] = {softAmount, 0, 0, 0};
+            bindTexture(0, bloomTex[0].texture);
+            quad(color, 9, QuadBlend::Darken, amount);
+        };
+        bool haveRefraction = false;
+        uint32_t screenCopyOrder = 0;
+        for (const Draw &d : draws)
+        {
+            if (d.state.refractionSample)
+                haveRefraction = true;
+            if (d.state.screenCopy && !screenCopyOrder)
+                screenCopyOrder = d.state.order;
+        }
+        auto doRefraction = [&]
+        {
+            snapshotColor();
+            copy(snapshot, refraction);
+            copy(refraction, refractionHalf);
+            copy(refractionHalf, refraction);
+        };
+        auto doDof = [&]
+        {
+            snapshotColor();
+            copy(snapshot, refraction);
+            for (int i = 0; i < dof.rounds; ++i)
+            {
+                copy(refraction, refractionHalf);
+                copy(refractionHalf, refraction);
+            }
+            const float a[4] = {dof.zA, dof.zB, static_cast<float>(dof.focusZ), static_cast<float>(dof.slices)};
+            bindTexture(0, refraction.texture);
+            bindTexture(2, color.depth);
+            quad(colorPlain, 11, QuadBlend::Over, a);
+        };
+        struct Event
+        {
+            uint32_t order;
+            int blur; // -1 bloom, -2 glow, -3 shadows, -4 refraction copy, -5 depth of field
+        };
+        std::vector<Event> events;
+        if (dofOn)
+            events.push_back({dof.order, -5});
+        if (softShadows)
+            events.push_back({softOrder, -3});
+        if (haveRefraction)
+            events.push_back({9u, -4});
+        if (screenCopyOrder)
+            events.push_back({screenCopyOrder, -4});
+        if (glow.enabled)
+            events.push_back({glow.order, -2});
+        if (bloomOn)
+            events.push_back({bloom.order, -1});
+        else
+            bloomHistory = false;
+        for (size_t i = 0; i < blurs.size(); ++i)
+            events.push_back({blurs[i].order, static_cast<int>(i)});
+        std::stable_sort(events.begin(), events.end(), [](const Event &x, const Event &y) { return x.order < y.order; });
+        uint32_t from = 0;
+        bool loaded = false;
+        for (const Event &ev : events)
+        {
+            pass(color, false, from, ev.order, loaded);
+            loaded = true;
+            from = ev.order;
+            if (ev.blur == -5)
+                doDof();
+            else if (ev.blur == -4)
+                doRefraction();
+            else if (ev.blur == -3)
+                doShadow();
+            else if (ev.blur == -2)
+                doGlow();
+            else if (ev.blur < 0)
+                doBloom();
+            else
+                doBlur(blurs[static_cast<size_t>(ev.blur)]);
+        }
+        pass(color, false, from, ~0u, loaded);
+
+        if (const auto &hook = native_renderer::detail::presentHook())
+        {
+            // The host shows the texture itself.
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            hook(color.texture, w, h);
+            return;
+        }
+        // Read back, top row first (the GL picture is y-up).
+        std::vector<uint8_t> pixels(static_cast<size_t>(w) * h * 4u);
+        glBindFramebuffer(GL_FRAMEBUFFER, color.fbo);
+        glReadPixels(0, 0, static_cast<GLsizei>(w), static_cast<GLsizei>(h), GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        std::lock_guard<std::mutex> lock(outputMutex);
+        output.resize(pixels.size());
+        const size_t row = static_cast<size_t>(w) * 4u;
+        for (uint32_t y = 0; y < h; ++y)
+            std::memcpy(output.data() + static_cast<size_t>(y) * row, pixels.data() + static_cast<size_t>(h - 1u - y) * row, row);
+        outputWidth = w;
+        outputHeight = h;
+        hasOutput = true;
+    }
+
+    class GlBackend final : public native_renderer::detail::Backend
+    {
+    public:
+        explicit GlBackend(Renderer *renderer) : r(renderer) {}
+
+        bool hasMesh(uint64_t id) override { return r->meshes.count(id) != 0; }
+        void uploadMesh(uint64_t id, const native_renderer::Vertex *vertices, uint32_t count) override
+        {
+            Lock lock;
+            Mesh &mesh = r->meshes[id];
+            if (!mesh.buffer)
+                glGenBuffers(1, &mesh.buffer);
+            glBindBuffer(GL_ARRAY_BUFFER, mesh.buffer);
+            glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(count * sizeof(native_renderer::Vertex)), vertices, GL_STATIC_DRAW);
+            mesh.count = count;
+        }
+        bool hasTexture(uint64_t id) override { return r->textures.count(id) != 0; }
+        void uploadTexture(uint64_t key, uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t levels) override
+        {
+            if (!width || !height)
+                return;
+            Lock lock;
+            levels = std::max(1u, levels);
+            Texture &t = r->textures[key];
+            if (!t.name)
+                glGenTextures(1, &t.name);
+            glBindTexture(GL_TEXTURE_2D, t.name);
+            for (uint32_t level = 0, w = width, h = height; level < levels; ++level)
+            {
+                glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(level), GL_RGBA, static_cast<GLsizei>(w), static_cast<GLsizei>(h), 0, GL_RGBA,
+                             GL_UNSIGNED_BYTE, rgba);
+                rgba += static_cast<size_t>(w) * h * 4u;
+                w = std::max(1u, w / 2u);
+                h = std::max(1u, h / 2u);
+            }
+#if !defined(PS2X_NATIVE_VITA)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(levels - 1u));
+#endif
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, levels > 1u ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        }
+        void beginFrame() override
+        {
+            r->draws.clear();
+            r->blurs.clear();
+        }
+        void draw(uint64_t mesh, const float clip[16], const native_renderer::DrawState &state) override
+        {
+            Draw d;
+            d.mesh = mesh;
+            d.state = state;
+            std::memcpy(d.clip, clip, sizeof(d.clip));
+            r->draws.push_back(d);
+        }
+        void setFog(const native_renderer::Fog &fog) override { r->fog = fog; }
+        void setBloom(const native_renderer::Bloom &bloom) override { r->bloom = bloom; }
+        void addScreenBlur(const native_renderer::ScreenBlur &blur) override { r->blurs.push_back(blur); }
+        void setGlowComposite(const native_renderer::GlowComposite &glow) override { r->glow = glow; }
+        void setDepthOfField(const native_renderer::DepthOfField &dof) override { r->dof = dof; }
+        void endFrame(uint32_t width, uint32_t height) override
+        {
+            Lock lock;
+            r->render(width, height);
+        }
+        bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height) override
+        {
+            std::lock_guard<std::mutex> lock(r->outputMutex);
+            if (!r->hasOutput)
+                return false;
+            rgba = r->output;
+            width = r->outputWidth;
+            height = r->outputHeight;
+            return true;
+        }
+
+    private:
+        // vitaGL is one GL for every thread: the host and this take turns.
+        struct Lock
+        {
+#if defined(PS2X_NATIVE_VITA)
+            std::lock_guard<std::recursive_mutex> guard{ps2xVitaGlMutex()};
+#endif
+        };
+        Renderer *r;
+    };
+}
+
+namespace native_renderer::detail
+{
+    Backend *createGlBackend()
+    {
+        auto *renderer = new Renderer();
+        if (!renderer->init())
+        {
+            delete renderer;
+            return nullptr;
+        }
+        return new GlBackend(renderer);
+    }
+}
+
+#endif

@@ -450,9 +450,13 @@ add_library(ps2_runtime STATIC
     src/lib/games_database.cpp
 )
 
+# Native renderer: the front picks Metal (macOS) or OpenGL (macOS with
+# SOTC_NATIVE_GL=1, the Vita through vitaGL).
+target_sources(ps2_runtime PRIVATE src/lib/native/native_renderer.cpp src/lib/native/native_renderer_gl.cpp)
+
 # GPU GS rasterizer (Metal) on macOS, the default there (PS2X_GS_GPU=0 = CPU).
 if(NOT APPLE)
-    target_sources(ps2_runtime PRIVATE src/lib/gs/gs_metal_raster_stub.cpp src/lib/native/native_renderer_stub.cpp)
+    target_sources(ps2_runtime PRIVATE src/lib/gs/gs_metal_raster_stub.cpp)
 endif()
 if(APPLE)
     target_sources(ps2_runtime PRIVATE src/lib/gs/metal/gs_metal_raster.mm src/lib/native/native_renderer_metal.mm)

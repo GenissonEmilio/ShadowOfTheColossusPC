@@ -6,6 +6,7 @@
 // emulated one on screen (native_renderer::setShown).
 
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 namespace native_renderer
@@ -19,6 +20,13 @@ namespace native_renderer
     };
 
     bool available();
+    // OpenGL backends: makes the renderer's context current on the calling
+    // thread (the game thread, where every call below comes from).
+    void setGlContext(std::function<void()> makeCurrent);
+    // OpenGL backends: hands each finished picture's GL texture (y-up) to the
+    // host instead of reading it back (the Vita: Vita3K's CPU reads of render
+    // targets do not see the GPU's output). Called from endFrame's thread.
+    void setPresentHook(std::function<void(uint32_t texture, uint32_t width, uint32_t height)> hook);
 
     bool hasMesh(uint64_t id);
     // A triangle list, kept on the GPU under `id` until the renderer goes.

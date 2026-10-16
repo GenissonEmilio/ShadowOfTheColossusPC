@@ -1,5 +1,5 @@
 // Native renderer on Metal (see runtime/native_renderer.h).
-#include "runtime/native_renderer.h"
+#include "native_backend.h"
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -1198,148 +1198,86 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
         }
     };
 
-    Renderer *g_renderer = nullptr;
-    bool g_failed = false;
-    std::atomic<bool> g_shown{false};
-
-    Renderer *renderer()
+    class MetalBackend final : public native_renderer::detail::Backend
     {
-        if (!g_renderer && !g_failed)
+    public:
+        explicit MetalBackend(Renderer *renderer) : r(renderer) {}
+        bool hasMesh(uint64_t id) override { return r->meshes.count(id) != 0; }
+        void uploadMesh(uint64_t id, const native_renderer::Vertex *vertices, uint32_t count) override
         {
-            g_renderer = new Renderer();
-            if (!g_renderer->init())
+            Mesh &mesh = r->meshes[id];
+            [mesh.buffer release];
+            mesh.buffer = count ? [r->device newBufferWithBytes:vertices length:count * sizeof(native_renderer::Vertex) options:MTLResourceStorageModeShared] : nil;
+            mesh.count = count;
+        }
+        bool hasTexture(uint64_t id) override { return r->textures.count(id) != 0; }
+        void uploadTexture(uint64_t key, uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t levels) override
+        {
+            if (!width || !height)
+                return;
+            levels = std::max(1u, levels);
+            MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:width height:height mipmapped:levels > 1u];
+            desc.mipmapLevelCount = levels;
+            desc.usage = MTLTextureUsageShaderRead;
+            desc.storageMode = MTLStorageModeShared;
+            id<MTLTexture> texture = [r->device newTextureWithDescriptor:desc];
+            for (uint32_t level = 0, w = width, h = height; level < levels; ++level)
             {
-                delete g_renderer;
-                g_renderer = nullptr;
-                g_failed = true;
+                [texture replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:level withBytes:rgba bytesPerRow:w * 4u];
+                rgba += static_cast<size_t>(w) * h * 4u;
+                w = std::max(1u, w / 2u);
+                h = std::max(1u, h / 2u);
             }
+            auto it = r->textures.find(key);
+            if (it != r->textures.end())
+                [it->second release];
+            r->textures[key] = texture;
         }
-        return g_renderer;
-    }
-}
-
-namespace native_renderer
-{
-    bool available() { return renderer() != nullptr; }
-
-    bool hasMesh(uint64_t id)
-    {
-        Renderer *r = renderer();
-        return r && r->meshes.count(id) != 0;
-    }
-
-    void uploadMesh(uint64_t id, const Vertex *vertices, uint32_t count)
-    {
-        Renderer *r = renderer();
-        if (!r)
-            return;
-        Mesh &mesh = r->meshes[id];
-        [mesh.buffer release];
-        mesh.buffer = count ? [r->device newBufferWithBytes:vertices length:count * sizeof(Vertex) options:MTLResourceStorageModeShared] : nil;
-        mesh.count = count;
-    }
-
-    bool hasTexture(uint64_t id)
-    {
-        Renderer *r = renderer();
-        return r && r->textures.count(id) != 0;
-    }
-
-    void uploadTexture(uint64_t key, uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t levels)
-    {
-        Renderer *r = renderer();
-        if (!r || !width || !height)
-            return;
-        levels = std::max(1u, levels);
-        MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:width height:height mipmapped:levels > 1u];
-        desc.mipmapLevelCount = levels;
-        desc.usage = MTLTextureUsageShaderRead;
-        desc.storageMode = MTLStorageModeShared;
-        id<MTLTexture> texture = [r->device newTextureWithDescriptor:desc];
-        for (uint32_t level = 0, w = width, h = height; level < levels; ++level)
-        {
-            [texture replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:level withBytes:rgba bytesPerRow:w * 4u];
-            rgba += static_cast<size_t>(w) * h * 4u;
-            w = std::max(1u, w / 2u);
-            h = std::max(1u, h / 2u);
-        }
-        auto it = r->textures.find(key);
-        if (it != r->textures.end())
-            [it->second release];
-        r->textures[key] = texture;
-    }
-
-    void beginFrame()
-    {
-        if (Renderer *r = renderer())
+        void beginFrame() override
         {
             r->draws.clear();
             r->blurs.clear();
         }
-    }
+        void draw(uint64_t mesh, const float clip[16], const native_renderer::DrawState &state) override
+        {
+            Draw d;
+            d.mesh = mesh;
+            d.state = state;
+            std::memcpy(d.clip, clip, sizeof(d.clip));
+            r->draws.push_back(d);
+        }
+        void setFog(const native_renderer::Fog &fog) override { r->fog = fog; }
+        void setBloom(const native_renderer::Bloom &bloom) override { r->bloom = bloom; }
+        void addScreenBlur(const native_renderer::ScreenBlur &blur) override { r->blurs.push_back(blur); }
+        void setGlowComposite(const native_renderer::GlowComposite &glow) override { r->glow = glow; }
+        void setDepthOfField(const native_renderer::DepthOfField &dof) override { r->dof = dof; }
+        void endFrame(uint32_t width, uint32_t height) override { r->render(width, height); }
+        bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height) override
+        {
+            std::lock_guard<std::mutex> lock(r->outputMutex);
+            if (!r->hasOutput)
+                return false;
+            rgba = r->output;
+            width = r->outputWidth;
+            height = r->outputHeight;
+            return true;
+        }
 
-    void draw(uint64_t mesh, const float clip[16], const DrawState &state)
+    private:
+        Renderer *r;
+    };
+}
+
+namespace native_renderer::detail
+{
+    Backend *createMetalBackend()
     {
-        Renderer *r = renderer();
-        if (!r)
-            return;
-        Draw d;
-        d.mesh = mesh;
-        d.state = state;
-        std::memcpy(d.clip, clip, sizeof(d.clip));
-        r->draws.push_back(d);
-    }
-
-    void setDepthOfField(const DepthOfField &dof)
-    {
-        if (Renderer *r = renderer())
-            r->dof = dof;
-    }
-
-    void setGlowComposite(const GlowComposite &glow)
-    {
-        if (Renderer *r = renderer())
-            r->glow = glow;
-    }
-
-    void addScreenBlur(const ScreenBlur &blur)
-    {
-        if (Renderer *r = renderer())
-            r->blurs.push_back(blur);
-    }
-
-    void setBloom(const Bloom &bloom)
-    {
-        if (Renderer *r = renderer())
-            r->bloom = bloom;
-    }
-
-    void setFog(const Fog &fog)
-    {
-        if (Renderer *r = renderer())
-            r->fog = fog;
-    }
-
-    void endFrame(uint32_t width, uint32_t height)
-    {
-        if (Renderer *r = renderer())
-            r->render(width, height);
-    }
-
-    void setShown(bool shown) { g_shown.store(shown, std::memory_order_relaxed); }
-    bool shown() { return g_shown.load(std::memory_order_relaxed); }
-
-    bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height)
-    {
-        Renderer *r = g_renderer;
-        if (!r)
-            return false;
-        std::lock_guard<std::mutex> lock(r->outputMutex);
-        if (!r->hasOutput)
-            return false;
-        rgba = r->output;
-        width = r->outputWidth;
-        height = r->outputHeight;
-        return true;
+        auto *renderer = new Renderer();
+        if (!renderer->init())
+        {
+            delete renderer;
+            return nullptr;
+        }
+        return new MetalBackend(renderer);
     }
 }

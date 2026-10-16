@@ -966,11 +966,31 @@ bool PS2Runtime::initialize(const char *title)
             else
                 std::cerr << "[gs:hw] could not create the GS GL context" << std::endl;
         }
+        if (std::getenv("SOTC_NATIVE_GL"))
+        {
+            // The native renderer on OpenGL (to check it against Metal): its own
+            // hidden context, current on the game thread that drives it.
+            glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+            glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+            glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+            glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
+            glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+            GLFWwindow *mainWindow = glfwGetCurrentContext();
+            GLFWwindow *nativeContext = glfwCreateWindow(16, 16, "native", nullptr, nullptr);
+            glfwWindowHint(GLFW_VISIBLE, GLFW_TRUE);
+            glfwMakeContextCurrent(mainWindow);
+            if (nativeContext)
+                native_renderer::setGlContext([nativeContext]
+                                              { glfwMakeContextCurrent(nativeContext); });
+            else
+                std::cerr << "[native] could not create the OpenGL context" << std::endl;
+        }
 #endif
 #if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
         // vitaGL is one GL for every thread (the shim's lock takes turns):
         // nothing to make current, the GPU GS renderer can start.
         GSHwBackend::setContextProvider([] {});
+        native_renderer::setGlContext([] {});
 #endif
         hostmenu::load();
         InitAudioDevice();
@@ -2776,10 +2796,21 @@ void PS2Runtime::run()
     static std::atomic<double> lastGsPresent{-1.0};
     GSHwBackend::setPresentHook([&](uint32_t texture, uint32_t width, uint32_t height)
                                 {
+                                    if (native_renderer::shown())
+                                        return; // the native renderer's picture is the one on screen
                                     lastGsPresent.store(GetTime(), std::memory_order_relaxed);
                                     drawHostFrame(Texture2D{texture | 0x80000000u, static_cast<int>(width), static_cast<int>(height), 1,
                                                             PIXELFORMAT_UNCOMPRESSED_R8G8B8A8},
                                                   width, height); });
+    // The native renderer's pictures go on screen the same way, from the game thread.
+    native_renderer::setPresentHook([&](uint32_t texture, uint32_t width, uint32_t height)
+                                    {
+                                        if (!native_renderer::shown())
+                                            return;
+                                        lastGsPresent.store(GetTime(), std::memory_order_relaxed);
+                                        drawHostFrame(Texture2D{texture | 0x80000000u, static_cast<int>(width), static_cast<int>(height), 1,
+                                                                PIXELFORMAT_UNCOMPRESSED_R8G8B8A8},
+                                                      width, height); });
 #endif
 
     std::atomic<bool> gameThreadFinished{false};
@@ -3203,6 +3234,7 @@ void PS2Runtime::run()
 
 #if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
     GSHwBackend::setPresentHook(nullptr); // drawHostFrame goes out of scope
+    native_renderer::setPresentHook(nullptr);
 #endif
     requestStop();
     if (gameThread.joinable())
