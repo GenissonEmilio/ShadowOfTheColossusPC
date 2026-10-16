@@ -122,10 +122,12 @@ register file, IOP DMA or interrupt, and the emulated SPU2 stays idle once
 the native driver is loaded. Voices are mixed in blocks of 64 frames, a
 voice at a time, skipping silent ones.
 
-- Clock: by default the mixer follows the emulated IOP time (deterministic
-  for recordings and tests). `PS2X_AUDIO_PULL=1` mixes in the host audio
-  thread when the device asks (the audio length follows wall-clock time):
-  the mode for the Vita, where it takes the mix off the game thread.
+- Clock: with SOTC_NATIVE=1 the host audio thread mixes when the device
+  asks, 64 frames per lock (the audio length follows wall-clock time); this
+  took the mix (about 8 % of the game thread's busy time, half of it the
+  reverb) off the game thread. With `PS2X_SPU2_WAV` (recordings) or
+  `PS2X_AUDIO_PULL=0` the mixer follows the emulated IOP time instead
+  (deterministic, comparable between runs).
 - Cost on the Mac: about 2-3 % of the game thread (half of it the reverb),
   as the emulated SPU2.
 - `PS2X_SPU2_WAV` records the native mix too.

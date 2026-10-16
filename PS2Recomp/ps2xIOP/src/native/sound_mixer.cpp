@@ -26,10 +26,17 @@ namespace ps2x::iop::detail
 
     bool SoundMixer::pullMode()
     {
+        // PS2X_AUDIO_PULL=1/0; by default on with SOTC_NATIVE=1 (the mix
+        // leaves the game thread), off when recording (PS2X_SPU2_WAV: the
+        // recording then follows emulated time, comparable between runs).
         static const bool pull = []
         {
-            const char *value = std::getenv("PS2X_AUDIO_PULL");
-            return value && std::atoi(value) != 0;
+            if (const char *value = std::getenv("PS2X_AUDIO_PULL"))
+                return std::atoi(value) != 0;
+            if (std::getenv("PS2X_SPU2_WAV"))
+                return false;
+            const char *native = std::getenv("SOTC_NATIVE");
+            return native && std::atoi(native) == 1;
         }();
         return pull;
     }
@@ -570,9 +577,15 @@ namespace ps2x::iop::detail
     {
         if (pullMode())
         {
-            auto lock = hold();
-            render(destination, static_cast<uint32_t>(frames));
-            pushOutput(destination, frames);
+            // A block at a time: the game thread's driver calls wait at most one block.
+            for (size_t done = 0; done < frames;)
+            {
+                const uint32_t n = static_cast<uint32_t>(std::min<size_t>(frames - done, kBlock));
+                auto lock = hold();
+                render(destination + done * 2u, n);
+                pushOutput(destination + done * 2u, n);
+                done += n;
+            }
             return frames;
         }
         const size_t read = m_ringRead.load(std::memory_order_relaxed);

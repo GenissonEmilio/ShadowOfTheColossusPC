@@ -9,6 +9,8 @@
 #include "runtime/gs/gs_async_backend.h"
 #include "ps2_log.h"
 #include <atomic>
+#include <map>
+#include <iostream>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -1326,6 +1328,14 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
     {
         m_timerIrqLatched |= flushEeTimers();
         m_timerBudget = 0u; // the timer changes: re-evaluate at the next cycles
+        // PS2X_TRACE_TIMERS=1: the first writes of each timer register (who uses the timers).
+        static const bool traceTimers = std::getenv("PS2X_TRACE_TIMERS") != nullptr;
+        if (traceTimers)
+        {
+            static std::map<uint32_t, int> logged;
+            if (logged[address]++ < 4)
+                std::cerr << "[timer] T" << timerIndex << " +0x" << std::hex << timerOffset << " = 0x" << value << std::dec << std::endl;
+        }
         EeTimer &timer = m_eeTimers[timerIndex];
         switch (timerOffset)
         {

@@ -375,7 +375,7 @@
   "status": "native",
   "since": "2026-10-16",
   "commit": "4d6adf4",
-  "note": "with SOTC_NATIVE=1 a host mixer (SoundMixer) plays the voices, envelopes, PS2 reverb and streamed PCM; the emulated SPU2 stays idle. Same sound as the emulated SPU2 on the route; PS2X_AUDIO_PULL=1 mixes in the host audio thread (for the Vita)"
+  "note": "with SOTC_NATIVE=1 a host mixer (SoundMixer) plays the voices, envelopes, PS2 reverb and streamed PCM; the emulated SPU2 stays idle. Same sound as the emulated SPU2 on the route; PS2X_AUDIO_PULL=1 mixes in the host audio thread (for the Vita); with SOTC_NATIVE=1 the mix runs in the host audio thread (PS2X_AUDIO_PULL), off the game thread"
  },
  {
   "map": "hardware",
@@ -408,10 +408,10 @@
   "map": "hardware",
   "area": "System",
   "feature": "Timers and interrupts",
-  "status": "emulated",
-  "since": "",
+  "status": "partial",
+  "since": "2026-10-16",
   "commit": "",
-  "note": "VBlank and timer events"
+  "note": "VBlank, alarms and the EE timers the game uses (T0 HBlank count, T1 as a clock, T2 compare interrupts; PS2X_TRACE_TIMERS shows them) are computed from the EE cycle count, which follows the host clock once GAMECORE runs; no hardware is modelled beyond that arithmetic. Interrupt delivery still goes through the emulated INTC/DMAC handlers"
  },
  {
   "map": "hardware",
