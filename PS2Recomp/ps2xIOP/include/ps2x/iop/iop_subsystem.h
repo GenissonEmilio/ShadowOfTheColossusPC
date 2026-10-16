@@ -32,6 +32,11 @@ namespace ps2x::iop
 
         [[nodiscard]] RpcAbi selectRpcAbi(const RpcAbiRequest &request) const;
         [[nodiscard]] bool canBindRpc(uint32_t sid) const noexcept;
+        // Called by a game once its IOP modules are loaded and the boot is
+        // over: with PS2X_NATIVE_IOP (default on with SOTC_NATIVE=1) the
+        // emulated IOP stops running code; RPCs go to the host services or
+        // are completed without effect. Returns whether it switched.
+        bool enterNativeMode();
         [[nodiscard]] RpcResult handleRpc(const RpcRequest &request);
         void onSifTransfer(const SifTransfer &transfer);
 

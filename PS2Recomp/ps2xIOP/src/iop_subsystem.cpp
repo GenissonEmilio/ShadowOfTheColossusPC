@@ -6,6 +6,7 @@
 #include "module_factories.h"
 #include "ps2x/iop/ps2_path.h"
 
+#include <cstdlib>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -13,6 +14,17 @@
 
 namespace ps2x::iop
 {
+    namespace
+    {
+        bool nativeIopAllowed()
+        {
+            if (const char *value = std::getenv("PS2X_NATIVE_IOP"))
+                return std::atoi(value) != 0;
+            const char *native = std::getenv("SOTC_NATIVE");
+            return native && std::atoi(native) == 1;
+        }
+    }
+
     class IopSubsystem::Impl
     {
     public:
@@ -86,6 +98,8 @@ namespace ps2x::iop
         std::string lastError;
         detail::IopModuleManager moduleManager;
         detail::IopEmulator emulator;
+        bool native = false;
+        std::unordered_set<uint64_t> loggedDroppedRpcs;
     };
 
     IopSubsystem::IopSubsystem(IopHost &host)
@@ -192,7 +206,7 @@ namespace ps2x::iop
 
     bool IopSubsystem::canBindRpc(uint32_t sid) const noexcept
     {
-        if (m_impl->routes.find(sid) != m_impl->routes.end())
+        if (m_impl->native || m_impl->routes.find(sid) != m_impl->routes.end())
         {
             return true;
         }
@@ -204,12 +218,45 @@ namespace ps2x::iop
         const auto route = m_impl->routes.find(request.sid);
         detail::IopService *hle = route != m_impl->routes.end() ? route->second : nullptr;
 
+        if (m_impl->native)
+        {
+            if (m_impl->emulator.servesNatively(request.sid))
+                return m_impl->emulator.handleRpc(request);
+            RpcResult result = hle ? hle->handleRpc(request) : RpcResult{};
+            if (!result.handled)
+            {
+                // No host service: complete the call, leave the buffers
+                // (SotC: the DualShock's vibration, the USB serial console).
+                if (m_impl->loggedDroppedRpcs.insert((uint64_t{request.sid} << 32u) | request.function).second)
+                {
+                    std::ostringstream out;
+                    out << "[IOP:native] rpc sid=0x" << std::hex << request.sid << " fn=0x" << request.function << " dropped";
+                    m_impl->host.log(LogLevel::Info, out.str());
+                }
+                result.handled = true;
+                result.resultAddress = request.receive.address;
+                result.serverDispatchPolicy = ServerDispatchPolicy::Suppress;
+                result.signalNowaitCompletion = true;
+                result.signalCompletion = true;
+            }
+            return result;
+        }
         RpcResult emulated = m_impl->emulator.handleRpc(request);
         if (emulated.handled || !hle)
         {
             return emulated;
         }
         return hle->handleRpc(request);
+    }
+
+    bool IopSubsystem::enterNativeMode()
+    {
+        if (m_impl->native || !nativeIopAllowed())
+            return m_impl->native;
+        m_impl->native = true;
+        m_impl->emulator.haltCpu();
+        m_impl->host.log(LogLevel::Info, "[IOP:native] boot over: the emulated IOP runs no more code");
+        return true;
     }
 
     void IopSubsystem::onSifTransfer(const SifTransfer &transfer)

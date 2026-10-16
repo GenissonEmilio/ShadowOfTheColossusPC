@@ -491,6 +491,7 @@ public:
     inline const PS2RomDevice &romDevice() const { return m_romDevice; }
     inline PS2Vfs &vfs() { return m_vfs; }
     inline const PS2Vfs &vfs() const { return m_vfs; }
+    inline ps2x::iop::IopSubsystem *iopSubsystem() { return m_iopSubsystem.get(); }
 
 private:
     struct GuestHeapBlock

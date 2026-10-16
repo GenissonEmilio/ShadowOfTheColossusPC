@@ -9,6 +9,7 @@
 #include "ps2_runtime_macros.h"
 #include "game_overrides.h"
 #include "runtime/ee_scheduler.h"
+#include "ps2x/iop/iop_subsystem.h"
 #include "runtime/ps2_stats.h"
 
 #include <array>
@@ -26,6 +27,7 @@ namespace
     constexpr uint32_t kGamecoreEntry = 0x01344788u;
 
     PS2Runtime::RecompiledFunction g_gamecoreEntry = nullptr;
+    bool g_gamecoreEntered = false;
 
     // Module placement depends on the guest heap, which is only reproducible
     // while emulated time is driven purely by executed cycles. Once all code
@@ -36,8 +38,15 @@ namespace
         if (!enabled)
         {
             enabled = true;
+            g_gamecoreEntered = true;
             runtime->eeScheduler().enableHostClockSync();
             std::cerr << "[sotc] GAMECORE entered; host clock sync enabled" << std::endl;
+            // Every IOP module is loaded by now (and the module layout is
+            // fixed): with SOTC_NATIVE=1 the emulated IOP stops here. Not
+            // earlier: without the IOP's timing during the boot GAMECORE
+            // lands 0x40 bytes off (see SOTC_LOG_MALLOC).
+            if (ps2x::iop::IopSubsystem *iop = runtime->iopSubsystem())
+                iop->enterNativeMode();
         }
         g_gamecoreEntry(rdram, ctx, runtime);
     }
@@ -528,8 +537,33 @@ namespace
         g_sg2RemoteTick(rdram, ctx, runtime);
     }
 
+    // SOTC_LOG_MALLOC=1: the boot's heap calls (iosMallocAlign, ...NoCheck,
+    // iosFree) until GAMECORE runs, in order: where module placement comes
+    // from. GAMECORE's image follows the main thread's letter post (0x14
+    // bytes from init_letter_manager, ra 0x1c8828) or not depending on when
+    // that thread first runs: boot timing moves the module by 0x40.
+    PS2Runtime::RecompiledFunction g_mallocAlign = nullptr, g_mallocNoCheck = nullptr, g_free = nullptr;
+    template <int Kind>
+    void heapHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t a0 = GPR_U32(ctx, 4), a1 = GPR_U32(ctx, 5), a2 = GPR_U32(ctx, 6), ra = GPR_U32(ctx, 31);
+        (Kind == 0 ? g_mallocAlign : Kind == 1 ? g_mallocNoCheck : g_free)(rdram, ctx, runtime);
+        if (!g_gamecoreEntered)
+            std::fprintf(stderr, "[heap] %s heap=%x size=%x align=%x ra=%x\n", Kind == 0 ? "malloc" : Kind == 1 ? "mallocNC" : "free",
+                         a0, a1, a2, ra);
+    }
+
     void applySotcOverrides(PS2Runtime &runtime)
     {
+        if (std::getenv("SOTC_LOG_MALLOC"))
+        {
+            g_mallocAlign = runtime.lookupFunction(0x001AFFD8u);
+            runtime.registerFunction(0x001AFFD8u, heapHook<0>);
+            g_mallocNoCheck = runtime.lookupFunction(0x001B00F0u);
+            runtime.registerFunction(0x001B00F0u, heapHook<1>);
+            g_free = runtime.lookupFunction(0x001B0328u);
+            runtime.registerFunction(0x001B0328u, heapHook<2>);
+        }
         if (std::getenv("SOTC_LOG_SG2") && runtime.hasFunction(0x001D21E8u))
         {
             g_sg2RemoteTick = runtime.lookupFunction(0x001D21E8u);

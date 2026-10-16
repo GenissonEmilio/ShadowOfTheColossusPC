@@ -592,6 +592,13 @@ namespace ps2x::iop::detail
 
         void runCycles(uint64_t cycles) noexcept
         {
+            if (cpuHalted)
+            {
+                // No IOP code runs any more: only the clock (the native mixer's).
+                totalCycles += cycles;
+                tickSpu2();
+                return;
+            }
             // PS2X_IOP_DUMP=1: the IOP kernel's state every ~5 s of IOP time.
             static const bool dump = std::getenv("PS2X_IOP_DUMP") != nullptr;
             static uint64_t nextDump = 0;
@@ -764,6 +771,7 @@ namespace ps2x::iop::detail
         IopMemory memory;
         Sg2Driver sg2{host, memory};
         std::atomic<bool> sg2Loaded{false}; // the native driver stands in for SG2IOPM1.IRX
+        bool cpuHalted = false;
         IopSysmem sysmem;
         IopKernel kernel;
         IopCdvd cdvd;
@@ -841,6 +849,16 @@ namespace ps2x::iop::detail
         if (m_impl->sg2Loaded.load(std::memory_order_acquire))
             return m_impl->sg2.mixer().readOutput(destination, frames);
         return m_impl->memory.spu2().readOutput(destination, frames);
+    }
+
+    void IopEmulator::haltCpu() noexcept
+    {
+        m_impl->cpuHalted = true;
+    }
+
+    bool IopEmulator::servesNatively(uint32_t sid) const noexcept
+    {
+        return m_impl->sg2Loaded && sid == Sg2Driver::Sid;
     }
 
     RpcResult IopEmulator::handleRpc(const RpcRequest &request)

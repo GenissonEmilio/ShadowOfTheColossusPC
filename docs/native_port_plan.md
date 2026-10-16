@@ -66,7 +66,17 @@ Vita3K running; then a real Vita).
 5. **Game-logic hot spots.** VU0 macro maths and the top profiled EE
    functions written natively (NEON on the Vita).
 6. **Audio.** SPU2/IOP replaced by a native mixer fed by the game's sound
-   requests.
+   requests. Done on the Mac (2026-10-16): native SG2 driver and mixer
+   (docs/native_audio_plan.md); with SOTC_NATIVE=1 the emulated IOP runs no
+   code once GAMECORE is entered (`IopSubsystem::enterNativeMode`): RPC
+   0x11223344 native, DBCMAN (0x80001300) by its host service, the
+   DualShock's vibration (0x8000131e/f) and the USB serial console
+   completed without effect; pad and memory card were host-side already.
+   The IRXs still load and start on the emulated IOP during the boot: the
+   boot's timing places the XFF modules (without it GAMECORE lands 0x40
+   bytes off, the main thread's letter post being allocated before it;
+   `SOTC_LOG_MALLOC=1` shows the order), and the recompiled code needs the
+   captured layout.
 7. **System.** Kernel threads/semaphores/timers on native threads and
    clocks; CDVD reads as direct file reads.
 
