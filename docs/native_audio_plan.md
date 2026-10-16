@@ -58,6 +58,25 @@ voice v % 24; libsd parameters are core | voice << 1 | register.
 | 1c, 1d | streamed voices: start / step (0x183c) |
 | 1e - 23 | PCM input to a core (AVOL 0xf80 / 0x1080, BlockTrans of 0x800-byte halves): streamed PCM (cutscenes) |
 
+## Data, transfers and the reply
+
+- No disc reading in the driver: the EE puts sample and stream data in IOP
+  memory (SIF DMA) and asks for copies to sound memory. `Sg2DmaTransVoice`
+  is command 0x13 (EE ring of DMA commands 0x28b740, one in flight;
+  `Sg2RemoteDmaTransStatus` reads it): the driver queues op 1 for its thread
+  (0x474), which does sceSdVoiceTrans(channel, write, IOP address, sound
+  address, size), waits, and marks the transfer done (0x7080 = 2 -> reply).
+  Op 2 is the same on the other DMA channel, op 4 the effect set-up
+  (0x120), op 8 a transfer flagged in 0x4c30.
+- Streamed voices (commands 0x18 / 0x19 / 0x1c / 0x1d): double-buffered in
+  sound memory; every reply the driver reads each one's NAX (0x2240) and,
+  when it has crossed into the other half, queues a refill of that half from
+  IOP memory (0x2204, then 0x2620 runs the queue: 0x1adc, 0x1d38, 0x1f64).
+- The reply (400 bytes, IOP 0x7088 -> EE 0x28b540): +0x000 ENVX of the 48
+  voices (u32 each), +0x0c0 each voice's stream position (0x7230 of its
+  slot), +0x180 the PCM input position (0xc8f4), +0x184 transfer busy
+  (1 while op 1 runs, EE 0x28b6c4).
+
 ## Plan
 
 1. Read the command dispatcher of SG2IOPM1.IRX: what each command does in
