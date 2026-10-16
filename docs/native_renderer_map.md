@@ -170,7 +170,7 @@ packets of 48-byte particles: position + size, colour 0..1, sin/cos of the
 rotation. The microcode expands each into a rotated square (s = size x
 0.7071; A = (k.x sin, k.y cos) s, B = (-cos, k.y sin) s, k at 0x118bfe0;
 type 1 along the billboard axes from *0x118bff4, 2/4/5 by the matrix),
-type 4 as a lit fan around the centre, type 3 a streak between two points
+type 4 as a lit fan around the centre (routine 0xe48: centre normal the camera's third axis, corners toward the centre; L = VU 26, k = VU 27; s = min((n.x L.x + n.y L.y + k.w n.z L.z + k.w) / 2, 1)^2, colour x (s k.y + k.x)); types 2, 4 and 7 add the matrix's translation row; type 3 a streak between two points
 (q0 = p1 and width, q2 = p2; sides (p - eye) x (p1 - p2), half the width,
 the eye VU 16), type 7 a square by the environment matrix with its
 translation and a texture cell offset per particle (q2 z / w). The

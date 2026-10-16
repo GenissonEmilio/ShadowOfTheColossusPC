@@ -186,7 +186,7 @@
   "status": "partial",
   "since": "2026-10-15",
   "commit": "75efe01",
-  "note": "glEnd's A+D packet read into the 2D path; the bird's heat-haze trail (samples a screen copy) and bossDeathEffect's off-screen fan are left out"
+  "note": "glEnd's A+D packet read into the 2D path; the bird's heat-haze strips sample the screen copy 0x10f37c8 makes at their layer; bossDeathEffect's off-screen fan left out"
  },
  {
   "map": "renderer",
@@ -267,7 +267,7 @@
   "status": "native",
   "since": "2026-10-16",
   "commit": "78d44f0",
-  "note": "microcode 7 expansion of every type in the route: 1/2/4/5 squares and lit puffs, 3 streaks (side = (p - eye) x (p1 - p2)), 7 squares with a texture cell per particle; the puff lighting is approximated"
+  "note": "microcode 7 expansion of every type in the route: 1 billboards, 2/4/7 by the environment matrix with its translation, 3 streaks, 4 lit fans (routine 0xe48 lighting from VU 26/27), 7 with a texture cell each"
  },
  {
   "map": "renderer",

@@ -90,6 +90,15 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
 {
     constexpr sampler repeatLinear(address::repeat, filter::linear, mip_filter::linear);
     float3 shade = in.color.rgb;
+    if (textured == 4)
+    {
+        // The picture before this layer (a reduced copy) at the draw's own UV.
+        constexpr sampler clampLinear(address::clamp_to_edge, filter::linear);
+        float4 c = float4(refraction.sample(clampLinear, in.uv).rgb, 1.0) * in.color;
+        if (c.a < 0.02)
+            discard_fragment();
+        return c;
+    }
     if (textured == 3)
     {
         // The picture so far at this pixel (waterRefractionBegin's reduced copy), tinted.
@@ -811,8 +820,8 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         light.uvOffset[1] = d.state.uvOffset[1];
                         [encoder setVertexBytes:&light length:sizeof(light) atIndex:2];
                         auto tex = d.state.texture ? textures.find(d.state.texture) : textures.end();
-                        const int textured = d.state.reflectionSample ? 2 : (d.state.refractionSample ? 3 : (tex != textures.end() ? 1 : 0));
-                        if (textured)
+                        const int textured = d.state.reflectionSample ? 2 : (d.state.refractionSample ? 3 : (d.state.screenCopy ? 4 : (tex != textures.end() ? 1 : 0)));
+                        if (textured == 1)
                             [encoder setFragmentTexture:tex->second atIndex:0];
                         [encoder setFragmentBytes:&textured length:sizeof(textured) atIndex:0];
                         struct
@@ -1062,12 +1071,14 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                 // 256 x 256, to 128 x 128 and back (bilinear: a blur), which the
                 // water surfaces then show at their screen position.
                 bool haveRefraction = false;
+                uint32_t screenCopyOrder = 0;
                 for (const Draw &d : draws)
+                {
                     if (d.state.refractionSample)
-                    {
                         haveRefraction = true;
-                        break;
-                    }
+                    if (d.state.screenCopy && !screenCopyOrder)
+                        screenCopyOrder = d.state.order;
+                }
                 auto doRefraction = [&]
                 {
                     if (!copySmall)
@@ -1143,6 +1154,8 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     events.push_back({softOrder, -3});
                 if (haveRefraction)
                     events.push_back({9u, -4});
+                if (screenCopyOrder) // the same reduced copy, later (refractionColor is free again)
+                    events.push_back({screenCopyOrder, -4});
                 if (glow.enabled)
                     events.push_back({glow.order, -2});
                 if (bloomOn)

@@ -767,6 +767,7 @@ namespace sotc_native
     };
 
     std::vector<uint32_t> g_layers; // iosDlPushLayer stack
+    constexpr uint32_t kScreenCopy = 1u; // a 2D "header" for 0x10f37c8's screen copy
     uint32_t g_requested = 0;       // NTO2 header of the last texTransRequest
 
     struct Assembler
@@ -798,7 +799,8 @@ namespace sotc_native
         native_renderer::uploadMesh(mesh, a.batch.data(), static_cast<uint32_t>(a.batch.size()));
         native_renderer::DrawState state;
         state.screen = true;
-        state.texture = (a.batchPrim & 0x10u) ? texture(a.batchHeader) : 0;
+        state.screenCopy = a.batchHeader == kScreenCopy && (a.batchPrim & 0x10u);
+        state.texture = (a.batchPrim & 0x10u) && !state.screenCopy ? texture(a.batchHeader) : 0;
         const uint32_t mode = static_cast<uint32_t>(a.batchAlpha & 0xFFu);
         state.blend = !(a.batchPrim & 0x40u) ? native_renderer::Blend::Opaque
                       : (mode == 0x48u ? native_renderer::Blend::Additive : native_renderer::Blend::Normal);
@@ -841,7 +843,8 @@ namespace sotc_native
         o.a = static_cast<uint8_t>(a.rgbaq >> 24);
         if (((a.alpha >> 4) & 3u) == 2u) // C = FIX
             o.a = static_cast<uint8_t>(std::min<uint64_t>((a.alpha >> 32) & 0xFFu, 0x80u));
-        const uint32_t format = a.header ? word(a.header + 0x1Cu) : 0u;
+        // kScreenCopy: 0x10f37c8's 256 x 256 copy of the screen.
+        const uint32_t format = a.header == kScreenCopy ? 0x00880000u : (a.header ? word(a.header + 0x1Cu) : 0u);
         if (a.prim & 0x100u) // FST: UV in texels, 12.4
         {
             o.u = (static_cast<float>(a.u) / 16.0f) / static_cast<float>(1u << ((format >> 16) & 0xFu));
@@ -974,11 +977,15 @@ namespace sotc_native
         syncFrame(rdram);
         static const bool off = std::getenv("SOTC_NATIVE_NOGL") != nullptr;
         const uint32_t start = word(0x01186398u), end = word(0x01186394u);
-        // Not drawn here: bossDeathEffectBegin's fan goes to an off-screen
-        // buffer; 0x10f3fb0's strips sample a copy of the screen (a heat
-        // haze trail behind the bird) that the 2D path does not have.
+        // Not drawn here: bossDeathEffectBegin's fan goes to an off-screen buffer.
         const uint32_t ra = GPR_U32(ctx, 31);
-        const bool offScreen = (ra >= 0x01085640u && ra < 0x01085E40u) || (ra >= 0x010F3FB0u && ra < 0x010F4890u);
+        const bool offScreen = ra >= 0x01085640u && ra < 0x01085E40u;
+        // 0x10f3fb0's strips (the heat haze behind the bird) sample the copy
+        // of the screen 0x10f37c8 made in their layer (UV in its 256 x 256 texels).
+        const bool haze = ra >= 0x010F3FB0u && ra < 0x010F4890u;
+        const uint32_t requested = g_requested;
+        if (haze)
+            g_requested = kScreenCopy;
         if (!off && !offScreen && start && end > start + 0x20u && end - start < 0x100000u && word(0x0118B5B0u) == 0u)
         {
             static const bool log = std::getenv("SOTC_NATIVE_LOG") != nullptr;
@@ -996,6 +1003,7 @@ namespace sotc_native
                 feed2D(word(q + 8u) & 0xFFu, value);
             }
         }
+        g_requested = requested;
         g_glEnd(rdram, ctx, runtime);
     }
 
@@ -1286,6 +1294,7 @@ namespace sotc_native
         float k[3] = {1, 1, 1};
         float axes[3][3];
         float fade = 1.0f;
+        float light[4] = {0, 0, 0, 0}, shade[4] = {0.75f, 0, 0, 0}; // VU 26 / 27 (type 4's lighting)
     } g_ptclEnvState;
     uint32_t g_ptclBlend = 0;
 
@@ -1306,6 +1315,14 @@ namespace sotc_native
             e.m[i] = real(mat + i * 4u);
         e.vec[0] = real(vec);
         e.vec[1] = real(vec + 4u);
+        const uint32_t lightAt = GPR_U32(ctx, 7), shadeAt = GPR_U32(ctx, 8);
+        for (int i = 0; i < 4; ++i)
+        {
+            if (lightAt)
+                e.light[i] = real(lightAt + i * 4u);
+            if (shadeAt)
+                e.shade[i] = real(shadeAt + i * 4u);
+        }
         for (int i = 0; i < 3; ++i)
             e.k[i] = real(0x118BFE0u + i * 4u);
         const uint32_t consts = word(0x118BFF4u);
@@ -1324,7 +1341,7 @@ namespace sotc_native
         g_ptclVtx(rdram, ctx, runtime);
         static const bool off = std::getenv("SOTC_NATIVE_NOPTCL") != nullptr;
         const ParticleEnv &e = g_ptclEnvState;
-        if (off || !g_cameraContext || count == 0u || count > 4096u || !(e.type >= 1u && e.type <= 5u) && e.type != 7u)
+        if (off || !g_cameraContext || count == 0u || count > 4096u || (!(e.type >= 1u && e.type <= 5u) && e.type != 7u))
             return;
         static std::vector<native_renderer::Vertex> tris;
         tris.clear();
@@ -1337,7 +1354,7 @@ namespace sotc_native
                     out[r] = e.axes[0][r] * x + e.axes[1][r] * y;
             else
                 for (int r = 0; r < 3; ++r)
-                    out[r] = e.m[r] * x + e.m[4 + r] * y + (e.type == 7u ? e.m[12 + r] : 0.0f); // type 7 adds the translation row
+                    out[r] = e.m[r] * x + e.m[4 + r] * y + ((e.type == 2u || e.type == 4u || e.type == 7u) ? e.m[12 + r] : 0.0f); // types 2, 4, 7 add the matrix's translation row
         };
         // Type 3 (streaks) side vectors: (p - eye) x (p1 - p2), half the width
         // long; the eye is VU 16, the 17th qword of the constants at *0x118bff4.
@@ -1380,7 +1397,7 @@ namespace sotc_native
                 c.z = p[2] + sign * o[2];
                 c.u = u;
                 c.v = vv;
-                col(c, e.type == 4u ? 0.75f : 1.0f);
+                col(c, 1.0f);
                 return c;
             };
             if (e.type == 3u)
@@ -1414,14 +1431,40 @@ namespace sotc_native
                                           v19 = at(B, -1, u0 + e.vec[0], v0 + e.vec[1]);
             if (e.type == 4u)
             {
-                native_renderer::Vertex c = v;
+                // A lit fan (routine 0xe48): the centre's normal is the camera's
+                // third axis, a corner's the way to the centre; with L = VU 26
+                // and k = VU 27: s = min((n.x L.x + n.y L.y + k.w n.z L.z + k.w) / 2,
+                // 1)^2, the colour times s k.y + k.x.
+                auto lit = [&](native_renderer::Vertex &o, const float *n)
+                {
+                    const float d = n[0] * e.light[0] + n[1] * e.light[1] + e.shade[3] * n[2] * e.light[2] + e.shade[3];
+                    float t = std::min(d * 0.5f, 1.0f);
+                    t *= t;
+                    col(o, t * e.shade[1] + e.shade[0]);
+                };
+                auto towardCentre = [&](const native_renderer::Vertex &o, float n[3])
+                {
+                    n[0] = p[0] - o.x;
+                    n[1] = p[1] - o.y;
+                    n[2] = p[2] - o.z;
+                    const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+                    for (int k = 0; k < 3; ++k)
+                        n[k] = len > 0.0f ? n[k] / len : 0.0f;
+                };
+                native_renderer::Vertex c = v, f16 = v16, f17 = v17, f18 = v18, f19 = v19;
                 c.x = p[0];
                 c.y = p[1];
                 c.z = p[2];
                 c.u = e.vec[0] * 0.5f;
                 c.v = e.vec[1] * 0.5f;
-                col(c, 0.75f);
-                tris.insert(tris.end(), {c, v16, v17, c, v17, v19, c, v19, v18, c, v18, v16});
+                lit(c, e.axes[2]);
+                float n[3];
+                for (native_renderer::Vertex *o : {&f16, &f17, &f18, &f19})
+                {
+                    towardCentre(*o, n);
+                    lit(*o, n);
+                }
+                tris.insert(tris.end(), {c, f16, f17, c, f17, f19, c, f19, f18, c, f18, f16});
             }
             else
                 tris.insert(tris.end(), {v16, v17, v18, v17, v19, v18});

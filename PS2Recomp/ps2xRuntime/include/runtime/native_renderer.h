@@ -76,6 +76,9 @@ namespace native_renderer
         // reduced and blurred, at its own screen position, times
         // reflectionTint (the same packet's).
         bool refractionSample = false;
+        // A screen-copy draw (SotC's 0x10f37c8 at layer 23): its texture is
+        // the picture before its layer reduced to 256 x 256, at its own UV.
+        bool screenCopy = false;
         uint32_t debugColour = 0; // non-zero: drawn flat in this RGB (who drew what)
         bool lit = false;
         float light[32] = {};
