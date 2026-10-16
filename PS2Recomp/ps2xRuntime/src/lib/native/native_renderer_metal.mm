@@ -257,6 +257,22 @@ fragment float4 dofComposite(Quad in [[stage_in]], texture2d<float> blurred [[te
     return float4(blurred.sample(s, in.uv).rgb, 1.0 - keep);
 }
 
+// zFog: the background over the picture by the fog amount of the depth's slice.
+fragment float4 fogComposite(Quad in [[stage_in]], texture2d<float> background [[texture(0)]], depth2d<float> depth [[texture(1)]],
+                             constant float4 &p [[buffer(0)]]) // start, width, steps
+{
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    uint2 size = uint2(depth.get_width(), depth.get_height());
+    float d = depth.read(min(uint2(in.position.xy), size - 1));
+    float w = d >= 1.0 ? 1e30 : kNearW / (1.0 - d);
+    int steps = int(p.z);
+    float a = 0.0;
+    for (int i = 0; i <= steps; ++i)
+        if (w >= p.x + p.y * float(i) / float(steps))
+            a = float((i * 128) / steps) / 128.0;
+    return float4(background.sample(s, in.uv).rgb, a);
+}
+
 fragment float4 copyTexture(Quad in [[stage_in]], texture2d<float> src [[texture(0)]])
 {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
@@ -336,7 +352,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
         id<MTLRenderPipelineState> blurCopy = nil, tintOver = nil;
         native_renderer::GlowComposite glow;
         native_renderer::DepthOfField dof;
-        id<MTLRenderPipelineState> dofPipeline = nil;
+        id<MTLRenderPipelineState> dofPipeline = nil, fogPipeline = nil;
         id<MTLTexture> snapshot = nil; // the picture so far, for screenBlur
         std::vector<native_renderer::ScreenBlur> blurs;
         native_renderer::Fog fog;
@@ -471,6 +487,11 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                 dofPipeline = [device newRenderPipelineStateWithDescriptor:d error:&e];
                 if (!dofPipeline)
                     std::cerr << "[native] dof pipeline failed: " << [[e localizedDescription] UTF8String] << std::endl;
+                [d.fragmentFunction release];
+                d.fragmentFunction = [library newFunctionWithName:@"fogComposite"];
+                fogPipeline = [device newRenderPipelineStateWithDescriptor:d error:&e];
+                if (!fogPipeline)
+                    std::cerr << "[native] fog pipeline failed: " << [[e localizedDescription] UTF8String] << std::endl;
                 [d.vertexFunction release];
                 [d.fragmentFunction release];
                 [d release];
@@ -544,8 +565,11 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                 std::cerr << "[native] pipeline failed: " << [[error localizedDescription] UTF8String] << std::endl;
                 return false;
             }
+            // The GS tests Z with GEQUAL (its Z grows towards the camera): a
+            // surface drawn again in the same place (the translucent layers
+            // over the ground) passes. Here: less or equal.
             MTLDepthStencilDescriptor *depthDesc = [[MTLDepthStencilDescriptor alloc] init];
-            depthDesc.depthCompareFunction = MTLCompareFunctionLess;
+            depthDesc.depthCompareFunction = MTLCompareFunctionLessEqual;
             depthDesc.depthWriteEnabled = YES;
             depthState = [device newDepthStencilStateWithDescriptor:depthDesc];
             depthDesc.depthWriteEnabled = NO;
@@ -1153,6 +1177,23 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         [q setFragmentBytes:&p length:sizeof(p) atIndex:0];
                     });
                 };
+                // zFog: the background over the picture by depth slices (layer 4).
+                const bool fogComposite = fogOn && fogPipeline && fog.steps > 0;
+                auto doFog = [&]
+                {
+                    MTLRenderPassDescriptor *qd = [MTLRenderPassDescriptor renderPassDescriptor];
+                    qd.colorAttachments[0].texture = color;
+                    qd.colorAttachments[0].loadAction = MTLLoadActionLoad;
+                    qd.colorAttachments[0].storeAction = MTLStoreActionStore;
+                    id<MTLRenderCommandEncoder> q = [commands renderCommandEncoderWithDescriptor:qd];
+                    [q setRenderPipelineState:fogPipeline];
+                    [q setFragmentTexture:backgroundSmall atIndex:0];
+                    [q setFragmentTexture:depth atIndex:1];
+                    const float p[4] = {fog.start, fog.width, static_cast<float>(fog.steps), 0.0f};
+                    [q setFragmentBytes:p length:sizeof(p) atIndex:0];
+                    [q drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                    [q endEncoding];
+                };
                 // The 3D and 2D by layer, cut where an effect reads the picture so far.
                 struct Event
                 {
@@ -1162,6 +1203,8 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                 std::vector<Event> events;
                 if (dof.enabled && dof.slices > 0)
                     events.push_back({dof.order, -5});
+                if (fogComposite)
+                    events.push_back({fog.order, -6});
                 if (softShadows)
                     events.push_back({softOrder, -3});
                 if (haveRefraction)
@@ -1184,7 +1227,9 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     pass(color, false, from, ev.order, loaded);
                     loaded = true;
                     from = ev.order;
-                    if (ev.blur == -5)
+                    if (ev.blur == -6)
+                        doFog();
+                    else if (ev.blur == -5)
                         doDof();
                     else if (ev.blur == -4)
                         doRefraction();

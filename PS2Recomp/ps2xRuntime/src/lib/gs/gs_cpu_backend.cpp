@@ -1577,6 +1577,25 @@ const GSCpuBackend::DecodedTexture *GSCpuBackend::decodedTexture(const GSDrawSta
     {
         decodeRows(0, static_cast<int>(height));
     }
+    // PS2X_GS_TEXDUMP=<dir>,<tbp>: the decoded RGBA of that texture (raw, per decode).
+    static const std::pair<std::string, long> texDump = []
+    {
+        const char *e = std::getenv("PS2X_GS_TEXDUMP");
+        if (!e)
+            return std::pair<std::string, long>{"", -1};
+        const char *comma = std::strchr(e, ',');
+        return std::pair<std::string, long>{comma ? std::string(e, comma) : std::string(e), comma ? std::atol(comma + 1) : -1};
+    }();
+    if (texDump.second >= 0 && tex.tbp0 == static_cast<uint32_t>(texDump.second))
+    {
+        static int n = 0;
+        const std::string path = texDump.first + "/gs_" + std::to_string(tex.tbp0) + "_" + std::to_string(width) + "x" + std::to_string(height) + "_" + std::to_string(n++) + ".rgba";
+        if (FILE *f = std::fopen(path.c_str(), "wb"))
+        {
+            std::fwrite(entry.texels.data(), 4, entry.texels.size(), f);
+            std::fclose(f);
+        }
+    }
     return &entry;
 }
 
@@ -1941,7 +1960,7 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
                 const GSVertex &v = batch.vertices[i];
                 line << " | xy=(" << v.x << "," << v.y << ") z=" << v.z << " stq=(" << v.s << "," << v.t << "," << v.q << ") st/q=("
                      << (v.q != 0.0f ? v.s / v.q : 0.0f) << "," << (v.q != 0.0f ? v.t / v.q : 0.0f) << ") rgba=("
-                     << static_cast<int>(v.r) << "," << static_cast<int>(v.g) << "," << static_cast<int>(v.b) << "," << static_cast<int>(v.a) << ")";
+                     << static_cast<int>(v.r) << "," << static_cast<int>(v.g) << "," << static_cast<int>(v.b) << "," << static_cast<int>(v.a) << ") f=" << static_cast<int>(v.fog);
             }
             std::cerr << line.str() << std::endl;
         }

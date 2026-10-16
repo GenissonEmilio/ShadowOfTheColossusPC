@@ -371,6 +371,17 @@ namespace sotc_native
         }
         // Metal wants the whole chain down to the smallest it was given; stop
         // where a level would be under 1 pixel (kept as decoded).
+        // SOTC_TEXDUMP_DIR=<dir> (debugging): level 0 of every decoded texture, raw RGBA.
+        if (const char *dir = std::getenv("SOTC_TEXDUMP_DIR"))
+        {
+            char path[512];
+            std::snprintf(path, sizeof(path), "%s/nat_%08x_psm%02x_%ux%u.rgba", dir, header, psm, width, height);
+            if (FILE *f = std::fopen(path, "wb"))
+            {
+                std::fwrite(rgba.data(), 1, static_cast<size_t>(width) * height * 4u, f);
+                std::fclose(f);
+            }
+        }
         native_renderer::uploadTexture(key, width, height, rgba.data(), decoded);
         return key;
     }
@@ -615,10 +626,9 @@ namespace sotc_native
             std::fprintf(stderr, "[native-fog] frame %llu slices %d width %g margin %g far %g c478 %g c47c %g near %g\n", (unsigned long long)g_frame, slices, width, margin,
                          farDistance, real(0x118C478u), real(0x118C47Cu), real(0x118C484u));
         }
-        // Opt-in until it matches: measured against the emulated picture
-        // (tools/native_compare.py) it made the high views of the shrine too
-        // bright and improved nothing else.
-        static const bool zFogOn = std::getenv("SOTC_NATIVE_ZFOG") != nullptr;
+        // The native renderer redoes it as one pass over the picture by depth
+        // (native_renderer::Fog); SOTC_NATIVE_ZFOG=0 leaves it out.
+        static const bool zFogOn = !std::getenv("SOTC_NATIVE_ZFOG") || std::atoi(std::getenv("SOTC_NATIVE_ZFOG")) != 0;
         if (zFogOn && slices > 0 && width > 0.0f)
         {
             g_fog.enabled = true;
@@ -626,7 +636,10 @@ namespace sotc_native
             g_fog.start = farDistance - margin - width;
             g_fog.steps = slices;
         }
-        g_zFog(rdram, ctx, runtime);
+        // SOTC_SKIP_ZFOG=1 (debugging): the game's own zFog does not run.
+        static const bool skip = std::getenv("SOTC_SKIP_ZFOG") != nullptr;
+        if (!skip)
+            g_zFog(rdram, ctx, runtime);
     }
 
     void endFrame()
@@ -676,8 +689,8 @@ namespace sotc_native
             std::fprintf(stderr, "\n");
         }
         if (std::getenv("SOTC_NATIVE_LOG") && g_frame % 60u == 0u)
-            std::fprintf(stderr, "[native-frame] %llu bloomZ %u ran %d zfog %d start %g width %g vfog %d models %u\n", (unsigned long long)g_frame, word(0x118C094u), g_bloomRan ? 1 : 0, g_fog.enabled ? 1 : 0,
-                         g_fog.start, g_fog.width, g_fog.vertexFog ? 1 : 0, g_modelDraws);
+            std::fprintf(stderr, "[native-frame] %llu bloomZ %u ran %d zfog %d start %g width %g vfog %d base %g scale %g col %g %g %g models %u\n", (unsigned long long)g_frame, word(0x118C094u), g_bloomRan ? 1 : 0, g_fog.enabled ? 1 : 0,
+                         g_fog.start, g_fog.width, g_fog.vertexFog ? 1 : 0, g_fog.base, g_fog.scale, g_fog.colour[0], g_fog.colour[1], g_fog.colour[2], g_modelDraws);
         if (std::getenv("SOTC_NATIVE_LOG") && g_frame % 120u == 0u)
         {
             const uint32_t table = word(0x118BFCCu);
@@ -1769,7 +1782,7 @@ namespace sotc_native
                                  clip[0], clip[1], clip[3], clip[12], clip[5], clip[13], clip[14], clip[15],
                                  real(ret + 16u), real(ret + 20u), real(ret + 28u), real(ret + 64u), real(ret + 36u), real(ret + 68u), real(ret + 72u), real(ret + 76u));
             }
-            state.fogged = state.order == 2u || state.order == 3u; // drawn before zFog
+            state.fogged = false; // zFog is a pass over the picture (layer 4), as the game does it
             if (g_litPackets.count(id))
             {
                 // The instance's lights (its own 15 qwords, unpacked to VU1

@@ -95,13 +95,18 @@ namespace native_renderer
         float light[32] = {};
     };
     void draw(uint64_t mesh, const float clip[16], const DrawState &state);
-    // Distance fog of this frame: fogged draws blend towards the background
-    // image by clamp((w - start) / width, 0, 1), in `steps` steps (w: depth).
+    // SotC's zFog: before layer `order`, every pixel blends towards the
+    // background image (bgEnd's reduced copy of layer 1) by the fog amount
+    // of its depth w: (i x 128 / steps) / 128 for the last i in 0..steps
+    // with w >= start + width x i / steps (empty pixels: all fog). Fogged
+    // draws (per draw, the older approximation) use clamp((w - start) /
+    // width) in `steps` steps instead.
     struct Fog
     {
         bool enabled = false;
         float start = 0.0f, width = 1.0f;
         int steps = 0; // 0: smooth
+        uint32_t order = 4;
         // The GS's per-vertex fog on 3D draws: F = clamp(base + scale / w,
         // 0, 255); colour = mix(fogColour, colour, F / 255).
         bool vertexFog = false;

@@ -55,6 +55,28 @@ nothing; the unlit models' instance factor (VU 991) is 1. Not yet checked:
 the GS texture function and CLUT path against the native decode on one
 surface, per draw.
 
+### Findings of 2026-10-16 (paired route, tools/native_run.sh)
+
+- Native about 15 brighter in mean luminance through the route; with the
+  native bloom off (SOTC_BLOOM_SCALE=0) the gap on the plain goes to ~0
+  (from +20) and drops from ~15 to ~11 at the pillars: most of it is the
+  bloom (see below). The shrine cutscenes keep +17 with the bloom off: the
+  bossDeathEffect composite (the section above).
+- Ruled out by measurement: textures (the GS's decoded texture and the
+  native one are byte-identical, PS2X_GS_TEXDUMP / SOTC_TEXDUMP_DIR),
+  vertex colours (the same VIF data on both paths), vertex fog (GS F = 255
+  near the camera, native base + scale / w clamps to 255; FOGCOL is light
+  here), coplanar layers (depth test now less-or-equal like the GS's
+  GEQUAL: no change), zFog (the game's zFog skipped on both sides,
+  SOTC_SKIP_ZFOG=1: no change).
+- zFog is now native by the game's own algorithm (a pass at layer 4 over
+  the picture: slice i at depth far - margin - width + width x i / N,
+  alpha i x 128 / N, the background copy blended by it), on by default.
+- PS2X_PROBE on the software GS (PS2X_GS_GPU=0): at a floor pixel the
+  bloom sprites arrive with colour (0, 0, 0, 0): the emulated bloom adds
+  nothing there, the native one does. Which one the PS2 does needs a real
+  reference (PCSX2 with a BIOS, or the console).
+
 ## Native vs emulated: bloom over the sky and windows (reference doubtful)
 
 On the new route (tools/native_run.sh) the native sky outdoors and the

@@ -194,6 +194,17 @@ void main()
         oColor = vec4(0.0, 0.0, 0.0, clamp(texture(uSrc, vUV).r * uA.x, 0.0, 1.0));
     else if (uMode == 10) // bloom composite: rgb x uB.rgb x uB.a
         oColor = vec4(texture(uSrc, vUV).rgb * uB.rgb * uB.a, 1.0);
+    else if (uMode == 12) // zFog: background (uSrc) by the depth's slice; uA = start, width, steps
+    {
+        float d = texelFetch(uDepth, ivec2(vUV * vec2(textureSize(uDepth, 0))), 0).r;
+        float w = d >= 1.0 ? 1e30 : 0.1 / (1.0 - d);
+        int steps = int(uA.z);
+        float a = 0.0;
+        for (int i = 0; i <= steps; ++i)
+            if (w >= uA.x + uA.y * float(i) / float(steps))
+                a = float((i * 128) / steps) / 128.0;
+        oColor = vec4(texture(uSrc, vUV).rgb, a);
+    }
     else // 11: depth of field: uA = zA, zB, focusZ, slices
     {
         float d = texelFetch(uDepth, ivec2(vUV * vec2(textureSize(uDepth, 0))), 0).r;
@@ -827,7 +838,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     }
                     else
                     {
-                        glDepthFunc(GL_LESS);
+                        glDepthFunc(GL_LEQUAL); // the GS's GEQUAL: a surface drawn again in place passes
                         glDepthMask(d.state.blend == native_renderer::Blend::Additive && !d.state.writeDepth ? GL_FALSE : GL_TRUE);
                     }
                 }
@@ -986,6 +997,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             copy(refraction, refractionHalf);
             copy(refractionHalf, refraction);
         };
+        auto doFog = [&]
+        {
+            const float a[4] = {fog.start, fog.width, static_cast<float>(fog.steps), 0};
+            bindTexture(0, backgroundSmall.texture);
+            bindTexture(2, color.depth);
+            quad(colorPlain, 12, QuadBlend::Over, a);
+        };
         auto doDof = [&]
         {
             snapshotColor();
@@ -1008,6 +1026,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         std::vector<Event> events;
         if (dofOn)
             events.push_back({dof.order, -5});
+#if !defined(PS2X_NATIVE_VITA)
+        if (fogOn && fog.steps > 0)
+            events.push_back({fog.order, -6}); // zFog reads depth: not on the Vita yet
+#endif
         if (softShadows)
             events.push_back({softOrder, -3});
         if (haveRefraction)
@@ -1030,7 +1052,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             pass(color, false, from, ev.order, loaded);
             loaded = true;
             from = ev.order;
-            if (ev.blur == -5)
+            if (ev.blur == -6)
+                doFog();
+            else if (ev.blur == -5)
                 doDof();
             else if (ev.blur == -4)
                 doRefraction();
