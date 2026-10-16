@@ -3419,6 +3419,7 @@ PresentationFrame GSCpuBackend::Present(const GSPresentationRequest &request)
                 {
                     const uint32_t sx = x * nw / width;
                     std::memcpy(&frame.pixels[(static_cast<size_t>(y) * kHostFrameWidth + x) * 4u], &native[(static_cast<size_t>(sy) * nw + sx) * 4u], 4);
+                    frame.pixels[(static_cast<size_t>(y) * kHostFrameWidth + x) * 4u + 3u] = 255u; // colour only, as the PS2's CRTC shows it
                 }
             }
             return frame;
@@ -3483,6 +3484,7 @@ PresentationFrame GSCpuBackend::Present(const GSPresentationRequest &request)
                         break;
                     const uint32_t sx = x * width / frame.width;
                     std::memcpy(&frame.pixels[dst], &native[(static_cast<size_t>(sy) * width + sx) * 4u], 4);
+                    frame.pixels[dst + 3u] = 255u; // the display shows colour only (the PS2's CRTC ignores alpha)
                 }
             }
         }
