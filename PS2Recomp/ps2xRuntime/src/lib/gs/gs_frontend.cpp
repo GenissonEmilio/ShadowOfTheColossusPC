@@ -816,9 +816,8 @@ void GS::submitVuBatch(uint64_t tagLo, std::vector<GSVuVertex> vertices, const f
 
 // PS2X_GS_NODRAW (default 1 with SOTC_NATIVE=1, 0 turns it off): while the
 // native renderer's picture is the one shown, the
-// GS does not rasterize the VU1 batches (the 3D, which the native renderer
-// draws). The direct draws (sprites, screen passes) still run: the game
-// stalls on the loading screen without them.
+// GS rasterizes nothing (the VU1 batches and the direct draws): the native
+// renderer draws the picture. Registers, transfers and signals go on.
 bool GS::skipRaster()
 {
     // On by default when the native picture is the one shown (SOTC_NATIVE=1).
@@ -1653,6 +1652,9 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
             command.trxpos = m_trxpos;
             command.trxreg = m_trxreg;
             command.direction = m_trxdir;
+            if (m_trxdir == 1u && std::getenv("PS2X_LOG_READBACK")) // debugging: local -> host
+                std::fprintf(stderr, "[readback] sbp %u sbw %u spsm %u %ux%u at %u,%u\n", m_bitbltbuf.sbp, m_bitbltbuf.sbw, static_cast<unsigned>(m_bitbltbuf.spsm),
+                             m_trxreg.rrw, m_trxreg.rrh, m_trxpos.ssax, m_trxpos.ssay);
             m_backend->BeginTransfer(command);
         }
         recordTransferDebugEventUnlocked();
@@ -1848,7 +1850,8 @@ void GS::vertexKick(bool drawing)
     {
         GSPrimitiveBatch batch = buildDrawBatch(needed);
         updatePreferredDisplaySourceForDraw(batch);
-        m_backend->Submit(batch);
+        if (!skipRaster())
+            m_backend->Submit(batch);
         recordDrawDebugEventUnlocked(needed);
     }
 

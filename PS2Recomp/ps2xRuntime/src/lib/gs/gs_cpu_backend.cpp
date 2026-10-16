@@ -3396,7 +3396,8 @@ PresentationFrame GSCpuBackend::Present(const GSPresentationRequest &request)
         }
         const std::array<uint64_t, 6> key{request.pmode, request.dispfb1, request.display1,
                                           request.dispfb2, request.display2, newest};
-        if (key == m_lastPresentKey)
+        // The native picture changes without the GS drawing (it may draw nothing).
+        if (key == m_lastPresentKey && !native_renderer::shown())
             return {};
         m_lastPresentKey = key;
     }
