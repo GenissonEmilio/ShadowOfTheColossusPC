@@ -51,6 +51,9 @@ namespace native_renderer
     struct DrawState
     {
         uint64_t texture = 0; // 0: none
+        // The GS's CLAMP (WMS / WMT): bit 0 clamps u to the texture's edge, bit 1
+        // v; otherwise the texture repeats.
+        uint8_t clamp = 0;
         Blend blend = Blend::Normal;
         uint32_t order = 0;   // draws go in this order (stable), like the game's display list layers
         // Lit draws (the VU1's lit microcode): d = max(0, L x (n, 1)), with

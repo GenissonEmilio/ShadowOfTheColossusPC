@@ -51,6 +51,7 @@ struct FogParams
     float lodK, lodScale, maxLod; // GS mip selection: level = log2(w) x 2^L + K, up to MXL (-1: level 0 only)
     float3 colour;
     float4 debug; // w > 0: flat debug colour
+    int clamp;    // the GS's CLAMP: bit 0 u, bit 1 v
 };
 
 struct Light
@@ -114,7 +115,15 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
         return float4(saturate(r * fog.debug.rgb), -fog.debug.w);
     }
     const float lod = fog.maxLod > 0.0 ? clamp(log2(max(in.depth, 1e-3)) * fog.lodScale + fog.lodK, 0.0, fog.maxLod) : 0.0;
-    float4 t = textured != 0 ? tex.sample(repeatLinear, in.uv, level(lod)) : float4(1.0);
+    constexpr sampler clampU(address::clamp_to_edge, address::repeat, address::repeat, filter::linear, mip_filter::linear);
+    constexpr sampler clampV(address::repeat, address::clamp_to_edge, address::repeat, filter::linear, mip_filter::linear);
+    constexpr sampler clampUV(address::clamp_to_edge, filter::linear, mip_filter::linear);
+    float4 t = float4(1.0);
+    if (textured != 0)
+        t = fog.clamp == 3 ? tex.sample(clampUV, in.uv, level(lod))
+            : fog.clamp == 2 ? tex.sample(clampV, in.uv, level(lod))
+            : fog.clamp == 1 ? tex.sample(clampU, in.uv, level(lod))
+                             : tex.sample(repeatLinear, in.uv, level(lod));
     float alpha = saturate(t.a * (textured != 0 ? 2.0 : 1.0) * in.color.a); // texture alpha 0x80 = opaque
     if (alpha < 0.02)
         discard_fragment();
@@ -834,13 +843,16 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                             float lodK, lodScale, maxLod;
                             float colour[4];
                             float debug[4];
+                            int clamp;
+                            int pad[3];
                         } fp = {fog.start, fog.width, (showFog && !d.state.screen) ? -1.0f : static_cast<float>(fog.steps), (!backgroundOnly && fogOn && d.state.fogged) ? 1 : 0,
                                 {static_cast<float>(w), static_cast<float>(h)},
                                 (fog.vertexFog && !d.state.screen && (!d.state.background || bgFog) && !(d.state.overlay && noOverlayFog)) ? 1 : 0, fog.base, fog.scale,
                                 d.state.lodK, d.state.lodScale, d.state.maxLod,
                                 {fog.colour[0], fog.colour[1], fog.colour[2], 0},
                                 {static_cast<float>(d.state.debugColour & 0xFFu) / 255.0f, static_cast<float>((d.state.debugColour >> 8) & 0xFFu) / 255.0f,
-                                 static_cast<float>((d.state.debugColour >> 16) & 0xFFu) / 255.0f, d.state.debugColour ? 1.0f : 0.0f}};
+                                 static_cast<float>((d.state.debugColour >> 16) & 0xFFu) / 255.0f, d.state.debugColour ? 1.0f : 0.0f},
+                                d.state.clamp, {0, 0, 0}};
                         if (d.state.reflectionSample || d.state.refractionSample)
                         {
                             for (int k = 0; k < 3; ++k)

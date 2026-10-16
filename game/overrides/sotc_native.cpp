@@ -1,3 +1,4 @@
+#include <tuple>
 // Shadow of the Colossus: models drawn by the native renderer
 // (runtime/native_renderer.h) straight from the game's own model data, read
 // at modelDisp (docs/native_renderer_map.md). SOTC_NATIVE=1 shows that
@@ -478,8 +479,36 @@ namespace sotc_native
     // ALPHA_1 (0x42, first pass) or ALPHA_2 (0x43, the second texture's
     // pass) in the surface's A+D packet (+0x60): 0x44 blends, 0x48 adds,
     // 0x42 subtracts (Cd - Cs x As).
+    // CLAMP_1 (0x08, first pass) or CLAMP_2 (0x09, the second texture's) in
+    // the surface's A+D packet: WMS / WMT 1 (clamp) or 2 (region clamp)
+    // keep the coordinate inside the texture; repeating there pulls the far
+    // edge into the border under bilinear filtering (light seams).
+    uint8_t surfaceClamp(uint32_t s, uint32_t reg = 0x08u)
+    {
+        for (uint32_t q = s + 0x60u; q < s + 0xC0u; q += 16u)
+            if (word(q + 8u) == reg)
+            {
+                const uint32_t v = word(q), wms = v & 3u, wmt = (v >> 2) & 3u;
+                return static_cast<uint8_t>(((wms == 1u || wms == 2u) ? 1u : 0u) | ((wmt == 1u || wmt == 2u) ? 2u : 0u));
+            }
+        return 0;
+    }
+
     native_renderer::Blend surfaceBlend(uint32_t s, uint32_t reg = 0x42u)
     {
+        // SOTC_LOG_SURFACE_REGS=1: the distinct GS registers of the surfaces' A+D packets.
+        static const bool logRegs = std::getenv("SOTC_LOG_SURFACE_REGS") != nullptr;
+        if (logRegs && reg == 0x42u)
+        {
+            static std::set<std::pair<uint32_t, uint64_t>> seen;
+            for (uint32_t q = s + 0x60u; q < s + 0xC0u; q += 16u)
+            {
+                const uint32_t r = word(q + 8u);
+                const uint64_t v = (static_cast<uint64_t>(word(q + 4u)) << 32) | word(q);
+                if (r < 0x80u && seen.insert({r, v}).second && seen.size() < 400)
+                    std::fprintf(stderr, "[surface] reg %02x = %016llx\n", r, static_cast<unsigned long long>(v));
+            }
+        }
         for (uint32_t q = s + 0x60u; q < s + 0xC0u; q += 16u)
             if (word(q + 8u) == reg)
                 switch (word(q) & 0xFFu)
@@ -802,6 +831,16 @@ namespace sotc_native
         state.screenCopy = a.batchHeader == kScreenCopy && (a.batchPrim & 0x10u);
         state.texture = (a.batchPrim & 0x10u) && !state.screenCopy ? texture(a.batchHeader) : 0;
         const uint32_t mode = static_cast<uint32_t>(a.batchAlpha & 0xFFu);
+        // SOTC_LOG_2D_ALPHA=1: the distinct ALPHA / PRIM pairs of the 2D draws.
+        static const bool logAlpha = std::getenv("SOTC_LOG_2D_ALPHA") != nullptr;
+        if (logAlpha)
+        {
+            static std::set<std::tuple<uint64_t, uint64_t, uint32_t>> seen;
+            if (seen.insert({a.batchAlpha, a.batchPrim & 0x7F7u, a.batchLayer}).second && seen.size() < 200)
+                std::fprintf(stderr, "[2d-alpha] alpha %016llx prim %03llx layer %u header %08x verts %zu rgba %02x%02x%02x%02x\n",
+                             static_cast<unsigned long long>(a.batchAlpha), static_cast<unsigned long long>(a.batchPrim & 0x7F7u), a.batchLayer, a.batchHeader,
+                             a.batch.size(), a.batch[0].r, a.batch[0].g, a.batch[0].b, a.batch[0].a);
+        }
         state.blend = !(a.batchPrim & 0x40u) ? native_renderer::Blend::Opaque
                       : (mode == 0x48u ? native_renderer::Blend::Additive : native_renderer::Blend::Normal);
         state.order = a.batchLayer;
@@ -1686,6 +1725,7 @@ namespace sotc_native
             native_renderer::DrawState state;
             state.texture = surfaceTexture(header, surface);
             state.blend = surfaceBlend(s);
+            state.clamp = surfaceClamp(s);
             state.order = surfaceLayer(header, s, fading);
             state.opacity = opacity;
             static const bool noMips = std::getenv("SOTC_NATIVE_NOMIPS") != nullptr;
@@ -1762,6 +1802,7 @@ namespace sotc_native
                 if (!noMips)
                     surfaceLod(header, surface, second, 0x3Cu);
                 second.blend = surfaceBlend(s, 0x43u);
+                second.clamp = surfaceClamp(s, 0x09u);
                 second.writeDepth = false;
                 second.overlay = true;
                 native_renderer::draw(id ^ (1ull << 61), transform, second);
