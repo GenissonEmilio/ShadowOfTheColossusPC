@@ -95,7 +95,7 @@
   "feature": "Mip levels",
   "status": "native",
   "since": "2026-10-15",
-  "commit": "",
+  "commit": "2744664",
   "note": "every level decoded; the level picked as the GS does from TEX1 (log2(w) x 2^L + K, NTO2 +0x78/+0x90/+0x94), SOTC_NATIVE_NOMIPS"
  },
  {
