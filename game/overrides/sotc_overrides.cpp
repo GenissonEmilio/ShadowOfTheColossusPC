@@ -1,3 +1,4 @@
+#include <cstring>
 // Shadow of the Colossus (SCUS-97472) runtime overrides.
 #include <cstdio>
 #include <utility>
@@ -497,8 +498,43 @@ namespace
         g_gpReleaseFrame(rdram, ctx, runtime);
     }
 
+    // SOTC_LOG_SG2=1: which commands the EE's sound engine sends its IOP
+    // driver: Sg2RemoteSend (0x1d2010) puts cmd, a, b, c in a ring (head
+    // 0x287500, tail 0x287504, 512 x 16 bytes at 0x287540) that the tick
+    // (Sg2RemoteTickProc 0x1d21e8, called through a pointer) sends by RPC
+    // 0x11223344; counted here before it goes.
+    PS2Runtime::RecompiledFunction g_sg2RemoteTick = nullptr;
+    void sg2RemoteTickHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static std::map<uint32_t, uint64_t> counts;
+        static std::map<uint32_t, std::array<uint32_t, 3>> example;
+        static uint64_t total = 0, ticks = 0;
+        auto w = [&](uint32_t a) { uint32_t v; std::memcpy(&v, rdram + a, 4); return v; };
+        const uint32_t head = w(0x287500u), tail = w(0x287504u);
+        for (uint32_t i = tail; i != head; i = (i + 1u) & 0x1FFu)
+        {
+            const uint32_t a = 0x287540u + i * 16u;
+            ++counts[w(a)];
+            example[w(a)] = {w(a + 4u), w(a + 8u), w(a + 12u)};
+            ++total;
+        }
+        if (++ticks % 1500u == 0u)
+        {
+            std::fprintf(stderr, "[sg2] ticks %llu commands %llu:", (unsigned long long)ticks, (unsigned long long)total);
+            for (const auto &[c, n] : counts)
+                std::fprintf(stderr, " %x:%llu(%x,%x,%x)", c, (unsigned long long)n, example[c][0], example[c][1], example[c][2]);
+            std::fprintf(stderr, "\n");
+        }
+        g_sg2RemoteTick(rdram, ctx, runtime);
+    }
+
     void applySotcOverrides(PS2Runtime &runtime)
     {
+        if (std::getenv("SOTC_LOG_SG2") && runtime.hasFunction(0x001D21E8u))
+        {
+            g_sg2RemoteTick = runtime.lookupFunction(0x001D21E8u);
+            runtime.registerFunction(0x001D21E8u, sg2RemoteTickHook);
+        }
         if (std::getenv("SOTC_FRAME_INTERVAL") && runtime.hasFunction(kGpReleaseFrame))
         {
             g_gpReleaseFrame = runtime.lookupFunction(kGpReleaseFrame);
