@@ -372,10 +372,10 @@
   "map": "hardware",
   "area": "Sound",
   "feature": "SPU2",
-  "status": "emulated",
-  "since": "",
-  "commit": "",
-  "note": "the mixer (ADPCM voices, ADSR, reverb) is the ps2xIOP SPU2 model; with SOTC_NATIVE=1 the native sound driver writes its registers directly, no IOP code in between"
+  "status": "native",
+  "since": "2026-10-16",
+  "commit": "4d6adf4",
+  "note": "with SOTC_NATIVE=1 a host mixer (SoundMixer) plays the voices, envelopes, PS2 reverb and streamed PCM; the emulated SPU2 stays idle. Same sound as the emulated SPU2 on the route; PS2X_AUDIO_PULL=1 mixes in the host audio thread (for the Vita)"
  },
  {
   "map": "hardware",
