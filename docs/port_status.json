@@ -345,10 +345,10 @@
   "map": "hardware",
   "area": "Graphics",
   "feature": "VIF1 and DMA",
-  "status": "emulated",
-  "since": "",
+  "status": "partial",
+  "since": "2026-10-16",
   "commit": "",
-  "note": "still runs under the native renderer"
+  "note": "with SOTC_NATIVE=1 the VIF1 steps over the UNPACK data (no VU1 to read it) and keeps its registers; the DMA chains are still walked and DIRECT packets still go to the GS registers"
  },
  {
   "map": "hardware",

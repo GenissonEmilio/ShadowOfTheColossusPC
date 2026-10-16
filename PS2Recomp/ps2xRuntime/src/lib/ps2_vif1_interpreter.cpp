@@ -628,6 +628,12 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         else if ((opcode & 0x60) == 0x60)
         {
             ps2_stats::vifUnpack.fetch_add(1, std::memory_order_relaxed);
+            if (skipVu1)
+            {
+                // Nothing runs on VU1 to read it: the data is only stepped over.
+                pos += unpackDataBytes(opcode, num, vif1_regs.cycle);
+                continue;
+            }
             uint8_t vn = (opcode >> 2) & 0x3;
             uint8_t vl = opcode & 0x3;
             const bool maskEnable = (opcode & 0x10u) != 0u;

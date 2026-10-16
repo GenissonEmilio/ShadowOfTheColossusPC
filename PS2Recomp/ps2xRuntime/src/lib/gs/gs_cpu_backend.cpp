@@ -3372,6 +3372,39 @@ bool GSCpuBackend::CopyFrameToHostRgba(const GSFrameReg &frame,
 
 PresentationFrame GSCpuBackend::Present(const GSPresentationRequest &request)
 {
+    // The native renderer's picture is the one shown: no need to read the
+    // display buffer out of local memory, only its size and place.
+    if (native_renderer::shown())
+    {
+        const GSPmodeState pmode = decodePmode(request.pmode);
+        const bool first = pmode.enableCrt1;
+        const uint64_t dispfb = first ? request.dispfb1 : request.dispfb2, display = first ? request.display1 : request.display2;
+        uint32_t width = 0u, height = 0u;
+        decodeDisplaySize(display, width, height);
+        thread_local std::vector<uint8_t> native;
+        uint32_t nw = 0, nh = 0;
+        if ((pmode.enableCrt1 || pmode.enableCrt2) && width && height && width <= kHostFrameWidth && height <= kHostFrameHeight &&
+            native_renderer::latestFrame(native, nw, nh) && nw && nh)
+        {
+            PresentationFrame frame;
+            frame.width = width;
+            frame.height = height;
+            frame.displayFbp = decodeDisplayFrame(dispfb).fbp;
+            frame.sourceFbp = frame.displayFbp;
+            frame.vsyncTick = request.vsyncTick;
+            frame.pixels.assign(static_cast<size_t>(kHostFrameWidth) * kHostFrameHeight * 4u, 0u);
+            for (uint32_t y = 0; y < height; ++y)
+            {
+                const uint32_t sy = y * nh / height;
+                for (uint32_t x = 0; x < width; ++x)
+                {
+                    const uint32_t sx = x * nw / width;
+                    std::memcpy(&frame.pixels[(static_cast<size_t>(y) * kHostFrameWidth + x) * 4u], &native[(static_cast<size_t>(sy) * nw + sx) * 4u], 4);
+                }
+            }
+            return frame;
+        }
+    }
     if (request.skipIfUnchanged)
     {
         // The display memory's last write plus the display setup identify
