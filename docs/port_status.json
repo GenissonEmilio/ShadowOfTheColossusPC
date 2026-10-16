@@ -356,7 +356,7 @@
   "feature": "GS rasteriser",
   "status": "partial",
   "since": "2026-10-16",
-  "commit": "",
+  "commit": "f2d103d",
   "note": "with the native picture shown, the VU1 batches (all the 3D) are no longer rasterized; the direct draws (sprites, screen passes) still are: the game stalls on the loading screen without them"
  },
  {
