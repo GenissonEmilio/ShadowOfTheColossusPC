@@ -1707,7 +1707,7 @@ namespace sotc_native
             // Debugging: who drew what. SOTC_NATIVE_IDCOLOR=1 every model, =<n> > 1
             // only surfaces in layers >= n (the rest drawn as usual).
             static const int idFrom = std::getenv("SOTC_NATIVE_IDCOLOR") ? std::max(1, std::atoi(std::getenv("SOTC_NATIVE_IDCOLOR"))) : 0;
-            if (idFrom && (idFrom == 1 || static_cast<int>(state.order) >= idFrom))
+            if (idFrom && (idFrom == 1 || static_cast<int>(state.order) >= idFrom) && state.blend != native_renderer::Blend::Additive) // glows keep their look
             {
                 uint32_t h = (header ^ (surface * 0x9E37u)) * 2654435761u;
                 h ^= h >> 13;

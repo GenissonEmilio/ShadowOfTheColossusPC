@@ -120,6 +120,7 @@ public:
     void enableGifWorker(std::function<void()> added, std::function<void()> done);
     // Runs fn after the packets queued so far (inline without the worker).
     void runInGifOrder(std::function<void()> fn);
+    static bool skipRaster();
 
     // VU1 batches on the GPU (docs/vu1_gpu_path.md). submitVuBatch draws one
     // in GIF order, as the kick of a packet with this GIF tag would: PRIM

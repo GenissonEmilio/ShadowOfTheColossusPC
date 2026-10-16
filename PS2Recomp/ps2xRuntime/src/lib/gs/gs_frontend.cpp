@@ -1,4 +1,5 @@
 #include "runtime/gs/gs_direct_frame.h"
+#include "runtime/native_renderer.h"
 #include <chrono>
 #include <set>
 #include <cstdlib>
@@ -809,7 +810,21 @@ void GS::submitVuBatch(uint64_t tagLo, std::vector<GSVuVertex> vertices, const f
                           writeRegisterUnlocked(GS_REG_PRIM, (tagLo >> 47) & 0x7FFu);
                       m_vtxCount = 0;
                       batch->state = buildDrawBatch(0).state;
-                      m_backend->SubmitVuBatch(*batch); });
+                      if (!skipRaster())
+                          m_backend->SubmitVuBatch(*batch); });
+}
+
+// PS2X_GS_NODRAW (default 1 with SOTC_NATIVE=1, 0 turns it off): while the
+// native renderer's picture is the one shown, the
+// GS does not rasterize the VU1 batches (the 3D, which the native renderer
+// draws). The direct draws (sprites, screen passes) still run: the game
+// stalls on the loading screen without them.
+bool GS::skipRaster()
+{
+    // On by default when the native picture is the one shown (SOTC_NATIVE=1).
+    static const int noDraw = std::getenv("PS2X_GS_NODRAW") ? std::atoi(std::getenv("PS2X_GS_NODRAW"))
+                                                            : (std::getenv("SOTC_NATIVE") && std::atoi(std::getenv("SOTC_NATIVE")) == 1 ? 1 : 0);
+    return noDraw != 0 && native_renderer::shown();
 }
 
 void GS::runInGifOrder(std::function<void()> fn)
