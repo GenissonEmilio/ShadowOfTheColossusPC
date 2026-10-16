@@ -562,10 +562,11 @@ namespace sotc_native
             b.maskColor[i] = static_cast<float>(word(0x118C0D0u + i * 4u) & 0xFFu) / 255.0f;
         for (int i = 0; i < 3; ++i)
             b.color[i] = static_cast<float>(word(0x118C140u + i * 4u) & 0xFFu) / 128.0f;
-        // The add is Cs x As + Cd, As the composite colour's alpha. The GS
-        // chain feeds its result back frame after frame; the strength here
-        // is matched by eye against it (SOTC_BLOOM_SCALE overrides).
-        static const float scale = std::getenv("SOTC_BLOOM_SCALE") ? static_cast<float>(std::atof(std::getenv("SOTC_BLOOM_SCALE"))) : 0.4f;
+        // The add is Cs x As + Cd, As the composite colour's alpha (the GS
+        // chain: mask in 0x118c0d0, a lerp blur of 12 shifted copies by alpha
+        // 0x40 / 0x20 / 0x10, the temporal lerp, then this add at full
+        // strength; SOTC_BLOOM_SCALE overrides).
+        static const float scale = std::getenv("SOTC_BLOOM_SCALE") ? static_cast<float>(std::atof(std::getenv("SOTC_BLOOM_SCALE"))) : 1.0f;
         b.color[3] = static_cast<float>(word(0x118C14Cu) & 0xFFu) / 128.0f * scale;
         const uint32_t temporal = word(0x118C12Cu) & 0xFFu;
         b.temporal = temporal ? static_cast<float>(temporal) / 128.0f : 1.0f;
@@ -639,7 +640,14 @@ namespace sotc_native
                          static_cast<int32_t>(word(0x11862D4u)), static_cast<int32_t>(word(0x11862D8u)), static_cast<float>(static_cast<int32_t>(word(0x11862DCu))),
                          word(0x11862E0u), word(0x11862E4u), word(0x11862E8u), word(0x11862ECu));
         if (std::getenv("SOTC_NATIVE_LOG") && g_frame % 60u == 0u)
-            std::fprintf(stderr, "[native-frame] %llu zfog %d start %g width %g vfog %d models %u\n", (unsigned long long)g_frame, g_fog.enabled ? 1 : 0,
+        {
+            std::fprintf(stderr, "[bloomcol] %llu:", (unsigned long long)g_frame);
+            for (uint32_t a = 0x118C0C0u; a < 0x118C150u; a += 4u)
+                std::fprintf(stderr, " %x", word(a));
+            std::fprintf(stderr, "\n");
+        }
+        if (std::getenv("SOTC_NATIVE_LOG") && g_frame % 60u == 0u)
+            std::fprintf(stderr, "[native-frame] %llu bloomZ %u ran %d zfog %d start %g width %g vfog %d models %u\n", (unsigned long long)g_frame, word(0x118C094u), g_bloomRan ? 1 : 0, g_fog.enabled ? 1 : 0,
                          g_fog.start, g_fog.width, g_fog.vertexFog ? 1 : 0, g_modelDraws);
         if (std::getenv("SOTC_NATIVE_LOG") && g_frame % 120u == 0u)
         {

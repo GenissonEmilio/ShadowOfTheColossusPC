@@ -892,8 +892,8 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         [e setFragmentTexture:depth atIndex:0];
                         [e setFragmentBytes:&bp length:sizeof(bp) atIndex:0];
                     });
-                    // The GS chain reduces the mask in stages before blurring: a wide glow.
-                    static const int rounds = std::getenv("SOTC_BLOOM_ROUNDS") ? std::atoi(std::getenv("SOTC_BLOOM_ROUNDS")) : 3;
+                    // The GS chain reduces the mask in stages, then blurs it once.
+                    static const int rounds = std::getenv("SOTC_BLOOM_ROUNDS") ? std::atoi(std::getenv("SOTC_BLOOM_ROUNDS")) : 1; // one round of +-3 texels, as the GS chain
                     static const float spreadGrow = std::getenv("SOTC_BLOOM_SPREAD") ? static_cast<float>(std::atof(std::getenv("SOTC_BLOOM_SPREAD"))) : 1.0f;
                     for (int i = 0; i < rounds; ++i)
                     {

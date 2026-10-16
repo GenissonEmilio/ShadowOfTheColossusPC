@@ -285,8 +285,11 @@ a second round when 0x118c12c != 0, lerped with the last frame's
 targets at 0x118c09c..b0 by 1/12 per frame. GS Z of a view depth w:
 camera context + 0x4a0, zA + zB / w (242.5 + 834987 / w). The native
 renderer redoes it with its own passes (quarter resolution, separable
-blur, history texture); its strength is matched by eye (the GS chain feeds
-back), SOTC_BLOOM_SCALE.
+blur, history texture). The 12 shifted copies blend by ALPHA 0x44 (a lerp,
+alpha 0x40 / 0x20 / 0x10 at 0x118c0fc / 10c / 11c), so the blur is
+normalized; the final add is full strength (colour 0x118c140, alpha
+0x118c14c). Natively: one blur round, scale 1 (SOTC_BLOOM_SCALE,
+SOTC_BLOOM_ROUNDS).
 
 Model instance opacity (modelDisp, to the microcode at packet + 0xdc):
 1 - instance[0x91] (+0x244), times 1 - instance[0x92] (+0x248) when the

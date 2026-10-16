@@ -210,10 +210,10 @@
   "map": "renderer",
   "area": "Effects",
   "feature": "Bloom",
-  "status": "partial",
-  "since": "2026-10-14",
-  "commit": "1dc09bf",
-  "note": "own passes; strength 0.4 measured against the emulated picture"
+  "status": "native",
+  "since": "2026-10-16",
+  "commit": "",
+  "note": "the game's own strength (no scale by eye) and one blur round, as the GS chain; mean diff 15.0 vs 14.7 with the old tuning, altar offset 14.9 vs 18.6"
  },
  {
   "map": "renderer",
