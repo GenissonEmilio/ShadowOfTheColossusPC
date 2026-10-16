@@ -3127,6 +3127,10 @@ void PS2Runtime::run()
             static const uint64_t everyFrames = std::getenv("PS2X_SNAPSHOT_FRAMES") ? std::strtoull(std::getenv("PS2X_SNAPSHOT_FRAMES"), nullptr, 10) : 0u;
             static uint64_t nextFrameShot = everyFrames;
             const uint64_t gameFrame = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
+            // PS2X_EXIT_AT_FRAME=<n>: leave once game frame n is shown (scripted
+            // runs end when their route does, not after a fixed time).
+            static const uint64_t exitAt = std::getenv("PS2X_EXIT_AT_FRAME") ? std::strtoull(std::getenv("PS2X_EXIT_AT_FRAME"), nullptr, 10) : 0u;
+            const bool exitNow = exitAt && gameFrame >= exitAt;
             bool frameShot = false;
             if (everyFrames && gameFrame >= nextFrameShot)
             {
@@ -3161,6 +3165,12 @@ void PS2Runtime::run()
                     std::fclose(index);
                 }
                 ++snapshotIndex;
+            }
+            if (exitNow)
+            {
+                std::fprintf(stderr, "[exit] game frame %llu reached\n", static_cast<unsigned long long>(gameFrame));
+                std::fflush(nullptr);
+                std::_Exit(0);
             }
         }
 

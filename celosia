@@ -239,7 +239,12 @@ cmd_autotest() {
         PS2X_VU1_DUMP_MISSING=$VU1_DUMPS PS2X_MEMCARD_DIR=${PS2X_MEMCARD_DIR:-$BUILD/autotest-memcards} \
         exec "$RUNNER" "$DISC/$BOOT") >"$LOGS/autotest.log" 2>&1 &
     pid=$!
-    sleep "$secs"
+    # Up to $secs: a run with PS2X_EXIT_AT_FRAME ends on its own sooner.
+    local waited=0
+    while [ "$waited" -lt "$secs" ] && kill -0 "$pid" 2>/dev/null; do
+        sleep 1
+        waited=$((waited + 1))
+    done
     kill "$pid" 2>/dev/null || true
     sleep 1
     kill -9 "$pid" 2>/dev/null || true
