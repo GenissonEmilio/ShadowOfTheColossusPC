@@ -347,7 +347,7 @@
   "feature": "VIF1 and DMA",
   "status": "partial",
   "since": "2026-10-16",
-  "commit": "",
+  "commit": "672646e",
   "note": "with SOTC_NATIVE=1 the VIF1 steps over the UNPACK data (no VU1 to read it) and keeps its registers; the DMA chains are still walked and DIRECT packets still go to the GS registers"
  },
  {
