@@ -255,10 +255,10 @@
   "map": "renderer",
   "area": "Effects",
   "feature": "Refraction",
-  "status": "emulated",
-  "since": "",
+  "status": "native",
+  "since": "2026-10-16",
   "commit": "",
-  "note": "refractionBegin, layer 19: nothing draws there on the route (no model surface maps to 19)"
+  "note": "underwater waves: refractionEnd's grid of strips (0x109c610) through the 2D path on the screen copy at layer 19 (SOTC_FORCE_UNDERWATER=1 shows it anywhere)"
  },
  {
   "map": "renderer",

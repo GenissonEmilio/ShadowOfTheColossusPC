@@ -762,6 +762,7 @@ namespace sotc_native
     void syncFrame(uint8_t *rdram)
     {
         g_ram = rdram;
+
         const uint64_t frame = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
         if (frame != g_frame)
         {
@@ -1063,6 +1064,19 @@ namespace sotc_native
         gsRegCensus(ra);
         if (ra >= 0x0109E2A0u && ra < 0x0109FB08u)
             g_bloomRan = true;
+        if (ra >= 0x0109C610u && ra < 0x0109CD28u)
+        {
+            // refractionEnd under water (0x109c610): a grid of strips over the
+            // screen at layer 19, its ST waving over refractionBegin's 256 x 256
+            // copy of the picture so far.
+            syncFrame(rdram);
+            const uint32_t requested = g_requested;
+            g_requested = kScreenCopy;
+            feed2D(GPR_U32(ctx, 4) & 0xFFu, GPR_U64(ctx, 5));
+            g_requested = requested;
+            g_gsReg(rdram, ctx, runtime);
+            return;
+        }
         for (const Range &r : k2D)
         {
             if (ra < r.start || ra >= r.end)
@@ -1096,6 +1110,14 @@ namespace sotc_native
                 std::fprintf(stderr, "[bossfx] frame %u flags %x radius %g rounds %d tint %08x %08x %08x sharp %08x blur %08x clear %08x %08x %08x %08x fade %08x %08x %08x %08x\n", g_frame,
                              word(0x01186290u), real(0x01186298u), static_cast<int>(word(0x011862A0u)), word(0x011862B0u), word(0x011862B4u), word(0x011862B8u), word(0x011862C4u), word(0x011862C0u),
                              word(0x01186280u), word(0x01186284u), word(0x01186288u), word(0x0118628Cu), word(0x01186260u), word(0x01186264u), word(0x01186268u), word(0x0118626Cu));
+        }
+        // Testing: refractionEnd's underwater waves on any scene (the flag
+        // getFogUnderWater reads, set just before refractionEnd tests it).
+        static const bool underwater = std::getenv("SOTC_FORCE_UNDERWATER") != nullptr;
+        if (underwater && GPR_U32(ctx, 31) == 0x0109D018u)
+        {
+            const uint32_t one = 1u;
+            std::memcpy(rdram + 0x1186328u, &one, 4);
         }
         g_layers.push_back(GPR_U32(ctx, 4));
         g_pushLayer(rdram, ctx, runtime);

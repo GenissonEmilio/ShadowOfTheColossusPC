@@ -90,10 +90,3 @@ the fog alpha. The native renderer, with SOTC_NATIVE_ZFOG=1, skips layer 1
 in the main pass ("shown through the backdrop"), which leaves flat, blurred
 patches where layer 1 surfaces come close to the camera (shrine floor near
 the stairs). To fix before turning zFog on.
-
-## Native: refraction (layer 19) not reached
-
-refractionBegin (0x109bea0) copies the picture reduced to 256 x 256 at layer
-19 for the draws after it, but no model surface goes to layer 19
-(modelGetDlLayer never returns it) and nothing draws there on the test
-route. Left emulated until a scene that uses it is found.
