@@ -356,7 +356,7 @@
   "feature": "GS rasteriser",
   "status": "native",
   "since": "2026-10-16",
-  "commit": "",
+  "commit": "0c1efcb",
   "note": "with SOTC_NATIVE=1 the GS rasterizes nothing (PS2X_GS_NODRAW=0 turns it back on); its registers, transfers and signals still run"
  },
  {
