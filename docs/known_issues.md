@@ -28,17 +28,6 @@ Note: a hook around a recompiled function that calls others sees its result
 too early (the function runs in pieces the dispatcher continues), so the
 SOTC_MATH_CHECK results for sinf/cosf/atanf/acos* are not evidence.
 
-## Native: cutscene walls brighter than on the PS2
-
-In the shrine cutscenes (bossDeathEffect active: word 0x1186290 != 0) the
-emulated picture has darker walls and Wander as a blurred ghost. The vertex
-fog is not the cause: the native F matches base + scale / w pixel for pixel
-and the emulated GIF stream carries the same F. bossDeathEffectEnd blends a
-reduced, blurred copy over the frame twice (alpha 0x11862c4, then 0x11862c0
-= 160: overshoot) tinted by 0x11862b0..b8; on the PS2 that blurred buffer
-must be darker than the picture (its alpha, or the copy's colour). The
-native composite (SOTC_NATIVE_GLOW=1) does not darken yet.
-
 ## Native: brighter than the emulated picture, most in the opening
 
 Measured 2026-10-15 at the same game frame: emulated / native mean
@@ -60,8 +49,9 @@ surface, per draw.
 - Native about 15 brighter in mean luminance through the route; with the
   native bloom off (SOTC_BLOOM_SCALE=0) the gap on the plain goes to ~0
   (from +20) and drops from ~15 to ~11 at the pillars: most of it is the
-  bloom (see below). The shrine cutscenes keep +17 with the bloom off: the
-  bossDeathEffect composite (the section above).
+  bloom (see below). The shrine cutscenes kept +17 with the bloom off: the
+  bossDeathEffect composite, native since 2026-10-16 (layer 8 drawn apart,
+  as the GS does; the cutscene now matches).
 - Ruled out by measurement: textures (the GS's decoded texture and the
   native one are byte-identical, PS2X_GS_TEXDUMP / SOTC_TEXDUMP_DIR),
   vertex colours (the same VIF data on both paths), vertex fog (GS F = 255
@@ -100,3 +90,10 @@ the fog alpha. The native renderer, with SOTC_NATIVE_ZFOG=1, skips layer 1
 in the main pass ("shown through the backdrop"), which leaves flat, blurred
 patches where layer 1 surfaces come close to the camera (shrine floor near
 the stairs). To fix before turning zFog on.
+
+## Native: refraction (layer 19) not reached
+
+refractionBegin (0x109bea0) copies the picture reduced to 256 x 256 at layer
+19 for the draws after it, but no model surface goes to layer 19
+(modelGetDlLayer never returns it) and nothing draws there on the test
+route. Left emulated until a scene that uses it is found.

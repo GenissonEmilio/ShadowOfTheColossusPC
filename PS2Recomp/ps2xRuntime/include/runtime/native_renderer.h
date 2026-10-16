@@ -143,10 +143,10 @@ namespace native_renderer
     };
     void addScreenBlur(const ScreenBlur &blur);
 
-    // SotC's bossDeathEffectEnd (the dark, soft look of some cutscenes): at
-    // layer `order` the picture so far, reduced and blurred `rounds` times,
-    // is blended over it twice: in `tint` (0x80 = 1) with alpha amountA,
-    // then amountB (0x80 = 1; above 1 overshoots, as the GS does).
+    // SotC's bossDeathEffect: the draws of layer `order` go to a buffer of
+    // their own (cleared to nothing, on the scene's depth), which is reduced
+    // to 256, 128, 64 and blurred by `rounds`, and laid over the picture
+    // sharp (alpha amountA) and blurred (amountB), in `tint` (0x80 = 1).
     struct GlowComposite
     {
         bool enabled = false;

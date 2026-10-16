@@ -170,6 +170,13 @@ void main()
         oColor = vec4(texture(uSrc, vUV).rgb, uA.x);
     else if (uMode == 4) // tint: rgb x uA.rgb, alpha uA.a
         oColor = vec4(clamp(texture(uSrc, vUV).rgb * uA.rgb, 0.0, 1.0), uA.a);
+    else if (uMode == 13) // plain copy, alpha kept, shifted by uA.xy
+        oColor = texture(uSrc, vUV + uA.xy);
+    else if (uMode == 14) // glow: rgb x uA.rgb, alpha x uA.a
+    {
+        vec4 c = texture(uSrc, vUV);
+        oColor = clamp(vec4(c.rgb * uA.rgb, c.a * uA.a), 0.0, 1.0);
+    }
     else if (uMode == 5) // shadow darken: alpha uA.x
         oColor = vec4(0.0, 0.0, 0.0, uA.x);
     else if (uMode == 6) // shadow mask write
@@ -378,6 +385,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         std::unordered_map<std::string, GLint> mainUniforms, quadUniforms;
         Target colorPlain; // the picture's colour alone (passes that read its depth)
         Target color, background, backgroundSmall, reflection, refraction, refractionHalf, snapshot, shadowMask;
+        Target glowLayer, glowSmall[4]; // bossDeathEffect: layer 8 apart (on the picture's depth); 256, 128, 64, 64
         Target bloomTex[3];
         bool bloomHistory = false;
         uint32_t width = 0, height = 0;
@@ -530,6 +538,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             makeTarget(background, w, h, true);
             makeTarget(snapshot, w, h, false);
             makeTarget(shadowMask, w, h, false);
+            makeTarget(glowLayer, w, h, false);
+            for (int i = 0; i < 4; ++i)
+                makeTarget(glowSmall[i], i == 0 ? 256u : (i == 1 ? 128u : 64u), i == 0 ? 256u : (i == 1 ? 128u : 64u), false);
             makeTarget(backgroundSmall, 256, 256, false);
             makeTarget(reflection, 256, 256, true);
             makeTarget(refraction, 256, 256, false);
@@ -548,6 +559,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #if !defined(PS2X_NATIVE_VITA)
             // The shadow mask pass tests the main picture's stencil.
             glBindFramebuffer(GL_FRAMEBUFFER, shadowMask.fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, color.depth, 0);
+            // Layer 8 drawn apart on the picture's depth.
+            glBindFramebuffer(GL_FRAMEBUFFER, glowLayer.fbo);
             glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, color.depth, 0);
 #endif
             bloomHistory = false;
@@ -697,9 +711,15 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         const bool softShadows = softOrder != 0;
         static const bool bgFog = std::getenv("SOTC_NATIVE_NOBGFOG") == nullptr;
 
-        auto pass = [&](Target &target, bool backgroundOnly, uint32_t fromOrder = 0, uint32_t toOrder = ~0u, bool load = false, bool mirror = false)
+        auto pass = [&](Target &target, bool backgroundOnly, uint32_t fromOrder = 0, uint32_t toOrder = ~0u, bool load = false, bool mirror = false,
+                        bool apart = false)
         {
             bindTarget(target);
+            if (apart) // a layer of its own over the picture's depth: colour cleared to nothing
+            {
+                glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+                glClear(GL_COLOR_BUFFER_BIT);
+            }
             if (!load)
             {
                 if (mirror)
@@ -925,18 +945,43 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 quad(color, 3, QuadBlend::Over, alpha, nullptr, params, true);
             }
         };
+        // bossDeathEffect (layer 8): the layer drawn apart into a buffer cleared
+        // to nothing, reduced to 256, 128, 64 and blurred, back to 256; laid
+        // over the picture sharp (amountA) and blurred (amountB), in the tint.
         auto doGlow = [&]
         {
-            snapshotColor();
-            copy(snapshot, bloomTex[0]);
-            blur(glow.rounds);
-            for (float amount : {glow.amountA, glow.amountB})
+            pass(glowLayer, false, glow.order, glow.order + 1u, true, false, true);
+            auto reduce = [&](const Target &from, const Target &to, float shift)
+            {
+                const float offset[4] = {shift / static_cast<float>(from.width), shift / static_cast<float>(from.height), 0, 0};
+                bindTexture(0, from.texture);
+                quad(to, 13, QuadBlend::None, offset);
+            };
+            reduce(glowLayer, glowSmall[0], 0.0f);
+            if (glow.rounds > 0)
+            {
+                reduce(glowSmall[0], glowSmall[1], 0.0f);
+                if (glow.rounds > 1)
+                {
+                    reduce(glowSmall[1], glowSmall[2], 0.0f);
+                    if (glow.rounds > 2)
+                        for (int i = 0; i <= glow.rounds; ++i)
+                        {
+                            reduce(glowSmall[2], glowSmall[3], 0.5f);
+                            reduce(glowSmall[3], glowSmall[2], -0.5f);
+                        }
+                    reduce(glowSmall[2], glowSmall[1], 0.0f);
+                }
+                reduce(glowSmall[1], glowSmall[0], 0.0f);
+            }
+            const std::pair<const Target *, float> layers[2] = {{&glowLayer, glow.amountA}, {&glowSmall[0], glow.amountB}};
+            for (const auto &[source, amount] : layers)
             {
                 if (!(amount > 0.0f))
                     continue;
                 const float tint[4] = {glow.tint[0], glow.tint[1], glow.tint[2], amount};
-                bindTexture(0, bloomTex[0].texture);
-                quad(color, 4, QuadBlend::Over, tint);
+                bindTexture(0, source->texture);
+                quad(color, 14, QuadBlend::Over, tint);
             }
         };
         auto doShadow = [&]
@@ -1036,8 +1081,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             events.push_back({9u, -4});
         if (screenCopyOrder)
             events.push_back({screenCopyOrder, -4});
+#if !defined(PS2X_NATIVE_VITA) // vitaGL framebuffers cannot share the picture's depth
         if (glow.enabled)
             events.push_back({glow.order, -2});
+#endif
         if (bloomOn)
             events.push_back({bloom.order, -1});
         else
@@ -1061,7 +1108,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             else if (ev.blur == -3)
                 doShadow();
             else if (ev.blur == -2)
+            {
                 doGlow();
+                from = glow.order + 1u; // drawn apart
+            }
             else if (ev.blur < 0)
                 doBloom();
             else

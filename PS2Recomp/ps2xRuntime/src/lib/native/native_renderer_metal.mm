@@ -273,6 +273,22 @@ fragment float4 fogComposite(Quad in [[stage_in]], texture2d<float> background [
     return float4(background.sample(s, in.uv).rgb, a);
 }
 
+// bossDeathEffectEnd's chain: plain bilinear copies (no blending), alpha kept.
+fragment float4 glowReduce(Quad in [[stage_in]], texture2d<float> src [[texture(0)]], constant float2 &offset [[buffer(0)]])
+{
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    return src.sample(s, in.uv + offset);
+}
+
+// Its composite: the layer's copy modulated by the tint (0x80 = 1), blended
+// by the copy's alpha times the amount.
+fragment float4 glowComposite(Quad in [[stage_in]], texture2d<float> src [[texture(0)]], constant float4 &tint [[buffer(0)]])
+{
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    float4 c = src.sample(s, in.uv);
+    return float4(saturate(c.rgb * tint.rgb), saturate(c.a * tint.a));
+}
+
 fragment float4 copyTexture(Quad in [[stage_in]], texture2d<float> src [[texture(0)]])
 {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
@@ -349,7 +365,9 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
         id<MTLTexture> reflectionColor = nil, reflectionDepth = nil; // the mirrored world, 256 x 256
         id<MTLTexture> refractionColor = nil, refractionHalf = nil;  // the picture before layer 9, 256 x 256 (via 128 x 128)
         id<MTLRenderPipelineState> copySmall = nil, backdrop = nil;
-        id<MTLRenderPipelineState> blurCopy = nil, tintOver = nil;
+        id<MTLRenderPipelineState> blurCopy = nil, tintOver = nil, glowOver = nil, glowReducePipeline = nil;
+        id<MTLTexture> glowLayer = nil;     // layer 8 alone (bossDeathEffectBegin's buffer), full size
+        id<MTLTexture> glowSmall[4] = {};   // its chain: 256, 128, 64, 64
         native_renderer::GlowComposite glow;
         native_renderer::DepthOfField dof;
         id<MTLRenderPipelineState> dofPipeline = nil, fogPipeline = nil;
@@ -472,6 +490,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
             temporalPipeline = fullscreen(@"bloomTemporal", false);
             compositePipeline = fullscreen(@"bloomComposite", true);
             copySmall = fullscreen(@"copyTexture", false);
+            glowReducePipeline = fullscreen(@"glowReduce", false);
             shadowReducePipeline = fullscreen(@"shadowReduce", false);
             {
                 MTLRenderPipelineDescriptor *d = [[MTLRenderPipelineDescriptor alloc] init];
@@ -526,6 +545,8 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                 d.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
                 NSError *e = nil;
                 tintOver = [device newRenderPipelineStateWithDescriptor:d error:&e];
+                d.fragmentFunction = [library newFunctionWithName:@"glowComposite"];
+                glowOver = [device newRenderPipelineStateWithDescriptor:d error:&e];
                 [d.vertexFunction release];
                 [d.fragmentFunction release];
                 [d release];
@@ -663,6 +684,22 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                 md.storageMode = MTLStorageModePrivate;
                 shadowMask = [device newTextureWithDescriptor:md];
             }
+            [glowLayer release];
+            {
+                MTLTextureDescriptor *gd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
+                gd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+                gd.storageMode = MTLStorageModePrivate;
+                glowLayer = [device newTextureWithDescriptor:gd];
+            }
+            for (int i = 0; i < 4; ++i)
+            {
+                [glowSmall[i] release];
+                const uint32_t size = i == 0 ? 256u : (i == 1 ? 128u : 64u);
+                MTLTextureDescriptor *gd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:size height:size mipmapped:NO];
+                gd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+                gd.storageMode = MTLStorageModePrivate;
+                glowSmall[i] = [device newTextureWithDescriptor:gd];
+            }
             for (id<MTLTexture> &t : bloomTex)
             {
                 [t release];
@@ -707,13 +744,15 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         }
                 const bool softShadows = softOrder != 0;
                 auto pass = [&](id<MTLTexture> target, bool backgroundOnly, uint32_t fromOrder = 0, uint32_t toOrder = ~0u, bool load = false,
-                                bool mirror = false)
+                                bool mirror = false, bool apart = false)
                 {
                     MTLRenderPassDescriptor *desc = [MTLRenderPassDescriptor renderPassDescriptor];
                     desc.colorAttachments[0].texture = target;
-                    desc.colorAttachments[0].loadAction = load ? MTLLoadActionLoad : MTLLoadActionClear;
-                    // The PS2 frame starts black; the mirror image is cleared to the fog colour.
-                    desc.colorAttachments[0].clearColor = mirror ? MTLClearColorMake(fog.colour[0], fog.colour[1], fog.colour[2], 1.0) : MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+                    desc.colorAttachments[0].loadAction = load && !apart ? MTLLoadActionLoad : MTLLoadActionClear;
+                    // The PS2 frame starts black; the mirror image is cleared to the fog
+                    // colour; a layer drawn apart (on the scene's depth) to nothing.
+                    desc.colorAttachments[0].clearColor = mirror ? MTLClearColorMake(fog.colour[0], fog.colour[1], fog.colour[2], 1.0)
+                                                                 : MTLClearColorMake(0.0, 0.0, 0.0, apart ? 0.0 : 1.0);
                     desc.colorAttachments[0].storeAction = MTLStoreActionStore;
                     id<MTLTexture> depth = mirror ? reflectionDepth : this->depth;
                     desc.depthAttachment.texture = depth;
@@ -1000,9 +1039,14 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     }
                     [e endEncoding];
                 };
+                // bossDeathEffect (layer 8): the layer is drawn apart, on the
+                // scene's depth, into a buffer cleared to nothing; reduced to 256,
+                // 128 and 64 and blurred, back to 256; then laid over the picture
+                // twice, sharp (amountA) and blurred (amountB), in the tint.
                 auto doGlow = [&]
                 {
-                    if (!tintOver || !copySmall || !blurPipeline)
+                    pass(glowLayer, false, glow.order, glow.order + 1u, true, false, true);
+                    if (!glowOver || !glowReducePipeline)
                         return;
                     auto quad = [&](id<MTLTexture> target, id<MTLRenderPipelineState> state, bool load, auto bind)
                     {
@@ -1016,34 +1060,47 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
                         [e endEncoding];
                     };
-                    // bloomTex[0..1] are free outside the bloom: reduce, blur, blend back.
-                    id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
-                    [blit copyFromTexture:color toTexture:snapshot];
-                    [blit endEncoding];
-                    quad(bloomTex[0], copySmall, false, [&](id<MTLRenderCommandEncoder> e) { [e setFragmentTexture:snapshot atIndex:0]; });
-                    const float lw = static_cast<float>(bloomTex[0].width), lh = static_cast<float>(bloomTex[0].height);
-                    for (int i = 0; i < glow.rounds; ++i)
+                    auto reduce = [&](id<MTLTexture> from, id<MTLTexture> to, float shift)
                     {
-                        const float stepH[2] = {1.0f / lw, 0.0f}, stepV[2] = {0.0f, 1.0f / lh};
-                        quad(bloomTex[1], blurPipeline, false, [&](id<MTLRenderCommandEncoder> e)
+                        const float offset[2] = {shift / static_cast<float>(from.width), shift / static_cast<float>(from.height)};
+                        quad(to, glowReducePipeline, false, [&](id<MTLRenderCommandEncoder> e)
                         {
-                            [e setFragmentTexture:bloomTex[0] atIndex:0];
-                            [e setFragmentBytes:stepH length:sizeof(stepH) atIndex:0];
+                            [e setFragmentTexture:from atIndex:0];
+                            [e setFragmentBytes:offset length:sizeof(offset) atIndex:0];
                         });
-                        quad(bloomTex[0], blurPipeline, false, [&](id<MTLRenderCommandEncoder> e)
+                    };
+                    reduce(glowLayer, glowSmall[0], 0.0f);
+                    if (glow.rounds > 0)
+                    {
+                        reduce(glowSmall[0], glowSmall[1], 0.0f);
+                        if (glow.rounds > 1)
                         {
-                            [e setFragmentTexture:bloomTex[1] atIndex:0];
-                            [e setFragmentBytes:stepV length:sizeof(stepV) atIndex:0];
-                        });
+                            reduce(glowSmall[1], glowSmall[2], 0.0f);
+                            if (glow.rounds > 2)
+                                for (int i = 0; i <= glow.rounds; ++i)
+                                {
+                                    reduce(glowSmall[2], glowSmall[3], 0.5f);
+                                    reduce(glowSmall[3], glowSmall[2], -0.5f);
+                                }
+                            reduce(glowSmall[2], glowSmall[1], 0.0f);
+                        }
+                        reduce(glowSmall[1], glowSmall[0], 0.0f);
                     }
-                    for (float amount : {glow.amountA, glow.amountB})
+                    static const int show = std::getenv("SOTC_GLOW_SHOW") ? std::atoi(std::getenv("SOTC_GLOW_SHOW")) : 0; // debugging: 1 the layer, 2 the blurred
+                    if (show)
+                    {
+                        quad(color, copySmall, false, [&](id<MTLRenderCommandEncoder> e) { [e setFragmentTexture:show == 1 ? glowLayer : glowSmall[0] atIndex:0]; });
+                        return;
+                    }
+                    const std::pair<id<MTLTexture>, float> layers[2] = {{glowLayer, glow.amountA}, {glowSmall[0], glow.amountB}};
+                    for (const auto &[source, amount] : layers)
                     {
                         if (!(amount > 0.0f))
                             continue;
                         const float tint[4] = {glow.tint[0], glow.tint[1], glow.tint[2], amount};
-                        quad(color, tintOver, true, [&](id<MTLRenderCommandEncoder> e)
+                        quad(color, glowOver, true, [&](id<MTLRenderCommandEncoder> e)
                         {
-                            [e setFragmentTexture:bloomTex[0] atIndex:0];
+                            [e setFragmentTexture:source atIndex:0];
                             [e setFragmentBytes:tint length:sizeof(tint) atIndex:0];
                         });
                     }
@@ -1236,7 +1293,10 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     else if (ev.blur == -3)
                         doShadow();
                     else if (ev.blur == -2)
+                    {
                         doGlow();
+                        from = glow.order + 1u; // drawn apart
+                    }
                     else if (ev.blur < 0)
                         doBloom();
                     else

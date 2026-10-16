@@ -258,7 +258,7 @@
   "status": "emulated",
   "since": "",
   "commit": "",
-  "note": "refractionBegin, layer 19"
+  "note": "refractionBegin, layer 19: nothing draws there on the route (no model surface maps to 19)"
  },
  {
   "map": "renderer",
@@ -291,10 +291,10 @@
   "map": "renderer",
   "area": "Effects",
   "feature": "Colossus death effect",
-  "status": "emulated",
-  "since": "",
+  "status": "partial",
+  "since": "2026-10-16",
   "commit": "",
-  "note": "bossDeathEffect"
+  "note": "bossDeathEffect's layer-8 composite native; the death fan (bit 0) into the off-screen buffer not yet"
  },
  {
   "map": "hardware",
@@ -426,10 +426,10 @@
   "map": "renderer",
   "area": "Effects",
   "feature": "Cutscene glow (bossDeathEffect)",
-  "status": "partial",
-  "since": "2026-10-15",
+  "status": "native",
+  "since": "2026-10-16",
   "commit": "",
-  "note": "blurred-copy composite redone, opt-in: the PS2's blurred buffer is darker than the picture, cause not found"
+  "note": "as the GS: layer 8 drawn apart on the scene's depth, reduced 256/128/64 and blurred, laid over sharp (0x11862c4) and blurred (0x11862c0) in the tint; on by default (SOTC_NATIVE_NOGLOW); Metal and Mac GL, not on the Vita yet (vitaGL framebuffers cannot share the depth)"
  },
  {
   "map": "hardware",

@@ -30,6 +30,7 @@
 #include "runtime/ps2_stats.h"
 
 #include <algorithm>
+#include <map>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -704,22 +705,19 @@ namespace sotc_native
             }
         }
         {
-            // bossDeathEffectEnd ran this frame when the effect word (0x1186290)
-            // has a bit set; its tint, amounts and blur rounds at 0x11862a0..c4.
+            // bossDeathEffect (on while the word 0x1186290 is set; most of the
+            // game): layer 8 is drawn apart and laid over the picture sharp
+            // (alpha 0x11862c4) and blurred (0x11862c0, 0x11862a0 rounds), in the
+            // tint 0x11862b0..b8 (0x80 = 1). SOTC_NATIVE_NOGLOW=1 draws it plainly.
             native_renderer::GlowComposite gc;
-            // Opt-in (SOTC_NATIVE_GLOW=1): the GS blurred buffer is darker than
-            // the picture (walls darken, Wander turns to a blurred ghost) for a
-            // reason not found yet; this composite only softens and brightens.
-            static const bool on = std::getenv("SOTC_NATIVE_GLOW") != nullptr;
-            gc.enabled = on && word(0x1186290u) != 0u && g_modelDraws != 0u;
+            static const bool off = std::getenv("SOTC_NATIVE_NOGLOW") != nullptr;
+            gc.enabled = !off && word(0x1186290u) != 0u && g_modelDraws != 0u;
             gc.order = 8;
-            gc.rounds = std::clamp(static_cast<int32_t>(word(0x11862A0u)), 0, 6);
-            static const float tintScale = std::getenv("SOTC_GLOW_TINT") ? static_cast<float>(std::atof(std::getenv("SOTC_GLOW_TINT"))) : 0.5f;
-            static const float alphaScale = std::getenv("SOTC_GLOW_ALPHA") ? static_cast<float>(std::atof(std::getenv("SOTC_GLOW_ALPHA"))) : 0.5f;
+            gc.rounds = std::clamp(static_cast<int32_t>(word(0x11862A0u)), 0, 8);
             for (int i = 0; i < 3; ++i)
-                gc.tint[i] = static_cast<float>(static_cast<int32_t>(word(0x11862B0u + i * 4u))) / 128.0f * tintScale;
-            gc.amountA = static_cast<float>(static_cast<int32_t>(word(0x11862C4u))) / 128.0f * alphaScale;
-            gc.amountB = static_cast<float>(static_cast<int32_t>(word(0x11862C0u))) / 128.0f * alphaScale;
+                gc.tint[i] = static_cast<float>(static_cast<int32_t>(word(0x11862B0u + i * 4u))) / 128.0f;
+            gc.amountA = static_cast<float>(static_cast<int32_t>(word(0x11862C4u))) / 128.0f;
+            gc.amountB = static_cast<float>(static_cast<int32_t>(word(0x11862C0u))) / 128.0f;
             native_renderer::setGlowComposite(gc);
         }
         {
@@ -985,7 +983,7 @@ namespace sotc_native
         std::sort(top.begin(), top.end(), [](const auto &a, const auto &b) { return a.second > b.second; });
         std::string line = "[gsreg] frame=" + std::to_string(g_frame);
         char item[32];
-        for (size_t i = 0; i < top.size() && i < 24u; ++i)
+        for (size_t i = 0; i < top.size() && i < 200u; ++i)
         {
             std::snprintf(item, sizeof(item), " %08x:%u", top[i].first, top[i].second);
             line += item;
@@ -1086,6 +1084,19 @@ namespace sotc_native
 
     void pushLayerHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        // SOTC_LOG_LAYER=<n> (debugging): who pushes display list layer n (caller, count).
+        static const int logLayer = std::getenv("SOTC_LOG_LAYER") ? std::atoi(std::getenv("SOTC_LOG_LAYER")) : -1;
+        if (logLayer >= 0 && GPR_U32(ctx, 4) == static_cast<uint32_t>(logLayer))
+        {
+            static std::map<uint32_t, uint64_t> callers;
+            const uint64_t n = ++callers[GPR_U32(ctx, 31)];
+            if (n == 1u || n % 600u == 0u)
+                std::fprintf(stderr, "[layer %d] pushed from %08x (%llu)\n", logLayer, GPR_U32(ctx, 31), static_cast<unsigned long long>(n));
+            if (GPR_U32(ctx, 31) == 0x010860F8u && (n < 40u || n % 60u == 0u))
+                std::fprintf(stderr, "[bossfx] frame %u flags %x radius %g rounds %d tint %08x %08x %08x sharp %08x blur %08x clear %08x %08x %08x %08x fade %08x %08x %08x %08x\n", g_frame,
+                             word(0x01186290u), real(0x01186298u), static_cast<int>(word(0x011862A0u)), word(0x011862B0u), word(0x011862B4u), word(0x011862B8u), word(0x011862C4u), word(0x011862C0u),
+                             word(0x01186280u), word(0x01186284u), word(0x01186288u), word(0x0118628Cu), word(0x01186260u), word(0x01186264u), word(0x01186268u), word(0x0118626Cu));
+        }
         g_layers.push_back(GPR_U32(ctx, 4));
         g_pushLayer(rdram, ctx, runtime);
     }
@@ -1730,6 +1741,23 @@ namespace sotc_native
             // the camera context's +0x520 matrix and sampled by the reflecting
             // surfaces (layers 14/15). Never on the screen; not rendered yet.
             const uint32_t layer = surfaceLayer(header, s, fading);
+            static const int logLayer = std::getenv("SOTC_LOG_LAYER") ? std::atoi(std::getenv("SOTC_LOG_LAYER")) : -1;
+            if (static_cast<int>(layer) == logLayer)
+            {
+                static std::set<uint64_t> told;
+                if (told.insert((static_cast<uint64_t>(header) << 16) | surface).second)
+                {
+                    std::string regs;
+                    char item[40];
+                    for (uint32_t q = s + 0x20u; q < s + 0x100u; q += 16u)
+                    {
+                        std::snprintf(item, sizeof(item), " %02x:%08x%08x", word(q + 8u) & 0xFFu, word(q + 4u), word(q));
+                        regs += item;
+                    }
+                    std::fprintf(stderr, "[layer %u model] header %08x surface %u flags %08x texmode %u frame %u regs%s\n", layer, header, surface,
+                                 word(s + 0x18u), word(s + 0x1Cu), g_frame, regs.c_str());
+                }
+            }
             static const bool noReflect = std::getenv("SOTC_NATIVE_NOREFLECT") != nullptr;
             if ((layer == 12u || layer == 13u) && noReflect)
                 continue;
