@@ -54,3 +54,27 @@ natively, 132 in the GS stream); switching the native lighting off changes
 nothing; the unlit models' instance factor (VU 991) is 1. Not yet checked:
 the GS texture function and CLUT path against the native decode on one
 surface, per draw.
+
+## Native vs emulated: bloom over the sky and windows (reference doubtful)
+
+On the new route (tools/native_run.sh) the native sky outdoors and the
+shrine window blow out to white, while the emulated picture shows clouds
+and the landscape through a soft glow. The game's own chain says the
+native is right: the mask (Z <= 0x118c094 + 1) covers the sky also on the
+PS2 (bgEnd clears Z to 1 after layer 1), the 12 shifted copies are a
+normalized lerp, and the final add is colour 0x118c140 (0xaf/0xaf/0xa5
+inside, 0x51/0x5e/0x5b outdoors) x alpha 0x80, which saturates a bright sky.
+An earlier finding (memory: GS-exact blend gives a bright shrine window; the
+software path sampled sprites half a texel off and dimmed the bloom) points
+at the emulated GS here. Needs a real reference (PCSX2 software or the
+console) before tuning either side.
+
+## Native zFog (opt-in): layer 1 kept out of the main pass
+
+bgEnd copies the main frame (layer 1 drawn into it) to the 256 x 256
+background and then sets Z to 1 with a full-screen Z-only sprite: layer 1 is
+in the main picture, sharp, and the zFog/bgDraw blend replaces it only by
+the fog alpha. The native renderer, with SOTC_NATIVE_ZFOG=1, skips layer 1
+in the main pass ("shown through the backdrop"), which leaves flat, blurred
+patches where layer 1 surfaces come close to the camera (shrine floor near
+the stairs). To fix before turning zFog on.
