@@ -2,6 +2,7 @@
 
 #include "ps2x/iop/iop_host.h"
 #include "ps2x/iop/iop_types.h"
+#include "native/sound_mixer.h"
 
 #include <array>
 #include <cstdint>
@@ -10,13 +11,12 @@
 namespace ps2x::iop::detail
 {
     class IopMemory;
-    class Spu2;
 
     // Native stand-in for SotC's IOP sound driver (SG2IOPM1.IRX,
     // "sg2iop_driver", RPC server 0x11223344): the EE's SG2 engine sends it
     // rings of 16-byte commands and reads a 400-byte status back. The driver
-    // turns them into libsd calls; here they go straight to the SPU2
-    // registers and sound RAM, so the IRX (and libsd for it) never runs.
+    // turns them into libsd calls; here they go straight to a host mixer
+    // (SoundMixer): neither the IRX, libsd nor the emulated SPU2 is used.
     // PS2X_NATIVE_SG2=1 turns it on (default with SOTC_NATIVE=1).
     class Sg2Driver
     {
@@ -31,6 +31,7 @@ namespace ps2x::iop::detail
 
         void reset();
         [[nodiscard]] RpcResult handleRpc(const RpcRequest &request);
+        [[nodiscard]] SoundMixer &mixer() { return m_mixer; }
 
     private:
         // A voice streamed from IOP memory through a double buffer in sound
@@ -81,13 +82,15 @@ namespace ps2x::iop::detail
         [[nodiscard]] uint32_t getAddr(uint32_t entry);
         void setCoreAttr(uint32_t entry, uint32_t value);
         void sdInit();
-        void write(uint32_t offset, uint16_t value);
-        [[nodiscard]] uint16_t read(uint32_t offset);
+        void setCoreVolume(uint32_t core, uint32_t index, uint16_t value);
         void iopToSpu(uint32_t iopAddress, uint32_t spuAddress, uint32_t bytes);
 
         IopHost &m_host;
         IopMemory &m_memory;
-        Spu2 &m_spu;
+        SoundMixer m_mixer;
+        std::array<uint32_t, 2> m_eea{}; // effect area end, words
+        uint16_t m_coreVolumes[2][8]{};
+        uint16_t m_voiceVolumes[48][2]{};
 
         std::array<uint8_t, 400> m_reply{};
         std::array<Stream, 48> m_streams{};

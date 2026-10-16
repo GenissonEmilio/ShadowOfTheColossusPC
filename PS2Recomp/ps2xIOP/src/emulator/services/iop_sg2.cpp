@@ -1,7 +1,6 @@
 #include "iop_sg2.h"
 
 #include "emulator/core/iop_memory.h"
-#include "emulator/core/iop_spu2.h"
 
 #include <algorithm>
 #include <cmath>
@@ -15,9 +14,6 @@ namespace ps2x::iop::detail
 {
     namespace
     {
-        // SPU2 register offsets (core 1 is +0x400; volumes at 0x760 + core * 0x28).
-        constexpr uint32_t kVolumes = 0x760u, kVolumeStride = 0x28u, kVoiceAddresses = 0x1C0u;
-
         // Note pitches, 192 steps per octave, 0x1000 at index 0xd0: the
         // driver's table (0x46a0) is floor(0x1000 * 2^((i - 0xd0) / 192))
         // with these few entries off by one (and two typos).
@@ -59,7 +55,7 @@ namespace ps2x::iop::detail
     }
 
     Sg2Driver::Sg2Driver(IopHost &host, IopMemory &memory)
-        : m_host(host), m_memory(memory), m_spu(memory.spu2())
+        : m_host(host), m_memory(memory)
     {
     }
 
@@ -102,7 +98,10 @@ namespace ps2x::iop::detail
         m_effects.fill({});
         m_transfer = 0;
         m_pcmOn = false;
-        m_spu.setInputRefill(nullptr);
+        m_eea = {0xFFFFFu, 0xEFFFFu};
+        std::memset(m_coreVolumes, 0, sizeof(m_coreVolumes));
+        std::memset(m_voiceVolumes, 0, sizeof(m_voiceVolumes));
+        m_mixer.reset();
     }
 
     RpcResult Sg2Driver::handleRpc(const RpcRequest &request)
@@ -110,6 +109,7 @@ namespace ps2x::iop::detail
         RpcResult result;
         if (request.function == 0u)
         {
+            auto lock = m_mixer.hold();
             std::vector<uint32_t> commands(request.send.size / 4u);
             if (!commands.empty() &&
                 m_host.readGuest(request.send.address, commands.data(), commands.size() * 4u))
@@ -260,7 +260,7 @@ namespace ps2x::iop::detail
         case 0x14: // 0x1720: op 2, the same as a read back
         {
             std::vector<uint8_t> data(c);
-            m_spu.readRam(b, data.data(), c);
+            m_mixer.readRam(b, data.data(), c);
             (void)m_memory.writeRam(a, data.data(), data.size());
             m_transfer = 2;
             break;
@@ -494,7 +494,7 @@ namespace ps2x::iop::detail
             (void)m_memory.readRam(source, staging.data() + i * chunk, chunk);
         staging[1] = half == 1u ? 2u : 6u;
         staging[bytes - 0x10u + 1u] = half == 1u ? 3u : 2u;
-        m_spu.writeRam(op.arg[4], staging.data(), bytes);
+        m_mixer.writeRam(op.arg[4], staging.data(), bytes);
         m_pendingAdvance = voice | 0x10000u;
     }
 
@@ -521,19 +521,19 @@ namespace ps2x::iop::detail
     }
 
     // 0x120 + sceSdSetEffectAttr: reverb preset, work area below EEA, depth
-    // into EVOL; a mode with 0x100 clears the work area with the master
-    // volume down.
+    // into the reverb return volume; a mode with 0x100 clears the work area
+    // with the master volume down.
     void Sg2Driver::setEffect(int core)
     {
         const Effect &effect = m_effects[core];
-        const uint32_t base = static_cast<uint32_t>(core) * 0x400u;
-        const uint32_t volumes = kVolumes + static_cast<uint32_t>(core) * kVolumeStride;
         const bool clear = (effect.mode & 0x100u) != 0u;
-        const uint16_t mvolL = read(volumes), mvolR = read(volumes + 2u);
+        const auto master = m_mixer.masterVolume(core);
         if (clear)
-            for (uint32_t offset = 0; offset < 8u; offset += 2u)
-                write(volumes + offset, 0);
-
+        {
+            m_mixer.setMasterVolume(core, 0, 0);
+            setCoreVolume(core, 2, 0);
+            setCoreVolume(core, 3, 0);
+        }
         const uint32_t type = effect.mode & 0xFFu;
         static bool warned = false;
         if (type != 4u && type != 0u && !warned)
@@ -541,25 +541,16 @@ namespace ps2x::iop::detail
             warned = true;
             std::fprintf(stderr, "[sg2] reverb mode %u not known, using studio C\n", type);
         }
-        const uint32_t eea = ((static_cast<uint32_t>(read(base + 0x33Cu)) & 0xFu) << 16u) | 0xFFFFu;
-        const uint32_t esa = eea - (kStudioCWords - 1u);
-        write(base + 0x2E0u, static_cast<uint16_t>(esa >> 16u));
-        write(base + 0x2E2u, static_cast<uint16_t>(esa));
-        for (uint32_t i = 0; i < 22u; ++i)
-        {
-            write(base + 0x2E4u + i * 4u, 0);
-            write(base + 0x2E6u + i * 4u, kStudioCAddresses[i]);
-        }
-        for (uint32_t i = 0; i < 10u; ++i)
-            write(volumes + 0x14u + i * 2u, type == 0u ? 0 : kStudioCCoefficients[i]);
-        write(volumes + 4u, static_cast<uint16_t>(effect.depthL));
-        write(volumes + 6u, static_cast<uint16_t>(effect.depthR));
+        const uint32_t esa = m_eea[core] - (kStudioCWords - 1u);
+        static constexpr uint16_t kSilent[10] = {};
+        m_mixer.setReverbArea(core, esa, m_eea[core]);
+        m_mixer.setReverbPreset(core, kStudioCAddresses, type == 0u ? kSilent : kStudioCCoefficients);
+        setCoreVolume(core, 2, static_cast<uint16_t>(effect.depthL));
+        setCoreVolume(core, 3, static_cast<uint16_t>(effect.depthR));
         if (clear)
         {
-            const std::vector<uint8_t> zeros((eea - esa + 1u) * 2u, 0);
-            m_spu.writeRam(esa * 2u, zeros.data(), static_cast<uint32_t>(zeros.size()));
-            write(volumes, mvolL);
-            write(volumes + 2u, mvolR);
+            m_mixer.clearRam(esa, m_eea[core]);
+            m_mixer.setMasterVolume(core, master[0], master[1]);
         }
     }
 
@@ -574,26 +565,26 @@ namespace ps2x::iop::detail
         m_pcmFirst = true;
         setParam(0xF80u, m_pcmVolL);
         setParam(0x1080u, m_pcmVolR);
-        m_spu.clearInput(0);
+        m_mixer.clearInput(0);
         uint8_t block[0x400];
         for (uint32_t offset = 0; offset < 0x800u; offset += 0x400u)
         {
             (void)m_memory.readRam(buffer + offset, block, sizeof(block));
-            m_spu.pushInputBlock(0, block);
+            m_mixer.pushInputBlock(0, block);
         }
         m_pcmOn = true;
-        m_spu.setInputRefill([this](int core)
-                             {
-                                 if (core == 0)
-                                     pcmRefill();
-                             });
+        m_mixer.setInputRefill([this](int core)
+                               {
+                                   if (core == 0)
+                                       pcmRefill();
+                               });
     }
 
     void Sg2Driver::pcmStop()
     {
         m_pcmOn = false;
-        m_spu.setInputRefill(nullptr);
-        m_spu.clearInput(0);
+        m_mixer.setInputRefill(nullptr);
+        m_mixer.clearInput(0);
     }
 
     void Sg2Driver::pcmRefill()
@@ -606,7 +597,22 @@ namespace ps2x::iop::detail
             m_pcmPosition = 0;
         uint8_t block[0x400];
         (void)m_memory.readRam(m_pcmBuffer + m_pcmPosition, block, sizeof(block));
-        m_spu.pushInputBlock(0, block);
+        m_mixer.pushInputBlock(0, block);
+    }
+
+    // Core volumes by libsd order: 0 master, 1 (R), 2 reverb return, 3, 4
+    // external input, 5, 6 sound data input, 7.
+    void Sg2Driver::setCoreVolume(uint32_t core, uint32_t index, uint16_t value)
+    {
+        uint16_t *v = m_coreVolumes[core];
+        v[index] = value;
+        switch (index / 2u)
+        {
+        case 0: m_mixer.setMasterVolume(static_cast<int>(core), v[0], v[1]); break;
+        case 1: m_mixer.setReverbVolume(static_cast<int>(core), v[2], v[3]); break;
+        case 2: m_mixer.setExternalVolume(static_cast<int>(core), v[4], v[5]); break;
+        default: m_mixer.setInputVolume(static_cast<int>(core), v[6], v[7]); break;
+        }
     }
 
     void Sg2Driver::setParam(uint32_t param, uint16_t value)
@@ -614,77 +620,94 @@ namespace ps2x::iop::detail
         const uint32_t core = param & 1u, reg = (param >> 8u) & 0xFFu;
         if ((param & 0x80u) || reg == 8u)
         {
-            if (reg == 8u) // MMIX
-                write(core * 0x400u + 0x198u, value);
+            if (reg == 8u)
+                m_mixer.setRouting(static_cast<int>(core), value);
             else if (reg >= 9u && reg <= 0x10u) // MVOL, EVOL, AVOL, BVOL
-                write(kVolumes + core * kVolumeStride + (reg - 9u) * 2u, value);
+                setCoreVolume(core, reg - 9u, value);
             return;
         }
         const uint32_t v = (param >> 1u) & 0x1Fu;
-        if (v < 24u && reg < 8u)
-            write(core * 0x400u + v * 0x10u + reg * 2u, value);
+        if (v >= 24u)
+            return;
+        const int voice = static_cast<int>(core * 24u + v);
+        switch (reg)
+        {
+        case 0:
+        case 1:
+            m_voiceVolumes[voice][reg] = value;
+            m_mixer.setVolume(voice, m_voiceVolumes[voice][0], m_voiceVolumes[voice][1]);
+            break;
+        case 2: m_mixer.setPitch(voice, value); break;
+        case 3: m_mixer.setAdsr1(voice, value); break;
+        case 4: m_mixer.setAdsr2(voice, value); break;
+        default: break; // ENVX, VOLX: read-only for the driver
+        }
     }
 
     uint16_t Sg2Driver::getParam(uint32_t param)
     {
         const uint32_t core = param & 1u, reg = (param >> 8u) & 0xFu, v = (param >> 1u) & 0x1Fu;
-        return v < 24u ? read(core * 0x400u + v * 0x10u + reg * 2u) : 0;
+        if (v >= 24u || reg != 5u) // only ENVX is read
+            return 0;
+        return m_mixer.envelope(static_cast<int>(core * 24u + v));
     }
 
     void Sg2Driver::setSwitch(uint32_t entry, uint32_t mask)
     {
-        static constexpr uint32_t kOffsets[] = {0x180u, 0x184u, 0x1A0u, 0x1A4u, 0u, 0x188u, 0x18Cu, 0x190u, 0x194u};
-        const uint32_t core = entry & 1u, reg = entry >> 8u;
-        if (reg < 0x13u || reg > 0x1Bu || reg == 0x17u)
-            return;
-        const uint32_t offset = core * 0x400u + kOffsets[reg - 0x13u];
-        write(offset, static_cast<uint16_t>(mask));
-        write(offset + 2u, static_cast<uint16_t>((mask >> 16u) & 0xFFu));
+        const int core = static_cast<int>(entry & 1u);
+        mask &= 0xFFFFFFu;
+        switch (entry >> 8u)
+        {
+        case 0x15: m_mixer.keyOn(core, mask); break;
+        case 0x16: m_mixer.keyOff(core, mask); break;
+        case 0x18: m_mixer.setDryLeft(core, mask); break;
+        case 0x19: m_mixer.setWetLeft(core, mask); break;
+        case 0x1A: m_mixer.setDryRight(core, mask); break;
+        case 0x1B: m_mixer.setWetRight(core, mask); break;
+        default: break; // pitch modulation and noise: not used by the mix
+        }
     }
 
     void Sg2Driver::setAddr(uint32_t entry, uint32_t byteAddress)
     {
         const uint32_t core = entry & 1u, reg = (entry >> 8u) & 0xFFu, v = (entry >> 1u) & 0x1Fu;
-        const uint32_t words = (byteAddress >> 1u) & 0xFFFFFu;
-        uint32_t offset;
-        if (reg == 0x1Cu) // ESA
-            offset = core * 0x400u + 0x2E0u;
-        else if (reg == 0x1Du) // EEA: the top bits only
+        const int voice = static_cast<int>(core * 24u + v);
+        switch (reg)
         {
-            write(core * 0x400u + 0x33Cu, static_cast<uint16_t>(byteAddress >> 17u));
-            return;
+        case 0x1D: // EEA: the top bits only, the area ends at a 128 KiB boundary
+            m_eea[core] = ((byteAddress >> 17u) & 0xFu) << 16u | 0xFFFFu;
+            break;
+        case 0x20:
+            if (v < 24u)
+                m_mixer.setStart(voice, byteAddress);
+            break;
+        case 0x21:
+            if (v < 24u)
+                m_mixer.setLoop(voice, byteAddress);
+            break;
+        case 0x22:
+            if (v < 24u)
+                m_mixer.setNext(voice, byteAddress);
+            break;
+        default: // ESA: set with the effect
+            break;
         }
-        else if (reg >= 0x20u && reg <= 0x22u && v < 24u) // SSA, LSAX, NAX
-            offset = core * 0x400u + kVoiceAddresses + v * 0xCu + (reg - 0x20u) * 4u;
-        else
-            return;
-        write(offset, static_cast<uint16_t>(words >> 16u));
-        write(offset + 2u, static_cast<uint16_t>(words));
     }
 
     uint32_t Sg2Driver::getAddr(uint32_t entry)
     {
         const uint32_t core = entry & 1u, reg = (entry >> 8u) & 0xFFu, v = (entry >> 1u) & 0x1Fu;
-        if (reg < 0x20u || reg > 0x22u || v >= 24u)
+        if (reg != 0x22u || v >= 24u) // only NAX is read
             return 0;
-        const uint32_t offset = core * 0x400u + kVoiceAddresses + v * 0xCu + (reg - 0x20u) * 4u;
-        return ((static_cast<uint32_t>(read(offset) & 0xFu) << 16u) | read(offset + 2u)) << 1u;
+        return m_mixer.nextAddress(static_cast<int>(core * 24u + v));
     }
 
     void Sg2Driver::setCoreAttr(uint32_t entry, uint32_t value)
     {
-        const uint32_t core = entry & 1u, type = entry >> 1u;
-        const uint32_t offset = core * 0x400u + 0x19Au;
-        uint16_t attr = read(offset);
-        switch (type)
-        {
-        case 1: attr = static_cast<uint16_t>((attr & ~0x80u) | (value ? 0x80u : 0u)); break;   // effect
-        case 2: attr = static_cast<uint16_t>((attr & ~0x40u) | (value ? 0x40u : 0u)); break;   // IRQ
-        case 3: attr = static_cast<uint16_t>((attr & ~0x4000u) | (value ? 0u : 0x4000u)); break; // mute
-        case 4: attr = static_cast<uint16_t>((attr & ~0x3F00u) | ((value & 0x3Fu) << 8u)); break; // noise clock
-        default: return; // SPDIF and the rest: not part of the mix
-        }
-        write(offset, attr);
+        // Only the effect switch matters to the mix (IRQ, mute, noise
+        // clock, SPDIF are not used).
+        if ((entry >> 1u) == 1u)
+            m_mixer.setReverbOn(static_cast<int>(entry & 1u), value != 0u);
     }
 
     // sceSdInit(0) as far as the mix sees it (values as libsd leaves them).
@@ -693,49 +716,40 @@ namespace ps2x::iop::detail
         pcmStop();
         for (uint32_t core = 0; core < 2u; ++core)
         {
-            const uint32_t base = core * 0x400u;
-            const uint32_t volumes = kVolumes + core * kVolumeStride;
-            setSwitch(0x1600u | core, 0xFFFFFFu);
-            write(base + 0x19Au, 0xC000u);
-            setSwitch(0x1300u | core, 0);
-            setSwitch(0x1400u | core, 0);
-            setSwitch(0x1800u | core, 0xFFFFFFu);
-            setSwitch(0x1A00u | core, 0xFFFFFFu);
-            setSwitch(0x1900u | core, 0);
-            setSwitch(0x1B00u | core, 0);
-            write(base + 0x198u, core ? 0x0FFCu : 0x0FF0u);
-            write(base + 0x1B0u, 0);
-            write(base + 0x33Cu, core ? 0xEu : 0xFu);
-            write(volumes + 0x0u, 0x3FFFu);
-            write(volumes + 0x2u, 0x3FFFu);
-            write(volumes + 0x4u, 0);
-            write(volumes + 0x6u, 0);
-            write(volumes + 0x8u, core ? 0x7FFFu : 0u);
-            write(volumes + 0xAu, core ? 0x7FFFu : 0u);
-            write(volumes + 0xCu, 0);
-            write(volumes + 0xEu, 0);
-            for (uint32_t i = 0; i < 10u; ++i)
-                write(volumes + 0x14u + i * 2u, 0);
+            const int c = static_cast<int>(core);
+            m_mixer.keyOff(c, 0xFFFFFFu);
+            m_mixer.setReverbOn(c, false);
+            m_mixer.setDry(c, 0xFFFFFFu, 0xFFFFFFu);
+            m_mixer.setWet(c, 0, 0);
+            m_mixer.setRouting(c, core ? 0x0FFCu : 0x0FF0u);
+            m_eea[core] = core ? 0xEFFFFu : 0xFFFFFu;
+            static constexpr uint16_t kZero[22] = {};
+            static constexpr uint16_t kZeroCoefficients[10] = {};
+            m_mixer.setReverbPreset(c, kZero, kZeroCoefficients);
+            setCoreVolume(core, 0, 0x3FFFu);
+            setCoreVolume(core, 1, 0x3FFFu);
+            setCoreVolume(core, 2, 0);
+            setCoreVolume(core, 3, 0);
+            setCoreVolume(core, 4, core ? 0x7FFFu : 0u);
+            setCoreVolume(core, 5, core ? 0x7FFFu : 0u);
+            setCoreVolume(core, 6, 0);
+            setCoreVolume(core, 7, 0);
             for (uint32_t v = 0; v < 24u; ++v)
-                for (uint32_t reg = 0; reg < 5u; ++reg)
-                    write(base + v * 0x10u + reg * 2u, 0);
+            {
+                const int voice = static_cast<int>(core * 24u + v);
+                m_voiceVolumes[voice][0] = m_voiceVolumes[voice][1] = 0;
+                m_mixer.setVolume(voice, 0, 0);
+                m_mixer.setPitch(voice, 0);
+                m_mixer.setAdsr1(voice, 0);
+                m_mixer.setAdsr2(voice, 0);
+            }
         }
-    }
-
-    void Sg2Driver::write(uint32_t offset, uint16_t value)
-    {
-        m_spu.write16(Spu2::Base + offset, value);
-    }
-
-    uint16_t Sg2Driver::read(uint32_t offset)
-    {
-        return m_spu.read16(Spu2::Base + offset);
     }
 
     void Sg2Driver::iopToSpu(uint32_t iopAddress, uint32_t spuAddress, uint32_t bytes)
     {
         std::vector<uint8_t> data(bytes);
         if (bytes && m_memory.readRam(iopAddress, data.data(), bytes))
-            m_spu.writeRam(spuAddress, data.data(), bytes);
+            m_mixer.writeRam(spuAddress, data.data(), bytes);
     }
 }

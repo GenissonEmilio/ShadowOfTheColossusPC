@@ -109,10 +109,30 @@ stream bookkeeping).
   Not exercised on the route: the PCM input (cutscene audio, command
   0x20), command 0x14, reverb modes other than 4.
 
-Left on the PS2 side: libsd and the other IRXs still load and run on the
-emulated IOP (libsd no longer called by the sound driver), and the mix is the ps2xIOP SPU2
-model (ADPCM voices, ADSR, reverb) fed by register writes. Next: the voices
-and reverb as a plain host mixer, without the register file.
+## Native mixer (2026-10-16)
+
+`ps2xIOP/src/native/sound_mixer.cpp` (`SoundMixer`) replaces the SPU2 for
+the native driver: 48 voices (ADPCM from 2 MiB of sound memory, cubic
+interpolation, ADSR), dry and reverb sends, the routing bits, core 0 into
+core 1, the sound data input and the reverb, with the same arithmetic as
+the emulated SPU2 (the recordings match it: same loudness per second on the
+route). The driver calls it with typed setters (volume, pitch, ADSR,
+addresses, key on/off, sends, volumes, reverb preset and area); there is no
+register file, IOP DMA or interrupt, and the emulated SPU2 stays idle once
+the native driver is loaded. Voices are mixed in blocks of 64 frames, a
+voice at a time, skipping silent ones.
+
+- Clock: by default the mixer follows the emulated IOP time (deterministic
+  for recordings and tests). `PS2X_AUDIO_PULL=1` mixes in the host audio
+  thread when the device asks (the audio length follows wall-clock time):
+  the mode for the Vita, where it takes the mix off the game thread.
+- Cost on the Mac: about 2-3 % of the game thread (half of it the reverb),
+  as the emulated SPU2.
+- `PS2X_SPU2_WAV` records the native mix too.
+
+Left on the PS2 side: libsd and the other IRXs still load on the emulated
+IOP (nothing calls libsd for sound now). The emulated SPU2 code stays for
+the emulated path (`PS2X_NATIVE_SG2=0`).
 
 ## Plan
 

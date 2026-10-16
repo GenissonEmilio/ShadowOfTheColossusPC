@@ -5,7 +5,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
-#include <functional>
 #include <vector>
 
 namespace ps2x::iop::detail
@@ -45,15 +44,6 @@ namespace ps2x::iop::detail
 
         // Interleaved stereo frames for the host audio device (any thread).
         size_t readOutput(int16_t *destination, size_t frames) noexcept;
-
-        // Direct access for a native sound driver (no IOP DMA): sound RAM by
-        // byte address, the core's sound data input (blocks of 256 left then
-        // 256 right samples) and a callback run when it is down to one block.
-        void writeRam(uint32_t byteAddress, const uint8_t *source, uint32_t bytes);
-        void readRam(uint32_t byteAddress, uint8_t *destination, uint32_t bytes) const;
-        void pushInputBlock(int core, const uint8_t *block);
-        void clearInput(int core) { m_cores[core].input.clear(); }
-        void setInputRefill(std::function<void(int core)> refill) { m_inputRefill = std::move(refill); }
 
     private:
         enum class Phase : uint8_t
@@ -126,6 +116,5 @@ namespace ps2x::iop::detail
         std::atomic<size_t> m_ringWrite{0};
         std::atomic<size_t> m_ringRead{0};
         bool m_outputStarted = false; // consumer side only
-        std::function<void(int core)> m_inputRefill;
     };
 }

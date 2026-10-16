@@ -340,38 +340,6 @@ namespace ps2x::iop::detail
         return std::max<uint64_t>(words, 64u);
     }
 
-    void Spu2::writeRam(uint32_t byteAddress, const uint8_t *source, uint32_t bytes)
-    {
-        uint32_t word = (byteAddress >> 1u) & (RamWords - 1u);
-        for (uint32_t i = 0; i + 1u < bytes; i += 2u)
-        {
-            std::memcpy(&m_ram[word], source + i, 2);
-            word = (word + 1u) & (RamWords - 1u);
-        }
-    }
-
-    void Spu2::readRam(uint32_t byteAddress, uint8_t *destination, uint32_t bytes) const
-    {
-        uint32_t word = (byteAddress >> 1u) & (RamWords - 1u);
-        for (uint32_t i = 0; i + 1u < bytes; i += 2u)
-        {
-            std::memcpy(destination + i, &m_ram[word], 2);
-            word = (word + 1u) & (RamWords - 1u);
-        }
-    }
-
-    void Spu2::pushInputBlock(int c, const uint8_t *block)
-    {
-        Core &core = m_cores[c];
-        for (uint32_t i = 0; i < 256u; ++i)
-        {
-            int16_t left, right;
-            std::memcpy(&left, block + i * 2u, 2);
-            std::memcpy(&right, block + 512u + i * 2u, 2);
-            core.input.push_back({left, right});
-        }
-    }
-
     uint64_t Spu2::dmaRead(int c, uint8_t *destination, uint32_t bytes)
     {
         Core &core = m_cores[c];
@@ -645,8 +613,6 @@ namespace ps2x::iop::detail
                 core.input.pop_front();
                 inputL = (frame[0] * static_cast<int16_t>(core.bvolL)) >> 15;
                 inputR = (frame[1] * static_cast<int16_t>(core.bvolR)) >> 15;
-                if (m_inputRefill && core.input.size() == 256u)
-                    m_inputRefill(c);
             }
             // AVOL scales the external input (core 0's output into core 1),
             // BVOL the sound data input (auto-DMA stream); both are plain

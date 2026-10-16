@@ -22,6 +22,7 @@
 #include "iop_emulator_const.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <map>
 #include <optional>
@@ -493,6 +494,11 @@ namespace ps2x::iop::detail
         // Not that good to use exception handling for control flow but will do for now
         void tickSpu2()
         {
+            if (sg2Loaded.load(std::memory_order_relaxed))
+            {
+                sg2.mixer().advanceTo(totalCycles); // the native driver's mixer; the SPU2 is idle
+                return;
+            }
             Spu2 &spu = memory.spu2();
             spu.advanceTo(totalCycles);
             if (spu.takeIrq() && !servicingSpuInterrupt)
@@ -757,7 +763,7 @@ namespace ps2x::iop::detail
         IopHost &host;
         IopMemory memory;
         Sg2Driver sg2{host, memory};
-        bool sg2Loaded = false; // the native driver stands in for SG2IOPM1.IRX
+        std::atomic<bool> sg2Loaded{false}; // the native driver stands in for SG2IOPM1.IRX
         IopSysmem sysmem;
         IopKernel kernel;
         IopCdvd cdvd;
@@ -832,6 +838,8 @@ namespace ps2x::iop::detail
 
     size_t IopEmulator::readAudio(int16_t *destination, size_t frames) noexcept
     {
+        if (m_impl->sg2Loaded.load(std::memory_order_acquire))
+            return m_impl->sg2.mixer().readOutput(destination, frames);
         return m_impl->memory.spu2().readOutput(destination, frames);
     }
 

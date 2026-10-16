@@ -27,6 +27,7 @@ add_library(ps2_iop STATIC
     src/emulator/imports/iop_timrman.cpp
     src/emulator/imports/iop_vblank.cpp
     src/emulator/services/iop_sg2.cpp
+    src/native/sound_mixer.cpp
     src/modules/dbcman.cpp
     src/modules/libsd.cpp
     src/modules/mcserv.cpp
