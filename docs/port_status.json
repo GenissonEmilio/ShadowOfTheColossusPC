@@ -185,7 +185,7 @@
   "feature": "Immediate gl* drawing",
   "status": "partial",
   "since": "2026-10-15",
-  "commit": "75efe01",
+  "commit": "299159f",
   "note": "glEnd's A+D packet read into the 2D path; the bird's heat-haze strips sample the screen copy 0x10f37c8 makes at their layer; bossDeathEffect's off-screen fan left out"
  },
  {
@@ -266,7 +266,7 @@
   "feature": "Particles",
   "status": "native",
   "since": "2026-10-16",
-  "commit": "78d44f0",
+  "commit": "299159f",
   "note": "microcode 7 expansion of every type in the route: 1 billboards, 2/4/7 by the environment matrix with its translation, 3 streaks, 4 lit fans (routine 0xe48 lighting from VU 26/27), 7 with a texture cell each"
  },
  {
