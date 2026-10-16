@@ -44,6 +44,7 @@ struct FogParams
     float2 size;
     int vertexFog;
     float base, scale;
+    float lodK, lodScale, maxLod; // GS mip selection: level = log2(w) x 2^L + K, up to MXL (-1: level 0 only)
     float3 colour;
     float4 debug; // w > 0: flat debug colour
 };
@@ -83,7 +84,7 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
                                texture2d<float> reflection [[texture(2)]], texture2d<float> refraction [[texture(3)]],
                                constant int &textured [[buffer(0)]], constant FogParams &fog [[buffer(1)]])
 {
-    constexpr sampler repeatLinear(address::repeat, filter::linear);
+    constexpr sampler repeatLinear(address::repeat, filter::linear, mip_filter::linear);
     float3 shade = in.color.rgb;
     if (textured == 3)
     {
@@ -99,7 +100,8 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
         float3 r = reflection.sample(clampLinear, in.position.xy / fog.size).rgb;
         return float4(saturate(r * fog.debug.rgb), -fog.debug.w);
     }
-    float4 t = textured != 0 ? tex.sample(repeatLinear, in.uv) : float4(1.0);
+    const float lod = fog.maxLod > 0.0 ? clamp(log2(max(in.depth, 1e-3)) * fog.lodScale + fog.lodK, 0.0, fog.maxLod) : 0.0;
+    float4 t = textured != 0 ? tex.sample(repeatLinear, in.uv, level(lod)) : float4(1.0);
     float alpha = saturate(t.a * (textured != 0 ? 2.0 : 1.0) * in.color.a); // texture alpha 0x80 = opaque
     if (alpha < 0.02)
         discard_fragment();
@@ -816,12 +818,13 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                             float size[2];
                             int vertexFog;
                             float base, scale;
-                            float pad[3];
+                            float lodK, lodScale, maxLod;
                             float colour[4];
                             float debug[4];
                         } fp = {fog.start, fog.width, (showFog && !d.state.screen) ? -1.0f : static_cast<float>(fog.steps), (!backgroundOnly && fogOn && d.state.fogged) ? 1 : 0,
                                 {static_cast<float>(w), static_cast<float>(h)},
-                                (fog.vertexFog && !d.state.screen && (!d.state.background || bgFog) && !(d.state.overlay && noOverlayFog)) ? 1 : 0, fog.base, fog.scale, {0, 0, 0},
+                                (fog.vertexFog && !d.state.screen && (!d.state.background || bgFog) && !(d.state.overlay && noOverlayFog)) ? 1 : 0, fog.base, fog.scale,
+                                d.state.lodK, d.state.lodScale, d.state.maxLod,
                                 {fog.colour[0], fog.colour[1], fog.colour[2], 0},
                                 {static_cast<float>(d.state.debugColour & 0xFFu) / 255.0f, static_cast<float>((d.state.debugColour >> 8) & 0xFFu) / 255.0f,
                                  static_cast<float>((d.state.debugColour >> 16) & 0xFFu) / 255.0f, d.state.debugColour ? 1.0f : 0.0f}};
@@ -1225,16 +1228,24 @@ namespace native_renderer
         return r && r->textures.count(id) != 0;
     }
 
-    void uploadTexture(uint64_t key, uint32_t width, uint32_t height, const uint8_t *rgba)
+    void uploadTexture(uint64_t key, uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t levels)
     {
         Renderer *r = renderer();
         if (!r || !width || !height)
             return;
-        MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:width height:height mipmapped:NO];
+        levels = std::max(1u, levels);
+        MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:width height:height mipmapped:levels > 1u];
+        desc.mipmapLevelCount = levels;
         desc.usage = MTLTextureUsageShaderRead;
         desc.storageMode = MTLStorageModeShared;
         id<MTLTexture> texture = [r->device newTextureWithDescriptor:desc];
-        [texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:rgba bytesPerRow:width * 4u];
+        for (uint32_t level = 0, w = width, h = height; level < levels; ++level)
+        {
+            [texture replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:level withBytes:rgba bytesPerRow:w * 4u];
+            rgba += static_cast<size_t>(w) * h * 4u;
+            w = std::max(1u, w / 2u);
+            h = std::max(1u, h / 2u);
+        }
         auto it = r->textures.find(key);
         if (it != r->textures.end())
             [it->second release];

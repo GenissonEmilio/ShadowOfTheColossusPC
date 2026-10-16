@@ -26,7 +26,8 @@ namespace native_renderer
 
     bool hasTexture(uint64_t id);
     // RGBA8 (alpha 0x80 = opaque, as the PS2's), kept on the GPU under `id`.
-    void uploadTexture(uint64_t id, uint32_t width, uint32_t height, const uint8_t *rgba);
+    // `levels` mip levels, each half the last, one after the other in `rgba`.
+    void uploadTexture(uint64_t id, uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t levels = 1);
 
     // Draws of one frame: `clip` (column-major) takes model space to clip
     // space with x, y and w as the game's projection gives them (x/w, y/w in
@@ -50,6 +51,9 @@ namespace native_renderer
         // vertex colour.
         float opacity = 1.0f; // scales the alpha
         float uvOffset[2] = {0.0f, 0.0f}; // added to the texture coordinates (VIF ROW scrolling)
+        // Mip level as the GS picks it (TEX1): log2(w) x lodScale + lodK, up
+        // to maxLod; maxLod <= 0: level 0.
+        float lodK = 0.0f, lodScale = 1.0f, maxLod = 0.0f;
         bool background = false; // also drawn into the background image (what distance fades to)
         bool fogged = false;     // fades to the background image with distance (setFog)
         bool writeDepth = false; // write depth even when additive (a second pass follows)

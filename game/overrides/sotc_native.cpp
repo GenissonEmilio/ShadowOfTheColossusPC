@@ -283,17 +283,7 @@ namespace sotc_native
                              sample(header + word(header + 0x18u), psm == 0x14u ? 64u : 1024u, 16u) * 31u ^ format;
         if (native_renderer::hasTexture(key))
             return key;
-        if (psm == 0x00u && width <= 1024u && height <= 1024u)
-        {
-            // PSMCT32: the pixels themselves, uploaded row by row (alpha 0x80 = opaque).
-            const uint32_t pixels = header + word(header + 0x14u);
-            std::vector<uint8_t> rgba(static_cast<size_t>(width) * height * 4u);
-            for (uint32_t i = 0; i < width * height; ++i)
-                std::memcpy(&rgba[i * 4u], g_ram + ((pixels + i * 4u) & 0x1FFFFFFu), 4);
-            native_renderer::uploadTexture(key, width, height, rgba.data());
-            return key;
-        }
-        if ((psm != 0x13u && psm != 0x14u) || width > 1024u || height > 1024u)
+        if ((psm != 0x00u && psm != 0x13u && psm != 0x14u) || width > 1024u || height > 1024u)
         {
             static const bool log = std::getenv("SOTC_NATIVE_LOG") != nullptr;
             static std::set<uint32_t> seen;
@@ -302,57 +292,85 @@ namespace sotc_native
                              g_ram[(header + 0x1Fu) & 0x1FFFFFFu] & 1u);
             return 0;
         }
-        const uint32_t pixels = header + word(header + 0x14u), clut = header + word(header + 0x18u);
-        const bool swizzled = (g_ram[(header + 0x1Fu) & 0x1FFFFFFu] & 1u) != 0u;
+        const uint32_t clut = header + word(header + 0x18u);
         const uint32_t entries = psm == 0x14u ? 16u : 256u;
         uint32_t palette[256];
-        for (uint32_t i = 0; i < entries; ++i)
-        {
-            // CSM1: of every 32 entries, 8-15 and 16-23 are swapped.
-            const uint32_t from = entries == 256u ? ((i & ~0x18u) | ((i & 8u) << 1) | ((i & 16u) >> 1)) : i;
-            palette[i] = word(clut + from * 4u);
-        }
+        if (psm != 0x00u)
+            for (uint32_t i = 0; i < entries; ++i)
+            {
+                // CSM1: of every 32 entries, 8-15 and 16-23 are swapped.
+                const uint32_t from = entries == 256u ? ((i & ~0x18u) | ((i & 8u) << 1) | ((i & 16u) >> 1)) : i;
+                palette[i] = word(clut + from * 4u);
+            }
+        // Mip levels (format bits 12-15, texTransResolve): each half the last,
+        // stored one after the other; byte +0x1f has a swizzle bit per level.
+        static const bool noMips = std::getenv("SOTC_NATIVE_NOMIPS") != nullptr;
+        const uint32_t levels = noMips ? 1u : std::clamp((format >> 12) & 0xFu, 1u, 7u);
+        const uint8_t swizzleBits = g_ram[(header + 0x1Fu) & 0x1FFFFFFu];
+        std::vector<uint8_t> rgba;
         std::vector<uint8_t> scratch;
-        if (swizzled)
+        uint32_t pixels = header + word(header + 0x14u), w = width, h = height, decoded = 0;
+        for (uint32_t level = 0; level < levels && w >= 1u && h >= 1u; ++level)
         {
-            // Uploaded as PSMCT32 and read back as 8/4-bit: replay that.
-            const uint32_t cw = width / 2u, ch = psm == 0x13u ? height / 2u : height / 4u;
-            scratch.assign(static_cast<size_t>(width) * height + 0x4000u, 0);
-            const uint32_t bw32 = std::max<uint32_t>(cw / 64u, 1u);
-            for (uint32_t i = 0; i < cw * ch; ++i)
+            const size_t base = rgba.size();
+            rgba.resize(base + static_cast<size_t>(w) * h * 4u);
+            uint8_t *out = &rgba[base];
+            const bool swizzled = ((swizzleBits >> level) & 1u) != 0u;
+            if (psm == 0x00u)
             {
-                const uint32_t a = GSPSMCT32::addrPSMCT32(0, bw32, i % cw, i / cw);
-                if (a + 4u <= scratch.size())
-                    std::memcpy(&scratch[a], g_ram + ((pixels + i * 4u) & 0x1FFFFFFu), 4);
+                // PSMCT32: the pixels themselves (alpha 0x80 = opaque).
+                for (uint32_t i = 0; i < w * h; ++i)
+                    std::memcpy(out + i * 4u, g_ram + ((pixels + i * 4u) & 0x1FFFFFFu), 4);
             }
+            else
+            {
+                if (swizzled)
+                {
+                    // Uploaded as PSMCT32 and read back as 8/4-bit: replay that.
+                    const uint32_t cw = std::max(w / 2u, 1u), ch = std::max(psm == 0x13u ? h / 2u : h / 4u, 1u);
+                    scratch.assign(static_cast<size_t>(std::max(w, 64u)) * std::max(h, 64u) + 0x4000u, 0);
+                    const uint32_t bw32 = std::max<uint32_t>(cw / 64u, 1u);
+                    for (uint32_t i = 0; i < cw * ch; ++i)
+                    {
+                        const uint32_t a = GSPSMCT32::addrPSMCT32(0, bw32, i % cw, i / cw);
+                        if (a + 4u <= scratch.size())
+                            std::memcpy(&scratch[a], g_ram + ((pixels + i * 4u) & 0x1FFFFFFu), 4);
+                    }
+                }
+                const uint32_t tbw = std::max<uint32_t>(w / 64u, 2u);
+                for (uint32_t y = 0; y < h; ++y)
+                    for (uint32_t x = 0; x < w; ++x)
+                    {
+                        uint32_t index;
+                        if (swizzled && psm == 0x14u)
+                        {
+                            const uint32_t n = GSPSMT4::addrPSMT4(0, tbw, x, y);
+                            const uint8_t b = (n >> 1) < scratch.size() ? scratch[n >> 1] : 0;
+                            index = (n & 1u) ? (b >> 4) : (b & 15u);
+                        }
+                        else if (swizzled)
+                        {
+                            const uint32_t a = GSPSMT8::addrPSMT8(0, tbw, x, y);
+                            index = a < scratch.size() ? scratch[a] : 0u;
+                        }
+                        else if (psm == 0x14u)
+                        {
+                            const uint8_t b = g_ram[(pixels + (y * w + x) / 2u) & 0x1FFFFFFu];
+                            index = (x & 1u) ? (b >> 4) : (b & 15u);
+                        }
+                        else
+                            index = g_ram[(pixels + y * w + x) & 0x1FFFFFFu];
+                        std::memcpy(out + (static_cast<size_t>(y) * w + x) * 4u, &palette[index & (entries - 1u)], 4);
+                    }
+            }
+            ++decoded;
+            pixels += psm == 0x00u ? w * h * 4u : (psm == 0x13u ? w * h : w * h / 2u);
+            w /= 2u;
+            h /= 2u;
         }
-        const uint32_t tbw = std::max<uint32_t>(width / 64u, 2u);
-        std::vector<uint8_t> rgba(static_cast<size_t>(width) * height * 4u);
-        for (uint32_t y = 0; y < height; ++y)
-            for (uint32_t x = 0; x < width; ++x)
-            {
-                uint32_t index;
-                if (swizzled && psm == 0x14u)
-                {
-                    const uint32_t n = GSPSMT4::addrPSMT4(0, tbw, x, y);
-                    const uint8_t b = (n >> 1) < scratch.size() ? scratch[n >> 1] : 0;
-                    index = (n & 1u) ? (b >> 4) : (b & 15u);
-                }
-                else if (swizzled)
-                {
-                    const uint32_t a = GSPSMT8::addrPSMT8(0, tbw, x, y);
-                    index = a < scratch.size() ? scratch[a] : 0u;
-                }
-                else if (psm == 0x14u)
-                {
-                    const uint8_t b = g_ram[(pixels + (y * width + x) / 2u) & 0x1FFFFFFu];
-                    index = (x & 1u) ? (b >> 4) : (b & 15u);
-                }
-                else
-                    index = g_ram[(pixels + y * width + x) & 0x1FFFFFFu];
-                std::memcpy(&rgba[(static_cast<size_t>(y) * width + x) * 4u], &palette[index & (entries - 1u)], 4);
-            }
-        native_renderer::uploadTexture(key, width, height, rgba.data());
+        // Metal wants the whole chain down to the smallest it was given; stop
+        // where a level would be under 1 pixel (kept as decoded).
+        native_renderer::uploadTexture(key, width, height, rgba.data(), decoded);
         return key;
     }
 
@@ -433,6 +451,28 @@ namespace sotc_native
         offset[0] = static_cast<float>(r0) / 4096.0f;
         offset[1] = static_cast<float>(r1) / 4096.0f;
         return r0 != 0 || r1 != 0;
+    }
+
+    // Mip selection as texTransResolve sets TEX1 from the NTO2 header: MXL =
+    // levels - 1, MMIN +0x78 (2-5: mipmapped), L +0x94, K = +0x90 x
+    // *0x118c180 (1/16 steps); the GS level is log2(1/Q) x 2^L + K, Q = 1/w.
+    void surfaceLod(uint32_t header, uint32_t surface, native_renderer::DrawState &state, uint32_t field = 0x2Cu)
+    {
+        const uint32_t s = word(header + 0x50u) + surface * 0x120u;
+        const uint32_t index = word(s + field);
+        if (index >= word(header + 0x44u))
+            return;
+        const uint32_t object = word(word(header + 0x40u) + index * 0x20u + 0x10u);
+        const uint32_t nto2 = object ? word(object + 0x20u) : 0u;
+        if (!nto2 || word(nto2) != 0x324F544Eu)
+            return;
+        const uint32_t levels = std::clamp((word(nto2 + 0x1Cu) >> 12) & 0xFu, 1u, 7u);
+        if (levels < 2u || word(nto2 + 0x78u) < 2u)
+            return;
+        state.maxLod = static_cast<float>(levels - 1u);
+        state.lodScale = static_cast<float>(1u << (word(nto2 + 0x94u) & 3u));
+        const int32_t k = static_cast<int32_t>(static_cast<float>(static_cast<int32_t>(word(nto2 + 0x90u))) * real(0x0118C180u));
+        state.lodK = static_cast<float>((k << 20) >> 20) / 16.0f; // 12-bit signed, 7.4
     }
 
     // ALPHA_1 (0x42, first pass) or ALPHA_2 (0x43, the second texture's
@@ -1554,6 +1594,15 @@ namespace sotc_native
             state.blend = surfaceBlend(s);
             state.order = surfaceLayer(header, s, fading);
             state.opacity = opacity;
+            static const bool noMips = std::getenv("SOTC_NATIVE_NOMIPS") != nullptr;
+            if (!noMips)
+                surfaceLod(header, surface, state);
+            if (std::getenv("SOTC_NATIVE_LOG") && state.maxLod > 0.0f)
+            {
+                static std::set<uint64_t> told;
+                if (told.insert((static_cast<uint64_t>(header) << 16) | surface).second && told.size() < 30)
+                    std::fprintf(stderr, "[mip] header %08x surface %u levels %g L x%g K %g\n", header, surface, state.maxLod + 1.0f, state.lodScale, state.lodK);
+            }
             static const bool noRow = std::getenv("SOTC_NATIVE_NOROW") != nullptr;
             if (!noRow && surfaceRow(header, surface, state.uvOffset) && std::getenv("SOTC_NATIVE_LOG"))
             {
@@ -1615,6 +1664,9 @@ namespace sotc_native
                 native_renderer::DrawState second = state;
                 second.texture = surfaceTexture(header, surface, 0x3Cu);
                 second.uvOffset[0] = second.uvOffset[1] = 0.0f; // the second pair takes ROW z / w (0)
+                second.maxLod = 0.0f;
+                if (!noMips)
+                    surfaceLod(header, surface, second, 0x3Cu);
                 second.blend = surfaceBlend(s, 0x43u);
                 second.writeDepth = false;
                 second.overlay = true;

@@ -11,7 +11,7 @@ namespace native_renderer
     void uploadMesh(uint64_t, const Vertex *, uint32_t) {}
     void beginFrame() {}
     bool hasTexture(uint64_t) { return false; }
-    void uploadTexture(uint64_t, uint32_t, uint32_t, const uint8_t *) {}
+    void uploadTexture(uint64_t, uint32_t, uint32_t, const uint8_t *, uint32_t) {}
     void draw(uint64_t, const float[16], const DrawState &) {}
     void setFog(const Fog &) {}
     void setBloom(const Bloom &) {}

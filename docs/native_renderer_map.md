@@ -146,6 +146,14 @@ focusZ >> i (focus 0x11862dc taken through the camera's 0x4a0 matrix),
 ZTST GEQUAL, alpha (0x80 / slices) x (i + 1). Natively: `setDepthOfField`,
 one pass reading the depth (`SOTC_NATIVE_NODOF`).
 
+Mip levels: an NTO2 texture has (format >> 12) & 15 levels, each half the
+last, stored one after the other (byte +0x1f: a swizzle bit per level).
+texTransResolve uploads them (MIPTBP1/2) and sets TEX1 from the header:
+MXL = levels - 1, MMAG +0x74, MMIN +0x78, L +0x94, K = +0x90 x *0x118c180
+(7.4 fixed). The GS level is log2(1/Q) x 2^L + K with Q = 1/w. Natively the
+fragment stage picks the level the same way (FogParams lodK / lodScale /
+maxLod); Metal's own derivative LOD blurred the floors.
+
 VIF ROW: every ST unpack (V2-16, and the two-texture V4-16) uses STMOD 1
 (offset). texTransResolve builds, for each requested texture, a RET packet
 (DMA 0x6000000c, FLUSHE, STROW, DIRECT 7 with the GS texture registers) in
