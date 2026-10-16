@@ -170,7 +170,12 @@ packets of 48-byte particles: position + size, colour 0..1, sin/cos of the
 rotation. The microcode expands each into a rotated square (s = size x
 0.7071; A = (k.x sin, k.y cos) s, B = (-cos, k.y sin) s, k at 0x118bfe0;
 type 1 along the billboard axes from *0x118bff4, 2/4/5 by the matrix),
-type 4 as a lit fan around the centre, type 3 a streak between two points.
+type 4 as a lit fan around the centre, type 3 a streak between two points
+(q0 = p1 and width, q2 = p2; sides (p - eye) x (p1 - p2), half the width,
+the eye VU 16), type 7 a square by the environment matrix with its
+translation and a texture cell offset per particle (q2 z / w). The
+environment packet unpacks the 18 qwords at *0x118bff4 to VU 0-17 (12-15
+the world-to-clip matrix, 16 the eye), then VU 18-27.
 
 ## Other systems that append chains or microcode
 

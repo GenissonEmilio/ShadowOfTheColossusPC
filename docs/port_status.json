@@ -264,10 +264,10 @@
   "map": "renderer",
   "area": "Effects",
   "feature": "Particles",
-  "status": "partial",
-  "since": "2026-10-15",
+  "status": "native",
+  "since": "2026-10-16",
   "commit": "",
-  "note": "microcode 7 expansion (types 1, 2, 4, 5: rotated squares and lit puffs); type 3 (streaks) and 7 not yet; the puff lighting is approximated"
+  "note": "microcode 7 expansion of every type in the route: 1/2/4/5 squares and lit puffs, 3 streaks (side = (p - eye) x (p1 - p2)), 7 squares with a texture cell per particle; the puff lighting is approximated"
  },
  {
   "map": "renderer",

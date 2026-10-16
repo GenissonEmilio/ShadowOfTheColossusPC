@@ -1324,7 +1324,7 @@ namespace sotc_native
         g_ptclVtx(rdram, ctx, runtime);
         static const bool off = std::getenv("SOTC_NATIVE_NOPTCL") != nullptr;
         const ParticleEnv &e = g_ptclEnvState;
-        if (off || !g_cameraContext || count == 0u || count > 4096u || !(e.type == 1u || e.type == 2u || e.type == 4u || e.type == 5u))
+        if (off || !g_cameraContext || count == 0u || count > 4096u || !(e.type >= 1u && e.type <= 5u) && e.type != 7u)
             return;
         static std::vector<native_renderer::Vertex> tris;
         tris.clear();
@@ -1337,7 +1337,22 @@ namespace sotc_native
                     out[r] = e.axes[0][r] * x + e.axes[1][r] * y;
             else
                 for (int r = 0; r < 3; ++r)
-                    out[r] = e.m[r] * x + e.m[4 + r] * y;
+                    out[r] = e.m[r] * x + e.m[4 + r] * y + (e.type == 7u ? e.m[12 + r] : 0.0f); // type 7 adds the translation row
+        };
+        // Type 3 (streaks) side vectors: (p - eye) x (p1 - p2), half the width
+        // long; the eye is VU 16, the 17th qword of the constants at *0x118bff4.
+        const uint32_t consts = word(0x118BFF4u) & 0x0FFFFFFFu;
+        const float eye[3] = {consts ? real(consts + 0x100u) : 0.0f, consts ? real(consts + 0x104u) : 0.0f, consts ? real(consts + 0x108u) : 0.0f};
+        auto side = [&](const float *p, const float *d, float half, float out[3])
+        {
+            const float r[3] = {p[0] - eye[0], p[1] - eye[1], p[2] - eye[2]};
+            out[0] = r[1] * d[2] - r[2] * d[1];
+            out[1] = r[2] * d[0] - r[0] * d[2];
+            out[2] = r[0] * d[1] - r[1] * d[0];
+            const float len = std::sqrt(out[0] * out[0] + out[1] * out[1] + out[2] * out[2]);
+            const float k = len > 0.0f ? half / len : 0.0f;
+            for (int i = 0; i < 3; ++i)
+                out[i] *= k;
         };
         for (uint32_t i = 0; i < count; ++i)
         {
@@ -1368,7 +1383,35 @@ namespace sotc_native
                 col(c, e.type == 4u ? 0.75f : 1.0f);
                 return c;
             };
-            const native_renderer::Vertex v16 = at(B, 1, 0, 0), v17 = at(A, 1, e.vec[0], 0), v18 = at(A, -1, 0, e.vec[1]), v19 = at(B, -1, e.vec[0], e.vec[1]);
+            if (e.type == 3u)
+            {
+                // A streak from p (q0, width in w) to p2 (q2): corners p +- a, p2 +- b.
+                const float p2[3] = {real(q + 32u), real(q + 36u), real(q + 40u)};
+                const float d[3] = {p[0] - p2[0], p[1] - p2[1], p[2] - p2[2]};
+                const float half = real(q + 12u) * 0.5f;
+                float sa[3], sb[3];
+                side(p, d, half, sa);
+                side(p2, d, half, sb);
+                auto corner = [&](const float *base, const float *o, float sign, float u, float vv)
+                {
+                    native_renderer::Vertex c = v;
+                    c.x = base[0] + sign * o[0];
+                    c.y = base[1] + sign * o[1];
+                    c.z = base[2] + sign * o[2];
+                    c.u = u;
+                    c.v = vv;
+                    col(c, 1.0f);
+                    return c;
+                };
+                const native_renderer::Vertex c16 = corner(p, sa, 1, 0, 0), c17 = corner(p, sa, -1, e.vec[0], 0), c18 = corner(p2, sb, 1, 0, e.vec[1]),
+                                              c19 = corner(p2, sb, -1, e.vec[0], e.vec[1]);
+                tris.insert(tris.end(), {c16, c17, c18, c17, c19, c18});
+                continue;
+            }
+            // Type 7: each particle's own texture cell offset (q2 z / w).
+            const float u0 = e.type == 7u ? real(q + 40u) : 0.0f, v0 = e.type == 7u ? real(q + 44u) : 0.0f;
+            const native_renderer::Vertex v16 = at(B, 1, u0, v0), v17 = at(A, 1, u0 + e.vec[0], v0), v18 = at(A, -1, u0, v0 + e.vec[1]),
+                                          v19 = at(B, -1, u0 + e.vec[0], v0 + e.vec[1]);
             if (e.type == 4u)
             {
                 native_renderer::Vertex c = v;
