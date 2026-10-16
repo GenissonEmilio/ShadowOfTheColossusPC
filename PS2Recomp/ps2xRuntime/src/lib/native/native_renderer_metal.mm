@@ -27,6 +27,10 @@ struct VIn
     uchar4 color [[attribute(2)]];
 };
 
+// The near plane: the game's geometry comes this close to the camera (a
+// camera low in a pit, on the ground); the PS2 cuts much nearer than w = 1.
+constant float kNearW = 0.1;
+
 struct VOut
 {
     float4 position [[position]];
@@ -63,8 +67,8 @@ vertex VOut nativeVertex(VIn in [[stage_in]], constant float4x4 &clip [[buffer(1
 {
     VOut out;
     float4 c = clip * float4(in.position, 1.0);
-    // Depth from w (near plane at w = 1): z / w = 1 - 1 / w.
-    out.position = float4(c.x, c.y, c.w - 1.0, c.w);
+    // Depth from w (near plane at w = kNearW): z / w = 1 - kNearW / w.
+    out.position = float4(c.x, c.y, c.w - kNearW, c.w);
     out.depth = c.w;
     out.fog = fog.vertexFog != 0 ? clamp(fog.base + fog.scale / max(c.w, 1e-3), 0.0, 255.0) / 255.0 : 1.0;
     out.normal = in.normal;
@@ -159,8 +163,8 @@ fragment float4 bloomMask(Quad in [[stage_in]], depth2d<float> depth [[texture(0
         for (uint x = 0; x < 4; ++x)
         {
             float d = depth.read(min(base + uint2(x, y), size - 1));
-            // depth = 1 - 1 / w (cleared: 1, nothing drawn); GS Z = zA + zB / w.
-            float gsz = d >= 1.0 ? 0.0 : b.zA + b.zB * (1.0 - d);
+            // depth = 1 - kNearW / w (cleared: 1, nothing drawn); GS Z = zA + zB / w.
+            float gsz = d >= 1.0 ? 0.0 : b.zA + b.zB * (1.0 - d) / kNearW;
             sum += gsz <= b.threshold + 1.0 ? 1.0 : 0.0;
         }
     return float4(b.maskColor.rgb * (sum / 16.0), 1.0);
@@ -227,7 +231,7 @@ fragment float4 dofComposite(Quad in [[stage_in]], texture2d<float> blurred [[te
     constexpr sampler s(address::clamp_to_edge, filter::linear);
     uint2 size = uint2(depth.get_width(), depth.get_height());
     float d = depth.read(min(uint2(in.position.xy), size - 1));
-    float gsz = d >= 1.0 ? 0.0 : p.zA + p.zB * (1.0 - d);
+    float gsz = d >= 1.0 ? 0.0 : p.zA + p.zB * (1.0 - d) / kNearW;
     float keep = 1.0; // the share of the picture left
     for (int i = 0; i < p.slices; ++i)
         if (gsz <= float(p.focusZ >> uint(i)))

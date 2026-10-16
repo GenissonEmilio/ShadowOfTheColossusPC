@@ -31,7 +31,7 @@ namespace native_renderer
 
     // Draws of one frame: `clip` (column-major) takes model space to clip
     // space with x, y and w as the game's projection gives them (x/w, y/w in
-    // -1..1, y up); depth comes from w.
+    // -1..1, y up); depth comes from w (near plane at w = 0.1).
     void beginFrame();
     enum class Blend : uint8_t
     {
