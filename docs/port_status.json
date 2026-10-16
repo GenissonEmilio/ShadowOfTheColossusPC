@@ -329,7 +329,7 @@
   "feature": "VU1 microcode",
   "status": "native",
   "since": "2026-10-16",
-  "commit": "",
+  "commit": "90ee6b0",
   "note": "with SOTC_NATIVE=1 no VU1 program runs (they only fed the GS); VIF1 still unpacks and keeps TOP/TOPS/DBF; PS2X_VU1_RUN=1 runs them again. CPU per test route 165 s -> 79 s"
  },
  {
