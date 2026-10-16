@@ -357,7 +357,7 @@
   "status": "native",
   "since": "2026-10-16",
   "commit": "0c1efcb",
-  "note": "with SOTC_NATIVE=1 the GS rasterizes nothing (PS2X_GS_NODRAW=0 turns it back on); its registers, transfers and signals still run"
+  "note": "with SOTC_NATIVE=1 the GS rasterizes nothing and its local memory is not written (texture uploads, CLUT loads skipped); registers and signals still run (PS2X_GS_NODRAW=0 turns it all back on)"
  },
  {
   "map": "hardware",

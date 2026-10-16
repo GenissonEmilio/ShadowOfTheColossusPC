@@ -1482,7 +1482,8 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
         t.csm = static_cast<uint8_t>((value >> 55) & 0x1);
         t.csa = static_cast<uint8_t>((value >> 56) & 0x1F);
         t.cld = static_cast<uint8_t>((value >> 61) & 0x7);
-        m_backend->LoadClut(t, m_texclut);
+        if (!skipRaster())
+            m_backend->LoadClut(t, m_texclut);
         break;
     }
     case GS_REG_CLAMP_1:
@@ -1513,7 +1514,8 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
         t.csm = static_cast<uint8_t>((value >> 55) & 0x1);
         t.csa = static_cast<uint8_t>((value >> 56) & 0x1F);
         t.cld = static_cast<uint8_t>((value >> 61) & 0x7);
-        m_backend->LoadClut(t, m_texclut);
+        if (!skipRaster())
+            m_backend->LoadClut(t, m_texclut);
         break;
     }
     case GS_REG_XYOFFSET_1:
@@ -1655,7 +1657,8 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
             if (m_trxdir == 1u && std::getenv("PS2X_LOG_READBACK")) // debugging: local -> host
                 std::fprintf(stderr, "[readback] sbp %u sbw %u spsm %u %ux%u at %u,%u\n", m_bitbltbuf.sbp, m_bitbltbuf.sbw, static_cast<unsigned>(m_bitbltbuf.spsm),
                              m_trxreg.rrw, m_trxreg.rrh, m_trxpos.ssax, m_trxpos.ssay);
-            m_backend->BeginTransfer(command);
+            if (!(skipRaster() && m_trxdir != 1u)) // local memory stays unwritten with nothing rasterized
+                m_backend->BeginTransfer(command);
         }
         recordTransferDebugEventUnlocked();
         break;
@@ -1884,7 +1887,8 @@ void GS::vertexKick(bool drawing)
 
 void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
 {
-    if (m_backend)
+    // Nothing rasterizes from local memory then: the uploads only fill it.
+    if (m_backend && !(skipRaster() && m_trxdir != 1u))
         m_backend->UploadImage(data, sizeBytes);
 }
 
