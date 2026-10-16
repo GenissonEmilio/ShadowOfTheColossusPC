@@ -340,6 +340,38 @@ namespace ps2x::iop::detail
         return std::max<uint64_t>(words, 64u);
     }
 
+    void Spu2::writeRam(uint32_t byteAddress, const uint8_t *source, uint32_t bytes)
+    {
+        uint32_t word = (byteAddress >> 1u) & (RamWords - 1u);
+        for (uint32_t i = 0; i + 1u < bytes; i += 2u)
+        {
+            std::memcpy(&m_ram[word], source + i, 2);
+            word = (word + 1u) & (RamWords - 1u);
+        }
+    }
+
+    void Spu2::readRam(uint32_t byteAddress, uint8_t *destination, uint32_t bytes) const
+    {
+        uint32_t word = (byteAddress >> 1u) & (RamWords - 1u);
+        for (uint32_t i = 0; i + 1u < bytes; i += 2u)
+        {
+            std::memcpy(destination + i, &m_ram[word], 2);
+            word = (word + 1u) & (RamWords - 1u);
+        }
+    }
+
+    void Spu2::pushInputBlock(int c, const uint8_t *block)
+    {
+        Core &core = m_cores[c];
+        for (uint32_t i = 0; i < 256u; ++i)
+        {
+            int16_t left, right;
+            std::memcpy(&left, block + i * 2u, 2);
+            std::memcpy(&right, block + 512u + i * 2u, 2);
+            core.input.push_back({left, right});
+        }
+    }
+
     uint64_t Spu2::dmaRead(int c, uint8_t *destination, uint32_t bytes)
     {
         Core &core = m_cores[c];
@@ -613,6 +645,8 @@ namespace ps2x::iop::detail
                 core.input.pop_front();
                 inputL = (frame[0] * static_cast<int16_t>(core.bvolL)) >> 15;
                 inputR = (frame[1] * static_cast<int16_t>(core.bvolR)) >> 15;
+                if (m_inputRefill && core.input.size() == 256u)
+                    m_inputRefill(c);
             }
             // AVOL scales the external input (core 0's output into core 1),
             // BVOL the sound data input (auto-DMA stream); both are plain
@@ -710,6 +744,28 @@ namespace ps2x::iop::detail
         if (iopCycle > m_cycle + CyclesPerSample * 12000u)
             m_cycle = iopCycle - CyclesPerSample * 12000u;
         static const bool trace = std::getenv("PS2X_SPU2_TRACE") != nullptr;
+        {
+            // PS2X_SPU2_DUMPREGS=1: the core set-up now and then (what libsd leaves).
+            static const bool dump = std::getenv("PS2X_SPU2_DUMPREGS") != nullptr;
+            static uint64_t lastDump = 0;
+            if (dump && iopCycle > lastDump + 36864000ull * 10u)
+            {
+                lastDump = iopCycle;
+                for (int c = 0; c < 2; ++c)
+                {
+                    const Core &k = m_cores[c];
+                    std::fprintf(stderr, "[spu2regs] core %d attr %04x mmix %04x vmixl %06x vmixr %06x vmixel %06x vmixer %06x mvol %04x %04x evol %04x %04x avol %04x %04x bvol %04x %04x esa %05x eea %05x admas %x\n",
+                                 c, k.attr, k.mmix, k.vmixl, k.vmixr, k.vmixel, k.vmixer, k.mvolL, k.mvolR, k.evolL, k.evolR, k.avolL, k.avolR, k.bvolL, k.bvolR, k.esa, k.eea, k.admas);
+                    std::fprintf(stderr, "[spu2regs] core %d rev:", c);
+                    for (uint32_t r = 0x2E4u; r < 0x33Cu; r += 2u)
+                        std::fprintf(stderr, " %04x", m_regs[(c * 0x400u + r) / 2u]);
+                    std::fprintf(stderr, " | 774:");
+                    for (uint32_t r = 0x774u; r < 0x7B0u; r += 2u)
+                        std::fprintf(stderr, " %04x", m_regs[(c * 0x28u + r) / 2u]);
+                    std::fprintf(stderr, "\n");
+                }
+            }
+        }
         while (m_cycle + CyclesPerSample <= iopCycle)
         {
             m_cycle += CyclesPerSample;

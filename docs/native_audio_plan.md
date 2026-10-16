@@ -77,6 +77,43 @@ voice v % 24; libsd parameters are core | voice << 1 | register.
   slot), +0x180 the PCM input position (0xc8f4), +0x184 transfer busy
   (1 while op 1 runs, EE 0x28b6c4).
 
+## Native driver (2026-10-16)
+
+`ps2xIOP/src/emulator/services/iop_sg2.cpp` (`Sg2Driver`) stands in for
+SG2IOPM1.IRX: when the game loads the IRX from its buffer
+(`sceSifLoadModuleBuffer`, the image's .iopmod name is "sg2iop_driver") the
+load returns a module id without running anything, and RPC 0x11223344 is
+answered on the host. Each command goes straight to the SPU2 registers and
+sound RAM with libsd's encodings (voice parameters, switches, addresses,
+core attributes); transfers (0x13 / 0x14) are copies done at once, so the
+busy flag reads 0 in the same reply; the streamed voices keep the driver's
+NAX polling, refill queue (one op per reply) and loop flags; the PCM input
+(0x20) feeds core 0's sound data input through a refill callback from the
+SPU2 mixer at each consumed block, as the transfer interrupt did. The
+reply is built in the driver's order (ENVX, stream positions, then the
+stream bookkeeping).
+
+- On by default with SOTC_NATIVE=1; `PS2X_NATIVE_SG2=1/0` forces it.
+  `PS2X_SG2_TRACE=1` prints the commands (not 1 and 0x1a).
+- Pitch table: floor(0x1000 * 2^((i - 0xd0) / 192)), 608 entries, with the
+  32 entries where the driver's table differs (rounding, two typos).
+- Reverb: only "studio C" (libsd mode 4, what SotC sets) is known: the 22
+  offsets and 10 coefficients captured from the emulated libsd
+  (`PS2X_SPU2_DUMPREGS=1`), work area 0x37f0 words below EEA. Another mode
+  prints a warning and uses it; mode 0 zeroes the coefficients.
+  `sceSdInit` is reduced to the registers the mix reads, with the values
+  libsd leaves (MMIX 0xff0 / 0xffc, VMIXL/R all, AVOL of core 1 0x7fff).
+- Measured on the route (tools/native_run.sh, PS2X_SPU2_WAV): loudness per
+  second follows the emulated driver's (same peaks, timing drift of a
+  second or two); CPU unchanged (55 s user both: the IRX was cheap).
+  Not exercised on the route: the PCM input (cutscene audio, command
+  0x20), command 0x14, reverb modes other than 4.
+
+Left on the PS2 side: libsd and the other IRXs still load and run on the
+emulated IOP (libsd no longer called by the sound driver), and the mix is the ps2xIOP SPU2
+model (ADPCM voices, ADSR, reverb) fed by register writes. Next: the voices
+and reverb as a plain host mixer, without the register file.
+
 ## Plan
 
 1. Read the command dispatcher of SG2IOPM1.IRX: what each command does in

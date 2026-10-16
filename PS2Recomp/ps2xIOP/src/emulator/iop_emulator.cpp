@@ -13,6 +13,7 @@
 #include "core/iop_memory.h"
 #include "services/iop_module_loader.h"
 #include "services/iop_rpc.h"
+#include "services/iop_sg2.h"
 #include "imports/iop_stdio.h"
 #include "imports/iop_sysclib.h"
 #include "imports/iop_sysmem.h"
@@ -119,6 +120,8 @@ namespace ps2x::iop::detail
         void reset()
         {
             memory.reset();
+            sg2.reset();
+            sg2Loaded = false;
             kernel.reset();
             modules.clear();
             imports.reset();
@@ -723,6 +726,13 @@ namespace ps2x::iop::detail
             }
             else if (!IopModuleLoader::readElfFromGuest(host, guestAddress, image))
                 return {true, -1, -1};
+            if (Sg2Driver::enabled() && Sg2Driver::isDriverImage(image))
+            {
+                sg2.reset();
+                sg2Loaded = true;
+                std::cerr << "[IOP] sg2iop_driver replaced by the native driver" << std::endl;
+                return {true, static_cast<int32_t>(nextModuleId++), 0};
+            }
             std::ostringstream tag;
             tag << "buffer@0x" << std::hex << guestAddress;
             return loadImage(tag.str(), image, arguments, argumentSize);
@@ -746,6 +756,8 @@ namespace ps2x::iop::detail
 
         IopHost &host;
         IopMemory memory;
+        Sg2Driver sg2{host, memory};
+        bool sg2Loaded = false; // the native driver stands in for SG2IOPM1.IRX
         IopSysmem sysmem;
         IopKernel kernel;
         IopCdvd cdvd;
@@ -826,12 +838,14 @@ namespace ps2x::iop::detail
     RpcResult IopEmulator::handleRpc(const RpcRequest &request)
     {
         m_impl->idleUntil = 0;
+        if (m_impl->sg2Loaded && request.sid == Sg2Driver::Sid)
+            return m_impl->sg2.handleRpc(request);
         return m_impl->rpc.handleRpc(request, *m_impl);
     }
 
     bool IopEmulator::hasRpcServer(uint32_t sid) const noexcept
     {
-        return m_impl->rpc.hasServer(sid);
+        return (m_impl->sg2Loaded && sid == Sg2Driver::Sid) || m_impl->rpc.hasServer(sid);
     }
 
     void IopEmulator::onSifTransfer(const SifTransfer &transfer)
