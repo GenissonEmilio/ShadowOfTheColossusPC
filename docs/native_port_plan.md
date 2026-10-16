@@ -67,7 +67,7 @@ Vita3K running; then a real Vita).
    walked: `Vif1Compactor` keeps the VIF1 codes without their data and
    `GifEventScanner` reads GIF data in place for SIGNAL/FINISH/LABEL, the
    only GS registers the game waits on. Left: the walk itself and the
-   VIFcode pass over the compacted stream (~0.5 % of the game thread).
+   VIFcode pass over the compacted stream (~2 % of the game thread samples, from ~13 %).
 5. **Game-logic hot spots.** VU0 macro maths and the top profiled EE
    functions written natively (NEON on the Vita).
 6. **Audio.** SPU2/IOP replaced by a native mixer fed by the game's sound

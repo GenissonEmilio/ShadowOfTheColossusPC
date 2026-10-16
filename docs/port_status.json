@@ -345,10 +345,10 @@
   "map": "hardware",
   "area": "Graphics",
   "feature": "VIF1 and DMA",
-  "status": "partial",
+  "status": "native",
   "since": "2026-10-16",
-  "commit": "672646e",
-  "note": "with SOTC_NATIVE=1 the VIF1 steps over the UNPACK data (no VU1 to read it) and keeps its registers; the DMA chains are still walked and DIRECT packets still go to the GS registers"
+  "commit": "8e86b02",
+  "note": "with SOTC_NATIVE=1 the DMA chains are still walked (tags only) but no data is copied for nothing: the VIF1 stream keeps only its VIFcodes (UNPACK/MPG/DIRECT data left out), and GIF data (VIF1 DIRECT and the GIF channel) is read in place for its event registers only (SIGNAL/FINISH/LABEL). DMA/VIF1/GIF cost on the route about 6x lower; host system time 13 s -> 7 s"
  },
  {
   "map": "hardware",
