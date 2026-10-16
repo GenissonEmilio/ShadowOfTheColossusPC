@@ -362,11 +362,20 @@
  {
   "map": "hardware",
   "area": "Sound",
+  "feature": "Sound driver (SG2IOPM1.IRX)",
+  "status": "native",
+  "since": "2026-10-16",
+  "commit": "6f1d322",
+  "note": "the IRX is not run: RPC 0x11223344 answered on the host, its 36 commands applied to the SPU2 (volumes, pitch, key on/off, transfers, streamed voices, PCM input, reverb studio C). Loudness on the route follows the emulated driver's; on with SOTC_NATIVE=1 (PS2X_NATIVE_SG2=0 turns it off)"
+ },
+ {
+  "map": "hardware",
+  "area": "Sound",
   "feature": "SPU2",
   "status": "emulated",
   "since": "",
   "commit": "",
-  "note": "emulated in ps2xIOP"
+  "note": "the mixer (ADPCM voices, ADSR, reverb) is the ps2xIOP SPU2 model; with SOTC_NATIVE=1 the native sound driver writes its registers directly, no IOP code in between"
  },
  {
   "map": "hardware",
