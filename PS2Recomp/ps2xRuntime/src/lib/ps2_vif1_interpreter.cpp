@@ -1,3 +1,4 @@
+#include "ps2_vif1_compact.h"
 #include "runtime/gs/gs_frontend.h"
 #include <cstdio>
 #include "runtime/ps2_stats.h"
@@ -340,6 +341,64 @@ namespace
                 return 0u;
         }
         return 0u;
+    }
+}
+
+void Vif1Compactor::feed(const uint8_t *data, uint32_t bytes)
+{
+    uint32_t pos = 0;
+    while (pos < bytes)
+    {
+        if (m_copy != 0u)
+        {
+            const uint32_t n = std::min(m_copy, bytes - pos);
+            append(data + pos, n);
+            m_copy -= n;
+            pos += n;
+            continue;
+        }
+        if (m_gif != 0u)
+        {
+            const uint32_t n = std::min(m_gif, bytes - pos);
+            m_direct.feed(data + pos, n);
+            m_gif -= n;
+            pos += n;
+            continue;
+        }
+        if (m_skip != 0u)
+        {
+            const uint32_t n = std::min(m_skip, bytes - pos);
+            m_skip -= n;
+            m_skipped += n;
+            pos += n;
+            continue;
+        }
+        if (pos + 4u > bytes)
+            break;
+        uint32_t cmd;
+        std::memcpy(&cmd, data + pos, 4);
+        pos += 4u;
+        const uint8_t opcode = (cmd >> 24) & 0x7Fu;
+        const uint16_t imm = cmd & 0xFFFFu;
+        const uint8_t num = (cmd >> 16) & 0xFFu;
+        if ((opcode & 0x60u) == 0x60u || opcode == VIF_MPG || opcode == VIF_DIRECT || opcode == VIF_DIRECTHL)
+        {
+            const uint32_t nop = cmd & 0x80000000u; // NOP, the interrupt bit kept
+            if (nop != 0u || m_out.empty())
+                append(&nop, 4u);
+            if (opcode == VIF_DIRECT || opcode == VIF_DIRECTHL)
+                m_gif = (imm == 0u ? 65536u : imm) * 16u;
+            else
+                m_skip = opcode == VIF_MPG ? (num == 0u ? 256u : num) * 8u : unpackDataBytes(opcode, num, m_cycle);
+            continue;
+        }
+        append(data + pos - 4u, 4u);
+        if (opcode == VIF_STCYCL)
+            m_cycle = imm;
+        else if (opcode == VIF_STMASK)
+            m_copy = 4u;
+        else if (opcode == VIF_STROW || opcode == VIF_STCOL)
+            m_copy = 16u;
     }
 }
 

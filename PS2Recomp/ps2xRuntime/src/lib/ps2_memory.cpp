@@ -13,6 +13,9 @@
 #include <limits>
 #include <stdexcept>
 #include <algorithm>
+#include <optional>
+#include "ps2_vif1_compact.h"
+#include "ps2_gif_events.h"
 #include <string>
 #include <vector>
 
@@ -1544,7 +1547,26 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 uint32_t chcr = value;
                 uint32_t mode = (chcr >> 2) & 0x3;
 
-                if (mode == 0 && qwc > 0)
+                if (mode == 0 && qwc > 0 && channelBase == 0x1000A000u && GS::skipRaster() && m_gsEventWrite)
+                {
+                    GifEventScanner gifEvents(m_gsEventWrite);
+                    const bool scratch = isScratchpad(madr);
+                    const uint8_t *base = scratch ? m_scratchpad : m_rdram;
+                    const uint32_t limit = scratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
+                    uint32_t src = translateAddress(madr);
+                    uint32_t bytes = qwc * 16u;
+                    while (bytes != 0u)
+                    {
+                        if (src >= limit)
+                            src = 0;
+                        const uint32_t chunk = std::min(bytes, limit - src);
+                        gifEvents.feed(base + src, chunk);
+                        bytes -= chunk;
+                        src += chunk;
+                    }
+                    m_gifScanned = true;
+                }
+                else if (mode == 0 && qwc > 0)
                 {
                     enqueueTransfer(madr, qwc);
                 }
@@ -1559,6 +1581,18 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     // (SotC's canyon frames build ~4,600), and a cut chain desyncs the GIF.
                     const int kMaxChainTags = 1 << 20;
                     std::vector<uint8_t> chainBuf;
+                    // No VU1 program runs (native renderer, GS::skipRaster): the
+                    // VIF1 chain is gathered without the UNPACK/MPG data.
+                    static const bool runVu1 = std::getenv("PS2X_VU1_RUN") && std::atoi(std::getenv("PS2X_VU1_RUN")) != 0;
+                    const bool eventsOnly = GS::skipRaster() && m_gsEventWrite;
+                    GifEventScanner gifEvents(m_gsEventWrite);
+                    std::optional<Vif1Compactor> compactor;
+                    if (channelBase == 0x10009000u && !runVu1 && eventsOnly)
+                        compactor.emplace(vif1_regs.cycle, chainBuf, gifEvents);
+                    // The GIF channel's chain, likewise: read for its events only.
+                    const bool gifEventsOnly = channelBase == 0x1000A000u && eventsOnly;
+                    if (gifEventsOnly)
+                        m_gifScanned = true;
 
                     auto appendData = [&](uint32_t srcAddr, uint32_t qwCount)
                     {
@@ -1589,7 +1623,12 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                 chunk = maxSz2 - src;
                             if (chunk == 0)
                                 break;
-                            chainBuf.insert(chainBuf.end(), base2 + src, base2 + src + chunk);
+                            if (compactor)
+                                compactor->feed(base2 + src, chunk);
+                            else if (gifEventsOnly)
+                                gifEvents.feed(base2 + src, chunk);
+                            else
+                                chainBuf.insert(chainBuf.end(), base2 + src, base2 + src + chunk);
                             bytes -= chunk;
                             src += chunk;
                         }
@@ -1608,7 +1647,10 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
                         // CHCR.TTE sends the DMAtag's upper 64 bits to the channel before
                         // the tag payload. VIF chains use those bytes for two VIFcodes.
-                        chainBuf.insert(chainBuf.end(), localBase + tagPhys + 8u, localBase + tagPhys + 16u);
+                        if (compactor)
+                            compactor->feed(localBase + tagPhys + 8u, 8u);
+                        else
+                            chainBuf.insert(chainBuf.end(), localBase + tagPhys + 8u, localBase + tagPhys + 16u);
                     };
 
                     const bool isVifChannel =
@@ -1937,7 +1979,8 @@ void PS2Memory::processPendingTransfers()
         m_mtvuDeferredVif1 = false;
     }
 
-    const bool hadGif = !m_pendingGifTransfers.empty() || m_mtvuDeferredGif;
+    const bool hadGif = !m_pendingGifTransfers.empty() || m_mtvuDeferredGif || m_gifScanned;
+    m_gifScanned = false;
     uint32_t observedGifQwc = 0u;
     for (const auto &transfer : m_pendingGifTransfers)
     {

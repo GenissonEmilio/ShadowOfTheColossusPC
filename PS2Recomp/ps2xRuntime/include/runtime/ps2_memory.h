@@ -352,6 +352,9 @@ public:
     using GifPacketCallback = std::function<void(const uint8_t *, uint32_t)>;
     void setGifPacketCallback(GifPacketCallback cb) { m_gifPacketCallback = std::move(cb); }
     void setGifArbiter(GifArbiter *arbiter) { m_gifArbiter = arbiter; }
+    // GS register write for the event registers (SIGNAL/FINISH/LABEL) found
+    // in GIF data while the GS rasterizes nothing (GS::skipRaster).
+    void setGsEventWriter(std::function<void(uint8_t, uint64_t)> write) { m_gsEventWrite = std::move(write); }
 
     using Vu1MscalCallback = std::function<void(uint32_t startPC, uint32_t top, uint32_t itop)>;
     void setVu1MscalCallback(Vu1MscalCallback cb) { m_vu1MscalCallback = std::move(cb); }
@@ -440,6 +443,8 @@ public:
 
     GifPacketCallback m_gifPacketCallback;
     GifArbiter *m_gifArbiter = nullptr;
+    std::function<void(uint8_t, uint64_t)> m_gsEventWrite;
+    bool m_gifScanned = false; // GIF channel data read for its events only
     Vu1MscalCallback m_vu1MscalCallback;
     Vu1MscntCallback m_vu1MscntCallback;
 

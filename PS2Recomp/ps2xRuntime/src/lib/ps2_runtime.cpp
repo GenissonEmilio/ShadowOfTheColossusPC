@@ -797,6 +797,8 @@ bool PS2Runtime::syncCoreSubsystems()
         m_memory.setMtvuJobEndHook([this]
                                    { m_gs.flushGifWork(); });
     m_memory.setGifArbiter(&m_gifArbiter);
+    m_memory.setGsEventWriter([this](uint8_t reg, uint64_t value)
+                              { m_gs.writeRegister(reg, value); });
     m_memory.setVu0FbrstProvider([this]
                                  {
                                      const R5900Context *context = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
