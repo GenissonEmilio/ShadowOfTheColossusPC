@@ -327,10 +327,10 @@
   "map": "hardware",
   "area": "Processors",
   "feature": "VU1 microcode",
-  "status": "partial",
-  "since": "2026-10-08",
-  "commit": "3586d22",
-  "note": "native world loop, rest interpreted; unused when the native renderer draws"
+  "status": "native",
+  "since": "2026-10-16",
+  "commit": "",
+  "note": "with SOTC_NATIVE=1 no VU1 program runs (they only fed the GS); VIF1 still unpacks and keeps TOP/TOPS/DBF; PS2X_VU1_RUN=1 runs them again. CPU per test route 165 s -> 79 s"
  },
  {
   "map": "hardware",

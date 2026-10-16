@@ -1,3 +1,4 @@
+#include "runtime/gs/gs_frontend.h"
 #include <cstdio>
 #include "runtime/ps2_stats.h"
 // Based on Blackline Interactive implementation
@@ -349,8 +350,12 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         return;
 
     uint32_t pos = 0;
+    // With the native renderer drawing and the GS rasterizing nothing
+    // (GS::skipRaster), VU1 programs only feed the GS: they are not run.
+    static const bool runVu1 = std::getenv("PS2X_VU1_RUN") && std::atoi(std::getenv("PS2X_VU1_RUN")) != 0;
+    const bool skipVu1 = !runVu1 && GS::skipRaster();
     // Native VU1 batches (vu1native::registerBatch): offered once per program.
-    bool offerBatch = vu1native::hasBatchFns();
+    bool offerBatch = !skipVu1 && vu1native::hasBatchFns();
 
     while (pos + 4 <= sizeBytes)
     {
@@ -482,9 +487,9 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             vif1_regs.stat ^= (1u << 7); // toggle DBF
 
             ps2_stats::vu1Mscal.fetch_add(1, std::memory_order_relaxed);
-            if (m_vu1MscalCallback)
+            if (m_vu1MscalCallback && !skipVu1)
                 m_vu1MscalCallback(startPC, runTop, runItop);
-            offerBatch = vu1native::hasBatchFns();
+            offerBatch = !skipVu1 && vu1native::hasBatchFns();
             continue;
         }
         else if (opcode == VIF_MSCNT)
@@ -503,9 +508,9 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 
             ps2_stats::vu1Mscnt.fetch_add(1, std::memory_order_relaxed);
                     ps2_stats::vu1Programs.fetch_add(1, std::memory_order_relaxed);
-            if (m_vu1MscntCallback)
+            if (m_vu1MscntCallback && !skipVu1)
                 m_vu1MscntCallback(runTop, runItop);
-            offerBatch = vu1native::hasBatchFns();
+            offerBatch = !skipVu1 && vu1native::hasBatchFns();
             continue;
         }
         else if (opcode == VIF_STMASK)
