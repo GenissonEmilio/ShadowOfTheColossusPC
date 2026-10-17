@@ -237,6 +237,7 @@ void EeScheduler::run()
         }
 
         publishDebugContext(context);
+        m_profileContext.store(&context, std::memory_order_relaxed);
 
         if (context.pc == 0u)
         {
@@ -2184,6 +2185,7 @@ void EeScheduler::writeGuestU32(uint32_t address, uint32_t value)
 
 void EeScheduler::waitForEvent()
 {
+    m_profileContext.store(nullptr, std::memory_order_relaxed);
     std::unique_lock lock(m_eventMutex);
     if (!m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
     {
@@ -2347,8 +2349,10 @@ void EeScheduler::idleWait()
                 until = std::min(until, item.hostDeadline);
         }
         ps2_load::Wait idle;
+        const R5900Context *running = m_profileContext.exchange(nullptr, std::memory_order_relaxed);
         m_eventCv.wait_until(lock, until, [this]()
                              { return !m_events.empty() || m_stopRequested.load(std::memory_order_acquire); });
+        m_profileContext.store(running, std::memory_order_relaxed);
     }
     syncCyclesToHostClock();
     m_checkpointPending.store(true, std::memory_order_release);

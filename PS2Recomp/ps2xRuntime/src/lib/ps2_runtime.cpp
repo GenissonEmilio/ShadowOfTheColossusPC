@@ -2824,6 +2824,49 @@ void PS2Runtime::run()
 
     std::atomic<bool> gameThreadFinished{false};
 
+    // PS2X_PROFILE=<file>: a sampling profiler of the guest code. 1000 times a
+    // second it reads the running EE context's pc and ra (null: the EE waits)
+    // and every 5 s rewrites <file> with "pc ra samples" lines and an "idle"
+    // line; tools/guest_profile.py names the functions. PS2X_PROFILE_START=<s>
+    // starts sampling that many seconds in (skip the boot).
+    if (const char *profilePath = std::getenv("PS2X_PROFILE"))
+    {
+        const double startAfter = std::getenv("PS2X_PROFILE_START") ? std::atof(std::getenv("PS2X_PROFILE_START")) : 0.0;
+        std::thread([this, path = std::string(profilePath), startAfter]()
+                    {
+            ThreadNaming::SetCurrentThreadName("GuestProfiler");
+            std::this_thread::sleep_for(std::chrono::duration<double>(startAfter));
+            std::unordered_map<uint64_t, uint64_t> samples;
+            uint64_t idle = 0, total = 0;
+            auto lastWrite = std::chrono::steady_clock::now();
+            while (true)
+            {
+                std::this_thread::sleep_for(std::chrono::microseconds(1000));
+                const R5900Context *context = m_eeScheduler ? m_eeScheduler->profileContext() : nullptr;
+                ++total;
+                if (!context)
+                    ++idle;
+                else
+                {
+                    const uint32_t pc = context->pc, ra = static_cast<uint32_t>(_mm_extract_epi32(context->r[31], 0));
+                    ++samples[(static_cast<uint64_t>(pc) << 32) | ra];
+                }
+                const auto now = std::chrono::steady_clock::now();
+                if (now - lastWrite >= std::chrono::seconds(5))
+                {
+                    lastWrite = now;
+                    if (FILE *f = std::fopen(path.c_str(), "w"))
+                    {
+                        std::fprintf(f, "total %llu\nidle %llu\n", static_cast<unsigned long long>(total), static_cast<unsigned long long>(idle));
+                        for (const auto &[key, n] : samples)
+                            std::fprintf(f, "%08x %08x %llu\n", static_cast<uint32_t>(key >> 32), static_cast<uint32_t>(key), static_cast<unsigned long long>(n));
+                        std::fclose(f);
+                    }
+                }
+            } })
+            .detach();
+    }
+
     std::thread gameThread([&]()
                            {
         ThreadNaming::SetCurrentThreadName("GameThread");

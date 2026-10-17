@@ -360,6 +360,9 @@ public:
     [[nodiscard]] R5900Context *currentContext();
     [[nodiscard]] uint8_t *rdram() const noexcept;
     [[nodiscard]] uint64_t eeCycle() const noexcept { return m_eeCycle; } // the EE clock (cycles)
+    // The guest context being executed, null while the executor waits (for
+    // a sampling profiler on another thread: its pc / ra are read racily).
+    [[nodiscard]] const R5900Context *profileContext() const noexcept { return m_profileContext.load(std::memory_order_relaxed); }
 
     // Direct syscall tests use the same main-thread record without starting a
     // second executor. Production execution calls reset() before run().
@@ -449,6 +452,7 @@ private:
     int m_nextEventFlagId = 1;
     int m_nextAlarmId = 1;
     uint64_t m_nextDelayToken = 1;
+    std::atomic<const R5900Context *> m_profileContext{nullptr};
     int m_nextIntcHandlerId = 1;
     int m_nextDmacHandlerId = 1;
     int m_intcHeadOrder = 0;
