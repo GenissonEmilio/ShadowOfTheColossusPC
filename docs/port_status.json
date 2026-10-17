@@ -408,19 +408,19 @@
   "map": "hardware",
   "area": "System",
   "feature": "Timers and interrupts",
-  "status": "partial",
+  "status": "native",
   "since": "2026-10-16",
   "commit": "",
-  "note": "VBlank, alarms and the EE timers the game uses (T0 HBlank count, T1 as a clock, T2 compare interrupts; PS2X_TRACE_TIMERS shows them) are computed from the EE cycle count, which follows the host clock once GAMECORE runs; no hardware is modelled beyond that arithmetic. Interrupt delivery still goes through the emulated INTC/DMAC handlers"
+  "note": "no timer is modelled once the boot is over: T0/T1/T2 stopped after the game arms them; the game library's counters (iosGetTCountExtension, the libkernel system time, the rap counter) read the EE clock, DelayThread is a timed wait on the host scheduler; interrupts (VBlank, DMA completion, GS FINISH) come from host events to the game's own handlers. PS2X_MMIO_CENSUS: 129 register accesses in a whole route, all at boot"
  },
  {
   "map": "hardware",
   "area": "System",
   "feature": "EE kernel and threads",
-  "status": "partial",
-  "since": "2026-10-02",
+  "status": "native",
+  "since": "2026-10-16",
   "commit": "ec4b26d",
-  "note": "own scheduler for the game's threads"
+  "note": "the game's threads on the host scheduler (PS2 priority semantics, timed waits on the host clock), syscalls on the host, no PS2 kernel code; the game library's hardware access (scratchpad DMA, display-list kicks, draw-finish test) replaced by host calls"
  },
  {
   "map": "renderer",

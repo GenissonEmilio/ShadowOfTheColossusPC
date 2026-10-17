@@ -1474,6 +1474,16 @@ void EeScheduler::completeExternalWait(uint32_t type, uint64_t token, int result
     blockCurrent(std::move(wait));
 }
 
+[[noreturn]] void EeScheduler::delayCurrent(uint32_t microseconds, std::function<void(R5900Context &)> completion)
+{
+    constexpr uint32_t kDelayWaitType = 0x44454C59u; // 'DELY'
+    const uint64_t token = m_nextDelayToken++;
+    const uint64_t cycles = std::max<uint64_t>(1u, static_cast<uint64_t>(microseconds) * kEeClockHz / 1000000u);
+    scheduleEvent(m_eeCycle + cycles, std::chrono::steady_clock::now() + std::chrono::microseconds(microseconds),
+                  EeEvent{EeEventType::ExternalWake, kDelayWaitType, token});
+    waitExternal(EeWaitReason::External, kDelayWaitType, token, std::move(completion));
+}
+
 GuestThread *EeScheduler::thread(int id)
 {
     auto it = m_threads.find(id);

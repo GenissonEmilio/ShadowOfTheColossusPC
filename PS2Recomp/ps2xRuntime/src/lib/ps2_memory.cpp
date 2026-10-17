@@ -3,6 +3,7 @@
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_stats.h"
 #include <cstdlib>
+#include <cstdio>
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_address.h"
 #include "runtime/gs/gs_frontend.h"
@@ -10,6 +11,7 @@
 #include "ps2_log.h"
 #include <atomic>
 #include <map>
+#include <mutex>
 #include <iostream>
 #include <cstring>
 #include <limits>
@@ -1318,8 +1320,54 @@ void PS2Memory::write128(uint32_t address, __m128i value)
     }
 }
 
+uint32_t (*g_ps2MmioCaller)() = nullptr; // the running guest code's return address (census)
+namespace
+{
+    thread_local bool t_hostIo = false; // register access made by the host itself (not counted)
+}
+
+namespace
+{
+    // PS2X_MMIO_CENSUS=1: which hardware registers (0x10000000..0x1000ffff)
+    // the game reads and writes, counted and printed at exit (debugging).
+    struct MmioCensus
+    {
+        bool on = std::getenv("PS2X_MMIO_CENSUS") != nullptr;
+        std::atomic<uint64_t> reads[0x4000]{}, writes[0x4000]{};
+        std::mutex mutex;
+        std::map<std::pair<uint32_t, uint32_t>, uint64_t> callers; // (register, guest ra) -> count
+        void count(uint32_t address, bool write)
+        {
+            if (!on || t_hostIo || (address & 0xFFFF0000u) != 0x10000000u)
+                return;
+            (write ? writes : reads)[(address & 0xFFFFu) >> 2].fetch_add(1, std::memory_order_relaxed);
+            if (g_ps2MmioCaller)
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                ++callers[{address | (write ? 1u : 0u), g_ps2MmioCaller()}];
+            }
+        }
+        void dump()
+        {
+            if (!on)
+                return;
+            for (uint32_t i = 0; i < 0x4000u; ++i)
+                if (reads[i] || writes[i])
+                    std::fprintf(stderr, "[mmio] %08x reads %llu writes %llu\n", 0x10000000u + i * 4u,
+                                 static_cast<unsigned long long>(reads[i].load()), static_cast<unsigned long long>(writes[i].load()));
+            for (const auto &[key, n] : callers)
+                std::fprintf(stderr, "[mmio-caller] %08x %s ra %08x count %llu\n", key.first & ~1u, (key.first & 1u) ? "write" : "read", key.second,
+                             static_cast<unsigned long long>(n));
+        }
+    };
+    MmioCensus g_mmioCensus;
+}
+
+void ps2DumpMmioCensus() { g_mmioCensus.dump(); }
+
 bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 {
+    g_mmioCensus.count(address, true);
     if ((address >= 0x10003000u && address < 0x10003100u) || (address >= 0x10003C00u && address < 0x10003E00u))
         syncVu1(); // GIF / VIF1 registers
     size_t timerIndex = 0u;
@@ -2615,6 +2663,7 @@ int PS2Memory::pollDmaRegisters()
 
 uint32_t PS2Memory::readIORegister(uint32_t address)
 {
+    g_mmioCensus.count(address, false);
     // VIF1_STAT / GIF_STAT while the VU1 worker still has work: report the
     // paths as busy instead of waiting, like the hardware. Games poll these
     // once per vsync to decide whether to flip (SotC's iosCheckDrawFinish);
@@ -2896,4 +2945,45 @@ void PS2Memory::clearModifiedFlag(uint32_t address, uint32_t size)
             }
         }
     }
+}
+
+void PS2Memory::hostDmaStart(uint32_t channelBase, uint32_t chcr, uint32_t madr, uint32_t qwc, uint32_t tadr)
+{
+    t_hostIo = true;
+    // As the game's own stores would: QWC, then TADR (chain) or MADR (normal).
+    writeIORegister(channelBase + 0x20u, qwc);
+    if (chcr & 0x4u)
+        writeIORegister(channelBase + 0x30u, tadr);
+    else
+        writeIORegister(channelBase + 0x10u, madr);
+    writeIORegister(channelBase, chcr);
+    t_hostIo = false;
+}
+
+bool PS2Memory::hostDrawPathsIdle()
+{
+    t_hostIo = true;
+    const bool idle = (readIORegister(0x10009000u) & 0x100u) == 0u && (readIORegister(0x1000A000u) & 0x100u) == 0u &&
+                      (readIORegister(0x10003C00u) & 0x1F000003u) == 0u && (readIORegister(0x10003020u) & 0xC00u) == 0u;
+    t_hostIo = false;
+    return idle;
+}
+
+void PS2Memory::hostStopEeTimer(size_t index)
+{
+    if (index >= m_eeTimers.size())
+        return;
+    m_timerIrqLatched |= flushEeTimers();
+    m_timerIrqLatched &= ~(1u << index); // nor an interrupt it raised already
+    m_eeTimers[index].mode = 0u;
+    m_eeTimers[index].count = 0u;
+    m_timerBudget = cyclesUntilNextEeTimerInterruptNow();
+}
+
+bool PS2Memory::hostChannelBusy(uint32_t channelBase)
+{
+    t_hostIo = true;
+    const bool busy = (readIORegister(channelBase) & 0x100u) != 0u;
+    t_hostIo = false;
+    return busy;
 }

@@ -344,6 +344,9 @@ public:
     void completeVSync(uint64_t tick);
     void completeExternalWait(uint32_t type, uint64_t token, int result);
     [[noreturn]] void waitExternal(EeWaitReason reason, uint32_t type, uint64_t token, std::function<void(R5900Context &)> completion = {});
+    // Block the current thread for a span of time (libkernel's DelayThread on
+    // the host): woken by a deadline on the EE clock / host clock.
+    [[noreturn]] void delayCurrent(uint32_t microseconds, std::function<void(R5900Context &)> completion = {});
 
     [[nodiscard]] GuestThread *thread(int id);
     [[nodiscard]] const GuestThread *thread(int id) const;
@@ -356,6 +359,7 @@ public:
     [[nodiscard]] int currentThreadId() const noexcept;
     [[nodiscard]] R5900Context *currentContext();
     [[nodiscard]] uint8_t *rdram() const noexcept;
+    [[nodiscard]] uint64_t eeCycle() const noexcept { return m_eeCycle; } // the EE clock (cycles)
 
     // Direct syscall tests use the same main-thread record without starting a
     // second executor. Production execution calls reset() before run().
@@ -444,6 +448,7 @@ private:
     int m_nextSemaphoreId = 1;
     int m_nextEventFlagId = 1;
     int m_nextAlarmId = 1;
+    uint64_t m_nextDelayToken = 1;
     int m_nextIntcHandlerId = 1;
     int m_nextDmacHandlerId = 1;
     int m_intcHeadOrder = 0;

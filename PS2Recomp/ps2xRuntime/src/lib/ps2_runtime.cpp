@@ -799,6 +799,15 @@ bool PS2Runtime::syncCoreSubsystems()
     m_memory.setGifArbiter(&m_gifArbiter);
     m_memory.setGsEventWriter([this](uint8_t reg, uint64_t value)
                               { m_gs.writeRegister(reg, value); });
+    {
+        extern uint32_t (*g_ps2MmioCaller)();
+        static PS2Runtime *self = this;
+        g_ps2MmioCaller = []() -> uint32_t
+        {
+            const R5900Context *context = self->m_eeScheduler ? self->m_eeScheduler->currentContext() : nullptr;
+            return context ? GPR_U32(context, 31) : 0u;
+        };
+    }
     m_memory.setVu0FbrstProvider([this]
                                  {
                                      const R5900Context *context = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
@@ -3202,6 +3211,8 @@ void PS2Runtime::run()
             if (exitNow)
             {
                 std::fprintf(stderr, "[exit] game frame %llu reached\n", static_cast<unsigned long long>(gameFrame));
+                extern void ps2DumpMmioCensus();
+                ps2DumpMmioCensus();
                 std::fflush(nullptr);
                 std::_Exit(0);
             }

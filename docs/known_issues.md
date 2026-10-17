@@ -90,3 +90,12 @@ the fog alpha. The native renderer, with SOTC_NATIVE_ZFOG=1, skips layer 1
 in the main pass ("shown through the backdrop"), which leaves flat, blurred
 patches where layer 1 surfaces come close to the camera (shrine floor near
 the stairs). To fix before turning zFog on.
+
+## Native: Wander's shadow on the plain, Agro up close
+
+On the plain the emulated picture shows Wander's soft shadow on the ground;
+the native one does not (seen 2026-10-16, with or without the glow and the
+native system: older than those). Agro right next to the camera (route
+picture 33, game frame ~2040) is missing natively: likely the near plane
+(the GS does not clip at it).
+

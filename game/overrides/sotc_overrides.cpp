@@ -563,6 +563,286 @@ namespace
                          a0, a1, a2, ra);
     }
 
+    // ---- Native system (SOTC_NATIVE): the game library's hardware access
+    // done on the host. The game no longer reads or writes a PS2 register
+    // once GAMECORE runs (PS2X_MMIO_CENSUS=1 counts what is left):
+    //  - T0 / T1: iosInitIntrSystem arms T0 (bus clock, overflow interrupt
+    //    every 65536 ticks, ~2300 a second, only to extend the count) and T1
+    //    (profiling, never read). Both are stopped after it; the 64-bit count
+    //    iosGetTCountExtension / iosGetTCount return comes from the EE clock
+    //    (bus = EE / 2, as the timer model counted it).
+    //  - Scratchpad DMA (iosMemToSprDmaAdrCopy, iosSprToMemDmaAdrCopy and
+    //    the chunked copy 0x1ad958): plain copies; the DMA was synchronous.
+    //  - iosDmaSendSChainPath1 (the display list, VIF1 chain) and
+    //    iosCopyFrameBuffer (a GIF packet): straight into the host DMA engine
+    //    once the paths are idle (otherwise the game's own wait runs).
+    //  - iosCheckDrawFinish: the host's "all paths idle".
+    //  - libkernel's timer system on T2 (StartTimerSystemTime, the system
+    //    time, its interrupt) and DelayThread, its one user: the EE clock
+    //    and a timed wait on the host scheduler; T2 stays stopped.
+    namespace sysnative
+    {
+        PS2Runtime::RecompiledFunction g_initIntr = nullptr, g_dmaSendPath1 = nullptr, g_copyFrameBuffer = nullptr;
+
+        void returnTo(R5900Context *ctx) { ctx->pc = GPR_U32(ctx, 31); }
+        uint64_t busTicks(PS2Runtime *runtime) { return runtime->eeScheduler().eeCycle() / 2u; }
+        uint32_t u32(uint8_t *rdram, uint32_t address)
+        {
+            uint32_t v;
+            std::memcpy(&v, getMemPtr(rdram, address), 4);
+            return v;
+        }
+        void put32(uint8_t *rdram, uint32_t address, uint32_t v) { std::memcpy(getMemPtr(rdram, address), &v, 4); }
+        void put64(uint8_t *rdram, uint32_t address, uint64_t v) { std::memcpy(getMemPtr(rdram, address), &v, 8); }
+
+        void initIntrSystem(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            g_initIntr(rdram, ctx, runtime);
+            runtime->memory().hostStopEeTimer(0);
+            runtime->memory().hostStopEeTimer(1);
+        }
+        void tcountOverflow(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            // T0's overflow handler (0x1ad850): T0 is stopped, nothing to extend or re-arm.
+            runtime->memory().hostStopEeTimer(0);
+            SET_GPR_U64(ctx, 2, 0u);
+            returnTo(ctx);
+        }
+        void delayThread(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            // libkernel's DelayThread (an alarm on T2, then SleepThread): a timed wait on the host.
+            runtime->eeScheduler().delayCurrent(GPR_U32(ctx, 4), [](R5900Context &resume)
+            {
+                R5900Context *r = &resume;
+                SET_GPR_U64(r, 2, 0u);
+                r->pc = GPR_U32(r, 31);
+            });
+        }
+        void timerSystemTime(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            SET_GPR_U64(ctx, 2, busTicks(runtime)); // (i)GetTimerSystemTime: bus clock ticks
+            returnTo(ctx);
+        }
+        void startTimerSystemTime(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            runtime->memory().hostStopEeTimer(2); // the system time comes from the EE clock
+            SET_GPR_U64(ctx, 2, 0u);
+            returnTo(ctx);
+        }
+        void timerInterrupt(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            runtime->memory().hostStopEeTimer(2); // T2's handler (0x1109d0): no alarms on T2 any more
+            SET_GPR_U64(ctx, 2, 0u);
+            returnTo(ctx);
+        }
+        void getTCountExtension(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            SET_GPR_U64(ctx, 2, busTicks(runtime));
+            returnTo(ctx);
+        }
+        void getTCount(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            SET_GPR_U64(ctx, 2, busTicks(runtime) & ~0xFFFFull);
+            returnTo(ctx);
+        }
+        // T1, the "CPU rap counter" (profiling): counted from the EE clock
+        // since its last reset, at the clock its mode selects, 16 bits.
+        uint64_t g_rapBase = 0;
+        void resetCpuRapCounter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            put32(rdram, 0x001E0BD4u, GPR_U32(ctx, 4)); // the mode its readers scale by
+            g_rapBase = runtime->eeScheduler().eeCycle();
+            returnTo(ctx);
+        }
+        void getCpuRapCount(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            static constexpr double kClockHz[4] = {147456000.0, 9216000.0, 576000.0, 15734.0};
+            const uint32_t mode = u32(rdram, 0x001E0BD4u);
+            const double seconds = static_cast<double>(runtime->eeScheduler().eeCycle() - g_rapBase) / 294912000.0;
+            const uint32_t count = static_cast<uint32_t>(seconds * kClockHz[mode & 3u]) & 0xFFFFu;
+            float scale;
+            std::memcpy(&scale, getMemPtr(rdram, 0x001E0BD8u + mode * 4u), 4);
+            ctx->f[0] = static_cast<float>(count) * 60.0f / scale; // iosGetCpuRapCountPar1Int
+            returnTo(ctx);
+        }
+        void chkGpDlTransExec(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const bool busy = runtime->memory().hostChannelBusy(0x10009000u) || runtime->memory().hostChannelBusy(0x1000A000u);
+            SET_GPR_U64(ctx, 2, busy ? 1u : 0u);
+            returnTo(ctx);
+        }
+        void memToSpr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t madr = GPR_U32(ctx, 4), bytes = (GPR_U32(ctx, 5) & 0xFFFFu) * 16u, sadr = GPR_U32(ctx, 6) & 0x3FF0u;
+            std::memcpy(runtime->memory().getScratchpad() + sadr, getMemPtr(rdram, madr), std::min(bytes, 0x4000u - sadr));
+            returnTo(ctx);
+        }
+        void sprToMem(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t madr = GPR_U32(ctx, 4), bytes = (GPR_U32(ctx, 5) & 0xFFFFu) * 16u, sadr = GPR_U32(ctx, 6) & 0x3FF0u;
+            std::memcpy(getMemPtr(rdram, madr), runtime->memory().getScratchpad() + sadr, std::min(bytes, 0x4000u - sadr));
+            returnTo(ctx);
+        }
+        void copyViaSpr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            // (dst, src, bytes): 16 KB at a time through the scratchpad.
+            uint32_t dst = GPR_U32(ctx, 4), src = GPR_U32(ctx, 5), qwc = GPR_U32(ctx, 6) >> 4;
+            uint8_t *spr = runtime->memory().getScratchpad();
+            while (true)
+            {
+                const uint32_t n = std::min(qwc, 0x400u);
+                std::memcpy(spr, getMemPtr(rdram, src), n * 16u);
+                std::memcpy(getMemPtr(rdram, dst), spr, n * 16u);
+                if (qwc <= 0x400u)
+                    break;
+                qwc -= 0x400u;
+                src += 0x4000u;
+                dst += 0x4000u;
+            }
+            returnTo(ctx);
+        }
+        void dmaSendPath1(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            if (!runtime->memory().hostDrawPathsIdle())
+            {
+                g_dmaSendPath1(rdram, ctx, runtime); // the game's own wait
+                return;
+            }
+            // Completions already pending go to their handlers first, as the
+            // game's stores before the kick would have delivered them.
+            runtime->drainCompletedDmacHandlers(rdram);
+            runtime->memory().hostDmaStart(0x10009000u, 0x145u, 0u, 0u, GPR_U32(ctx, 4) & 0x7FFFFFFFu);
+            runtime->drainCompletedDmacHandlers(rdram);
+            returnTo(ctx);
+        }
+        void checkDrawFinish(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            put32(rdram, 0x001E10ECu, u32(rdram, 0x001E10ECu) + 1u);
+            SET_GPR_U64(ctx, 2, runtime->memory().hostDrawPathsIdle() ? 1u : 0u);
+            returnTo(ctx);
+        }
+        void copyFrameBuffer(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            if (!runtime->memory().hostDrawPathsIdle())
+            {
+                g_copyFrameBuffer(rdram, ctx, runtime);
+                return;
+            }
+            // The packet iosCopyFrameBuffer (0x1c19c0) builds at 0x213710: the
+            // draw buffer copied (stretched when the sizes differ) to the display one.
+            const int32_t dw = static_cast<int32_t>(u32(rdram, 0x00213810u)), dh = static_cast<int32_t>(u32(rdram, 0x00213814u));
+            const int32_t sw = static_cast<int32_t>(u32(rdram, 0x00213818u)), sh = static_cast<int32_t>(u32(rdram, 0x0021381Cu));
+            auto log2Up = [](int32_t v) -> int64_t
+            {
+                for (int64_t k = 0; k < 11; ++k)
+                    if (v <= (1 << k))
+                        return k;
+                return -1;
+            };
+            const int64_t th = log2Up(sh), tw = log2Up(sw);
+            const bool same = dw == sw && dh == sh;
+            put64(rdram, 0x00213710u, 0x100000000000800Full);
+            put64(rdram, 0x00213718u, 0xEu);
+            put64(rdram, 0x00213720u, ((static_cast<uint64_t>(dw >> 6) & 0x3Fu) << 16) | 0x1000000u);
+            put64(rdram, 0x00213728u, 0x4Cu);
+            put64(rdram, 0x00213730u, static_cast<uint64_t>(static_cast<int64_t>(dw * dh >> 11)) | 0x131000000ull);
+            put64(rdram, 0x00213738u, 0x4Eu);
+            put64(rdram, 0x00213740u, 0x30000u);
+            put64(rdram, 0x00213748u, 0x47u);
+            put64(rdram, 0x00213750u, 0u);
+            put64(rdram, 0x00213758u, 8u);
+            put64(rdram, 0x00213760u, (static_cast<uint64_t>(dw - 1) << 16) | (static_cast<uint64_t>(dh - 1) << 48));
+            put64(rdram, 0x00213768u, 0x40u);
+            put64(rdram, 0x00213770u, static_cast<uint64_t>(static_cast<int64_t>((0x800 - dw / 2) * 0x10)) |
+                                          (static_cast<uint64_t>(static_cast<int64_t>((0x800 - dh / 2) * 0x10)) << 32));
+            put64(rdram, 0x00213778u, 0x18u);
+            put64(rdram, 0x00213780u, 1u);
+            put64(rdram, 0x00213788u, 0x3Fu);
+            put64(rdram, 0x00213790u, static_cast<uint64_t>(static_cast<int64_t>((dw * dh >> 6) + (sw * sh >> 6))) | (static_cast<uint64_t>(th) << 30) |
+                                          (static_cast<uint64_t>(sw >> 6) << 14) | 0x100000u | (static_cast<uint64_t>(tw) << 26));
+            put64(rdram, 0x00213798u, 6u);
+            put64(rdram, 0x002137A0u, same ? 0u : 0x60u);
+            put64(rdram, 0x002137A8u, 0x14u);
+            put64(rdram, 0x002137B0u, 0x3F80000080808080ull);
+            put64(rdram, 0x002137B8u, 1u);
+            put64(rdram, 0x002137C0u, 0x116u);
+            put64(rdram, 0x002137C8u, 0u);
+            const int32_t hh = dh >> 1, hw = dw >> 1;
+            uint64_t a, b;
+            if (same)
+            {
+                a = static_cast<uint64_t>((0x800 - hw) * 0x10) | (static_cast<uint64_t>((0x800 - hh) * 0x10) << 16);
+                b = static_cast<uint64_t>((hw + 0x800) * 0x10) | (static_cast<uint64_t>((hh + 0x800) * 0x10) << 16);
+                put64(rdram, 0x002137F0u, static_cast<uint64_t>(dw << 4) | (static_cast<uint64_t>(dh << 4) << 16));
+                put64(rdram, 0x002137D0u, 0u);
+            }
+            else
+            {
+                a = static_cast<uint64_t>((0x800 - hw) * 0x10 - 8) | (static_cast<uint64_t>((0x800 - hh) * 0x10 - 8) << 16);
+                b = static_cast<uint64_t>(hw * 0x10 + 0x7FF8) | (static_cast<uint64_t>(hh * 0x10 + 0x7FF8) << 16);
+                put64(rdram, 0x002137F0u, static_cast<uint64_t>(sw * 0x10 - 0x18) | (static_cast<uint64_t>(sh * 0x10 - 0x18) << 16));
+                put64(rdram, 0x002137D0u, 0x80008u);
+            }
+            put64(rdram, 0x00213800u, b | 0xFFFFFFFF00000000ull);
+            put64(rdram, 0x002137E0u, a | 0xFFFFFFFF00000000ull);
+            put64(rdram, 0x00213808u, 4u);
+            put64(rdram, 0x002137F8u, 3u);
+            put64(rdram, 0x002137E8u, 4u);
+            put64(rdram, 0x002137D8u, 3u);
+            runtime->drainCompletedDmacHandlers(rdram);
+            runtime->memory().hostDmaStart(0x1000A000u, 0x141u, 0x00213710u, 0x10u, 0u);
+            runtime->drainCompletedDmacHandlers(rdram);
+            returnTo(ctx);
+        }
+
+        void install(PS2Runtime &runtime)
+        {
+            const char *native = std::getenv("SOTC_NATIVE");
+            if (!native || std::atoi(native) == 0 || std::getenv("SOTC_SYSTEM_EMULATED"))
+                return;
+            struct Hook
+            {
+                uint32_t address;
+                PS2Runtime::RecompiledFunction fn;
+                PS2Runtime::RecompiledFunction *original;
+            };
+            const Hook hooks[] = {
+                {0x001AD460u, initIntrSystem, &g_initIntr},
+                {0x001AD850u, tcountOverflow, nullptr},
+                {0x00107A08u, delayThread, nullptr},
+                {0x00110670u, startTimerSystemTime, nullptr},
+                {0x00110C78u, timerSystemTime, nullptr},
+                {0x00110CC8u, timerSystemTime, nullptr},
+                {0x001109D0u, timerInterrupt, nullptr},
+                {0x001AD528u, getTCountExtension, nullptr},
+                {0x001AD510u, getTCount, nullptr},
+                {0x001AD628u, resetCpuRapCounter, nullptr},
+                {0x001AD658u, getCpuRapCount, nullptr},
+                {0x001C35E8u, chkGpDlTransExec, nullptr},
+                {0x001B2A18u, memToSpr, nullptr},
+                {0x001B2A80u, sprToMem, nullptr},
+                {0x001AD958u, copyViaSpr, nullptr},
+                {0x001C2570u, dmaSendPath1, &g_dmaSendPath1},
+                {0x001C2A78u, checkDrawFinish, nullptr},
+                {0x001C19C0u, copyFrameBuffer, &g_copyFrameBuffer},
+            };
+            const char *skip = std::getenv("SOTC_SYSTEM_SKIP"); // debugging: "0x1c2570,0x1c2a78" left to the game
+            for (const Hook &h : hooks)
+            {
+                if (!runtime.hasFunction(h.address))
+                    continue;
+                char tag[16];
+                std::snprintf(tag, sizeof(tag), "0x%x", h.address);
+                if (skip && std::strstr(skip, tag))
+                    continue;
+                if (h.original)
+                    *h.original = runtime.lookupFunction(h.address);
+                runtime.registerFunction(h.address, h.fn);
+            }
+            std::cerr << "[sotc] system library on the host (timers, scratchpad DMA, display list kicks)" << std::endl;
+        }
+    }
+
     void applySotcOverrides(PS2Runtime &runtime)
     {
         if (runtime.hasFunction(0x001AFFD8u) && runtime.hasFunction(0x001B00F0u) && runtime.hasFunction(0x001B0328u))
@@ -597,6 +877,7 @@ namespace
         installCallTracing(runtime);
         installCensus(runtime);
         installSotcNative(runtime);
+        sysnative::install(runtime);
         if (std::getenv("SOTC_MATH_CHECK") && runtime.hasFunction(0x010816C0u))
         {
             g_yawPitch = runtime.lookupFunction(0x010816C0u);

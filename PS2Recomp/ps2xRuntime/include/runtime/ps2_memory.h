@@ -298,6 +298,17 @@ public:
     // Initialize memory
     bool initialize(size_t ramSize = PS2_RAM_SIZE);
 
+    // Native system calls (game library functions replaced on the host):
+    // the same DMA engine and status as the registers give, without the game
+    // touching a register. hostDmaStart starts a channel (as a CHCR write with
+    // STR after MADR / QWC / TADR); hostDrawPathsIdle is the "VIF1, GIF, VU1
+    // all idle" test games poll before kicking the next frame; hostStopEeTimer
+    // stops a timer (no counting, no interrupts).
+    void hostDmaStart(uint32_t channelBase, uint32_t chcr, uint32_t madr, uint32_t qwc, uint32_t tadr);
+    bool hostDrawPathsIdle();
+    bool hostChannelBusy(uint32_t channelBase); // CHCR.STR
+    void hostStopEeTimer(size_t index);
+
     // Memory access methods
     uint8_t *getRDRAM() { return m_rdram; }
     uint8_t *getScratchpad() { return m_scratchpad; }
