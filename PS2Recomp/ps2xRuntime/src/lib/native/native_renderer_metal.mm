@@ -1341,7 +1341,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
     public:
         explicit MetalBackend(Renderer *renderer) : r(renderer) {}
         bool hasMesh(uint64_t id) override { return r->meshes.count(id) != 0; }
-        void uploadMesh(uint64_t id, const native_renderer::Vertex *vertices, uint32_t count) override
+        void uploadMesh(uint64_t id, const native_renderer::Vertex *vertices, uint32_t count, bool) override
         {
             Mesh &mesh = r->meshes[id];
             [mesh.buffer release];

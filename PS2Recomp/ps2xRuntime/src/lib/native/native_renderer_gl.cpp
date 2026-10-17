@@ -376,6 +376,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     {
         GLuint buffer = 0;
         uint32_t count = 0;
+        bool dynamic = false; // in this frame's arena, from vertex `first`
+        uint32_t first = 0;
+        uint64_t frame = 0;   // the arena it went into (debugging)
     };
 
     struct Texture
@@ -431,6 +434,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         std::unordered_map<uint64_t, Mesh> meshes;
         std::unordered_map<uint64_t, Texture> textures;
         std::vector<Draw> draws;
+        std::vector<native_renderer::Vertex> arena; // this frame's dynamic vertices
+        GLuint arenaBuffers[3] = {};                 // in turn: the GPU may still read the last two
+        int arenaIndex = 0;
+        uint64_t arenaFrame = 0;
         std::vector<native_renderer::ScreenBlur> blurs;
         native_renderer::Fog fog;
         native_renderer::Bloom bloom;
@@ -760,6 +767,16 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     void Renderer::render(uint32_t w, uint32_t h)
     {
         ensureTargets(w, h);
+        if (!arena.empty())
+        {
+            // One upload for every dynamic mesh of the frame (in place of one
+            // buffer allocated and filled per mesh: 100-250 a frame).
+            arenaIndex = (arenaIndex + 1) % 3;
+            if (!arenaBuffers[arenaIndex])
+                glGenBuffers(1, &arenaBuffers[arenaIndex]);
+            glBindBuffer(GL_ARRAY_BUFFER, arenaBuffers[arenaIndex]);
+            glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(arena.size() * sizeof(native_renderer::Vertex)), arena.data(), GL_STREAM_DRAW);
+        }
         std::stable_sort(draws.begin(), draws.end(), [](const Draw &a, const Draw &b) { return a.state.order < b.state.order; });
         const bool fogOn = fog.enabled && fog.width > 0.0f;
         bool haveMirror = false;
@@ -868,16 +885,25 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 glBindFramebuffer(GL_FRAMEBUFFER, target.fbo);
                 glViewport(0, 0, static_cast<GLsizei>(target.width), static_cast<GLsizei>(target.height));
                 glUseProgram(mainProgram);
-                glBindBuffer(GL_ARRAY_BUFFER, mesh->second.buffer);
+                static const bool checkArena = std::getenv("SOTC_GL_ARENA_LOG") != nullptr;
+                if (checkArena && mesh->second.dynamic && mesh->second.frame != arenaFrame)
+                {
+                    static int n = 0;
+                    if (n++ < 20)
+                        std::fprintf(stderr, "[arena] mesh %016llx drawn in arena %llu, uploaded in %llu (order %u)\n", (unsigned long long)d.mesh,
+                                     (unsigned long long)arenaFrame, (unsigned long long)mesh->second.frame, d.state.order);
+                }
                 const GLsizei stride = sizeof(native_renderer::Vertex);
+                const size_t base = mesh->second.dynamic ? static_cast<size_t>(mesh->second.first) * stride : 0u;
+                glBindBuffer(GL_ARRAY_BUFFER, mesh->second.dynamic ? arenaBuffers[arenaIndex] : mesh->second.buffer);
                 glEnableVertexAttribArray(0);
-                glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::Vertex, x)));
+                glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, x)));
                 glEnableVertexAttribArray(1);
-                glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::Vertex, nx)));
+                glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, nx)));
                 glEnableVertexAttribArray(2);
-                glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::Vertex, r)));
+                glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, r)));
                 glEnableVertexAttribArray(3);
-                glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::Vertex, u)));
+                glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, u)));
                 glUniform4fv(uniform(true, "uClip"), 4, d.clip);
                 glUniform4fv(uniform(true, "uDirections"), 4, d.state.light);
                 glUniform4fv(uniform(true, "uColours"), 4, d.state.light + 16);
@@ -1231,8 +1257,19 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         explicit GlBackend(Renderer *renderer) : r(renderer) {}
 
         bool hasMesh(uint64_t id) override { return r->meshes.count(id) != 0; }
-        void uploadMesh(uint64_t id, const native_renderer::Vertex *vertices, uint32_t count) override
+        void uploadMesh(uint64_t id, const native_renderer::Vertex *vertices, uint32_t count, bool perFrame) override
         {
+            static const bool noArena = std::getenv("SOTC_GL_NOARENA") != nullptr; // debugging: one buffer per mesh
+            if (perFrame && !noArena)
+            {
+                Mesh &mesh = r->meshes[id];
+                mesh.dynamic = true;
+                mesh.frame = r->arenaFrame;
+                mesh.first = static_cast<uint32_t>(r->arena.size());
+                mesh.count = count;
+                r->arena.insert(r->arena.end(), vertices, vertices + count);
+                return;
+            }
             Lock lock;
             Mesh &mesh = r->meshes[id];
             if (!mesh.buffer)
@@ -1271,6 +1308,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         void beginFrame() override
         {
             r->draws.clear();
+            r->arena.clear();
+            ++r->arenaFrame;
             r->blurs.clear();
         }
         void draw(uint64_t mesh, const float clip[16], const native_renderer::DrawState &state) override

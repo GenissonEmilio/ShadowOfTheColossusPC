@@ -841,7 +841,7 @@ namespace sotc_native
             return;
         }
         const uint64_t mesh = (1ull << 62) | g_skinnedDraws++;
-        native_renderer::uploadMesh(mesh, a.batch.data(), static_cast<uint32_t>(a.batch.size()));
+        native_renderer::uploadMesh(mesh, a.batch.data(), static_cast<uint32_t>(a.batch.size()), true);
         native_renderer::DrawState state;
         state.screen = true;
         state.screenCopy = a.batchHeader == kScreenCopy && (a.batchPrim & 0x10u);
@@ -1243,7 +1243,7 @@ namespace sotc_native
                 tris.insert(tris.end(), {a, b, d, b, e, d});
             }
         const uint64_t mesh = (1ull << 60) | g_skinnedDraws++;
-        native_renderer::uploadMesh(mesh, tris.data(), static_cast<uint32_t>(tris.size()));
+        native_renderer::uploadMesh(mesh, tris.data(), static_cast<uint32_t>(tris.size()), true);
         float camera[16];
         for (int i = 0; i < 16; ++i)
             camera[i] = real(g_cameraContext + 0x5A0u + i * 4u);
@@ -1393,7 +1393,7 @@ namespace sotc_native
         for (int i = 0; i < 16; ++i)
             projection[i] = real(g_cameraContext + 0x40u + i * 4u);
         const uint64_t mesh = (1ull << 59) | g_skinnedDraws++;
-        native_renderer::uploadMesh(mesh, g_volume.data(), static_cast<uint32_t>(g_volume.size()));
+        native_renderer::uploadMesh(mesh, g_volume.data(), static_cast<uint32_t>(g_volume.size()), true);
         native_renderer::DrawState state;
         if (std::getenv("SOTC_SHADOW_SHOW")) // debugging: the volumes in red
         {
@@ -1612,7 +1612,7 @@ namespace sotc_native
         for (int i = 0; i < 16; ++i)
             camera[i] = real(g_cameraContext + 0x5A0u + i * 4u);
         const uint64_t mesh = (1ull << 58) | g_skinnedDraws++;
-        native_renderer::uploadMesh(mesh, tris.data(), static_cast<uint32_t>(tris.size()));
+        native_renderer::uploadMesh(mesh, tris.data(), static_cast<uint32_t>(tris.size()), true);
         native_renderer::DrawState state;
         state.texture = texture(header);
         state.blend = g_ptclBlend == 1u ? native_renderer::Blend::Additive : (g_ptclBlend == 2u ? native_renderer::Blend::Subtract : native_renderer::Blend::Normal);
@@ -1779,7 +1779,7 @@ namespace sotc_native
                     }
                 }, vertices);
                 mesh = (1ull << 63) | g_skinnedDraws++;
-                native_renderer::uploadMesh(mesh, vertices.data(), static_cast<uint32_t>(vertices.size()));
+                native_renderer::uploadMesh(mesh, vertices.data(), static_cast<uint32_t>(vertices.size()), true);
                 transform = projection;
             }
             static const bool logPasses = std::getenv("SOTC_NATIVE_LOG") != nullptr;

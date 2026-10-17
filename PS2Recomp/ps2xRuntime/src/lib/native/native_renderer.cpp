@@ -37,7 +37,7 @@ namespace
     public:
         CheckBackend(native_renderer::detail::Backend *shown, native_renderer::detail::Backend *other) : a(shown), b(other) {}
         bool hasMesh(uint64_t id) override { return a->hasMesh(id) && b->hasMesh(id); }
-        void uploadMesh(uint64_t id, const native_renderer::Vertex *v, uint32_t n) override { a->uploadMesh(id, v, n), b->uploadMesh(id, v, n); }
+        void uploadMesh(uint64_t id, const native_renderer::Vertex *v, uint32_t n, bool f) override { a->uploadMesh(id, v, n, f), b->uploadMesh(id, v, n, f); }
         bool hasTexture(uint64_t id) override { return a->hasTexture(id) && b->hasTexture(id); }
         void uploadTexture(uint64_t id, uint32_t w, uint32_t h, const uint8_t *p, uint32_t l) override { a->uploadTexture(id, w, h, p, l), b->uploadTexture(id, w, h, p, l); }
         void beginFrame() override { a->beginFrame(), b->beginFrame(); }
@@ -159,14 +159,31 @@ namespace native_renderer
         return backend() != nullptr;
     }
     bool hasMesh(uint64_t id) { return backend() && g_backend->hasMesh(id); }
-    void uploadMesh(uint64_t id, const Vertex *vertices, uint32_t count)
+    // SOTC_NATIVE_LOG_UPLOADS=1: uploads per frame (meshes: static / per-frame
+    // ones, the ids with a top bit set; textures), every 60 frames.
+    struct UploadStats
     {
+        bool on = std::getenv("SOTC_NATIVE_LOG_UPLOADS") != nullptr;
+        uint64_t frames = 0, staticMeshes = 0, staticBytes = 0, frameMeshes = 0, frameBytes = 0, textures = 0, textureBytes = 0, draws = 0;
+    } g_uploads;
+    void uploadMesh(uint64_t id, const Vertex *vertices, uint32_t count, bool perFrame)
+    {
+        if (g_uploads.on)
+        {
+            (perFrame ? g_uploads.frameMeshes : g_uploads.staticMeshes) += 1;
+            (perFrame ? g_uploads.frameBytes : g_uploads.staticBytes) += static_cast<uint64_t>(count) * sizeof(Vertex);
+        }
         if (backend())
-            g_backend->uploadMesh(id, vertices, count);
+            g_backend->uploadMesh(id, vertices, count, perFrame);
     }
     bool hasTexture(uint64_t id) { return backend() && g_backend->hasTexture(id); }
     void uploadTexture(uint64_t id, uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t levels)
     {
+        if (g_uploads.on)
+        {
+            ++g_uploads.textures;
+            g_uploads.textureBytes += static_cast<uint64_t>(width) * height * 4u;
+        }
         if (backend())
             g_backend->uploadTexture(id, width, height, rgba, levels);
     }
@@ -177,6 +194,7 @@ namespace native_renderer
     }
     void draw(uint64_t mesh, const float clip[16], const DrawState &state)
     {
+        ++g_uploads.draws;
         if (backend())
             g_backend->draw(mesh, clip, state);
     }
@@ -209,6 +227,14 @@ namespace native_renderer
     {
         if (backend())
             g_backend->endFrame(width, height);
+        if (g_uploads.on && ++g_uploads.frames % 60u == 0u)
+        {
+            UploadStats &u = g_uploads;
+            std::fprintf(stderr, "[uploads] per frame: static meshes %.1f (%.0f KB), per-frame meshes %.1f (%.0f KB), textures %.2f (%.0f KB), draws %.0f\n",
+                         u.staticMeshes / 60.0, u.staticBytes / 60.0 / 1024.0, u.frameMeshes / 60.0, u.frameBytes / 60.0 / 1024.0,
+                         u.textures / 60.0, u.textureBytes / 60.0 / 1024.0, u.draws / 60.0);
+            u.staticMeshes = u.staticBytes = u.frameMeshes = u.frameBytes = u.textures = u.textureBytes = u.draws = 0;
+        }
     }
     void setShown(bool shown) { g_shown.store(shown, std::memory_order_relaxed); }
     bool shown() { return g_shown.load(std::memory_order_relaxed); }

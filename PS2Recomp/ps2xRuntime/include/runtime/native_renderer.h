@@ -30,7 +30,9 @@ namespace native_renderer
 
     bool hasMesh(uint64_t id);
     // A triangle list, kept on the GPU under `id` until the renderer goes.
-    void uploadMesh(uint64_t id, const Vertex *vertices, uint32_t count);
+    // perFrame: made again every frame (skinned, 2D, particles...): kept only
+    // for this frame (one shared buffer per frame on GL).
+    void uploadMesh(uint64_t id, const Vertex *vertices, uint32_t count, bool perFrame = false);
 
     bool hasTexture(uint64_t id);
     // RGBA8 (alpha 0x80 = opaque, as the PS2's), kept on the GPU under `id`.
