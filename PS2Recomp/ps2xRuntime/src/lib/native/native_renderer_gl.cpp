@@ -894,7 +894,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                                      (unsigned long long)arenaFrame, (unsigned long long)mesh->second.frame, d.state.order);
                 }
                 const GLsizei stride = sizeof(native_renderer::Vertex);
-                const size_t base = mesh->second.dynamic ? static_cast<size_t>(mesh->second.first) * stride : 0u;
+                // A dynamic mesh is a range of the frame's buffer: its start goes
+                // to glDrawArrays (vitaGL keeps a pointer offset in GXM's 16-bit
+                // attribute offset: past 64 KB it read garbage).
+                const size_t base = 0u;
+                const GLint firstVertex = mesh->second.dynamic ? static_cast<GLint>(mesh->second.first) : 0;
                 glBindBuffer(GL_ARRAY_BUFFER, mesh->second.dynamic ? arenaBuffers[arenaIndex] : mesh->second.buffer);
                 glEnableVertexAttribArray(0);
                 glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, x)));
@@ -931,7 +935,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #if !defined(PS2X_NATIVE_VITA)
                     glEnable(GL_DEPTH_CLAMP); // the GS does not cut at the near plane
 #endif
-                    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(mesh->second.count));
+                    glDrawArrays(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(mesh->second.count));
 #if !defined(PS2X_NATIVE_VITA)
                     glDisable(GL_DEPTH_CLAMP);
 #endif
@@ -996,7 +1000,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 glUniform4fv(uniform(true, "uFogC"), 1, fogC);
                 glUniform4fv(uniform(true, "uFogColour"), 1, fogColour);
                 glUniform4fv(uniform(true, "uDebug"), 1, debug);
-                glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(mesh->second.count));
+                glDrawArrays(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(mesh->second.count));
             }
             resolveShadows();
             for (GLuint i = 1; i < 4; ++i)
