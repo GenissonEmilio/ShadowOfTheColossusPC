@@ -797,7 +797,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     static const bool additiveZ = std::getenv("SOTC_NATIVE_ADDZ") != nullptr; // debugging
                     static const bool showFog = std::getenv("SOTC_NATIVE_SHOWFOG") != nullptr; // debugging
                     static const bool noOverlayFog = std::getenv("SOTC_FOG_NO_OVERLAY") != nullptr; // debugging
-                    static const bool bgFog = std::getenv("SOTC_NATIVE_NOBGFOG") == nullptr; // every batch has FGE, the sky too
+                    static const bool bgFog = std::getenv("SOTC_NATIVE_BGFOG") != nullptr; // every batch has FGE, the sky too
                     int bound = -1;
                     // Shadow volumes counted so far, waiting for their darkening.
                     uint32_t shadowOrder = 0;

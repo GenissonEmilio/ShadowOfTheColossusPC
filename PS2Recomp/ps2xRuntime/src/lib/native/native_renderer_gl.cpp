@@ -719,7 +719,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     softAmount = d.state.shadow;
                 }
         const bool softShadows = softOrder != 0;
-        static const bool bgFog = std::getenv("SOTC_NATIVE_NOBGFOG") == nullptr;
+        static const bool bgFog = std::getenv("SOTC_NATIVE_BGFOG") != nullptr;
 
         auto pass = [&](Target &target, bool backgroundOnly, uint32_t fromOrder = 0, uint32_t toOrder = ~0u, bool load = false, bool mirror = false,
                         bool apart = false)
