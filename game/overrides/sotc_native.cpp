@@ -1159,6 +1159,18 @@ namespace sotc_native
         // context, ALPHA 0x60 ((Cs - Cs) x FIX + Cd: no change), as the GS shows.
         if (GPR_U32(ctx, 31) >= 0x01089E50u && GPR_U32(ctx, 31) < 0x0108A0E0u)
             g_2d.alpha = 0x60u;
+        // Testing: bossDeathEffectBegin's fan (bit 0 of 0x1186290) at this radius.
+        static const float fan = std::getenv("SOTC_FORCE_BOSSFAN") ? static_cast<float>(std::atof(std::getenv("SOTC_FORCE_BOSSFAN"))) : 0.0f;
+        if (fan > 0.0f && GPR_U32(ctx, 31) == 0x01085910u)
+        {
+            uint32_t flags;
+            std::memcpy(&flags, rdram + 0x1186290u, 4);
+            flags |= 1u;
+            std::memcpy(rdram + 0x1186290u, &flags, 4);
+            std::memcpy(rdram + 0x1186298u, &fan, 4);
+            const float none = 0.0f;
+            std::memcpy(rdram + 0x118629Cu, &none, 4);
+        }
         g_layers.push_back(GPR_U32(ctx, 4));
         g_pushLayer(rdram, ctx, runtime);
     }
