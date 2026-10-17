@@ -29,21 +29,31 @@ namespace native_renderer::detail
 
 namespace native_renderer
 {
+    Tuning defaultTuning()
+    {
+        Tuning d;
+#if defined(__APPLE__)
+        d.renderScale = 3;
+#endif
+        return d;
+    }
+
     Tuning &tuning()
     {
         static Tuning t = []
         {
-            Tuning d;
+            Tuning d = defaultTuning();
             auto on = [](const char *name) { return std::getenv(name) != nullptr; };
             auto number = [](const char *name, float fallback) { return std::getenv(name) ? static_cast<float>(std::atof(std::getenv(name))) : fallback; };
-            d.bloomStrength = number("SOTC_BLOOM_SCALE", 1.0f);
-            d.bloom = d.bloomStrength > 0.0f;
-            if (!d.bloom)
-                d.bloomStrength = 1.0f;
+            d.renderScale = static_cast<int>(number("SOTC_RENDER_SCALE", static_cast<float>(d.renderScale)));
+            const float strength = number("SOTC_BLOOM_SCALE", d.bloomStrength);
+            d.bloom = strength > 0.0f;
+            if (d.bloom)
+                d.bloomStrength = strength;
             d.bloomRounds = static_cast<int>(number("SOTC_BLOOM_ROUNDS", 1.0f));
             d.bloomSpread = number("SOTC_BLOOM_SPREAD", 1.0f);
             d.vertexFog = !on("SOTC_NATIVE_NOVFOG");
-            d.vertexFogAmount = number("SOTC_FOG_AMOUNT", 1.0f);
+            d.vertexFogAmount = number("SOTC_FOG_AMOUNT", d.vertexFogAmount);
             d.zFog = !on("SOTC_NATIVE_ZFOG") || std::atoi(std::getenv("SOTC_NATIVE_ZFOG")) != 0;
             d.glow = !on("SOTC_NATIVE_NOGLOW");
             d.depthOfField = !on("SOTC_NATIVE_NODOF");
@@ -59,10 +69,12 @@ namespace native_renderer
 
     std::string tuningAsEnv()
     {
-        const Tuning &t = tuning(), d;
+        const Tuning &t = tuning(), d = defaultTuning();
         std::string out;
         auto add = [&](const std::string &s) { out += (out.empty() ? "" : " ") + s; };
         auto number = [](float v) { char b[32]; std::snprintf(b, sizeof(b), "%g", v); return std::string(b); };
+        if (t.renderScale != d.renderScale)
+            add("SOTC_RENDER_SCALE=" + std::to_string(t.renderScale));
         if (!t.bloom)
             add("SOTC_BLOOM_SCALE=0");
         else if (t.bloomStrength != d.bloomStrength)

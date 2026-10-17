@@ -759,7 +759,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             for (int i = 0; i < rounds; ++i)
             {
                 const float spread = 1.0f + spreadGrow * static_cast<float>(i);
-                const float h[4] = {spread / lw, 0, 0, 0}, v[4] = {0, spread / lh, 0, 0};
+                const float k = spread * static_cast<float>(width) / 512.0f; // PS2 pixels: the texture grows with the render scale
+                const float h[4] = {k / lw, 0, 0, 0}, v[4] = {0, k / lh, 0, 0};
                 bindTexture(0, bloomTex[0].texture);
                 quad(bloomTex[1], 1, QuadBlend::None, h);
                 bindTexture(0, bloomTex[1].texture);
@@ -1103,7 +1104,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             {
                 const float f = static_cast<float>(b.steps - i) / static_cast<float>(b.steps);
                 const float params[4] = {(b.scale - 1.0f) * f + 1.0f, std::fabs(b.angle) >= 0.01570796f ? -b.angle * f : 0.0f,
-                                         b.dx * f / (static_cast<float>(w) * 0.5f), -b.dy * f / (static_cast<float>(h) * 0.5f)};
+                                         b.dx * f / 256.0f, -b.dy * f / 224.0f}; // PS2 pixels
                 const float alpha[4] = {1.0f / static_cast<float>(i + 1), 0, 0, 0};
                 quad(color, 3, QuadBlend::Over, alpha, nullptr, params, true);
             }

@@ -2207,12 +2207,13 @@ namespace
     void drawNativeTuning(bool &open)
     {
         native_renderer::Tuning &t = native_renderer::tuning();
-        const native_renderer::Tuning d;
+        const native_renderer::Tuning d = native_renderer::defaultTuning();
         ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(330.0f, 0.0f), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowBgAlpha(0.82f);
         if (ImGui::Begin("Native renderer (F10)", &open))
         {
+            ImGui::SliderInt("Resolution x", &t.renderScale, 1, 4);
             ImGui::SeparatorText("Bloom");
             ImGui::Checkbox("Bloom", &t.bloom);
             ImGui::SliderFloat("Strength", &t.bloomStrength, 0.0f, 2.0f, "%.2f");

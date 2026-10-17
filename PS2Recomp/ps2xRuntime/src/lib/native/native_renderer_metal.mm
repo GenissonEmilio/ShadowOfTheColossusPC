@@ -999,7 +999,9 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     for (int i = 0; i < rounds; ++i)
                     {
                         const float spread = 1.0f + spreadGrow * static_cast<float>(i);
-                        const float stepH[2] = {spread / lw, 0.0f}, stepV[2] = {0.0f, spread / lh};
+                        // In PS2 pixels: the texture grows with the render scale.
+                        const float k = spread * static_cast<float>(w) / 512.0f;
+                        const float stepH[2] = {k / lw, 0.0f}, stepV[2] = {0.0f, k / lh};
                         quad(bloomTex[1], blurPipeline, false, [&](id<MTLRenderCommandEncoder> e)
                         {
                             [e setFragmentTexture:bloomTex[0] atIndex:0];
@@ -1049,7 +1051,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                             float scale, angle, alpha, pad;
                             float offset[2];
                         } u = {(b.scale - 1.0f) * f + 1.0f, std::fabs(b.angle) >= 0.01570796f ? -b.angle * f : 0.0f, 1.0f / static_cast<float>(i + 1), 0.0f,
-                               {b.dx * f / (static_cast<float>(w) * 0.5f), -b.dy * f / (static_cast<float>(h) * 0.5f)}};
+                               {b.dx * f / 256.0f, -b.dy * f / 224.0f}}; // PS2 pixels
                         [e setVertexBytes:&u length:sizeof(u) atIndex:0];
                         [e setFragmentBytes:&u length:sizeof(u) atIndex:0];
                         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
@@ -1159,7 +1161,8 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     const float lw = static_cast<float>(bloomTex[0].width), lh = static_cast<float>(bloomTex[0].height);
                     for (int i = 0; i < rounds; ++i)
                     {
-                        const float stepH[2] = {1.0f / lw, 0.0f}, stepV[2] = {0.0f, 1.0f / lh};
+                        const float k = static_cast<float>(w) / 512.0f; // PS2 pixels
+                        const float stepH[2] = {k / lw, 0.0f}, stepV[2] = {0.0f, k / lh};
                         quad(bloomTex[1], blurPipeline, false, [&](id<MTLRenderCommandEncoder> q)
                         {
                             [q setFragmentTexture:bloomTex[0] atIndex:0];

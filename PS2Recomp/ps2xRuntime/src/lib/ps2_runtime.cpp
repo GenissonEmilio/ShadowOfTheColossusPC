@@ -2963,6 +2963,36 @@ void PS2Runtime::run()
         uint32_t presentWidth = FB_WIDTH;
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
         UploadFrame(frameTex, this, presentWidth, presentHeight);
+#if !(defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
+        // The native renderer's picture at its own size (it may draw larger
+        // than the PS2's 512 x 448), filtered: not through the GS's display.
+        static Texture2D nativeTex{};
+        static std::vector<uint8_t> nativePixels;
+        bool nativeOnScreen = false;
+        if (native_renderer::shown())
+        {
+            uint32_t nw = 0, nh = 0;
+            if (native_renderer::latestFrame(nativePixels, nw, nh) && nw && nh && nativePixels.size() >= static_cast<size_t>(nw) * nh * 4u)
+            {
+                if (nativeTex.id == 0 || nativeTex.width != static_cast<int>(nw) || nativeTex.height != static_cast<int>(nh))
+                {
+                    if (nativeTex.id)
+                        UnloadTexture(nativeTex);
+                    Image image{nativePixels.data(), static_cast<int>(nw), static_cast<int>(nh), 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+                    nativeTex = LoadTextureFromImage(image);
+                    SetTextureFilter(nativeTex, TEXTURE_FILTER_BILINEAR);
+                }
+                else
+                    UpdateTexture(nativeTex, nativePixels.data());
+                presentWidth = nw;
+                presentHeight = nh;
+                nativeOnScreen = true;
+            }
+        }
+        const Texture2D &shownTex = nativeOnScreen ? nativeTex : (g_directFrame.id ? g_directFrame : frameTex);
+#else
+        const Texture2D &shownTex = g_directFrame.id ? g_directFrame : frameTex;
+#endif
 
 #if defined(PLATFORM_VITA)
         static const bool statsEnabled = true; // to the log file: the Vita has no environment
@@ -3233,7 +3263,7 @@ void PS2Runtime::run()
             {
                 if (!burstShot)
                     nextSnapshot += snapshotPeriod;
-                Image shot = LoadImageFromTexture(g_directFrame.id ? g_directFrame : frameTex);
+                Image shot = LoadImageFromTexture(shownTex);
                 ImageCrop(&shot, Rectangle{0.0f, 0.0f, static_cast<float>(presentWidth), static_cast<float>(presentHeight)});
                 const std::string path = std::string(snapshotDir) + "/frame_" + std::to_string(snapshotIndex) + ".png";
                 ExportImage(shot, path.c_str());
@@ -3278,7 +3308,7 @@ void PS2Runtime::run()
             std::this_thread::sleep_for(std::chrono::milliseconds(4));
         }
 #else
-        drawHostFrame(g_directFrame.id ? g_directFrame : frameTex, presentWidth, presentHeight);
+        drawHostFrame(shownTex, presentWidth, presentHeight);
 #endif
         hostmenu::update();
 
