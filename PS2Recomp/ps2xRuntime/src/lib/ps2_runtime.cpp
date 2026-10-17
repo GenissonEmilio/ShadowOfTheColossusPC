@@ -2974,6 +2974,10 @@ void PS2Runtime::run()
             uint32_t nw = 0, nh = 0;
             if (native_renderer::latestFrame(nativePixels, nw, nh) && nw && nh && nativePixels.size() >= static_cast<size_t>(nw) * nh * 4u)
             {
+                // The display shows colour only (the PS2's CRTC ignores alpha):
+                // drawn blended over black, the picture's alpha darkened it.
+                for (size_t i = 3; i < static_cast<size_t>(nw) * nh * 4u; i += 4)
+                    nativePixels[i] = 255u;
                 if (nativeTex.id == 0 || nativeTex.width != static_cast<int>(nw) || nativeTex.height != static_cast<int>(nh))
                 {
                     if (nativeTex.id)
