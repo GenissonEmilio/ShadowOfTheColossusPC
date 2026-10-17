@@ -77,11 +77,12 @@ Vita3K running; then a real Vita).
    0x11223344 native, DBCMAN (0x80001300) by its host service, the
    DualShock's vibration (0x8000131e/f) and the USB serial console
    completed without effect; pad and memory card were host-side already.
-   The IRXs still load and start on the emulated IOP during the boot: the
-   boot's timing places the XFF modules (without it GAMECORE lands 0x40
-   bytes off, the main thread's letter post being allocated before it;
-   `SOTC_LOG_MALLOC=1` shows the order), and the recompiled code needs the
-   captured layout.
+   Since 2026-10-16 no IOP code runs at all, the boot included: the IRXs
+   are only recorded as loaded (`PS2X_NATIVE_IOP_BOOT`, on by default with
+   SOTC_NATIVE). The boot's layout no longer depends on the IOP's timing:
+   the main thread's letter post (0x14 bytes, ra 0x1c8828) waits a VBlank
+   at a time until GAMECORE's image is allocated, the order the modules
+   were captured with (`SOTC_LOG_MALLOC=1` shows it).
 7. **System.** Kernel threads/semaphores/timers on native threads and
    clocks; CDVD reads as direct file reads.
 

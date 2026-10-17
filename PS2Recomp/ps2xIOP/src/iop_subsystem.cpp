@@ -16,6 +16,17 @@ namespace ps2x::iop
 {
     namespace
     {
+        // No IOP code from the start (the IRXs are only recorded as loaded,
+        // their services answered on the host): by default with SOTC_NATIVE,
+        // PS2X_NATIVE_IOP_BOOT=0/1 to choose.
+        bool nativeIopBoot()
+        {
+            if (const char *value = std::getenv("PS2X_NATIVE_IOP_BOOT"))
+                return std::atoi(value) != 0;
+            const char *native = std::getenv("SOTC_NATIVE");
+            return native && std::atoi(native) != 0;
+        }
+
         bool nativeIopAllowed()
         {
             if (const char *value = std::getenv("PS2X_NATIVE_IOP"))
@@ -105,6 +116,11 @@ namespace ps2x::iop
     IopSubsystem::IopSubsystem(IopHost &host)
         : m_impl(std::make_unique<Impl>(host))
     {
+        if (nativeIopBoot())
+        {
+            m_impl->native = true;
+            m_impl->emulator.haltCpu();
+        }
     }
 
     IopSubsystem::~IopSubsystem() = default;
@@ -126,6 +142,11 @@ namespace ps2x::iop
         m_impl->emulator.reset();
         m_impl->refreshServiceModuleKeys();
         m_impl->rebuildRoutes();
+        if (nativeIopBoot())
+        {
+            m_impl->native = true;
+            m_impl->emulator.haltCpu();
+        }
     }
 
     ModuleLoadResult IopSubsystem::loadModule(std::string_view path, const void *arguments, uint32_t argumentSize)

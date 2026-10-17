@@ -1,3 +1,4 @@
+#include <cstdio>
 #include "Common.h"
 #include "RPC.h"
 #include "../../ps2_iop_transport.h"
@@ -256,6 +257,9 @@ namespace ps2_syscalls
         uint32_t clientPtr = getRegU32(ctx, 4);
         uint32_t rpcId = getRegU32(ctx, 5);
         uint32_t mode = getRegU32(ctx, 6);
+        static const bool logRpc = std::getenv("PS2X_LOG_RPC") != nullptr; // debugging: every bind and call
+        if (logRpc)
+            std::fprintf(stderr, "[rpc] bind sid=0x%x client=0x%x ra=0x%x\n", rpcId, clientPtr, getRegU32(ctx, 31));
 
         t_SifRpcClientData *client = reinterpret_cast<t_SifRpcClientData *>(getMemPtr(rdram, clientPtr));
 
@@ -349,6 +353,13 @@ namespace ps2_syscalls
         const uint32_t sendBuf = getRegU32(ctx, 7);
         const uint32_t stackPointer = getRegU32(ctx, 29);
 
+        static const bool logRpc = std::getenv("PS2X_LOG_RPC") != nullptr;
+        if (logRpc)
+        {
+            static uint64_t calls = 0;
+            if (++calls < 400)
+                std::fprintf(stderr, "[rpc] call client=0x%x fn=0x%x mode=%u ra=0x%x\n", clientPtr, rpcNum, mode, getRegU32(ctx, 31));
+        }
         const uint32_t sendSizeRegisters = getRegU32(ctx, 8);
         const uint32_t receiveBufferRegisters = getRegU32(ctx, 9);
         const uint32_t receiveSizeRegisters = getRegU32(ctx, 10);

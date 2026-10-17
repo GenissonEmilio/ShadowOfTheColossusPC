@@ -63,11 +63,11 @@ namespace ps2x::iop::detail
     {
         static const bool on = []
         {
-            // PS2X_NATIVE_SG2=1/0; by default on with SOTC_NATIVE=1.
+            // PS2X_NATIVE_SG2=1/0; by default on with SOTC_NATIVE (no IOP code runs then).
             if (const char *value = std::getenv("PS2X_NATIVE_SG2"))
                 return std::atoi(value) != 0;
             const char *native = std::getenv("SOTC_NATIVE");
-            return native && std::atoi(native) == 1;
+            return native && std::atoi(native) != 0;
         }();
         return on;
     }

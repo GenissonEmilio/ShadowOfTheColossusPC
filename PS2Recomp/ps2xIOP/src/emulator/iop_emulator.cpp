@@ -660,6 +660,21 @@ namespace ps2x::iop::detail
         ModuleLoadResult loadImage(std::string path, std::span<const uint8_t> image, const void *arguments, uint32_t argumentSize)
         {
             ModuleLoadResult result{true, -1, -1};
+            if (cpuHalted)
+            {
+                // No IOP code runs: the module counts as loaded and resident,
+                // its services answered on the host.
+                Module module;
+                module.id = nextModuleId++;
+                module.path = std::move(path);
+                const size_t slash = module.path.find_last_of("/\\:");
+                module.name = slash == std::string::npos ? module.path : module.path.substr(slash + 1u);
+                module.resident = true;
+                result.moduleId = module.id;
+                result.startResult = 0;
+                modules[module.id] = std::move(module);
+                return result;
+            }
             const IopImageLoadResult loaded = IopModuleLoader::load(image, memory, moduleCursor);
             moduleCursor = loaded.nextModuleCursor;
             if (!loaded)

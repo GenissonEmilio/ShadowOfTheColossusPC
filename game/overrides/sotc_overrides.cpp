@@ -41,10 +41,9 @@ namespace
             g_gamecoreEntered = true;
             runtime->eeScheduler().enableHostClockSync();
             std::cerr << "[sotc] GAMECORE entered; host clock sync enabled" << std::endl;
-            // Every IOP module is loaded by now (and the module layout is
-            // fixed): with SOTC_NATIVE=1 the emulated IOP stops here. Not
-            // earlier: without the IOP's timing during the boot GAMECORE
-            // lands 0x40 bytes off (see SOTC_LOG_MALLOC).
+            // With SOTC_NATIVE the IOP runs no code from the start (the boot's
+            // layout made deterministic by heapHook); PS2X_NATIVE_IOP_BOOT=0
+            // keeps the IRXs for the boot, the emulated IOP stopping here.
             if (ps2x::iop::IopSubsystem *iop = runtime->iopSubsystem())
                 iop->enterNativeMode();
         }
@@ -542,20 +541,31 @@ namespace
     // from. GAMECORE's image follows the main thread's letter post (0x14
     // bytes from init_letter_manager, ra 0x1c8828) or not depending on when
     // that thread first runs: boot timing moves the module by 0x40.
+    //
+    // So the layout never depends on timing, the letter post waits (a VBlank
+    // at a time, the call made again) until GAMECORE's image is allocated:
+    // the order of a boot with the IOP's timing, which the recompiled modules
+    // were captured with. Without it the boot needs no IOP code at all.
     PS2Runtime::RecompiledFunction g_mallocAlign = nullptr, g_mallocNoCheck = nullptr, g_free = nullptr;
+    bool g_gamecoreImageAllocated = false;
     template <int Kind>
     void heapHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t a0 = GPR_U32(ctx, 4), a1 = GPR_U32(ctx, 5), a2 = GPR_U32(ctx, 6), ra = GPR_U32(ctx, 31);
+        if (Kind == 0 && !g_gamecoreEntered && ra == 0x001C8828u && !g_gamecoreImageAllocated)
+            runtime->eeWaitVSyncTicks(1u, 0x001AFFD8u); // the letter post: after GAMECORE's image
         (Kind == 0 ? g_mallocAlign : Kind == 1 ? g_mallocNoCheck : g_free)(rdram, ctx, runtime);
-        if (!g_gamecoreEntered)
+        if (Kind == 0 && ra == 0x001B5558u && a1 == 0x0020AEA8u)
+            g_gamecoreImageAllocated = true;
+        static const bool log = std::getenv("SOTC_LOG_MALLOC") != nullptr;
+        if (log && !g_gamecoreEntered)
             std::fprintf(stderr, "[heap] %s heap=%x size=%x align=%x ra=%x\n", Kind == 0 ? "malloc" : Kind == 1 ? "mallocNC" : "free",
                          a0, a1, a2, ra);
     }
 
     void applySotcOverrides(PS2Runtime &runtime)
     {
-        if (std::getenv("SOTC_LOG_MALLOC"))
+        if (runtime.hasFunction(0x001AFFD8u) && runtime.hasFunction(0x001B00F0u) && runtime.hasFunction(0x001B0328u))
         {
             g_mallocAlign = runtime.lookupFunction(0x001AFFD8u);
             runtime.registerFunction(0x001AFFD8u, heapHook<0>);

@@ -336,10 +336,10 @@
   "map": "hardware",
   "area": "Processors",
   "feature": "IOP modules",
-  "status": "partial",
+  "status": "native",
   "since": "2026-10-16",
   "commit": "d94cee7",
-  "note": "with SOTC_NATIVE=1 the emulated IOP runs no code once GAMECORE is entered: sound by the native driver, DBCMAN by a host service, vibration and the USB console completed without effect; the IRXs still load and start during the boot (the boot's timing fixes the module layout the recompiled code needs)"
+  "note": "no IOP code runs, boot included: the IRXs are recorded as loaded; sound by the native SG2 driver, DBCMAN by a host service, vibration and the USB console completed without effect; the boot layout made deterministic (the letter post waits for GAMECORE's image)"
  },
  {
   "map": "hardware",
