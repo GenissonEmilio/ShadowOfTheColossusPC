@@ -219,10 +219,10 @@
   "map": "renderer",
   "area": "Effects",
   "feature": "Distance fog",
-  "status": "partial",
+  "status": "native",
   "since": "2026-10-15",
   "commit": "64b72f1",
-  "note": "opt-in: too bright in high views"
+  "note": "zFog as the game does it: one pass at layer 4 by depth slices over bgEnd's background copy, on by default (SOTC_NATIVE_ZFOG=0); far cliffs paler than the GS (polish)"
  },
  {
   "map": "renderer",
@@ -237,7 +237,7 @@
   "map": "renderer",
   "area": "Effects",
   "feature": "Reflections",
-  "status": "partial",
+  "status": "native",
   "since": "2026-10-15",
   "commit": "0fd00e9",
   "note": "mirrored layers 12/13 drawn off-screen, sampled by the 0x2200 surfaces in layer 15; tint alpha matched by measurement"
@@ -273,10 +273,10 @@
   "map": "renderer",
   "area": "Effects",
   "feature": "Screen blur",
-  "status": "partial",
-  "since": "2026-10-15",
+  "status": "native",
+  "since": "2026-10-16",
   "commit": "",
-  "note": "screenBlur (zoom/turn blur, the soft resample of cutscenes) redone; the radial blur of other effects not yet"
+  "note": "screenBlur (zoom/turn blur; cameraBlur goes through it) and feedbackBlur/feedbackBlur2 (the last frame shown over the new one at layer 29, by the layer's root ALPHA as the GS does)"
  },
  {
   "map": "renderer",

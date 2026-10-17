@@ -91,6 +91,12 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
 {
     constexpr sampler repeatLinear(address::repeat, filter::linear, mip_filter::linear);
     float3 shade = in.color.rgb;
+    if (textured == 5)
+    {
+        // The last frame shown, at the draw's own UV.
+        constexpr sampler clampLinear(address::clamp_to_edge, filter::linear);
+        return float4(tex.sample(clampLinear, in.uv).rgb, 1.0) * in.color;
+    }
     if (textured == 4)
     {
         // The picture before this layer (a reduced copy) at the draw's own UV.
@@ -366,6 +372,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
         id<MTLTexture> refractionColor = nil, refractionHalf = nil;  // the picture before layer 9, 256 x 256 (via 128 x 128)
         id<MTLRenderPipelineState> copySmall = nil, backdrop = nil;
         id<MTLRenderPipelineState> blurCopy = nil, tintOver = nil, glowOver = nil, glowReducePipeline = nil;
+        id<MTLTexture> previousColor = nil; // the last frame shown (feedbackBlur)
         id<MTLTexture> glowLayer = nil;     // layer 8 alone (bossDeathEffectBegin's buffer), full size
         id<MTLTexture> glowSmall[4] = {};   // its chain: 256, 128, 64, 64
         native_renderer::GlowComposite glow;
@@ -684,6 +691,13 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                 md.storageMode = MTLStorageModePrivate;
                 shadowMask = [device newTextureWithDescriptor:md];
             }
+            [previousColor release];
+            {
+                MTLTextureDescriptor *pd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
+                pd.usage = MTLTextureUsageShaderRead;
+                pd.storageMode = MTLStorageModePrivate;
+                previousColor = [device newTextureWithDescriptor:pd];
+            }
             [glowLayer release];
             {
                 MTLTextureDescriptor *gd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
@@ -892,9 +906,11 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         light.uvOffset[1] = d.state.uvOffset[1];
                         [encoder setVertexBytes:&light length:sizeof(light) atIndex:2];
                         auto tex = d.state.texture ? textures.find(d.state.texture) : textures.end();
-                        const int textured = d.state.reflectionSample ? 2 : (d.state.refractionSample ? 3 : (d.state.screenCopy ? 4 : (tex != textures.end() ? 1 : 0)));
+                        const int textured = d.state.previousFrame ? 5 : d.state.reflectionSample ? 2 : (d.state.refractionSample ? 3 : (d.state.screenCopy ? 4 : (tex != textures.end() ? 1 : 0)));
                         if (textured == 1)
                             [encoder setFragmentTexture:tex->second atIndex:0];
+                        else if (textured == 5)
+                            [encoder setFragmentTexture:previousColor atIndex:0];
                         [encoder setFragmentBytes:&textured length:sizeof(textured) atIndex:0];
                         struct
                         {
@@ -1303,6 +1319,11 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         doBlur(blurs[static_cast<size_t>(ev.blur)]);
                 }
                 pass(color, false, from, ~0u, loaded);
+                {
+                    id<MTLBlitCommandEncoder> keep = [commands blitCommandEncoder];
+                    [keep copyFromTexture:color toTexture:previousColor];
+                    [keep endEncoding];
+                }
                 [commands commit];
                 [commands waitUntilCompleted];
                 std::lock_guard<std::mutex> lock(outputMutex);

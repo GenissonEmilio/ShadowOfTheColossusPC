@@ -84,6 +84,11 @@ void main()
     float textured = uFogColour.w;
     vec2 screen = vScreen.xy / vScreen.z * 0.5 + 0.5;
     float depth = vUV.z;
+    if (textured > 4.5) // the last frame shown, at the draw's UV
+    {
+        oColor = vec4(texture(uTex, vUV.xy).rgb, 1.0) * vColor;
+        return;
+    }
     if (textured > 3.5)
     {
         vec4 c = vec4(texture(uRefraction, vUV.xy).rgb, 1.0) * vColor;
@@ -261,6 +266,8 @@ float4 main(float4 vUV : TEXCOORD0, float4 vColor : TEXCOORD1, float4 vScreen : 
     float textured = uFogColour.w;
     float2 screen = vScreen.xy / vScreen.z * 0.5 + 0.5;
     float depth = vUV.z;
+    if (textured > 4.5)
+        return float4(tex2D(uTex, vUV.xy).rgb, 1.0) * vColor;
     if (textured > 3.5)
     {
         float4 c = float4(tex2D(uRefraction, vUV.xy).rgb, 1.0) * vColor;
@@ -385,6 +392,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         std::unordered_map<std::string, GLint> mainUniforms, quadUniforms;
         Target colorPlain; // the picture's colour alone (passes that read its depth)
         Target color, background, backgroundSmall, reflection, refraction, refractionHalf, snapshot, shadowMask;
+        Target previous; // the last frame shown (feedbackBlur)
         Target glowLayer, glowSmall[4]; // bossDeathEffect: layer 8 apart (on the picture's depth); 256, 128, 64, 64
         Target bloomTex[3];
         bool bloomHistory = false;
@@ -538,6 +546,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             makeTarget(background, w, h, true);
             makeTarget(snapshot, w, h, false);
             makeTarget(shadowMask, w, h, false);
+            makeTarget(previous, w, h, false);
             makeTarget(glowLayer, w, h, false);
             for (int i = 0; i < 4; ++i)
                 makeTarget(glowSmall[i], i == 0 ? 256u : (i == 1 ? 128u : 64u), i == 0 ? 256u : (i == 1 ? 128u : 64u), false);
@@ -863,7 +872,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     }
                 }
                 auto tex = d.state.texture ? textures.find(d.state.texture) : textures.end();
-                const int textured = d.state.reflectionSample ? 2 : (d.state.refractionSample ? 3 : (d.state.screenCopy ? 4 : (tex != textures.end() ? 1 : 0)));
+                const int textured = d.state.previousFrame ? 5 : d.state.reflectionSample ? 2 : (d.state.refractionSample ? 3 : (d.state.screenCopy ? 4 : (tex != textures.end() ? 1 : 0)));
+                if (textured == 5)
+                    bindTexture(0, previous.texture);
                 if (textured == 1)
                 {
                     bindTexture(0, tex->second.name);
@@ -1118,6 +1129,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 doBlur(blurs[static_cast<size_t>(ev.blur)]);
         }
         pass(color, false, from, ~0u, loaded);
+        copy(colorPlain, previous);
 
         if (const auto &hook = native_renderer::detail::presentHook())
         {

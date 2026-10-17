@@ -90,6 +90,9 @@ namespace native_renderer
         // A screen-copy draw (SotC's 0x10f37c8 at layer 23): its texture is
         // the picture before its layer reduced to 256 x 256, at its own UV.
         bool screenCopy = false;
+        // The last frame shown (SotC's feedbackBlur: the display buffer drawn
+        // over the new frame at layer 29), at its own UV, times the colour.
+        bool previousFrame = false;
         uint32_t debugColour = 0; // non-zero: drawn flat in this RGB (who drew what)
         bool lit = false;
         float light[32] = {};

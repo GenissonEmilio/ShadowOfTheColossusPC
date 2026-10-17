@@ -809,6 +809,7 @@ namespace sotc_native
 
     std::vector<uint32_t> g_layers; // iosDlPushLayer stack
     constexpr uint32_t kScreenCopy = 1u; // a 2D "header" for 0x10f37c8's screen copy
+    constexpr uint32_t kPreviousFrame = 2u; // and for feedbackBlur's display buffer (the last frame shown)
     uint32_t g_requested = 0;       // NTO2 header of the last texTransRequest
 
     struct Assembler
@@ -830,7 +831,10 @@ namespace sotc_native
         if (a.batch.empty())
             return;
         static const bool idColours = std::getenv("SOTC_NATIVE_IDCOLOR") != nullptr; // only the models then
-        if (idColours)
+        // Blending with A = B and D = Cd leaves the frame as it was ((Cs - Cs) x C + Cd).
+        const uint64_t blendBits = a.batchAlpha & 0xFFu;
+        const bool unchanged = (a.batchPrim & 0x40u) && (blendBits & 3u) == ((blendBits >> 2) & 3u) && ((blendBits >> 6) & 3u) == 1u;
+        if (idColours || unchanged)
         {
             a.batch.clear();
             a.batchKey = ~0ull;
@@ -841,7 +845,8 @@ namespace sotc_native
         native_renderer::DrawState state;
         state.screen = true;
         state.screenCopy = a.batchHeader == kScreenCopy && (a.batchPrim & 0x10u);
-        state.texture = (a.batchPrim & 0x10u) && !state.screenCopy ? texture(a.batchHeader) : 0;
+        state.previousFrame = a.batchHeader == kPreviousFrame && (a.batchPrim & 0x10u);
+        state.texture = (a.batchPrim & 0x10u) && !state.screenCopy && !state.previousFrame ? texture(a.batchHeader) : 0;
         const uint32_t mode = static_cast<uint32_t>(a.batchAlpha & 0xFFu);
         // SOTC_LOG_2D_ALPHA=1: the distinct ALPHA / PRIM pairs of the 2D draws.
         static const bool logAlpha = std::getenv("SOTC_LOG_2D_ALPHA") != nullptr;
@@ -896,7 +901,12 @@ namespace sotc_native
             o.a = static_cast<uint8_t>(std::min<uint64_t>((a.alpha >> 32) & 0xFFu, 0x80u));
         // kScreenCopy: 0x10f37c8's 256 x 256 copy of the screen.
         const uint32_t format = a.header == kScreenCopy ? 0x00880000u : (a.header ? word(a.header + 0x1Cu) : 0u);
-        if (a.prim & 0x100u) // FST: UV in texels, 12.4
+        if ((a.prim & 0x100u) && a.header == kPreviousFrame) // the display buffer, 512 x 448
+        {
+            o.u = (static_cast<float>(a.u) / 16.0f) / 512.0f;
+            o.v = (static_cast<float>(a.v) / 16.0f) / 448.0f;
+        }
+        else if (a.prim & 0x100u) // FST: UV in texels, 12.4
         {
             o.u = (static_cast<float>(a.u) / 16.0f) / static_cast<float>(1u << ((format >> 16) & 0xFu));
             o.v = (static_cast<float>(a.v) / 16.0f) / static_cast<float>(1u << ((format >> 20) & 0xFu));
@@ -1062,8 +1072,29 @@ namespace sotc_native
     {
         const uint32_t ra = GPR_U32(ctx, 31);
         gsRegCensus(ra);
+        // SOTC_LOG_GSREG=<reg>: who writes that register, in which layer, with what (debugging).
+        static const int logReg = std::getenv("SOTC_LOG_GSREG") ? static_cast<int>(std::strtol(std::getenv("SOTC_LOG_GSREG"), nullptr, 0)) : -1;
+        if (logReg >= 0 && (GPR_U32(ctx, 4) & 0xFFu) == static_cast<uint32_t>(logReg))
+        {
+            static std::set<std::pair<uint32_t, uint64_t>> seen;
+            if (seen.insert({ra, GPR_U64(ctx, 5)}).second && seen.size() < 300)
+                std::fprintf(stderr, "[gsreg-log] ra %08x layer %u value %016llx\n", ra, g_layers.empty() ? 99u : g_layers.back(),
+                             static_cast<unsigned long long>(GPR_U64(ctx, 5)));
+        }
         if (ra >= 0x0109E2A0u && ra < 0x0109FB08u)
             g_bloomRan = true;
+        if (ra >= 0x01089BF8u && ra < 0x0108A0E0u)
+        {
+            // feedbackBlur / feedbackBlur2 (layer 29): the display buffer, the
+            // last frame shown, laid over the new one (FIX or vertex alpha).
+            syncFrame(rdram);
+            const uint32_t requested = g_requested;
+            g_requested = kPreviousFrame;
+            feed2D(GPR_U32(ctx, 4) & 0xFFu, GPR_U64(ctx, 5));
+            g_requested = requested;
+            g_gsReg(rdram, ctx, runtime);
+            return;
+        }
         if (ra >= 0x0109C610u && ra < 0x0109CD28u)
         {
             // refractionEnd under water (0x109c610): a grid of strips over the
@@ -1119,6 +1150,15 @@ namespace sotc_native
             const uint32_t one = 1u;
             std::memcpy(rdram + 0x1186328u, &one, 4);
         }
+        // Testing: feedbackBlur2's trail at this alpha (graphFrameFinish reads
+        // 0x118b740 after refractionEnd).
+        static const int feedback = std::getenv("SOTC_FORCE_FEEDBACK") ? std::atoi(std::getenv("SOTC_FORCE_FEEDBACK")) : 0;
+        if (feedback && GPR_U32(ctx, 31) == 0x0109D018u)
+            std::memcpy(rdram + 0x118B740u, &feedback, 4);
+        // feedbackBlur2 sets no ALPHA: its sprite blends by the layer's root
+        // context, ALPHA 0x60 ((Cs - Cs) x FIX + Cd: no change), as the GS shows.
+        if (GPR_U32(ctx, 31) >= 0x01089E50u && GPR_U32(ctx, 31) < 0x0108A0E0u)
+            g_2d.alpha = 0x60u;
         g_layers.push_back(GPR_U32(ctx, 4));
         g_pushLayer(rdram, ctx, runtime);
     }
