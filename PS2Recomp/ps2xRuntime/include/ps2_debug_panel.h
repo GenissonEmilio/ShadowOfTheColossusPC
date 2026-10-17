@@ -17,6 +17,7 @@ public:
 private:
     bool m_initialized = false;
     bool m_visible = false; // F12 (or PS2X_DEBUG_UI=1 at start) shows the developer debugger
+    bool m_tuningVisible = false; // F10: the native renderer's live adjustments
     bool m_showRegisters = true;
     unsigned int m_memoryAddress = 0x00100000u;
     unsigned int m_memoryBytes = 0x100u;

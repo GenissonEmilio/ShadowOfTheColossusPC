@@ -9,6 +9,7 @@
 // and stencil (nothing to attach); no depth textures, so the passes that read
 // depth (bloom mask, depth of field) are left out there for now.
 #include "native_backend.h"
+#include "runtime/native_tuning.h"
 
 #if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
 
@@ -1079,8 +1080,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             const float maskColour[4] = {bloom.maskColor[0], bloom.maskColor[1], bloom.maskColor[2], 1};
             bindTexture(2, color.depth);
             quad(bloomTex[0], 8, QuadBlend::None, a, maskColour);
-            static const int rounds = std::getenv("SOTC_BLOOM_ROUNDS") ? std::atoi(std::getenv("SOTC_BLOOM_ROUNDS")) : 1;
-            static const float spreadGrow = std::getenv("SOTC_BLOOM_SPREAD") ? static_cast<float>(std::atof(std::getenv("SOTC_BLOOM_SPREAD"))) : 1.0f;
+            const int rounds = std::clamp(native_renderer::tuning().bloomRounds, 1, 8); // F10 panel (SOTC_BLOOM_ROUNDS)
+            const float spreadGrow = native_renderer::tuning().bloomSpread;
             blur(rounds, spreadGrow);
             const float amount[4] = {bloomHistory ? bloom.temporal : 1.0f, 0, 0, 0};
             bindTexture(0, bloomTex[0].texture);

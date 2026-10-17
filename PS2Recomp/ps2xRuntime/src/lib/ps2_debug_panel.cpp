@@ -1,5 +1,6 @@
 #include <cstdlib>
 #include "ps2_debug_panel.h"
+#include "runtime/native_tuning.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "ps2_log.h"
@@ -2199,6 +2200,52 @@ void PS2DebugPanel::shutdown()
 #endif
 }
 
+#if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
+namespace
+{
+    // F10: the native renderer's effects, changed while the game runs.
+    void drawNativeTuning(bool &open)
+    {
+        native_renderer::Tuning &t = native_renderer::tuning();
+        const native_renderer::Tuning d;
+        ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(330.0f, 0.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowBgAlpha(0.82f);
+        if (ImGui::Begin("Native renderer (F10)", &open))
+        {
+            ImGui::SeparatorText("Bloom");
+            ImGui::Checkbox("Bloom", &t.bloom);
+            ImGui::SliderFloat("Strength", &t.bloomStrength, 0.0f, 2.0f, "%.2f");
+            ImGui::SliderInt("Blur rounds", &t.bloomRounds, 1, 6);
+            ImGui::SliderFloat("Spread", &t.bloomSpread, 0.0f, 4.0f, "%.2f");
+            ImGui::SeparatorText("Fog");
+            ImGui::Checkbox("Vertex fog", &t.vertexFog);
+            ImGui::SliderFloat("Fog amount", &t.vertexFogAmount, 0.0f, 2.0f, "%.2f");
+            ImGui::Checkbox("Depth fog into the sky (zFog)", &t.zFog);
+            ImGui::SeparatorText("Effects");
+            ImGui::Checkbox("Glow (layer 8)", &t.glow);
+            ImGui::SameLine(165.0f);
+            ImGui::Checkbox("Depth of field", &t.depthOfField);
+            ImGui::Checkbox("Shadows", &t.shadows);
+            ImGui::SameLine(165.0f);
+            ImGui::Checkbox("Particles", &t.particles);
+            ImGui::Checkbox("Screen blur", &t.screenBlur);
+            ImGui::SameLine(165.0f);
+            ImGui::Checkbox("Reflections", &t.reflections);
+            ImGui::Checkbox("Water refraction", &t.refraction);
+            ImGui::Separator();
+            if (ImGui::Button("Defaults"))
+                t = d;
+            ImGui::SameLine();
+            if (ImGui::Button("Print to log"))
+                std::fprintf(stderr, "[tuning] %s\n", native_renderer::tuningAsEnv().c_str());
+            ImGui::TextWrapped("%s", native_renderer::tuningAsEnv().c_str());
+        }
+        ImGui::End();
+    }
+}
+#endif
+
 void PS2DebugPanel::draw(PS2Runtime &runtime)
 {
 #if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
@@ -2218,13 +2265,22 @@ void PS2DebugPanel::draw(PS2Runtime &runtime)
     {
         toggleVisible();
     }
+    if (IsKeyPressed(KEY_F10))
+        m_tuningVisible = !m_tuningVisible;
 
-    if (!m_visible)
+    if (!m_visible && !m_tuningVisible)
     {
         return;
     }
 
     rlImGuiBegin();
+    if (m_tuningVisible)
+        drawNativeTuning(m_tuningVisible);
+    if (!m_visible)
+    {
+        rlImGuiEnd();
+        return;
+    }
 
     ImGui::SetNextWindowSize(ImVec2(780.0f, 620.0f), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Runtime Debugger", &m_visible, ImGuiWindowFlags_MenuBar))

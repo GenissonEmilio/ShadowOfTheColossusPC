@@ -23,6 +23,7 @@
 
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
+#include "runtime/native_tuning.h"
 #include "runtime/native_renderer.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
 #include "runtime/gs/ps2_gs_psmt4.h"
@@ -599,7 +600,8 @@ namespace sotc_native
     native_renderer::Bloom bloomParams()
     {
         native_renderer::Bloom b;
-        b.enabled = g_cameraContext != 0;
+        const native_renderer::Tuning &tune = native_renderer::tuning();
+        b.enabled = g_cameraContext != 0 && tune.bloom;
         b.order = 20;
         b.threshold = static_cast<float>(word(0x118C094u));
         b.zA = real(g_cameraContext + 0x4A0u + 10u * 4u);
@@ -612,7 +614,7 @@ namespace sotc_native
         // chain: mask in 0x118c0d0, a lerp blur of 12 shifted copies by alpha
         // 0x40 / 0x20 / 0x10, the temporal lerp, then this add at full
         // strength; SOTC_BLOOM_SCALE overrides).
-        static const float scale = std::getenv("SOTC_BLOOM_SCALE") ? static_cast<float>(std::atof(std::getenv("SOTC_BLOOM_SCALE"))) : 1.0f;
+        const float scale = tune.bloomStrength;
         b.color[3] = static_cast<float>(word(0x118C14Cu) & 0xFFu) / 128.0f * scale;
         const uint32_t temporal = word(0x118C12Cu) & 0xFFu;
         b.temporal = temporal ? static_cast<float>(temporal) / 128.0f : 1.0f;
@@ -634,7 +636,7 @@ namespace sotc_native
         }
         // The native renderer redoes it as one pass over the picture by depth
         // (native_renderer::Fog); SOTC_NATIVE_ZFOG=0 leaves it out.
-        static const bool zFogOn = !std::getenv("SOTC_NATIVE_ZFOG") || std::atoi(std::getenv("SOTC_NATIVE_ZFOG")) != 0;
+        const bool zFogOn = native_renderer::tuning().zFog;
         if (zFogOn && slices > 0 && width > 0.0f)
         {
             g_fog.enabled = true;
@@ -658,8 +660,8 @@ namespace sotc_native
         // graphSetFogParam last set FOGCOL (0x118b8dc/e0/e4).
         {
             const float nearD = real(0x12147DCu), farD = real(0x12147E0u), nearR = real(0x12147E4u), farR = real(0x12147E8u), k = real(0x12147ECu);
-            static const bool noVFog = std::getenv("SOTC_NATIVE_NOVFOG") != nullptr; // debugging
-            if (!noVFog && farD != nearD)
+            const native_renderer::Tuning &tune = native_renderer::tuning();
+            if (tune.vertexFog && farD != nearD)
             {
                 static const float baseScale = std::getenv("SOTC_FOG_BASE_SCALE") ? static_cast<float>(std::atof(std::getenv("SOTC_FOG_BASE_SCALE"))) : 1.0f;
                 g_fog.vertexFog = true;
@@ -667,6 +669,10 @@ namespace sotc_native
                 // The camera packet of every layer (0x1098e20) carries these
                 // two values for the microcode: F = factor1 + factor0 / w.
                 g_fog.base = ((farR - nearR) * (farD + nearD) / (farD - nearD) + farR + nearR) * k * baseScale;
+                // The tuning's amount scales the fog's share: F' = 255 - (255 - F) x amount.
+                const float amount = std::max(0.0f, tune.vertexFogAmount);
+                g_fog.base = 255.0f - (255.0f - g_fog.base) * amount;
+                g_fog.scale *= amount;
                 for (int i = 0; i < 3; ++i)
                     g_fog.colour[i] = static_cast<float>(word(0x118B8DCu + i * 4u) & 0xFFu) / 255.0f;
             }
@@ -715,8 +721,7 @@ namespace sotc_native
             // (alpha 0x11862c4) and blurred (0x11862c0, 0x11862a0 rounds), in the
             // tint 0x11862b0..b8 (0x80 = 1). SOTC_NATIVE_NOGLOW=1 draws it plainly.
             native_renderer::GlowComposite gc;
-            static const bool off = std::getenv("SOTC_NATIVE_NOGLOW") != nullptr;
-            gc.enabled = !off && word(0x1186290u) != 0u && g_modelDraws != 0u;
+            gc.enabled = native_renderer::tuning().glow && word(0x1186290u) != 0u && g_modelDraws != 0u;
             gc.order = 8;
             gc.rounds = std::clamp(static_cast<int32_t>(word(0x11862A0u)), 0, 8);
             for (int i = 0; i < 3; ++i)
@@ -730,8 +735,7 @@ namespace sotc_native
             // distance 0x11862dc taken to GS Z by the camera's 0x4a0 matrix,
             // slices 0x11862d8, blur rounds 0x11862d4.
             native_renderer::DepthOfField dof;
-            static const bool off = std::getenv("SOTC_NATIVE_NODOF") != nullptr;
-            if (!off && g_cameraContext && word(0x11862D0u) != 0u && g_modelDraws != 0u)
+            if (native_renderer::tuning().depthOfField && g_cameraContext && word(0x11862D0u) != 0u && g_modelDraws != 0u)
             {
                 const float focus = static_cast<float>(static_cast<int32_t>(word(0x11862DCu)));
                 const uint32_t m = g_cameraContext + 0x4A0u;
@@ -1310,7 +1314,7 @@ namespace sotc_native
         const uint32_t chain = GPR_U32(ctx, 4), model = GPR_U32(ctx, 5);
         const bool skinnedShadow = GPR_U32(ctx, 10) != 0u;
         g_shadowDisp(rdram, ctx, runtime);
-        static const bool shadows = std::getenv("SOTC_NATIVE_NOSHADOWS") == nullptr;
+        const bool shadows = native_renderer::tuning().shadows;
         static const bool idColours = std::getenv("SOTC_NATIVE_IDCOLOR") != nullptr;
         if (!shadows || idColours || !model || !g_cameraContext || ((word(chain) >> 28) & 7u) != 2u)
             return;
@@ -1502,7 +1506,7 @@ namespace sotc_native
         const uint32_t a = GPR_U32(ctx, 4), count = GPR_U32(ctx, 5);
         const uint32_t header = g_requested, layer = g_layers.empty() ? 18u : g_layers.back();
         g_ptclVtx(rdram, ctx, runtime);
-        static const bool off = std::getenv("SOTC_NATIVE_NOPTCL") != nullptr;
+        const bool off = !native_renderer::tuning().particles;
         const ParticleEnv &e = g_ptclEnvState;
         if (off || !g_cameraContext || count == 0u || count > 4096u || (!(e.type >= 1u && e.type <= 5u) && e.type != 7u))
             return;
@@ -1666,8 +1670,7 @@ namespace sotc_native
         b.steps = static_cast<int32_t>(GPR_U32(ctx, 7));
         b.dx = static_cast<float>(static_cast<int32_t>(GPR_U32(ctx, 8)));
         b.dy = static_cast<float>(static_cast<int32_t>(GPR_U32(ctx, 9)));
-        static const bool off = std::getenv("SOTC_NATIVE_NOSBLUR") != nullptr;
-        if (!off && b.steps > 0 && b.steps < 64)
+        if (native_renderer::tuning().screenBlur && b.steps > 0 && b.steps < 64)
             native_renderer::addScreenBlur(b);
         g_screenBlur(rdram, ctx, runtime);
     }
@@ -1861,7 +1864,7 @@ namespace sotc_native
                                  word(s + 0x18u), word(s + 0x1Cu), g_frame, regs.c_str());
                 }
             }
-            static const bool noReflect = std::getenv("SOTC_NATIVE_NOREFLECT") != nullptr;
+            const bool noReflect = !native_renderer::tuning().reflections;
             if ((layer == 12u || layer == 13u) && noReflect)
                 continue;
             if ((skipLayers >> (layer & 31u)) & 1u)
@@ -1977,7 +1980,7 @@ namespace sotc_native
                 ++g_frameDraws;
                 // And first in layer 9 the same way, showing the picture as it
                 // was before that layer (waterRefractionBegin's reduced copy).
-                static const bool noRefract = std::getenv("SOTC_NATIVE_NOREFRACT") != nullptr;
+                const bool noRefract = !native_renderer::tuning().refraction;
                 static const float refractAlpha = std::getenv("SOTC_REFRACT_ALPHA") ? static_cast<float>(std::atof(std::getenv("SOTC_REFRACT_ALPHA"))) : 1.0f;
                 if (!noRefract)
                 {

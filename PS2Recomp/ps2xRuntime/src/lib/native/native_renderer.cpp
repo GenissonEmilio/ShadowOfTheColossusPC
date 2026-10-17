@@ -2,6 +2,7 @@
 // time it is used. macOS: Metal, or OpenGL with SOTC_NATIVE_GL=1 (to check
 // the GL path against Metal); the Vita: OpenGL (vitaGL); elsewhere none.
 #include "native_backend.h"
+#include "runtime/native_tuning.h"
 
 #include <algorithm>
 #include <atomic>
@@ -24,6 +25,66 @@ namespace native_renderer::detail
 #if !defined(PS2X_NATIVE_GL)
     Backend *createGlBackend() { return nullptr; }
 #endif
+}
+
+namespace native_renderer
+{
+    Tuning &tuning()
+    {
+        static Tuning t = []
+        {
+            Tuning d;
+            auto on = [](const char *name) { return std::getenv(name) != nullptr; };
+            auto number = [](const char *name, float fallback) { return std::getenv(name) ? static_cast<float>(std::atof(std::getenv(name))) : fallback; };
+            d.bloomStrength = number("SOTC_BLOOM_SCALE", 1.0f);
+            d.bloom = d.bloomStrength > 0.0f;
+            if (!d.bloom)
+                d.bloomStrength = 1.0f;
+            d.bloomRounds = static_cast<int>(number("SOTC_BLOOM_ROUNDS", 1.0f));
+            d.bloomSpread = number("SOTC_BLOOM_SPREAD", 1.0f);
+            d.vertexFog = !on("SOTC_NATIVE_NOVFOG");
+            d.vertexFogAmount = number("SOTC_FOG_AMOUNT", 1.0f);
+            d.zFog = !on("SOTC_NATIVE_ZFOG") || std::atoi(std::getenv("SOTC_NATIVE_ZFOG")) != 0;
+            d.glow = !on("SOTC_NATIVE_NOGLOW");
+            d.depthOfField = !on("SOTC_NATIVE_NODOF");
+            d.shadows = !on("SOTC_NATIVE_NOSHADOWS");
+            d.particles = !on("SOTC_NATIVE_NOPTCL");
+            d.screenBlur = !on("SOTC_NATIVE_NOSBLUR");
+            d.reflections = !on("SOTC_NATIVE_NOREFLECT");
+            d.refraction = !on("SOTC_NATIVE_NOREFRACT");
+            return d;
+        }();
+        return t;
+    }
+
+    std::string tuningAsEnv()
+    {
+        const Tuning &t = tuning(), d;
+        std::string out;
+        auto add = [&](const std::string &s) { out += (out.empty() ? "" : " ") + s; };
+        auto number = [](float v) { char b[32]; std::snprintf(b, sizeof(b), "%g", v); return std::string(b); };
+        if (!t.bloom)
+            add("SOTC_BLOOM_SCALE=0");
+        else if (t.bloomStrength != d.bloomStrength)
+            add("SOTC_BLOOM_SCALE=" + number(t.bloomStrength));
+        if (t.bloomRounds != d.bloomRounds)
+            add("SOTC_BLOOM_ROUNDS=" + std::to_string(t.bloomRounds));
+        if (t.bloomSpread != d.bloomSpread)
+            add("SOTC_BLOOM_SPREAD=" + number(t.bloomSpread));
+        if (!t.vertexFog)
+            add("SOTC_NATIVE_NOVFOG=1");
+        if (t.vertexFogAmount != d.vertexFogAmount)
+            add("SOTC_FOG_AMOUNT=" + number(t.vertexFogAmount));
+        if (!t.zFog)
+            add("SOTC_NATIVE_ZFOG=0");
+        const std::pair<bool, const char *> offs[] = {{t.glow, "SOTC_NATIVE_NOGLOW=1"}, {t.depthOfField, "SOTC_NATIVE_NODOF=1"}, {t.shadows, "SOTC_NATIVE_NOSHADOWS=1"},
+                                                      {t.particles, "SOTC_NATIVE_NOPTCL=1"}, {t.screenBlur, "SOTC_NATIVE_NOSBLUR=1"}, {t.reflections, "SOTC_NATIVE_NOREFLECT=1"},
+                                                      {t.refraction, "SOTC_NATIVE_NOREFRACT=1"}};
+        for (const auto &[value, env] : offs)
+            if (!value)
+                add(env);
+        return out.empty() ? "(the defaults)" : out;
+    }
 }
 
 namespace

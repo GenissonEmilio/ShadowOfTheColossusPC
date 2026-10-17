@@ -1,5 +1,6 @@
 // Native renderer on Metal (see runtime/native_renderer.h).
 #include "native_backend.h"
+#include "runtime/native_tuning.h"
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -993,8 +994,8 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         [e setFragmentBytes:&bp length:sizeof(bp) atIndex:0];
                     });
                     // The GS chain reduces the mask in stages, then blurs it once.
-                    static const int rounds = std::getenv("SOTC_BLOOM_ROUNDS") ? std::atoi(std::getenv("SOTC_BLOOM_ROUNDS")) : 1; // one round of +-3 texels, as the GS chain
-                    static const float spreadGrow = std::getenv("SOTC_BLOOM_SPREAD") ? static_cast<float>(std::atof(std::getenv("SOTC_BLOOM_SPREAD"))) : 1.0f;
+                    const int rounds = std::clamp(native_renderer::tuning().bloomRounds, 1, 8); // F10 panel (SOTC_BLOOM_ROUNDS)
+                    const float spreadGrow = native_renderer::tuning().bloomSpread;
                     for (int i = 0; i < rounds; ++i)
                     {
                         const float spread = 1.0f + spreadGrow * static_cast<float>(i);
