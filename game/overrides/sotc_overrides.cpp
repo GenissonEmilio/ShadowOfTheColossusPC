@@ -20,6 +20,7 @@
 #include <string>
 
 void installSotcNative(PS2Runtime &runtime); // sotc_native.cpp
+#include "sotc_decomp.h"
 
 namespace
 {
@@ -878,6 +879,7 @@ namespace
         installCensus(runtime);
         installSotcNative(runtime);
         sysnative::install(runtime);
+        sotc_decomp::install(runtime);
         if (std::getenv("SOTC_MATH_CHECK") && runtime.hasFunction(0x010816C0u))
         {
             g_yawPitch = runtime.lookupFunction(0x010816C0u);
