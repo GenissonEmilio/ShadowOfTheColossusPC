@@ -317,45 +317,51 @@ void main(float2 aPos, uniform float4 uQuad,
 }
 )";
 
-    // No depth textures: the depth modes (8, 11) are not used on the Vita.
+    // No depth textures: the depth modes (8, 11, 12) are not used on the Vita.
+    // One program per mode (MODE defined in front): an "uber" shader with a
+    // run-time mode and a loop is more than Vita3K's shader translation (and
+    // the real GPU's branching) handles well.
     const char *kQuadFragment = R"(
 float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uSrc2,
-            uniform float uMode, uniform float4 uA, uniform float4 uB, uniform float4 uSize) : COLOR
+            uniform float4 uA, uniform float4 uB, uniform float4 uSize) : COLOR
 {
     float2 uv = vUV.xy;
-    if (uMode < 0.5)
-        return float4(tex2D(uSrc, uv).rgb, 1.0);
-    if (uMode < 1.5)
-    {
-        float4 c = tex2D(uSrc, uv) * 0.30;
-        c += (tex2D(uSrc, uv + uA.xy) + tex2D(uSrc, uv - uA.xy)) * 0.235;
-        c += (tex2D(uSrc, uv + uA.xy * 2.0) + tex2D(uSrc, uv - uA.xy * 2.0)) * 0.12;
-        c += (tex2D(uSrc, uv + uA.xy * 3.0) + tex2D(uSrc, uv - uA.xy * 3.0)) * 0.05;
-        return c;
-    }
-    if (uMode < 2.5)
-        return lerp(tex2D(uSrc2, uv), tex2D(uSrc, uv), uA.xxxx); // CG: no float4, float4, float overload
-    if (uMode < 3.5)
-        return float4(tex2D(uSrc, uv).rgb, uA.x);
-    if (uMode < 4.5)
-        return float4(saturate(tex2D(uSrc, uv).rgb * uA.rgb), uA.a);
-    if (uMode < 5.5)
-        return float4(0.0, 0.0, 0.0, uA.x);
-    if (uMode < 6.5)
-        return float4(1.0, 1.0, 1.0, 1.0);
-    if (uMode < 7.5)
-    {
-        // 4 x 4 reduction of the shadow mask (uSize: its texel size).
-        float2 base = floor(uv / uSize.xy / 4.0) * 4.0;
-        float sum = 0.0;
-        for (int y = 0; y < 4; ++y)
-            for (int x = 0; x < 4; ++x)
-                sum += tex2D(uSrc, (base + float2(x, y) + 0.5) * uSize.xy).r;
-        return float4(sum / 16.0, sum / 16.0, sum / 16.0, 1.0);
-    }
-    if (uMode < 9.5)
-        return float4(0.0, 0.0, 0.0, saturate(tex2D(uSrc, uv).r * uA.x));
+#if MODE == 0
+    return float4(tex2D(uSrc, uv).rgb, 1.0);
+#elif MODE == 1
+    float4 c = tex2D(uSrc, uv) * 0.30;
+    c += (tex2D(uSrc, uv + uA.xy) + tex2D(uSrc, uv - uA.xy)) * 0.235;
+    c += (tex2D(uSrc, uv + uA.xy * 2.0) + tex2D(uSrc, uv - uA.xy * 2.0)) * 0.12;
+    c += (tex2D(uSrc, uv + uA.xy * 3.0) + tex2D(uSrc, uv - uA.xy * 3.0)) * 0.05;
+    return c;
+#elif MODE == 2
+    return lerp(tex2D(uSrc2, uv), tex2D(uSrc, uv), uA.xxxx);
+#elif MODE == 3
+    return float4(tex2D(uSrc, uv).rgb, uA.x);
+#elif MODE == 4
+    return float4(saturate(tex2D(uSrc, uv).rgb * uA.rgb), uA.a);
+#elif MODE == 5
+    return float4(0.0, 0.0, 0.0, uA.x);
+#elif MODE == 6
+    return float4(1.0, 1.0, 1.0, 1.0);
+#elif MODE == 7
+    // 4 x 4 reduction of the shadow mask (uSize: its texel size), unrolled.
+    float2 base = floor(uv / uSize.xy / 4.0) * 4.0 + 0.5;
+    float sum = 0.0;
+    sum += tex2D(uSrc, (base + float2(0, 0)) * uSize.xy).r + tex2D(uSrc, (base + float2(1, 0)) * uSize.xy).r;
+    sum += tex2D(uSrc, (base + float2(2, 0)) * uSize.xy).r + tex2D(uSrc, (base + float2(3, 0)) * uSize.xy).r;
+    sum += tex2D(uSrc, (base + float2(0, 1)) * uSize.xy).r + tex2D(uSrc, (base + float2(1, 1)) * uSize.xy).r;
+    sum += tex2D(uSrc, (base + float2(2, 1)) * uSize.xy).r + tex2D(uSrc, (base + float2(3, 1)) * uSize.xy).r;
+    sum += tex2D(uSrc, (base + float2(0, 2)) * uSize.xy).r + tex2D(uSrc, (base + float2(1, 2)) * uSize.xy).r;
+    sum += tex2D(uSrc, (base + float2(2, 2)) * uSize.xy).r + tex2D(uSrc, (base + float2(3, 2)) * uSize.xy).r;
+    sum += tex2D(uSrc, (base + float2(0, 3)) * uSize.xy).r + tex2D(uSrc, (base + float2(1, 3)) * uSize.xy).r;
+    sum += tex2D(uSrc, (base + float2(2, 3)) * uSize.xy).r + tex2D(uSrc, (base + float2(3, 3)) * uSize.xy).r;
+    return float4(sum / 16.0, sum / 16.0, sum / 16.0, 1.0);
+#elif MODE == 9
+    return float4(0.0, 0.0, 0.0, saturate(tex2D(uSrc, uv).r * uA.x));
+#else
     return float4(tex2D(uSrc, uv).rgb * uB.rgb * uB.a, 1.0);
+#endif
 }
 )";
 #endif
@@ -389,6 +395,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     struct Renderer
     {
         GLuint mainProgram = 0, quadProgram = 0;
+#if defined(PS2X_NATIVE_VITA)
+        GLuint quadPrograms[11] = {}; // by mode (8: depth, not on the Vita)
+#endif
         GLuint quadBuffer = 0, blurBuffer = 0, vao = 0;
         std::unordered_map<std::string, GLint> mainUniforms, quadUniforms;
         Target colorPlain; // the picture's colour alone (passes that read its depth)
@@ -454,18 +463,46 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         GLint uniform(bool main, const char *name)
         {
             auto &cache = main ? mainUniforms : quadUniforms;
-            auto it = cache.find(name);
+            const std::string key = main ? std::string(name) : std::string(name) + "#" + std::to_string(quadProgram);
+            auto it = cache.find(key);
             if (it != cache.end())
                 return it->second;
             const GLint location = glGetUniformLocation(main ? mainProgram : quadProgram, name);
-            cache.emplace(name, location);
+            cache.emplace(key, location);
             return location;
+        }
+
+        // The full-screen pass program for a mode (one program per mode on the Vita).
+        void useQuad(int mode)
+        {
+#if defined(PS2X_NATIVE_VITA)
+            if (mode >= 0 && mode < 11 && quadPrograms[mode])
+                quadProgram = quadPrograms[mode];
+#else
+            (void)mode;
+#endif
+            glUseProgram(quadProgram);
         }
 
         bool init()
         {
             mainProgram = program(kMainVertex, kMainFragment, {"aPos", "aNormal", "aColor", "aUV"});
+#if defined(PS2X_NATIVE_VITA)
+            for (int mode : {0, 1, 2, 3, 4, 5, 6, 7, 9, 10})
+            {
+                const std::string source = "#define MODE " + std::to_string(mode) + "\n" + kQuadFragment;
+                quadPrograms[mode] = program(kQuadVertex, source.c_str(), {"aPos"});
+                if (!quadPrograms[mode])
+                    return false;
+                quadProgram = quadPrograms[mode];
+                glUseProgram(quadProgram);
+                glUniform1i(uniform(false, "uSrc"), 0);
+                glUniform1i(uniform(false, "uSrc2"), 1);
+            }
+            quadProgram = quadPrograms[0];
+#else
             quadProgram = program(kQuadVertex, kQuadFragment, {"aPos"});
+#endif
             if (!mainProgram || !quadProgram)
                 return false;
 #if !defined(PS2X_NATIVE_VITA)
@@ -629,7 +666,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                   const float quadParams[4] = nullptr, bool corners = false)
         {
             bindTarget(target);
-            glUseProgram(quadProgram);
+            useQuad(mode);
             glDisable(GL_DEPTH_TEST);
             glDisable(GL_CULL_FACE);
             switch (blend)
@@ -1014,7 +1051,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #endif
             {
                 bindTarget(shadowMask);
-                glUseProgram(quadProgram);
+                useQuad(6);
                 glDisable(GL_DEPTH_TEST);
                 glDisable(GL_BLEND);
 #if defined(PS2X_NATIVE_VITA)
