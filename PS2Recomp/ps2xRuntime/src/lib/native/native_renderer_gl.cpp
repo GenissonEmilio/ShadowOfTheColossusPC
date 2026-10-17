@@ -409,6 +409,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         Target colorPlain; // the picture's colour alone (passes that read its depth)
         Target color, background, backgroundSmall, reflection, refraction, refractionHalf, snapshot, shadowMask;
         Target previous; // the last frame shown (feedbackBlur)
+        Target shownFrame[2]; // what the host shows, alternately (the GPU draws later: never the target being drawn)
+        int shownIndex = 0;
         Target glowLayer, glowSmall[4]; // bossDeathEffect: layer 8 apart (on the picture's depth); 256, 128, 64, 64
         Target bloomTex[3];
         bool bloomHistory = false;
@@ -591,6 +593,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             makeTarget(snapshot, w, h, false);
             makeTarget(shadowMask, w, h, false);
             makeTarget(previous, w, h, false);
+            for (Target &t : shownFrame)
+                makeTarget(t, w, h, false);
             makeTarget(glowLayer, w, h, false);
             for (int i = 0; i < 4; ++i)
                 makeTarget(glowSmall[i], i == 0 ? 256u : (i == 1 ? 128u : 64u), i == 0 ? 256u : (i == 1 ? 128u : 64u), false);
@@ -1177,9 +1181,12 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 
         if (const auto &hook = native_renderer::detail::presentHook())
         {
-            // The host shows the texture itself.
+            // The host shows a copy of its own: the next frame starts drawing
+            // into `color` before the GPU has put this one on the screen.
+            shownIndex ^= 1;
+            copy(colorPlain, shownFrame[shownIndex]);
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
-            hook(color.texture, w, h);
+            hook(shownFrame[shownIndex].texture, w, h);
             return;
         }
         // Read back, top row first (the GL picture is y-up).
