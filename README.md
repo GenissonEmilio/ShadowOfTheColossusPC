@@ -17,6 +17,8 @@ it talks to (DMA, IOP, SPU2) is reimplemented as host code.
 
 ## Status
 
+![What is native](docs/port_status.svg)
+
 | Area | State |
 | --- | --- |
 | Boot, logos, intro cinematic | ✅ |

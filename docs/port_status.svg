@@ -1,0 +1,192 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1046" viewBox="0 0 1000 1046" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+<rect width="1000" height="1046" fill="#0d1117"/>
+<text x="16" y="34" fill="#e6edf3" font-size="22" font-weight="600">Celosia: what is native</text>
+<text x="16" y="56" fill="#8b949e" font-size="13">50 of 50 features native (100%). Generated from docs/port_status.json by tools/status_treemap.py.</text>
+<rect x="700" y="24" width="12" height="12" rx="2" fill="#2f9e5b"/><text x="717" y="35" fill="#c9d1d9" font-size="12">native (50)</text>
+<rect x="795" y="24" width="12" height="12" rx="2" fill="#d9a521"/><text x="812" y="35" fill="#c9d1d9" font-size="12">partial (0)</text>
+<rect x="890" y="24" width="12" height="12" rx="2" fill="#c8553d"/><text x="907" y="35" fill="#c9d1d9" font-size="12">emulated (0)</text>
+<text x="16" y="92" fill="#e6edf3" font-size="16" font-weight="600">Native renderer<tspan fill="#8b949e" font-weight="400" font-size="13">  35/35 native</tspan></text>
+<rect x="16.0" y="104.0" width="387.2" height="420.0" fill="#161b22" stroke="#0d1117" stroke-width="3"/>
+<text x="22.0" y="119.0" fill="#8b949e" font-size="11" font-weight="600">EFFECTS</text>
+<g><title>Vertex fog: native since 2026-10-15 (b7fc671). the game&#x27;s fog factors, on every layer (sky and far landscape too)</title><rect x="20.0" y="126.0" width="93.3" height="111.1" rx="3" fill="#2f9e5b"/>
+<text x="24.0" y="142.0" fill="#ffffff" font-size="11">Vertex fog</text>
+</g>
+<g><title>Front fog: native since 2026-10-14 (ab142b6). drawFrontFog</title><rect x="115.3" y="126.0" width="93.3" height="111.1" rx="3" fill="#2f9e5b"/>
+<text x="119.3" y="142.0" fill="#ffffff" font-size="11">Front fog</text>
+</g>
+<g><title>Bloom: native since 2026-10-16 (4bb6054). the game&#x27;s own strength (no scale by eye) and one blur round, as the GS chain; mean diff 15.0 vs 14.7 with the old tuning, altar offset 14.9 vs 18.6</title><rect x="210.6" y="126.0" width="93.3" height="111.1" rx="3" fill="#2f9e5b"/>
+<text x="214.6" y="142.0" fill="#ffffff" font-size="11">Bloom</text>
+</g>
+<g><title>Distance fog: native since 2026-10-15 (64b72f1). zFog as the game does it: one pass at layer 4 by depth slices over bgEnd&#x27;s background copy, on by default (SOTC_NATIVE_ZFOG=0); far cliffs paler than the GS (polish)</title><rect x="305.9" y="126.0" width="93.3" height="111.1" rx="3" fill="#2f9e5b"/>
+<text x="309.9" y="142.0" fill="#ffffff" font-size="11">Distance fog</text>
+</g>
+<g><title>Shadows: native since 2026-10-15 (0c3a518). stencil volumes (rigid and skinned paths), soft as shadowDraw: mask reduced, blurred, darkened; on by default</title><rect x="20.0" y="239.1" width="112.4" height="92.3" rx="3" fill="#2f9e5b"/>
+<text x="24.0" y="255.1" fill="#ffffff" font-size="11">Shadows</text>
+</g>
+<g><title>Reflections: native since 2026-10-15 (0fd00e9). mirrored layers 12/13 drawn off-screen, sampled by the 0x2200 surfaces in layer 15; tint alpha matched by measurement</title><rect x="20.0" y="333.4" width="112.4" height="92.3" rx="3" fill="#2f9e5b"/>
+<text x="24.0" y="349.4" fill="#ffffff" font-size="11">Reflections</text>
+</g>
+<g><title>Water refraction: native since 2026-10-15 (47f8465). layer 9: the 0x2200 surfaces show the picture before that layer, reduced 256 -&gt; 128 -&gt; 256; the layer 15 reflection covers it (alpha 1, as on the PS2)</title><rect x="20.0" y="427.7" width="112.4" height="92.3" rx="3" fill="#2f9e5b"/>
+<text x="24.0" y="443.7" fill="#ffffff" font-size="11">Water refraction</text>
+</g>
+<g><title>Refraction: native since 2026-10-16 (). underwater waves: refractionEnd&#x27;s grid of strips (0x109c610) through the 2D path on the screen copy at layer 19 (SOTC_FORCE_UNDERWATER=1 shows it anywhere)</title><rect x="134.4" y="239.1" width="86.9" height="119.2" rx="3" fill="#2f9e5b"/>
+<text x="138.4" y="253.1" fill="#ffffff" font-size="9">Refraction</text>
+</g>
+<g><title>Particles: native since 2026-10-16 (299159f). microcode 7 expansion of every type in the route: 1 billboards, 2/4/7 by the environment matrix with its translation, 3 streaks, 4 lit fans (routine 0xe48 lighting from VU 26/27), 7 with a texture cell each</title><rect x="223.3" y="239.1" width="86.9" height="119.2" rx="3" fill="#2f9e5b"/>
+<text x="227.3" y="253.1" fill="#ffffff" font-size="9">Particles</text>
+</g>
+<g><title>Screen blur: native since 2026-10-16 (). screenBlur (zoom/turn blur; cameraBlur goes through it) and feedbackBlur/feedbackBlur2 (the last frame shown over the new one at layer 29, by the layer&#x27;s root ALPHA as the GS does)</title><rect x="312.3" y="239.1" width="86.9" height="119.2" rx="3" fill="#2f9e5b"/>
+<text x="316.3" y="253.1" fill="#ffffff" font-size="9">Screen blur</text>
+</g>
+<g><title>Depth of field: native since 2026-10-15 (ae4246f). 256 x 256 blurred copy laid over the pixels beyond the focus in slices by GS Z, as depthOfField (SOTC_NATIVE_NODOF)</title><rect x="134.4" y="360.4" width="131.4" height="78.8" rx="3" fill="#2f9e5b"/>
+<text x="138.4" y="376.4" fill="#ffffff" font-size="11">Depth of field</text>
+</g>
+<g><title>Colossus death effect: native since 2026-10-16 (). bossDeathEffect&#x27;s layer-8 composite native; the fan bit 0 draws into the 256 x 256 buffer that End&#x27;s first copy overwrites whole before anything reads it (GS trace with SOTC_FORCE_BOSSFAN): no effect on the picture, left out</title><rect x="134.4" y="441.2" width="131.4" height="78.8" rx="3" fill="#2f9e5b"/>
+<text x="138.4" y="457.2" fill="#ffffff" font-size="11">Colossus death</text>
+<text x="138.4" y="470.2" fill="#ffffff" font-size="11">effect</text>
+</g>
+<g><title>Cutscene glow (bossDeathEffect): native since 2026-10-16 (). as the GS: layer 8 drawn apart on the scene&#x27;s depth, reduced 256/128/64 and blurred, laid over sharp (0x11862c4) and blurred (0x11862c0) in the tint; on by default (SOTC_NATIVE_NOGLOW); Metal and Mac GL, not on the Vita yet (vitaGL framebuffers cannot share the depth)</title><rect x="267.8" y="360.4" width="131.4" height="78.8" rx="3" fill="#2f9e5b"/>
+<text x="271.8" y="376.4" fill="#ffffff" font-size="11">Cutscene glow</text>
+<text x="271.8" y="389.4" fill="#ffffff" font-size="11">(bossDeathEffect)</text>
+</g>
+<g><title>Higher resolution (512x448 x up to 4): native since 2026-10-17 (72b6c63). 3x on the Mac, shown filtered at full size; effects measured in PS2 pixels; F10 tuning panel</title><rect x="267.8" y="441.2" width="131.4" height="78.8" rx="3" fill="#2f9e5b"/>
+<text x="271.8" y="457.2" fill="#ffffff" font-size="11">Higher resolution</text>
+<text x="271.8" y="470.2" fill="#ffffff" font-size="11">(512x448 x up to 4)</text>
+</g>
+<rect x="403.2" y="104.0" width="331.9" height="420.0" fill="#161b22" stroke="#0d1117" stroke-width="3"/>
+<text x="409.2" y="119.0" fill="#8b949e" font-size="11" font-weight="600">3D MODELS</text>
+<g><title>Models, LOD and part visibility: native since 2026-10-14 (b8a0ffb). modelDisp read from the game&#x27;s own model data</title><rect x="407.2" y="126.0" width="106.6" height="97.0" rx="3" fill="#2f9e5b"/>
+<text x="411.2" y="142.0" fill="#ffffff" font-size="11">Models, LOD and</text>
+<text x="411.2" y="155.0" fill="#ffffff" font-size="11">part visibility</text>
+</g>
+<g><title>Textures (4/8-bit CLUT): native since 2026-10-14 (8c4bb05). NTO2 textures decoded once, cached by content</title><rect x="515.8" y="126.0" width="106.6" height="97.0" rx="3" fill="#2f9e5b"/>
+<text x="519.8" y="142.0" fill="#ffffff" font-size="11">Textures</text>
+<text x="519.8" y="155.0" fill="#ffffff" font-size="11">(4/8-bit CLUT)</text>
+</g>
+<g><title>Textures (32-bit): native since 2026-10-14 (3591a51). PSMCT32</title><rect x="624.5" y="126.0" width="106.6" height="97.0" rx="3" fill="#2f9e5b"/>
+<text x="628.5" y="142.0" fill="#ffffff" font-size="11">Textures</text>
+<text x="628.5" y="155.0" fill="#ffffff" font-size="11">(32-bit)</text>
+</g>
+<g><title>Materials and draw layers: native since 2026-10-14 (8daaafc). ALPHA blends, modelGetDlLayer order</title><rect x="407.2" y="225.0" width="106.6" height="97.0" rx="3" fill="#2f9e5b"/>
+<text x="411.2" y="241.0" fill="#ffffff" font-size="11">Materials and</text>
+<text x="411.2" y="254.0" fill="#ffffff" font-size="11">draw layers</text>
+</g>
+<g><title>Surface skip rules: native since 2026-10-14 (9fa0953). boss effect, shadow effect, underwater</title><rect x="407.2" y="324.0" width="106.6" height="97.0" rx="3" fill="#2f9e5b"/>
+<text x="411.2" y="340.0" fill="#ffffff" font-size="11">Surface skip</text>
+<text x="411.2" y="353.0" fill="#ffffff" font-size="11">rules</text>
+</g>
+<g><title>Instance opacity: native since 2026-10-14 (20ba0c5). fading instances</title><rect x="407.2" y="423.0" width="106.6" height="97.0" rx="3" fill="#2f9e5b"/>
+<text x="411.2" y="439.0" fill="#ffffff" font-size="11">Instance opacity</text>
+</g>
+<g><title>Skinned characters: native since 2026-10-14 (9fa0953). bone palette, skinned on the CPU</title><rect x="515.8" y="225.0" width="106.6" height="97.0" rx="3" fill="#2f9e5b"/>
+<text x="519.8" y="241.0" fill="#ffffff" font-size="11">Skinned</text>
+<text x="519.8" y="254.0" fill="#ffffff" font-size="11">characters</text>
+</g>
+<g><title>Lighting: native since 2026-10-14 (600a17e). the instance&#x27;s lights, VU1 lit formula</title><rect x="624.5" y="225.0" width="106.6" height="97.0" rx="3" fill="#2f9e5b"/>
+<text x="628.5" y="241.0" fill="#ffffff" font-size="11">Lighting</text>
+</g>
+<g><title>Two-texture surfaces: native since 2026-10-14 (57de9ac). second pass by ALPHA_2</title><rect x="515.8" y="324.0" width="106.6" height="97.0" rx="3" fill="#2f9e5b"/>
+<text x="519.8" y="340.0" fill="#ffffff" font-size="11">Two-texture</text>
+<text x="519.8" y="353.0" fill="#ffffff" font-size="11">surfaces</text>
+</g>
+<g><title>Cloth and hair: native since 2026-10-14 (e60af7b). meshDisp grids</title><rect x="515.8" y="423.0" width="106.6" height="97.0" rx="3" fill="#2f9e5b"/>
+<text x="519.8" y="439.0" fill="#ffffff" font-size="11">Cloth and hair</text>
+</g>
+<g><title>Mip levels: native since 2026-10-15 (2744664). every level decoded; the level picked as the GS does from TEX1 (log2(w) x 2^L + K, NTO2 +0x78/+0x90/+0x94), SOTC_NATIVE_NOMIPS</title><rect x="624.5" y="324.0" width="106.6" height="97.0" rx="3" fill="#2f9e5b"/>
+<text x="628.5" y="340.0" fill="#ffffff" font-size="11">Mip levels</text>
+</g>
+<g><title>Scrolling texture coordinates: native since 2026-10-15 (e231623). the STROW texTransResolve builds per texture: 16-bit row at *(NTO2 +0xc), +4, added to S/T (SOTC_NATIVE_NOROW)</title><rect x="624.5" y="423.0" width="106.6" height="97.0" rx="3" fill="#2f9e5b"/>
+<text x="628.5" y="439.0" fill="#ffffff" font-size="11">Scrolling</text>
+<text x="628.5" y="452.0" fill="#ffffff" font-size="11">texture</text>
+<text x="628.5" y="465.0" fill="#ffffff" font-size="11">coordinates</text>
+</g>
+<rect x="735.1" y="104.0" width="248.9" height="420.0" fill="#161b22" stroke="#0d1117" stroke-width="3"/>
+<text x="741.1" y="119.0" fill="#8b949e" font-size="11" font-weight="600">2D</text>
+<g><title>Menu and title sprites: native since 2026-10-14 (9b145ec). spriteDrawSprite</title><rect x="739.1" y="126.0" width="119.5" height="86.0" rx="3" fill="#2f9e5b"/>
+<text x="743.1" y="142.0" fill="#ffffff" font-size="11">Menu and title</text>
+<text x="743.1" y="155.0" fill="#ffffff" font-size="11">sprites</text>
+</g>
+<g><title>Sprite variants: native since 2026-10-14 (20ba0c5). UV, ST, UV2, ST2, TexNoSet</title><rect x="860.5" y="126.0" width="119.5" height="86.0" rx="3" fill="#2f9e5b"/>
+<text x="864.5" y="142.0" fill="#ffffff" font-size="11">Sprite variants</text>
+</g>
+<g><title>Screen fades: native since 2026-10-14 (20ba0c5). fadeScreen</title><rect x="739.1" y="214.0" width="119.5" height="86.0" rx="3" fill="#2f9e5b"/>
+<text x="743.1" y="230.0" fill="#ffffff" font-size="11">Screen fades</text>
+</g>
+<g><title>Cinema bars: native since 2026-10-14 (20ba0c5). drawDemoBar</title><rect x="860.5" y="214.0" width="119.5" height="86.0" rx="3" fill="#2f9e5b"/>
+<text x="864.5" y="230.0" fill="#ffffff" font-size="11">Cinema bars</text>
+</g>
+<g><title>Subtitles: native since 2026-10-14 (ff7152c). pre-rendered lines</title><rect x="739.1" y="302.0" width="95.2" height="108.0" rx="3" fill="#2f9e5b"/>
+<text x="743.1" y="318.0" fill="#ffffff" font-size="11">Subtitles</text>
+</g>
+<g><title>HUD gauges: native since 2026-10-14 (ff7152c). grip and health circles</title><rect x="739.1" y="412.0" width="95.2" height="108.0" rx="3" fill="#2f9e5b"/>
+<text x="743.1" y="428.0" fill="#ffffff" font-size="11">HUD gauges</text>
+</g>
+<g><title>Loading indicator: native since 2026-10-14 (ff7152c). lines</title><rect x="836.3" y="302.0" width="143.7" height="71.3" rx="3" fill="#2f9e5b"/>
+<text x="840.3" y="318.0" fill="#ffffff" font-size="11">Loading indicator</text>
+</g>
+<g><title>Windows: native since 2026-10-14 (ff7152c). spriteDraw, windowSprite</title><rect x="836.3" y="375.3" width="143.7" height="71.3" rx="3" fill="#2f9e5b"/>
+<text x="840.3" y="391.3" fill="#ffffff" font-size="11">Windows</text>
+</g>
+<g><title>Immediate gl* drawing: native since 2026-10-15 (299159f). glEnd&#x27;s A+D packet read into the 2D path; the bird&#x27;s heat-haze strips sample the screen copy 0x10f37c8 makes at their layer; bossDeathEffect&#x27;s fan left out (overwritten on the GS before it is read)</title><rect x="836.3" y="448.7" width="143.7" height="71.3" rx="3" fill="#2f9e5b"/>
+<text x="840.3" y="464.7" fill="#ffffff" font-size="11">Immediate gl* drawing</text>
+</g>
+<text x="16" y="560" fill="#e6edf3" font-size="16" font-weight="600">PS2 hardware<tspan fill="#8b949e" font-weight="400" font-size="13">  15/15 native</tspan></text>
+<rect x="16.0" y="572.0" width="322.7" height="420.0" fill="#161b22" stroke="#0d1117" stroke-width="3"/>
+<text x="22.0" y="587.0" fill="#8b949e" font-size="11" font-weight="600">PROCESSORS</text>
+<g><title>EE game code: native since 2026-10-02 (f48e26f). statically recompiled to C++</title><rect x="20.0" y="594.0" width="156.3" height="156.4" rx="3" fill="#2f9e5b"/>
+<text x="24.0" y="610.0" fill="#ffffff" font-size="11">EE game code</text>
+</g>
+<g><title>EE FPU: native since 2026-10-07 (fa3bae3). recompiled, PS2 rounding</title><rect x="178.3" y="594.0" width="156.3" height="156.4" rx="3" fill="#2f9e5b"/>
+<text x="182.3" y="610.0" fill="#ffffff" font-size="11">EE FPU</text>
+</g>
+<g><title>VU0 macro mode: native since 2026-10-02 (3fafa75). recompiled with the EE code</title><rect x="20.0" y="752.4" width="209.1" height="116.8" rx="3" fill="#2f9e5b"/>
+<text x="24.0" y="768.4" fill="#ffffff" font-size="11">VU0 macro mode</text>
+</g>
+<g><title>VU1 microcode: native since 2026-10-16 (90ee6b0). with SOTC_NATIVE=1 no VU1 program runs (they only fed the GS); VIF1 still unpacks and keeps TOP/TOPS/DBF; PS2X_VU1_RUN=1 runs them again. CPU per test route 165 s -&gt; 79 s</title><rect x="20.0" y="871.2" width="209.1" height="116.8" rx="3" fill="#2f9e5b"/>
+<text x="24.0" y="887.2" fill="#ffffff" font-size="11">VU1 microcode</text>
+</g>
+<g><title>IOP modules: native since 2026-10-16 (d94cee7). no IOP code runs, boot included: the IRXs are recorded as loaded; sound by the native SG2 driver, DBCMAN by a host service, vibration and the USB console completed without effect; the boot layout made deterministic (the letter post waits for GAMECORE&#x27;s image)</title><rect x="231.1" y="752.4" width="103.6" height="235.6" rx="3" fill="#2f9e5b"/>
+<text x="235.1" y="768.4" fill="#ffffff" font-size="11">IOP modules</text>
+</g>
+<rect x="338.7" y="572.0" width="387.2" height="210.0" fill="#161b22" stroke="#0d1117" stroke-width="3"/>
+<text x="344.7" y="587.0" fill="#8b949e" font-size="11" font-weight="600">GRAPHICS</text>
+<g><title>VIF1 and DMA: native since 2026-10-16 (8e86b02). with SOTC_NATIVE=1 the DMA chains are still walked (tags only) but no data is copied for nothing: the VIF1 stream keeps only its VIFcodes (UNPACK/MPG/DIRECT data left out), and GIF data (VIF1 DIRECT and the GIF channel) is read in place for its event registers only (SIGNAL/FINISH/LABEL). DMA/VIF1/GIF cost on the route about 6x lower; host system time 13 s -&gt; 7 s</title><rect x="342.7" y="594.0" width="125.1" height="184.0" rx="3" fill="#2f9e5b"/>
+<text x="346.7" y="610.0" fill="#ffffff" font-size="11">VIF1 and DMA</text>
+</g>
+<g><title>GS rasteriser: native since 2026-10-16 (0c1efcb). with SOTC_NATIVE=1 the GS rasterizes nothing and its local memory is not written (texture uploads, CLUT loads skipped); registers and signals still run (PS2X_GS_NODRAW=0 turns it all back on)</title><rect x="469.7" y="594.0" width="125.1" height="184.0" rx="3" fill="#2f9e5b"/>
+<text x="473.7" y="610.0" fill="#ffffff" font-size="11">GS rasteriser</text>
+</g>
+<g><title>GS COLCLAMP wrap: native since 2026-10-15 (0c3a518). emulated GS fix: blends wrap modulo 256 when COLCLAMP is off (the shadow count)</title><rect x="596.8" y="594.0" width="125.1" height="184.0" rx="3" fill="#2f9e5b"/>
+<text x="600.8" y="610.0" fill="#ffffff" font-size="11">GS COLCLAMP wrap</text>
+</g>
+<rect x="338.7" y="782.0" width="387.2" height="210.0" fill="#161b22" stroke="#0d1117" stroke-width="3"/>
+<text x="344.7" y="797.0" fill="#8b949e" font-size="11" font-weight="600">INPUT AND STORAGE</text>
+<g><title>Controller: native since 2026-10-02 (ec4b26d). host gamepad and keyboard</title><rect x="342.7" y="804.0" width="125.1" height="184.0" rx="3" fill="#2f9e5b"/>
+<text x="346.7" y="820.0" fill="#ffffff" font-size="11">Controller</text>
+</g>
+<g><title>Memory card: native since 2026-10-02 (bc2616e). files on the host</title><rect x="469.7" y="804.0" width="125.1" height="184.0" rx="3" fill="#2f9e5b"/>
+<text x="473.7" y="820.0" fill="#ffffff" font-size="11">Memory card</text>
+</g>
+<g><title>Disc: native since 2026-10-02 (ec4b26d). host file reads</title><rect x="596.8" y="804.0" width="125.1" height="184.0" rx="3" fill="#2f9e5b"/>
+<text x="600.8" y="820.0" fill="#ffffff" font-size="11">Disc</text>
+</g>
+<rect x="725.9" y="572.0" width="258.1" height="210.0" fill="#161b22" stroke="#0d1117" stroke-width="3"/>
+<text x="731.9" y="587.0" fill="#8b949e" font-size="11" font-weight="600">SOUND</text>
+<g><title>Sound driver (SG2IOPM1.IRX): native since 2026-10-16 (6f1d322). the IRX is not run: RPC 0x11223344 answered on the host, its 36 commands applied to the SPU2 (volumes, pitch, key on/off, transfers, streamed voices, PCM input, reverb studio C). Loudness on the route follows the emulated driver&#x27;s; on with SOTC_NATIVE=1 (PS2X_NATIVE_SG2=0 turns it off)</title><rect x="729.9" y="594.0" width="124.1" height="184.0" rx="3" fill="#2f9e5b"/>
+<text x="733.9" y="610.0" fill="#ffffff" font-size="11">Sound driver</text>
+<text x="733.9" y="623.0" fill="#ffffff" font-size="11">(SG2IOPM1.IRX)</text>
+</g>
+<g><title>SPU2: native since 2026-10-16 (4d6adf4). with SOTC_NATIVE=1 a host mixer (SoundMixer) plays the voices, envelopes, PS2 reverb and streamed PCM; the emulated SPU2 stays idle. Same sound as the emulated SPU2 on the route; PS2X_AUDIO_PULL=1 mixes in the host audio thread (for the Vita); with SOTC_NATIVE=1 the mix runs in the host audio thread (PS2X_AUDIO_PULL), off the game thread</title><rect x="855.9" y="594.0" width="124.1" height="184.0" rx="3" fill="#2f9e5b"/>
+<text x="859.9" y="610.0" fill="#ffffff" font-size="11">SPU2</text>
+</g>
+<rect x="725.9" y="782.0" width="258.1" height="210.0" fill="#161b22" stroke="#0d1117" stroke-width="3"/>
+<text x="731.9" y="797.0" fill="#8b949e" font-size="11" font-weight="600">SYSTEM</text>
+<g><title>Timers and interrupts: native since 2026-10-16 (). no timer is modelled once the boot is over: T0/T1/T2 stopped after the game arms them; the game library&#x27;s counters (iosGetTCountExtension, the libkernel system time, the rap counter) read the EE clock, DelayThread is a timed wait on the host scheduler; interrupts (VBlank, DMA completion, GS FINISH) come from host events to the game&#x27;s own handlers. PS2X_MMIO_CENSUS: 129 register accesses in a whole route, all at boot</title><rect x="729.9" y="804.0" width="124.1" height="184.0" rx="3" fill="#2f9e5b"/>
+<text x="733.9" y="820.0" fill="#ffffff" font-size="11">Timers and</text>
+<text x="733.9" y="833.0" fill="#ffffff" font-size="11">interrupts</text>
+</g>
+<g><title>EE kernel and threads: native since 2026-10-16 (ec4b26d). the game&#x27;s threads on the host scheduler (PS2 priority semantics, timed waits on the host clock), syscalls on the host, no PS2 kernel code; the game library&#x27;s hardware access (scratchpad DMA, display-list kicks, draw-finish test) replaced by host calls</title><rect x="855.9" y="804.0" width="124.1" height="184.0" rx="3" fill="#2f9e5b"/>
+<text x="859.9" y="820.0" fill="#ffffff" font-size="11">EE kernel and</text>
+<text x="859.9" y="833.0" fill="#ffffff" font-size="11">threads</text>
+</g>
+</svg>

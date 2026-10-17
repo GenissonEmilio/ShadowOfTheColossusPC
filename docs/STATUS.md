@@ -13,6 +13,8 @@ replaced, piece by piece, by native code. Today the game no longer needs a
 GS, VU1 or VIF emulation to draw a frame. The next stage is decompiling the
 game's own code where it matters.
 
+![What is native](port_status.svg)
+
 ## At a glance
 
 | | macOS (Apple Silicon) | PS Vita |
@@ -25,9 +27,9 @@ game's own code where it matters.
 | Saves | PCSX2-compatible `memcards/Mcd001.ps2` | `ux0:data/celosia/memcards/` |
 | Playable | boot to gameplay (riding, exploring) | boots and plays the intro; fidelity and speed in progress |
 
-Everything in [`port_status.json`](port_status.json) (49 features: 34 in the
+Everything in [`port_status.json`](port_status.json) (50 features: 35 in the
 renderer, 15 in the hardware) is **native**: no area still falls back to the
-emulated path.
+emulated path. `tools/status_treemap.py` redraws the picture above from it.
 
 ## What is native
 
