@@ -405,7 +405,20 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         GLuint quadPrograms[11] = {}; // by mode (8: depth, not on the Vita)
 #endif
         GLuint quadBuffer = 0, blurBuffer = 0, vao = 0;
-        std::unordered_map<std::string, GLint> mainUniforms, quadUniforms;
+        // Uniform locations by (program, name): the names are string literals,
+        // so their address is the key (no string built per call: that was 41%
+        // of the Vita's time).
+        struct UniformKey
+        {
+            GLuint program;
+            const char *name;
+            bool operator==(const UniformKey &o) const { return program == o.program && name == o.name; }
+        };
+        struct UniformKeyHash
+        {
+            size_t operator()(const UniformKey &k) const { return std::hash<const void *>()(k.name) ^ (static_cast<size_t>(k.program) * 0x9E3779B1u); }
+        };
+        std::unordered_map<UniformKey, GLint, UniformKeyHash> uniforms;
         Target colorPlain; // the picture's colour alone (passes that read its depth)
         Target color, background, backgroundSmall, reflection, refraction, refractionHalf, snapshot, shadowMask;
         Target previous; // the last frame shown (feedbackBlur)
@@ -470,13 +483,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 
         GLint uniform(bool main, const char *name)
         {
-            auto &cache = main ? mainUniforms : quadUniforms;
-            const std::string key = main ? std::string(name) : std::string(name) + "#" + std::to_string(quadProgram);
-            auto it = cache.find(key);
-            if (it != cache.end())
+            const GLuint program = main ? mainProgram : quadProgram;
+            const UniformKey key{program, name};
+            auto it = uniforms.find(key);
+            if (it != uniforms.end())
                 return it->second;
-            const GLint location = glGetUniformLocation(main ? mainProgram : quadProgram, name);
-            cache.emplace(key, location);
+            const GLint location = glGetUniformLocation(program, name);
+            uniforms.emplace(key, location);
             return location;
         }
 
