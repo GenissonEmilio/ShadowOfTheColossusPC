@@ -300,19 +300,25 @@ float4 main(float4 vUV : TEXCOORD0, float4 vColor : TEXCOORD1, float4 vScreen : 
 }
 )";
 
+    // The plain full-screen vertex program, and the one screenBlur's
+    // scaled / turned copies (mode 3) use: no branch on the Vita.
     const char *kQuadVertex = R"(
+void main(float2 aPos,
+          float4 out oPosition : POSITION,
+          float4 out vUV : TEXCOORD0)
+{
+    oPosition = float4(aPos, 0.0, 1.0);
+    vUV = float4(aPos * 0.5 + 0.5, 0.0, 0.0);
+}
+)";
+    const char *kQuadVertexTurned = R"(
 void main(float2 aPos, uniform float4 uQuad,
           float4 out oPosition : POSITION,
           float4 out vUV : TEXCOORD0)
 {
-    float2 p = aPos;
-    if (uQuad.x != 0.0)
-    {
-        float2 c = aPos * uQuad.x;
-        float s = sin(uQuad.y), k = cos(uQuad.y);
-        p = float2(c.x * k - c.y * s, c.x * s + c.y * k) + uQuad.zw;
-    }
-    oPosition = float4(p, 0.0, 1.0);
+    float2 c = aPos * uQuad.x;
+    float s = sin(uQuad.y), k = cos(uQuad.y);
+    oPosition = float4(c.x * k - c.y * s + uQuad.z, c.x * s + c.y * k + uQuad.w, 0.0, 1.0);
     vUV = float4(aPos * 0.5 + 0.5, 0.0, 0.0);
 }
 )";
@@ -491,7 +497,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             for (int mode : {0, 1, 2, 3, 4, 5, 6, 7, 9, 10})
             {
                 const std::string source = "#define MODE " + std::to_string(mode) + "\n" + kQuadFragment;
-                quadPrograms[mode] = program(kQuadVertex, source.c_str(), {"aPos"});
+                quadPrograms[mode] = program(mode == 3 ? kQuadVertexTurned : kQuadVertex, source.c_str(), {"aPos"});
                 if (!quadPrograms[mode])
                     return false;
                 quadProgram = quadPrograms[mode];
