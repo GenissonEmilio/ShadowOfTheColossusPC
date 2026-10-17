@@ -379,11 +379,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         bool dynamic = false; // in this frame's arena, from vertex `first`
         uint32_t first = 0;
         uint64_t frame = 0;   // the arena it went into (debugging)
+        uint64_t used = 0;    // the last frame that drew it (eviction)
     };
 
     struct Texture
     {
         GLuint name = 0;
+        uint64_t used = 0;
     };
 
     struct Draw
@@ -438,6 +440,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         GLuint arenaBuffers[3] = {};                 // in turn: the GPU may still read the last two
         int arenaIndex = 0;
         uint64_t arenaFrame = 0;
+        void evictUnused(); // meshes and textures no frame drew for a while
         std::vector<native_renderer::ScreenBlur> blurs;
         native_renderer::Fog fog;
         native_renderer::Bloom bloom;
@@ -764,6 +767,40 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         void render(uint32_t w, uint32_t h);
     };
 
+    // Ids hash a model's or a texture's content: when the game loads another
+    // area into the same memory, the old ones are never asked for again (the
+    // title's demo filled the Vita's 160 MB in ~12 min). What no frame drew for
+    // ~30 s goes; drawn again, the frontend uploads it anew (hasMesh false).
+    void Renderer::evictUnused()
+    {
+        constexpr uint64_t kEvery = 256, kUnused = 1800;
+        if (arenaFrame % kEvery != 0 || arenaFrame < kUnused)
+            return;
+        const uint64_t before = arenaFrame - kUnused;
+        for (auto it = meshes.begin(); it != meshes.end();)
+        {
+            const Mesh &m = it->second;
+            if ((m.dynamic ? m.frame : m.used) < before)
+            {
+                if (m.buffer)
+                    glDeleteBuffers(1, &m.buffer);
+                it = meshes.erase(it);
+            }
+            else
+                ++it;
+        }
+        for (auto it = textures.begin(); it != textures.end();)
+        {
+            if (it->second.used < before)
+            {
+                glDeleteTextures(1, &it->second.name);
+                it = textures.erase(it);
+            }
+            else
+                ++it;
+        }
+    }
+
     void Renderer::render(uint32_t w, uint32_t h)
     {
         ensureTargets(w, h);
@@ -882,6 +919,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 auto mesh = meshes.find(d.mesh);
                 if (mesh == meshes.end() || mesh->second.count == 0)
                     continue;
+                mesh->second.used = arenaFrame;
                 glBindFramebuffer(GL_FRAMEBUFFER, target.fbo);
                 glViewport(0, 0, static_cast<GLsizei>(target.width), static_cast<GLsizei>(target.height));
                 glUseProgram(mainProgram);
@@ -969,6 +1007,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     bindTexture(0, previous.texture);
                 if (textured == 1)
                 {
+                    tex->second.used = arenaFrame;
                     bindTexture(0, tex->second.name);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, (d.state.clamp & 1u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, (d.state.clamp & 2u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
@@ -1276,6 +1315,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             }
             Lock lock;
             Mesh &mesh = r->meshes[id];
+            mesh.used = r->arenaFrame;
             if (!mesh.buffer)
                 glGenBuffers(1, &mesh.buffer);
             glBindBuffer(GL_ARRAY_BUFFER, mesh.buffer);
@@ -1290,6 +1330,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             Lock lock;
             levels = std::max(1u, levels);
             Texture &t = r->textures[key];
+            t.used = r->arenaFrame;
             if (!t.name)
                 glGenTextures(1, &t.name);
             glBindTexture(GL_TEXTURE_2D, t.name);
@@ -1333,6 +1374,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         {
             Lock lock;
             r->render(width, height);
+            r->evictUnused();
         }
         bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height) override
         {

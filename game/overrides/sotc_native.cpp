@@ -567,7 +567,12 @@ namespace sotc_native
         return true;
     }
 
-    std::unordered_map<uint64_t, std::vector<Strip>> g_skinnedPackets; // bind pose, by packet
+    struct SkinnedPacket
+    {
+        std::vector<Strip> strips; // bind pose
+        uint64_t used = 0;         // the last frame (g_frame) that drew it
+    };
+    std::unordered_map<uint64_t, SkinnedPacket> g_skinnedPackets; // by packet
     std::unordered_set<uint64_t> g_litPackets;                        // packets with normals
     uint64_t g_skinnedDraws = 0;                                       // this frame's skinned meshes
 
@@ -771,6 +776,18 @@ namespace sotc_native
             g_frame = frame;
             g_frameDraws = 0;
             g_skinnedDraws = 0;
+            // A packet's id hashes its content: another area loaded in its
+            // place makes new ids, the old ones never come back (the title's
+            // demo filled the Vita's heap). Gone after ~30 s undrawn.
+            if (frame % 256u == 0u)
+                for (auto it = g_skinnedPackets.begin(); it != g_skinnedPackets.end();)
+                    if (it->second.used + 1800u < frame)
+                    {
+                        g_litPackets.erase(it->first);
+                        it = g_skinnedPackets.erase(it);
+                    }
+                    else
+                        ++it;
         }
     }
 
@@ -1723,14 +1740,16 @@ namespace sotc_native
             const uint32_t size = word(pk), data = word(pk + 16u);
             const uint64_t id = ((static_cast<uint64_t>(size) << 32) | data) ^ (sample(data, size, 32u) & 0x7FFF000000000000ull);
             auto skinnedPacket = g_skinnedPackets.find(id);
-            if (skinnedPacket == g_skinnedPackets.end() && !native_renderer::hasMesh(id))
+            const bool twoPasses = word(s + 0x1Cu) == 2u;
+            if (skinnedPacket == g_skinnedPackets.end() &&
+                (!native_renderer::hasMesh(id) || (twoPasses && !native_renderer::hasMesh(id ^ (1ull << 61)))))
             {
                 strips.clear();
                 readBatches(data, size, strips);
                 if (skinned(strips) && lit(strips))
                     g_litPackets.insert(id);
                 if (skinned(strips))
-                    skinnedPacket = g_skinnedPackets.emplace(id, std::move(strips)).first;
+                    skinnedPacket = g_skinnedPackets.emplace(id, SkinnedPacket{std::move(strips), 0}).first;
                 else
                 {
                     vertices.clear();
@@ -1747,7 +1766,7 @@ namespace sotc_native
                     };
                     triangulate(strips, place, vertices);
                     native_renderer::uploadMesh(id, vertices.data(), static_cast<uint32_t>(vertices.size()));
-                    if (word(s + 0x1Cu) == 2u) // two textures: the second pass's mesh, with the second coordinates
+                    if (twoPasses) // two textures: the second pass's mesh, with the second coordinates
                     {
                         vertices.clear();
                         triangulate(strips, place, vertices, true);
@@ -1759,11 +1778,12 @@ namespace sotc_native
             const float *transform = clip;
             if (skinnedPacket != g_skinnedPackets.end())
             {
+                skinnedPacket->second.used = g_frame;
                 if (!hasPalette)
                     continue;
                 // Posed on the CPU (camera space), one mesh per draw this frame.
                 vertices.clear();
-                triangulate(skinnedPacket->second, [](const BatchVertex &v, native_renderer::Vertex &o)
+                triangulate(skinnedPacket->second.strips, [](const BatchVertex &v, native_renderer::Vertex &o)
                 {
                     o.x = o.y = o.z = o.nx = o.ny = o.nz = 0.0f;
                     for (uint32_t b = 0; b < v.bones; ++b)
