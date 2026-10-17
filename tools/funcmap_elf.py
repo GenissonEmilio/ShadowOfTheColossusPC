@@ -94,6 +94,32 @@ def find_starts(words, in_text, data_blobs):
     return starts
 
 
+def branch_targets(words):
+    """Targets of every direct branch and j in the code."""
+    out = set()
+    for a, w in words.items():
+        op = w >> 26
+        if op in (4, 5, 6, 7, 0x14, 0x15, 0x16, 0x17) or (op == 1 and ((w >> 16) & 31) in (0, 1, 2, 3, 16, 17, 18, 19)):
+            out.add((a + 4 + (struct.unpack("<h", struct.pack("<H", w & 0xFFFF))[0] << 2)) & 0xFFFFFFFF)
+        elif op == 2:
+            out.add(((a + 4) & 0xF0000000) | ((w & 0x3FFFFFF) << 2))
+    return out
+
+
+def hidden_entries(words, starts):
+    """Code right after a jump and its delay slot, with no nop padding, that
+    no branch reaches and that starts no known function: a leaf GCC packed
+    against the previous function (gamecore 0x1357888, 'v0 = 1; *t0 = v0')
+    or a switch case. Called through a pointer, it needs an entry of its own."""
+    targets = branch_targets(words)
+    out = []
+    for a, w in words.items():
+        t = a + 8
+        if is_terminal(w) and t not in starts and t not in targets and words.get(t) not in (None, 0):
+            out.append(t)
+    return sorted(out)
+
+
 def main(elf_path, sym_path, out_csv):
     elf = Elf(elf_path)
     ranges = elf.exec_ranges()
