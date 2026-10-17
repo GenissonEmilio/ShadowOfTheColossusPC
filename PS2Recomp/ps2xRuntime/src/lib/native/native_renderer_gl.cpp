@@ -678,6 +678,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             bindTarget(target);
             useQuad(mode);
             glDisable(GL_DEPTH_TEST);
+            glDepthMask(GL_FALSE); // vitaGL still writes depth with the test off (GXM: always pass)
             glDisable(GL_CULL_FACE);
             switch (blend)
             {
@@ -810,7 +811,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 bindTexture(3, refraction.texture);
             }
             glEnable(GL_DEPTH_TEST);
-            glDepthFunc(GL_LESS);
+            glDepthFunc(GL_LEQUAL); // as the GS's GEQUAL (and far pixels round to the clear value 1.0 in the Vita's depth buffer)
             glDepthMask(GL_TRUE);
             glDisable(GL_STENCIL_TEST);
             uint32_t shadowOrder = 0;
@@ -882,7 +883,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
                     glDepthMask(GL_FALSE);
                     glEnable(GL_DEPTH_TEST);
-                    glDepthFunc(GL_LESS);
+                    glDepthFunc(GL_LEQUAL); // as the GS's GEQUAL (and far pixels round to the clear value 1.0 in the Vita's depth buffer)
                     glEnable(GL_STENCIL_TEST);
                     glStencilMask(0xFF);
                     glStencilFuncSeparate(GL_FRONT_AND_BACK, GL_ALWAYS, 0, 0xFF);
