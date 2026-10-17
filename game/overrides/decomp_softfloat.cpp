@@ -244,8 +244,15 @@ namespace
                 }
                 if (b.cls != kZero)
                 {
-                    const unsigned __int128 product = static_cast<unsigned __int128>(b.fraction) * a.fraction;
-                    uint64_t high = static_cast<uint64_t>(product >> 64), low = static_cast<uint64_t>(product);
+                    // The 128-bit product from 32-bit halves, as the SDK does it
+                    // (and as a 32-bit ARM has to).
+                    const uint64_t x = b.fraction, y = a.fraction;
+                    const uint64_t ll = (x & 0xFFFFFFFFu) * (y & 0xFFFFFFFFu);
+                    const uint64_t hl = (x >> 32) * (y & 0xFFFFFFFFu);
+                    const uint64_t mid = hl + (x & 0xFFFFFFFFu) * (y >> 32);
+                    const uint64_t hh = (x >> 32) * (y >> 32);
+                    uint64_t low = ll + (mid << 32);
+                    uint64_t high = (static_cast<uint64_t>(mid < hl) << 32) + static_cast<uint64_t>(low < ll) + (mid >> 32) + hh;
                     Parts r;
                     r.cls = kNormal;
                     r.sign = sign;
