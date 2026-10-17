@@ -285,6 +285,9 @@ void ClearBackground(Color color)
 
 void DrawTexturePro(Texture2D texture, Rectangle source, Rectangle dest, Vector2, float, Color tint)
 {
+    // As raylib: a negative source height flips the picture vertically.
+    if (source.height < 0.0f)
+        source.y -= source.height;
     if (texture.id & 0x80000000u)
     {
         // A GL texture name (the GPU GS renderer's frame): opaque, drawn as is.

@@ -334,7 +334,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         return c;
     }
     if (uMode < 2.5)
-        return lerp(tex2D(uSrc2, uv), tex2D(uSrc, uv), uA.x);
+        return lerp(tex2D(uSrc2, uv), tex2D(uSrc, uv), uA.xxxx); // CG: no float4, float4, float overload
     if (uMode < 3.5)
         return float4(tex2D(uSrc, uv).rgb, uA.x);
     if (uMode < 4.5)

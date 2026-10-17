@@ -2743,6 +2743,8 @@ void PS2Runtime::run()
 
     // One host frame: the game picture (4:3 / stretch / integer), the FPS
     // overlay, the debug UI and the settings menu.
+    // Set while the native renderer's GL picture is shown: GL textures are y-up.
+    bool hostFrameFlipY = false;
     std::function<void(const Texture2D &, uint32_t, uint32_t)> drawHostFrame = [&](const Texture2D &shown, uint32_t presentWidth, uint32_t presentHeight)
     {
             BeginDrawing();
@@ -2767,7 +2769,7 @@ void PS2Runtime::run()
                 dstWidth = srcWidth * whole;
                 dstHeight = srcHeight * whole;
             }
-            const Rectangle srcRect{0.0f, 0.0f, srcWidth, srcHeight};
+            const Rectangle srcRect{0.0f, 0.0f, srcWidth, hostFrameFlipY ? -srcHeight : srcHeight};
             const Rectangle dstRect{
                 (screenWidth - dstWidth) * 0.5f,
                 (screenHeight - dstHeight) * 0.5f,
@@ -2817,9 +2819,11 @@ void PS2Runtime::run()
                                         if (!native_renderer::shown())
                                             return;
                                         lastGsPresent.store(GetTime(), std::memory_order_relaxed);
+                                        hostFrameFlipY = true; // a GL render target: y-up
                                         drawHostFrame(Texture2D{texture | 0x80000000u, static_cast<int>(width), static_cast<int>(height), 1,
                                                                 PIXELFORMAT_UNCOMPRESSED_R8G8B8A8},
-                                                      width, height); });
+                                                      width, height);
+                                        hostFrameFlipY = false; });
 #endif
 
     std::atomic<bool> gameThreadFinished{false};
