@@ -78,6 +78,9 @@ namespace
                 }
                 std::fclose(env);
             }
+            // The port runs native on the Vita (renderer, sound, IOP, system)
+            // unless env.txt says otherwise.
+            setenv("SOTC_NATIVE", "1", 0);
             // An uncaught exception (bad_alloc...) aborts without a word on
             // the Vita: say what it was and how full the heap is first.
             std::set_terminate([]

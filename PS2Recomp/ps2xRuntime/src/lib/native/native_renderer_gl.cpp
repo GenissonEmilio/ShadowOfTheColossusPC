@@ -16,6 +16,7 @@
 #define GL_SILENCE_DEPRECATION
 #include <OpenGL/gl3.h>
 #else
+#include <mutex>
 #include <vitaGL.h>
 #define PS2X_NATIVE_VITA 1
 std::recursive_mutex &ps2xVitaGlMutex();

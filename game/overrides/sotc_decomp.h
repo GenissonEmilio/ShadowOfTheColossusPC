@@ -17,6 +17,7 @@
 #pragma once
 
 #include "ps2_runtime.h"
+#include "ps2_runtime_macros.h"
 
 #include <cstdint>
 #include <vector>
