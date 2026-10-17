@@ -380,12 +380,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         uint32_t first = 0;
         uint64_t frame = 0;   // the arena it went into (debugging)
         uint64_t used = 0;    // the last frame that drew it (eviction)
+        uint64_t bytes = 0;
     };
 
     struct Texture
     {
         GLuint name = 0;
         uint64_t used = 0;
+        uint64_t bytes = 0;
     };
 
     struct Draw
@@ -774,6 +776,17 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     void Renderer::evictUnused()
     {
         constexpr uint64_t kEvery = 256, kUnused = 1800;
+        static const bool log = std::getenv("SOTC_GL_CACHE_LOG") != nullptr;
+        if (log && arenaFrame % 600 == 0)
+        {
+            uint64_t meshBytes = 0, textureBytes = 0;
+            for (const auto &m : meshes)
+                meshBytes += m.second.bytes;
+            for (const auto &t : textures)
+                textureBytes += t.second.bytes;
+            std::fprintf(stderr, "[gl:cache] frame %llu meshes %zu (%.1f MB) textures %zu (%.1f MB) arena %zu\n", (unsigned long long)arenaFrame,
+                         meshes.size(), meshBytes / 1048576.0, textures.size(), textureBytes / 1048576.0, arena.size());
+        }
         if (arenaFrame % kEvery != 0 || arenaFrame < kUnused)
             return;
         const uint64_t before = arenaFrame - kUnused;
@@ -1321,6 +1334,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             glBindBuffer(GL_ARRAY_BUFFER, mesh.buffer);
             glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(count * sizeof(native_renderer::Vertex)), vertices, GL_STATIC_DRAW);
             mesh.count = count;
+            mesh.bytes = static_cast<uint64_t>(count) * sizeof(native_renderer::Vertex);
         }
         bool hasTexture(uint64_t id) override { return r->textures.count(id) != 0; }
         void uploadTexture(uint64_t key, uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t levels) override
@@ -1331,6 +1345,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             levels = std::max(1u, levels);
             Texture &t = r->textures[key];
             t.used = r->arenaFrame;
+            t.bytes = static_cast<uint64_t>(width) * height * 4u * (levels > 1u ? 4u : 3u) / 3u;
             if (!t.name)
                 glGenTextures(1, &t.name);
             glBindTexture(GL_TEXTURE_2D, t.name);

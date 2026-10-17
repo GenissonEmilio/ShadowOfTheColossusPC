@@ -498,6 +498,8 @@ public:
     std::condition_variable m_mtvuWork;
     std::condition_variable m_mtvuIdle;
     std::deque<MtvuJob> m_mtvuQueue;
+    size_t m_mtvuQueuedBytes = 0;          // copied data waiting in m_mtvuQueue
+    std::condition_variable m_mtvuSpace;   // m_mtvuQueuedBytes went under the low mark
     std::function<void()> m_mtvuJobEndHook;
     std::atomic<uint32_t> m_mtvuOutstanding{0};
     bool m_mtvuStop = false;

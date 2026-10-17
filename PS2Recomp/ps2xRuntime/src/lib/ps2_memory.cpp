@@ -271,14 +271,26 @@ bool PS2Memory::onVu1Worker()
     return t_onVu1Worker;
 }
 
+// Each job holds a copy of its DMA data: when the VU1 worker falls behind
+// (the Vita in a heavy scene: vu1 100%), the queue grew by tens of MB in
+// seconds and ran the heap out. Past the high mark the caller waits for it.
+constexpr size_t kMtvuQueueHigh = 16u << 20, kMtvuQueueLow = 8u << 20;
+
 void PS2Memory::mtvuEnqueue(MtvuJob &&job)
 {
     {
-        std::lock_guard<std::mutex> lock(m_mtvuMutex);
+        std::unique_lock<std::mutex> lock(m_mtvuMutex);
         if (!m_mtvuThread.joinable())
             m_mtvuThread = std::thread([this]
                                        { mtvuWorkerLoop(); });
+        if (m_mtvuQueuedBytes > kMtvuQueueHigh && !onVu1Worker())
+        {
+            ps2_load::Wait waiting;
+            m_mtvuSpace.wait(lock, [this]
+                             { return m_mtvuQueuedBytes <= kMtvuQueueLow || m_mtvuStop; });
+        }
         m_mtvuOutstanding.fetch_add(1, std::memory_order_release);
+        m_mtvuQueuedBytes += job.data.size();
         m_mtvuQueue.push_back(std::move(job));
     }
     m_mtvuWork.notify_one();
@@ -305,6 +317,9 @@ void PS2Memory::mtvuWorkerLoop()
             return;
         MtvuJob job = std::move(m_mtvuQueue.front());
         m_mtvuQueue.pop_front();
+        m_mtvuQueuedBytes -= job.data.size();
+        if (m_mtvuQueuedBytes <= kMtvuQueueLow)
+            m_mtvuSpace.notify_all();
         lock.unlock();
         m_mtvuFbrst = job.fbrst;
         if (job.marker)
@@ -393,6 +408,7 @@ PS2Memory::~PS2Memory()
         m_mtvuStop = true;
     }
     m_mtvuWork.notify_all();
+    m_mtvuSpace.notify_all();
     if (m_mtvuThread.joinable())
         m_mtvuThread.join();
     if (m_rdram)

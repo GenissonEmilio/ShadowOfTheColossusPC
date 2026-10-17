@@ -779,6 +779,15 @@ namespace sotc_native
             // A packet's id hashes its content: another area loaded in its
             // place makes new ids, the old ones never come back (the title's
             // demo filled the Vita's heap). Gone after ~30 s undrawn.
+            static const bool cacheLog = std::getenv("SOTC_GL_CACHE_LOG") != nullptr;
+            if (cacheLog && frame % 600u == 0u)
+            {
+                size_t strips = 0;
+                for (const auto &p : g_skinnedPackets)
+                    strips += p.second.strips.size();
+                std::fprintf(stderr, "[skinned:cache] frame %llu packets %zu strips %zu lit %zu\n", (unsigned long long)frame,
+                             g_skinnedPackets.size(), strips, g_litPackets.size());
+            }
             if (frame % 256u == 0u)
                 for (auto it = g_skinnedPackets.begin(); it != g_skinnedPackets.end();)
                     if (it->second.used + 1800u < frame)
