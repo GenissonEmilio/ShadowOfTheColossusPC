@@ -932,7 +932,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 }
                 const float misc[4] = {d.state.lit ? 1.0f : 0.0f, d.state.opacity, d.state.uvOffset[0], d.state.uvOffset[1]};
                 const bool vertexFog = fog.vertexFog && !d.state.screen && (!d.state.background || bgFog);
-                const float fogA[4] = {fog.start, fog.width, static_cast<float>(fog.steps), (!backgroundOnly && fogOn && d.state.fogged) ? 1.0f : 0.0f};
+#if defined(PS2X_NATIVE_VITA)
+                // No depth texture for the zFog pass: the world before its layer
+                // blends to the background by its own depth here, slice for slice.
+                const bool zFogged = fogOn && fog.steps > 0 && !d.state.screen && !d.state.background && d.state.order < fog.order;
+#else
+                const bool zFogged = false;
+#endif
+                const float fogA[4] = {fog.start, fog.width, static_cast<float>(fog.steps), (!backgroundOnly && fogOn && (d.state.fogged || zFogged)) ? 1.0f : 0.0f};
                 const float fogB[4] = {static_cast<float>(w), static_cast<float>(h), vertexFog ? 1.0f : 0.0f, fog.base};
                 const float fogC[4] = {fog.scale, d.state.lodK, d.state.lodScale, d.state.maxLod};
                 const float fogColour[4] = {fog.colour[0], fog.colour[1], fog.colour[2], static_cast<float>(textured)};
