@@ -439,5 +439,14 @@
   "since": "2026-10-15",
   "commit": "0c3a518",
   "note": "emulated GS fix: blends wrap modulo 256 when COLCLAMP is off (the shadow count)"
+ },
+ {
+  "map": "renderer",
+  "area": "Effects",
+  "feature": "Higher resolution (512x448 x up to 4)",
+  "status": "native",
+  "since": "2026-10-17",
+  "commit": "72b6c63",
+  "note": "3x on the Mac, shown filtered at full size; effects measured in PS2 pixels; F10 tuning panel"
  }
 ]

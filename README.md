@@ -1,13 +1,17 @@
 # Celosia
 
-A native macOS (Apple Silicon) port of **Shadow of the Colossus** (PS2, USA,
-SCUS-97472), built by statically recompiling the game's MIPS code to C++ with
-[PS2Recomp](https://github.com/ran-j/PS2Recomp).
+A native port of **Shadow of the Colossus** (PS2, USA, SCUS-97472) to macOS
+(Apple Silicon) and the **PS Vita**, built by statically recompiling the
+game's MIPS code to C++ with [PS2Recomp](https://github.com/ran-j/PS2Recomp).
 
 No emulator runs the game's CPU code. The EE code from the boot ELF and the
 game's three XFF modules is translated into C++ ahead of time and compiled
-natively. So is the VU1 microcode. The hardware the code talks to (GS, VIF,
-DMA, IOP, SPU2) is reimplemented in the runtime.
+natively. The game is drawn by a native renderer (Metal on the Mac, OpenGL
+ES on the Vita) that reads its model data directly. The rest of the hardware
+it talks to (DMA, IOP, SPU2) is reimplemented as host code.
+
+**Where it stands: [docs/STATUS.md](docs/STATUS.md)** (and the live
+[status dashboard](https://claude.ai/artifact/1RnzZd7UBKjDKzogkGEFN9)).
 
 > **No game data is included.** You need your own copy of the game.
 
@@ -16,13 +20,14 @@ DMA, IOP, SPU2) is reimplemented in the runtime.
 | Area | State |
 | --- | --- |
 | Boot, logos, intro cinematic | ✅ |
-| 3D rendering (VU1 recompiled, GS rasterizer) | ✅ |
+| Native renderer (models, characters, 2D, fog, bloom, shadows, reflections, water…) | ✅ all 49 tracked features native |
 | Audio (SPU2: voices, ADSR, reverb, streaming) | ✅ |
 | Title screen, menus | ✅ |
-| Memory card (libmc2, PCSX2-compatible `memcards/Mcd001.ps2`) | ✅ detection, formatting/saving under test |
-| New Game, intro, riding Agro | ✅ |
-| Gameplay (Wander under control) | ✅ |
-| Performance (M-series) | ~28-30 fps in gameplay (Metal renderer) |
+| Memory card (libmc2, PCSX2-compatible `memcards/Mcd001.ps2`) | ✅ |
+| New Game, intro, riding Agro, gameplay | ✅ |
+| Performance, Mac (M4 Pro) | 60 fps, drawn at 1536×1344 |
+| PS Vita | ✅ builds and runs (18–25 fps in Vita3K's intro); fidelity and speed in progress |
+| Decompilation | started: software doubles rewritten and proven ([docs/decomp.md](docs/decomp.md)) |
 
 ## Requirements
 
@@ -45,6 +50,16 @@ cd celosia
 `setup` takes a while the first time: it compiles the runtime and around 16k
 recompiled functions. It briefly opens the game window a few times while it
 captures each module (see below).
+
+### Settings
+
+- **F1** (Select twice on the Vita): the player menu. Video, sound,
+  language, in Portuguese or English.
+- **F10** (Mac): the native renderer's panel. Resolution (× 512×448), bloom
+  strength, fog amount and every effect on/off, changed live. "Print to log"
+  gives the setting as `SOTC_*` variables that set it at start. The table is
+  in [docs/STATUS.md](docs/STATUS.md#settings).
+- **F12**: the developer debugger (CPU, threads, DMA, memory).
 
 ### Controls
 
@@ -89,6 +104,28 @@ in stages:
 Everything generated (recompiled code, captures, build files) goes to
 `build/`. None of it is committed.
 
+## PS Vita
+
+```sh
+export VITASDK=~/vitasdk
+./celosia vita          # after ./celosia setup: build/vita/ps2xRuntime/ps2EntryRunner.vpk
+```
+
+The first run also builds vitaGL at a pinned revision with this port's
+patches. Install the `.vpk` (VitaShell, or File › Install in Vita3K). Then
+put the extracted disc in `ux0:data/celosia/disc/`. Saves go to
+`ux0:data/celosia/memcards/` and logs to `ux0:data/celosia/log.txt` and
+`err.txt`. The Vita has no environment: `ux0:data/celosia/env.txt` takes
+`NAME=value` lines (for example `PS2X_PROFILE=ux0:data/celosia/prof.txt`).
+
+## Decompilation
+
+The recompiled code works but is not readable. Functions that matter are
+being rewritten by hand in C++ and proven equal to the recompiled ones, byte
+for byte, on the same machine state (`SOTC_DIFFTEST`). It is a functional
+decomp, not a matching one. The workflow (guest profiler, Ghidra scripts,
+difftest) is in [docs/decomp.md](docs/decomp.md).
+
 ## Commands
 
 ```
@@ -98,6 +135,7 @@ Everything generated (recompiled code, captures, build files) goes to
 ./celosia recompile            relink modules, recompile and rebuild
 ./celosia build                rebuild after editing PS2Recomp sources
 ./celosia autotest [s] [int]   scripted run, screenshots every int s in shots/run
+./celosia vita                 build the PS Vita VPK
 ./celosia clean                delete build/
 ```
 
@@ -117,7 +155,9 @@ Everything generated (recompiled code, captures, build files) goes to
 | `PS2X_STATS=1` | frame, VU1 and GS statistics |
 | `PS2X_GS_BOB=1` | bob deinterlacing instead of weave |
 | `PS2X_GS_THREADS=n` | raster threads |
-| `PS2X_GS_GPU=0` | rasterize on the CPU instead of the GPU (Metal) |
+| `SOTC_NATIVE=1` / `2` | native renderer shown (default) / drawn but not shown, for side-by-side checks |
+| `SOTC_NATIVE_GL=1` / `check` | the OpenGL renderer on the Mac / compared against Metal |
+| `PS2X_GS_GPU=0` | emulated view rasterized on the CPU (exact GS fog: the reference for fidelity checks) |
 | `PS2X_MTVU=0` | run VIF1/VU1/GIF on the game thread instead of their own thread |
 | `PS2X_GIF_THREAD=0` | process GIF packets on the VU1 thread instead of their own |
 | `PS2X_GS_PROFILE=1` | where GS raster time goes, and what flushes the draw queue |
@@ -127,7 +167,12 @@ Everything generated (recompiled code, captures, build files) goes to
 
 `tools/` also has analysis helpers: `addr2sym.py`, `callers.py`, `xref.py`
 (symbols and call graph), `vudis.py` (VU disassembler), `gsdecode.py`,
-`dmawalk.py`, `xffinfo.py`.
+`dmawalk.py`, `xffinfo.py`. Also:
+- `native_run.sh` and `native_sbs.py`: the emulated and native pictures of
+  the same moment, side by side;
+- `ghidra.sh`: Ghidra headless scripts;
+- `guest_profile.py` and `vita_profile.py`: the guest and Vita3K profilers;
+- `vita3k.sh`: a separate Vita3K tree for testing.
 
 ## Layout
 
