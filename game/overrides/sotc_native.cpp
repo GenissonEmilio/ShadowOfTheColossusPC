@@ -1121,6 +1121,11 @@ namespace sotc_native
             // feedbackBlur / feedbackBlur2 (layer 29): the display buffer, the
             // last frame shown, laid over the new one (FIX or vertex alpha).
             syncFrame(rdram);
+            if (!native_renderer::tuning().feedback)
+            {
+                g_gsReg(rdram, ctx, runtime);
+                return;
+            }
             const uint32_t requested = g_requested;
             g_requested = kPreviousFrame;
             feed2D(GPR_U32(ctx, 4) & 0xFFu, GPR_U64(ctx, 5));

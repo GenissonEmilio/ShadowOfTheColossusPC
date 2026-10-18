@@ -443,6 +443,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         GLuint arenaBuffers[3] = {};                 // in turn: the GPU may still read the last two
         int arenaIndex = 0;
         uint64_t arenaFrame = 0;
+        // [gl:tex] every 300 frames (the Vita's log; SOTC_GL_TEX_LOG elsewhere):
+        // draws whose texture is not here (drawn white), uploads, GL errors.
+        struct
+        {
+            uint64_t missing = 0, uploads = 0, errors = 0;
+            uint32_t lastError = 0;
+        } texStats;
         void evictUnused(); // meshes and textures no frame drew for a while
         std::vector<native_renderer::ScreenBlur> blurs;
         native_renderer::Fog fog;
@@ -777,6 +784,21 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     // ~30 s goes; drawn again, the frontend uploads it anew (hasMesh false).
     void Renderer::evictUnused()
     {
+#if defined(PS2X_NATIVE_VITA)
+        static const bool texLog = true;
+#else
+        static const bool texLog = std::getenv("SOTC_GL_TEX_LOG") != nullptr;
+#endif
+        if (texLog && arenaFrame % 300 == 0)
+        {
+            uint64_t textureBytes = 0;
+            for (const auto &t : textures)
+                textureBytes += t.second.bytes;
+            std::fprintf(stderr, "[gl:tex] frame %llu missing draws %llu uploads %llu gl errors %llu (last 0x%x) textures %zu (%.1f MB)\n",
+                         (unsigned long long)arenaFrame, (unsigned long long)texStats.missing, (unsigned long long)texStats.uploads,
+                         (unsigned long long)texStats.errors, texStats.lastError, textures.size(), textureBytes / 1048576.0);
+            texStats.missing = texStats.uploads = texStats.errors = 0;
+        }
         constexpr uint64_t kEvery = 256, kUnused = 1800;
         static const bool log = std::getenv("SOTC_GL_CACHE_LOG") != nullptr;
         if (log && arenaFrame % 600 == 0)
@@ -1017,6 +1039,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     }
                 }
                 auto tex = d.state.texture ? textures.find(d.state.texture) : textures.end();
+                if (d.state.texture && tex == textures.end())
+                    ++texStats.missing;
                 const int textured = d.state.previousFrame ? 5 : d.state.reflectionSample ? 2 : (d.state.refractionSample ? 3 : (d.state.screenCopy ? 4 : (tex != textures.end() ? 1 : 0)));
                 if (textured == 5)
                     bindTexture(0, previous.texture);
@@ -1285,6 +1309,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         pass(color, false, from, ~0u, loaded);
         copy(colorPlain, previous);
 
+
         if (const auto &hook = native_renderer::detail::presentHook())
         {
             // The host shows a copy of its own: the next frame starts drawing
@@ -1347,6 +1372,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             Lock lock;
             levels = std::max(1u, levels);
             Texture &t = r->textures[key];
+            ++r->texStats.uploads;
             t.used = r->arenaFrame;
             t.bytes = static_cast<uint64_t>(width) * height * 4u * (levels > 1u ? 4u : 3u) / 3u;
             if (!t.name)
@@ -1356,6 +1382,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             {
                 glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(level), GL_RGBA, static_cast<GLsizei>(w), static_cast<GLsizei>(h), 0, GL_RGBA,
                              GL_UNSIGNED_BYTE, rgba);
+                if (const GLenum e = glGetError(); e != GL_NO_ERROR)
+                {
+                    ++r->texStats.errors;
+                    r->texStats.lastError = e;
+                }
                 rgba += static_cast<size_t>(w) * h * 4u;
                 w = std::max(1u, w / 2u);
                 h = std::max(1u, h / 2u);

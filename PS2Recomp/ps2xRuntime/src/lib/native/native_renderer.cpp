@@ -62,6 +62,7 @@ namespace native_renderer
             d.shadows = !on("SOTC_NATIVE_NOSHADOWS");
             d.particles = !on("SOTC_NATIVE_NOPTCL");
             d.screenBlur = !on("SOTC_NATIVE_NOSBLUR");
+            d.feedback = !on("SOTC_NATIVE_NOFEEDBACK");
             d.reflections = !on("SOTC_NATIVE_NOREFLECT");
             d.refraction = !on("SOTC_NATIVE_NOREFRACT");
             return d;
@@ -92,7 +93,7 @@ namespace native_renderer
         if (!t.zFog)
             add("SOTC_NATIVE_ZFOG=0");
         const std::pair<bool, const char *> offs[] = {{t.glow, "SOTC_NATIVE_NOGLOW=1"}, {t.depthOfField, "SOTC_NATIVE_NODOF=1"}, {t.shadows, "SOTC_NATIVE_NOSHADOWS=1"},
-                                                      {t.particles, "SOTC_NATIVE_NOPTCL=1"}, {t.screenBlur, "SOTC_NATIVE_NOSBLUR=1"}, {t.reflections, "SOTC_NATIVE_NOREFLECT=1"},
+                                                      {t.particles, "SOTC_NATIVE_NOPTCL=1"}, {t.screenBlur, "SOTC_NATIVE_NOSBLUR=1"}, {t.feedback, "SOTC_NATIVE_NOFEEDBACK=1"}, {t.reflections, "SOTC_NATIVE_NOREFLECT=1"},
                                                       {t.refraction, "SOTC_NATIVE_NOREFRACT=1"}};
         for (const auto &[value, env] : offs)
             if (!value)
@@ -134,6 +135,8 @@ namespace native_renderer
              nullptr, 0, 1, 1, "SOTC_NATIVE_NOPTCL"},
             {"screen_blur", "Screen blur", "Borrão de tela", "The motion and impact blurs.", "Os borrões de movimento e de impacto.",
              &Tuning::screenBlur, nullptr, 0, 1, 1, "SOTC_NATIVE_NOSBLUR"},
+            {"feedback", "Motion trail", "Rastro", "The last frame laid over the new one (the eagle's flight, the title).",
+             "O quadro anterior por cima do novo (o voo da águia, a tela-título).", &Tuning::feedback, nullptr, 0, 1, 1, "SOTC_NATIVE_NOFEEDBACK"},
             {"reflections", "Reflections", "Reflexos", "Mirror reflections on water and floors.", "Reflexos na água e no chão.",
              &Tuning::reflections, nullptr, 0, 1, 1, "SOTC_NATIVE_NOREFLECT"},
             {"refraction", "Water refraction", "Refração da água", "The scene seen through water.", "O cenário visto através da água.",

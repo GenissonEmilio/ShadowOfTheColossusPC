@@ -26,6 +26,7 @@ namespace native_renderer
         bool shadows = true;        // SOTC_NATIVE_NOSHADOWS
         bool particles = true;      // SOTC_NATIVE_NOPTCL
         bool screenBlur = true;     // SOTC_NATIVE_NOSBLUR
+        bool feedback = true;       // feedbackBlur: the last frame laid over the new one (SOTC_NATIVE_NOFEEDBACK)
         bool reflections = true;    // SOTC_NATIVE_NOREFLECT
         bool refraction = true;     // SOTC_NATIVE_NOREFRACT
     };
