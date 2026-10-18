@@ -632,7 +632,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             for (int i = 0; i < 4; ++i)
                 makeTarget(glowSmall[i], i == 0 ? 256u : (i == 1 ? 128u : 64u), i == 0 ? 256u : (i == 1 ? 128u : 64u), false);
             makeTarget(backgroundSmall, 256, 256, false);
+#if defined(PS2X_NATIVE_VITA)
+            // Full size on the Vita: the 256 x 256 targets drawn mid-frame
+            // did not hold there (the refraction copy came out white).
+            makeTarget(reflection, w, h, true);
+#else
             makeTarget(reflection, 256, 256, true);
+#endif
             makeTarget(refraction, 256, 256, false);
             makeTarget(refractionHalf, 128, 128, false);
             for (Target &t : bloomTex)
@@ -1010,6 +1016,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     glUniform4fv(uniform(true, "uFogColour"), 1, none);
                     glUniform4fv(uniform(true, "uDebug"), 1, none);
                     glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+#if defined(PS2X_NATIVE_VITA)
+                    // vitaGL bakes the colour mask into the fragment program's
+                    // blend info, which did not hold (the volumes were painted
+                    // over the horizon): blend so the colour cannot change too.
+                    glEnable(GL_BLEND);
+                    glBlendEquation(GL_FUNC_ADD);
+                    glBlendFunc(GL_ZERO, GL_ONE);
+#endif
                     glDepthMask(GL_FALSE);
                     glEnable(GL_DEPTH_TEST);
                     glDepthFunc(GL_LEQUAL); // as the GS's GEQUAL (and far pixels round to the clear value 1.0 in the Vita's depth buffer)
