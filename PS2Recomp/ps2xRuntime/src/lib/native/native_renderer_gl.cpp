@@ -925,11 +925,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             if (!mirror)
             {
                 bindTexture(2, reflection.texture);
-#if defined(PS2X_NATIVE_VITA)
-                bindTexture(3, previous.texture);
-#else
                 bindTexture(3, refraction.texture);
-#endif
             }
             glEnable(GL_DEPTH_TEST);
             glDepthFunc(GL_LEQUAL); // as the GS's GEQUAL (and far pixels round to the clear value 1.0 in the Vita's depth buffer)
@@ -1074,6 +1070,12 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 const int textured = d.state.previousFrame ? 5 : d.state.reflectionSample ? 2 : (d.state.refractionSample ? 3 : (d.state.screenCopy ? 4 : (tex != textures.end() ? 1 : 0)));
                 if (textured == 5)
                     bindTexture(0, previous.texture);
+                if (textured == 3 || textured == 4)
+                {
+                    const native_renderer::Tuning &t = native_renderer::tuning();
+                    const int source = static_cast<int>((textured == 4 ? t.hazeSource : t.waterSource) + 0.5f);
+                    bindTexture(3, source == 2 ? previous.texture : (source == 1 ? snapshot.texture : refraction.texture));
+                }
                 if (textured == 1)
                 {
                     tex->second.used = arenaFrame;
@@ -1256,16 +1258,19 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         }
         auto doRefraction = [&]
         {
-#if !defined(PS2X_NATIVE_VITA)
+            // The copies the chosen sources need (Tuning hazeSource / waterSource).
+            const native_renderer::Tuning &t = native_renderer::tuning();
+            const int haze = static_cast<int>(t.hazeSource + 0.5f), water = static_cast<int>(t.waterSource + 0.5f);
+            if (haze == 2 && water == 2)
+                return;
             snapshotColor();
-            copy(snapshot, refraction);
-            copy(refraction, refractionHalf);
-            copy(refractionHalf, refraction);
-#endif
-            // The Vita samples the last frame's picture instead (bound to
-            // unit 3 in pass): a copy of the picture made mid-frame comes out
-            // white there (vitaGL / Vita3K have not drawn it yet), and the
-            // heat haze of layer 23 (opaque strips of that copy) whitened the screen.
+            if (haze == 0 || water == 0)
+            {
+                copy(snapshot, refraction);
+                copy(refraction, refractionHalf);
+                copy(refractionHalf, refraction);
+            }
+            // Each draw binds its source (textured 3 / 4 in pass).
         };
         auto doFog = [&]
         {

@@ -43,6 +43,12 @@ namespace native_renderer
         bool skyImage = true;       // the sky image laid behind the scene (bgEnd's copy)
         bool mipmaps = true;        // SOTC_NATIVE_NOMIPS
         bool textureScroll = true;  // VIF ROW scrolling (SOTC_NATIVE_NOROW)
+        // What the heat haze (layer 23) and the water (layer 9) read as "the
+        // picture so far" on the OpenGL renderer: 0 the 256 x 256 copy made at
+        // their layer (the PS2's way), 1 a full-size copy made there, 2 the
+        // last frame shown. On the Vita a copy made mid-frame came out white.
+        float hazeSource = 0.0f;    // SOTC_HAZE_SOURCE
+        float waterSource = 0.0f;   // SOTC_WATER_SOURCE
     };
 
     Tuning &tuning();

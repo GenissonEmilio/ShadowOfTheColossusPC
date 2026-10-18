@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <tuple>
 #include <functional>
 #include <iostream>
 
@@ -36,6 +37,10 @@ namespace native_renderer
         Tuning d;
 #if defined(__APPLE__)
         d.renderScale = 3.0f;
+#endif
+#if defined(__vita__)
+        d.hazeSource = 2.0f; // the full-size and 256 x 256 copies came out white
+        d.waterSource = 1.0f;
 #endif
         return d;
     }
@@ -67,6 +72,8 @@ namespace native_renderer
             d.refraction = !on("SOTC_NATIVE_NOREFRACT");
             d.mipmaps = !on("SOTC_NATIVE_NOMIPS");
             d.textureScroll = !on("SOTC_NATIVE_NOROW");
+            d.hazeSource = number("SOTC_HAZE_SOURCE", d.hazeSource);
+            d.waterSource = number("SOTC_WATER_SOURCE", d.waterSource);
             if (const char *h = std::getenv("SOTC_HIDE_LAYERS")) // n,n,n
                 for (const char *c = h; *c;)
                 {
@@ -183,6 +190,17 @@ namespace native_renderer
         debugToggle("dbg_overlays", "Second passes", "Segundas passadas", "A second pass drawn over the same geometry.",
                     "Uma segunda passada desenhada sobre a mesma geometria.", &Tuning::overlays);
         debugToggle("dbg_sky", "Sky image", "Imagem do céu", "The sky image laid behind the scene.", "A imagem do céu posta atrás da cena.", &Tuning::skyImage);
+        for (const auto &[key, label, labelPt, member, env] :
+             {std::tuple<const char *, const char *, const char *, float Tuning::*, const char *>{"dbg_haze_source", "Heat haze reads", "Calor lê", &Tuning::hazeSource, "SOTC_HAZE_SOURCE"},
+              {"dbg_water_source", "Water reads", "Água lê", &Tuning::waterSource, "SOTC_WATER_SOURCE"}})
+        {
+            TuningItem item{key, label, labelPt,
+                            "The picture this effect bends: small copy (the PS2's), full copy, or last frame (OpenGL / Vita only).",
+                            "A imagem que este efeito distorce: cópia pequena (a do PS2), cópia inteira ou quadro anterior (só OpenGL / Vita).",
+                            nullptr, member, 0.0f, 2.0f, 1.0f, env};
+            item.debug = true;
+            v.push_back(item);
+        }
         debugToggle("dbg_mips", "Mipmaps", "Mipmaps", "Smaller textures far away.", "Texturas menores ao longe.", &Tuning::mipmaps, "SOTC_NATIVE_NOMIPS");
         debugToggle("dbg_scroll", "Texture scrolling", "Rolagem de textura", "Water and cloth textures that move.", "Texturas que se movem (água, tecido).",
                     &Tuning::textureScroll, "SOTC_NATIVE_NOROW");
@@ -216,6 +234,11 @@ namespace native_renderer
             return ((t.*item.mask >> item.bit) & 1u) ? "Off" : "On";
         char b[32];
         const float v = t.*item.number;
+        if (item.number == &Tuning::hazeSource || item.number == &Tuning::waterSource)
+        {
+            static const char *names[] = {"small copy", "full copy", "last frame"};
+            return names[std::clamp(static_cast<int>(v + 0.5f), 0, 2)];
+        }
         if (item.number == &Tuning::renderScale)
             std::snprintf(b, sizeof(b), "%gx (%dx%d)", v, static_cast<int>(512 * v + 0.5f), static_cast<int>(448 * v + 0.5f));
         else
