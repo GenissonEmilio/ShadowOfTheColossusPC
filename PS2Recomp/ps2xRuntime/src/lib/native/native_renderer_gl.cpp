@@ -954,6 +954,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 quad(target, 5, QuadBlend::Darken, a);
                 glDisable(GL_STENCIL_TEST);
                 glUseProgram(mainProgram);
+                // quad() turned the depth test off: the rest of the pass needs
+                // it (without it, everything after layer 7 covered the scene).
+                glEnable(GL_DEPTH_TEST);
+                glDepthFunc(GL_LEQUAL);
+                glDepthMask(GL_TRUE);
                 shadowAmount = 0.0f;
             };
             for (const Draw &d : draws)
