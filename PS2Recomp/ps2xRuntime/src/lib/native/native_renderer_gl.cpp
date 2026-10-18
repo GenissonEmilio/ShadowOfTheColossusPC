@@ -847,7 +847,6 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     void Renderer::render(uint32_t w, uint32_t h)
     {
         ensureTargets(w, h);
-        }
         if (!arena.empty())
         {
             // One upload for every dynamic mesh of the frame (in place of one
