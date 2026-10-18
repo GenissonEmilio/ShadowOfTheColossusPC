@@ -29,6 +29,8 @@ namespace hostmenu
 
     // Loads the saved settings (call once at startup).
     void load();
+    // Writes them (and the renderer adjustments, native_tuning.h) now.
+    void saveSettings();
     // Reads the controller and keyboard; call once per host frame.
     void update();
     // Draws the menu when open; call inside BeginDrawing/EndDrawing.

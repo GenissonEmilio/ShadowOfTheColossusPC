@@ -1,6 +1,8 @@
 #include <cstdlib>
 #include "ps2_debug_panel.h"
 #include "runtime/native_tuning.h"
+#include "runtime/host_menu.h"
+#include <cmath>
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "ps2_log.h"
@@ -2213,30 +2215,32 @@ namespace
         ImGui::SetNextWindowBgAlpha(0.82f);
         if (ImGui::Begin("Native renderer (F10)", &open))
         {
-            ImGui::SliderInt("Resolution x", &t.renderScale, 1, 4);
-            ImGui::SeparatorText("Bloom");
-            ImGui::Checkbox("Bloom", &t.bloom);
-            ImGui::SliderFloat("Strength", &t.bloomStrength, 0.0f, 2.0f, "%.2f");
-            ImGui::SliderInt("Blur rounds", &t.bloomRounds, 1, 6);
-            ImGui::SliderFloat("Spread", &t.bloomSpread, 0.0f, 4.0f, "%.2f");
-            ImGui::SeparatorText("Fog");
-            ImGui::Checkbox("Vertex fog", &t.vertexFog);
-            ImGui::SliderFloat("Fog amount", &t.vertexFogAmount, 0.0f, 2.0f, "%.2f");
-            ImGui::Checkbox("Depth fog into the sky (zFog)", &t.zFog);
-            ImGui::SeparatorText("Effects");
-            ImGui::Checkbox("Glow (layer 8)", &t.glow);
-            ImGui::SameLine(165.0f);
-            ImGui::Checkbox("Depth of field", &t.depthOfField);
-            ImGui::Checkbox("Shadows", &t.shadows);
-            ImGui::SameLine(165.0f);
-            ImGui::Checkbox("Particles", &t.particles);
-            ImGui::Checkbox("Screen blur", &t.screenBlur);
-            ImGui::SameLine(165.0f);
-            ImGui::Checkbox("Reflections", &t.reflections);
-            ImGui::Checkbox("Water refraction", &t.refraction);
+            // The same list as the player menu's Renderer tab (the Vita's).
+            bool changed = false;
+            for (const native_renderer::TuningItem &item : native_renderer::tuningItems())
+            {
+                if (item.toggle)
+                    changed |= ImGui::Checkbox(item.label, &(t.*item.toggle));
+                else
+                {
+                    float &v = t.*item.number;
+                    if (ImGui::SliderFloat(item.label, &v, item.min, item.max, item.step >= 1.0f ? "%.0f" : (item.step >= 0.5f ? "%.1f" : "%.2f")))
+                    {
+                        v = std::clamp(std::round(v / item.step) * item.step, item.min, item.max);
+                        changed = true;
+                    }
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", item.help);
+            }
+            if (changed)
+                hostmenu::saveSettings();
             ImGui::Separator();
             if (ImGui::Button("Defaults"))
+            {
                 t = d;
+                hostmenu::saveSettings();
+            }
             ImGui::SameLine();
             if (ImGui::Button("Print to log"))
                 std::fprintf(stderr, "[tuning] %s\n", native_renderer::tuningAsEnv().c_str());

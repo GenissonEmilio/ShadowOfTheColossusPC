@@ -758,8 +758,8 @@ namespace sotc_native
         g_bloomRan = false;
         // Drawn larger than the PS2's 512 x 448 (F10 / SOTC_RENDER_SCALE): the
         // geometry has no resolution; the effects measure in PS2 pixels.
-        const uint32_t scale = static_cast<uint32_t>(std::clamp(native_renderer::tuning().renderScale, 1, 4));
-        native_renderer::endFrame(512u * scale, 448u * scale);
+        const float scale = std::clamp(native_renderer::tuning().renderScale, 0.5f, 4.0f);
+        native_renderer::endFrame(static_cast<uint32_t>(512.0f * scale + 0.5f), static_cast<uint32_t>(448.0f * scale + 0.5f));
         static const bool show = std::atoi(std::getenv("SOTC_NATIVE")) != 2; // 2: draw, keep the emulated picture
         native_renderer::setShown(show && g_frameDraws != 0);
     }

@@ -1081,7 +1081,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             const float maskColour[4] = {bloom.maskColor[0], bloom.maskColor[1], bloom.maskColor[2], 1};
             bindTexture(2, color.depth);
             quad(bloomTex[0], 8, QuadBlend::None, a, maskColour);
-            const int rounds = std::clamp(native_renderer::tuning().bloomRounds, 1, 8); // F10 panel (SOTC_BLOOM_ROUNDS)
+            const int rounds = std::clamp(static_cast<int>(native_renderer::tuning().bloomRounds + 0.5f), 1, 8); // F10 panel (SOTC_BLOOM_ROUNDS)
             const float spreadGrow = native_renderer::tuning().bloomSpread;
             blur(rounds, spreadGrow);
             const float amount[4] = {bloomHistory ? bloom.temporal : 1.0f, 0, 0, 0};

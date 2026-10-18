@@ -1,4 +1,5 @@
 #include "runtime/host_menu.h"
+#include "runtime/native_tuning.h"
 
 #include "raylib.h"
 
@@ -71,6 +72,7 @@ namespace
             {"Sound", "Som"},
             {"System", "Sistema"},
             {"About", "Sobre"},
+            {"Renderer", "Gráficos"},
             {"Exact transparency", "Transparências precisas"},
             {"Show FPS", "Mostrar FPS"},
             {"Screen", "Tela"},
@@ -154,13 +156,49 @@ namespace
         {kLanguage, "Language", "Language of this menu. Automatic follows the system language."},
         {kQuit, "Quit game", "Closes the game. Unsaved progress is lost."},
     };
+    // The Renderer tab lists native_renderer::tuningItems() (the same list
+    // as the Mac's F10 panel) and a last "Defaults" row.
+    constexpr int kRendererTab = 1;
     const Tab kTabs[] = {
         {"Video", kVideoItems, 3},
+        {"Renderer", nullptr, -1},
         {"Sound", kSoundItems, 1},
         {"System", kSystemItems, 2},
         {"About", nullptr, 0},
     };
-    constexpr int kTabCount = 4;
+    constexpr int kTabCount = 5;
+
+    int itemCount(int tab)
+    {
+        return tab == kRendererTab ? static_cast<int>(native_renderer::tuningItems().size()) + 1 : kTabs[tab].count;
+    }
+
+    const char *rendererLabel(int i)
+    {
+        const auto &items = native_renderer::tuningItems();
+        if (i >= static_cast<int>(items.size()))
+            return portuguese() ? "Restaurar padrões" : "Reset to defaults";
+        return portuguese() ? items[i].labelPt : items[i].label;
+    }
+
+    const char *rendererHelp(int i)
+    {
+        const auto &items = native_renderer::tuningItems();
+        if (i >= static_cast<int>(items.size()))
+            return portuguese() ? "Volta todos os ajustes do renderer aos valores padrão." : "Puts every renderer adjustment back to its default.";
+        return portuguese() ? items[i].helpPt : items[i].help;
+    }
+
+    std::string rendererValue(int i)
+    {
+        const auto &items = native_renderer::tuningItems();
+        if (i >= static_cast<int>(items.size()))
+            return "";
+        const std::string v = native_renderer::tuningValueText(items[i]);
+        if (v == "On" || v == "Off")
+            return T(v.c_str());
+        return v;
+    }
 
     std::string valueText(ItemId id)
     {
@@ -197,6 +235,9 @@ namespace
             return;
         std::fprintf(f, "exact_alpha=%d\nshow_fps=%d\nscreen=%d\nvolume=%d\nlanguage=%d\n", g_settings.exactAlpha ? 1 : 0,
                      g_settings.showFps ? 1 : 0, g_settings.screenMode.load(), g_settings.volume.load(), g_settings.language.load());
+        const native_renderer::Tuning &t = native_renderer::tuning();
+        for (const native_renderer::TuningItem &item : native_renderer::tuningItems())
+            std::fprintf(f, "%s=%g\n", item.key, item.toggle ? (t.*item.toggle ? 1.0 : 0.0) : static_cast<double>(t.*item.number));
         std::fclose(f);
     }
 
@@ -316,6 +357,7 @@ namespace
 }
 
 Settings &settings() { return g_settings; }
+void saveSettings() { save(); }
 
 void load()
 {
@@ -328,9 +370,12 @@ void load()
     if (!f)
         return;
     char key[64];
-    int value = 0;
-    while (std::fscanf(f, " %63[^=]=%d", key, &value) == 2)
+    float number = 0.0f;
+    while (std::fscanf(f, " %63[^=]=%f", key, &number) == 2)
     {
+        const int value = static_cast<int>(number);
+        if (native_renderer::tuningRestore(key, number))
+            continue;
         if (!std::strcmp(key, "exact_alpha")) g_settings.exactAlpha = value != 0;
         else if (!std::strcmp(key, "show_fps")) g_settings.showFps = value != 0;
         else if (!std::strcmp(key, "screen")) g_settings.screenMode = std::clamp(value, 0, 2);
@@ -363,7 +408,7 @@ void update()
         {
             g_open = true;
             g_help = false;
-            g_item = std::min(g_item, std::max(kTabs[g_tab].count - 1, 0));
+            g_item = std::min(g_item, std::max(itemCount(g_tab) - 1, 0));
         }
         return;
     }
@@ -392,12 +437,29 @@ void update()
         g_quitArmed = false;
         return;
     }
-    if (tab.count == 0)
+    const int count = itemCount(g_tab);
+    if (count == 0)
         return;
     if (pressed(kUp) || pressed(kDown))
     {
-        g_item = (g_item + (pressed(kDown) ? 1 : tab.count - 1)) % tab.count;
+        g_item = (g_item + (pressed(kDown) ? 1 : count - 1)) % count;
         g_quitArmed = false;
+    }
+    if (g_tab == kRendererTab)
+    {
+        const auto &items = native_renderer::tuningItems();
+        const int dir = (pressed(kCross) || pressed(kRight)) ? 1 : (pressed(kLeft) ? -1 : 0);
+        if (dir != 0)
+        {
+            if (g_item >= static_cast<int>(items.size()))
+                native_renderer::tuning() = native_renderer::defaultTuning();
+            else
+                native_renderer::tuningStep(items[g_item], dir);
+            save();
+        }
+        if (pressed(kTriangle))
+            g_help = true;
+        return;
     }
     const ItemId id = tab.items[g_item].id;
     if (pressed(kCross) || pressed(kRight))
@@ -443,15 +505,15 @@ void draw(int screenWidth, int screenHeight)
     const Tab &tab = kTabs[g_tab];
     const int listY = tabY + size * 2 + size / 2;
     const int helpY = boxY + boxH - size * 5;
-    if (g_help && tab.count > 0)
+    const bool renderer = g_tab == kRendererTab;
+    if (g_help && itemCount(g_tab) > 0)
     {
-        const Item &item = tab.items[g_item];
-        DrawText(T(item.label), boxX + pad, listY, size, accent);
-        drawWrapped(T(item.help), boxX + pad, listY + size * 2, boxW - 2 * pad, small, text, small / 2);
+        DrawText(renderer ? rendererLabel(g_item) : T(tab.items[g_item].label), boxX + pad, listY, size, accent);
+        drawWrapped(renderer ? rendererHelp(g_item) : T(tab.items[g_item].help), boxX + pad, listY + size * 2, boxW - 2 * pad, small, text, small / 2);
         DrawText(T("Triangle / O: back"), boxX + pad, boxY + boxH - size * 3 / 2, small, dim);
         return;
     }
-    if (tab.count == 0)
+    if (itemCount(g_tab) == 0)
     {
         int y = listY;
         for (const char *l : {"Shadow of the Colossus, recompiled to run natively.", "celosia - port by HenryKun55", "",
@@ -464,17 +526,25 @@ void draw(int screenWidth, int screenHeight)
     }
     else
     {
-        for (int i = 0; i < tab.count; ++i)
+        // Scrolls when the list is longer than the box (the Renderer tab).
+        const int count = itemCount(g_tab);
+        const int rows = std::max(1, (helpY - size - listY) / (size * 3 / 2));
+        const int first = std::clamp(g_item - rows + 1, 0, std::max(0, count - rows));
+        for (int i = first; i < count && i < first + rows; ++i)
         {
-            const int y = listY + i * size * 3 / 2;
+            const int y = listY + (i - first) * size * 3 / 2;
             if (i == g_item)
                 DrawRectangle(boxX + pad / 2, y - size / 4, boxW - pad, size * 3 / 2, highlight);
-            DrawText(T(tab.items[i].label), boxX + pad, y, size, i == g_item ? text : dim);
-            const std::string value = valueText(tab.items[i].id);
+            DrawText(renderer ? rendererLabel(i) : T(tab.items[i].label), boxX + pad, y, size, i == g_item ? text : dim);
+            const std::string value = renderer ? rendererValue(i) : valueText(tab.items[i].id);
             DrawText(value.c_str(), boxX + boxW * 11 / 20, y, size, i == g_item ? accent : dim);
         }
+        if (first > 0)
+            DrawText("^", boxX + boxW - pad, listY, small, dim);
+        if (first + rows < count)
+            DrawText("v", boxX + boxW - pad, listY + (rows - 1) * size * 3 / 2, small, dim);
         DrawRectangle(boxX + pad, helpY - size / 2, boxW - 2 * pad, 1, line);
-        drawWrapped(T(tab.items[g_item].help), boxX + pad, helpY, boxW - 2 * pad, small, dim, small / 3);
+        drawWrapped(renderer ? rendererHelp(g_item) : T(tab.items[g_item].help), boxX + pad, helpY, boxW - 2 * pad, small, dim, small / 3);
     }
     DrawText(T("L/R: tab   D-pad: choose   X: change   Triangle: help   O: close"), boxX + pad, boxY + boxH - size * 3 / 2, small, dim);
 }

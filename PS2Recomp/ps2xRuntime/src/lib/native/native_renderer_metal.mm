@@ -994,7 +994,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         [e setFragmentBytes:&bp length:sizeof(bp) atIndex:0];
                     });
                     // The GS chain reduces the mask in stages, then blurs it once.
-                    const int rounds = std::clamp(native_renderer::tuning().bloomRounds, 1, 8); // F10 panel (SOTC_BLOOM_ROUNDS)
+                    const int rounds = std::clamp(static_cast<int>(native_renderer::tuning().bloomRounds + 0.5f), 1, 8); // F10 panel (SOTC_BLOOM_ROUNDS)
                     const float spreadGrow = native_renderer::tuning().bloomSpread;
                     for (int i = 0; i < rounds; ++i)
                     {

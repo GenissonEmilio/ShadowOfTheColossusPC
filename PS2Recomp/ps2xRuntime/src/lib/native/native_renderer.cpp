@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 #include <cstdlib>
+#include <cstring>
+#include <cmath>
 #include <functional>
 #include <iostream>
 
@@ -33,7 +35,7 @@ namespace native_renderer
     {
         Tuning d;
 #if defined(__APPLE__)
-        d.renderScale = 3;
+        d.renderScale = 3.0f;
 #endif
         return d;
     }
@@ -45,12 +47,12 @@ namespace native_renderer
             Tuning d = defaultTuning();
             auto on = [](const char *name) { return std::getenv(name) != nullptr; };
             auto number = [](const char *name, float fallback) { return std::getenv(name) ? static_cast<float>(std::atof(std::getenv(name))) : fallback; };
-            d.renderScale = static_cast<int>(number("SOTC_RENDER_SCALE", static_cast<float>(d.renderScale)));
+            d.renderScale = number("SOTC_RENDER_SCALE", d.renderScale);
             const float strength = number("SOTC_BLOOM_SCALE", d.bloomStrength);
             d.bloom = strength > 0.0f;
             if (d.bloom)
                 d.bloomStrength = strength;
-            d.bloomRounds = static_cast<int>(number("SOTC_BLOOM_ROUNDS", 1.0f));
+            d.bloomRounds = number("SOTC_BLOOM_ROUNDS", d.bloomRounds);
             d.bloomSpread = number("SOTC_BLOOM_SPREAD", 1.0f);
             d.vertexFog = !on("SOTC_NATIVE_NOVFOG");
             d.vertexFogAmount = number("SOTC_FOG_AMOUNT", d.vertexFogAmount);
@@ -74,13 +76,13 @@ namespace native_renderer
         auto add = [&](const std::string &s) { out += (out.empty() ? "" : " ") + s; };
         auto number = [](float v) { char b[32]; std::snprintf(b, sizeof(b), "%g", v); return std::string(b); };
         if (t.renderScale != d.renderScale)
-            add("SOTC_RENDER_SCALE=" + std::to_string(t.renderScale));
+            add("SOTC_RENDER_SCALE=" + number(t.renderScale));
         if (!t.bloom)
             add("SOTC_BLOOM_SCALE=0");
         else if (t.bloomStrength != d.bloomStrength)
             add("SOTC_BLOOM_SCALE=" + number(t.bloomStrength));
         if (t.bloomRounds != d.bloomRounds)
-            add("SOTC_BLOOM_ROUNDS=" + std::to_string(t.bloomRounds));
+            add("SOTC_BLOOM_ROUNDS=" + number(t.bloomRounds));
         if (t.bloomSpread != d.bloomSpread)
             add("SOTC_BLOOM_SPREAD=" + number(t.bloomSpread));
         if (!t.vertexFog)
@@ -96,6 +98,92 @@ namespace native_renderer
             if (!value)
                 add(env);
         return out.empty() ? "(the defaults)" : out;
+    }
+
+    const std::vector<TuningItem> &tuningItems()
+    {
+        static const std::vector<TuningItem> items = {
+            {"render_scale", "Resolution", "Resolução",
+             "The picture is drawn at 512 x 448 times this: 0.5 is faster, 1 is the PS2's, 2 to 4 are sharper.",
+             "A imagem é desenhada em 512 x 448 vezes este valor: 0,5 é mais rápido, 1 é a do PS2, 2 a 4 ficam mais nítidas.",
+             nullptr, &Tuning::renderScale, 0.5f, 4.0f, 0.5f, "SOTC_RENDER_SCALE"},
+            {"bloom", "Bloom", "Bloom", "The glow around bright light and sky.", "O brilho em volta da luz forte e do céu.",
+             &Tuning::bloom, nullptr, 0, 1, 1, "SOTC_BLOOM_SCALE"},
+            {"bloom_strength", "Bloom strength", "Força do bloom",
+             "Times the game's own strength, which it keeps raising and lowering by scene and camera.",
+             "Vezes a força do próprio jogo, que ele aumenta e diminui conforme a cena e a câmera.",
+             nullptr, &Tuning::bloomStrength, 0.0f, 2.0f, 0.02f, "SOTC_BLOOM_SCALE"},
+            {"bloom_rounds", "Bloom blur", "Borrão do bloom", "Blur rounds: more spreads the glow wider.",
+             "Rodadas de borrão: mais espalha o brilho.", nullptr, &Tuning::bloomRounds, 1.0f, 6.0f, 1.0f, "SOTC_BLOOM_ROUNDS"},
+            {"bloom_spread", "Bloom spread", "Espalhamento", "How much each further blur round grows (from the second round).",
+             "Quanto cada rodada de borrão a mais cresce (a partir da segunda).", nullptr, &Tuning::bloomSpread, 0.0f, 4.0f, 0.1f,
+             "SOTC_BLOOM_SPREAD"},
+            {"vertex_fog", "Distance fog", "Névoa por distância", "The PS2's fog that fades far things into the air colour.",
+             "A névoa do PS2 que apaga o que está longe na cor do ar.", &Tuning::vertexFog, nullptr, 0, 1, 1, "SOTC_NATIVE_NOVFOG"},
+            {"fog_amount", "Fog amount", "Quantidade de névoa", "Times the game's fog: 1 is the game's own.",
+             "Vezes a névoa do jogo: 1 é a do próprio jogo.", nullptr, &Tuning::vertexFogAmount, 0.0f, 2.0f, 0.05f, "SOTC_FOG_AMOUNT"},
+            {"zfog", "Depth fog", "Névoa de profundidade", "Far scenery fades into the sky.", "O cenário distante some no céu.",
+             &Tuning::zFog, nullptr, 0, 1, 1, "SOTC_NATIVE_ZFOG"},
+            {"glow", "Glow", "Brilho (glow)", "The cutscenes' glowing layer.", "A camada brilhante das cenas.", &Tuning::glow, nullptr, 0, 1, 1,
+             "SOTC_NATIVE_NOGLOW"},
+            {"dof", "Depth of field", "Profundidade de campo", "Far things blurred in some scenes.", "O fundo desfocado em algumas cenas.",
+             &Tuning::depthOfField, nullptr, 0, 1, 1, "SOTC_NATIVE_NODOF"},
+            {"shadows", "Shadows", "Sombras", "Characters' and colossi's shadows.", "As sombras dos personagens e colossos.", &Tuning::shadows,
+             nullptr, 0, 1, 1, "SOTC_NATIVE_NOSHADOWS"},
+            {"particles", "Particles", "Partículas", "Dust, sparks, birds, grass.", "Poeira, faíscas, pássaros, grama.", &Tuning::particles,
+             nullptr, 0, 1, 1, "SOTC_NATIVE_NOPTCL"},
+            {"screen_blur", "Screen blur", "Borrão de tela", "The motion and impact blurs.", "Os borrões de movimento e de impacto.",
+             &Tuning::screenBlur, nullptr, 0, 1, 1, "SOTC_NATIVE_NOSBLUR"},
+            {"reflections", "Reflections", "Reflexos", "Mirror reflections on water and floors.", "Reflexos na água e no chão.",
+             &Tuning::reflections, nullptr, 0, 1, 1, "SOTC_NATIVE_NOREFLECT"},
+            {"refraction", "Water refraction", "Refração da água", "The scene seen through water.", "O cenário visto através da água.",
+             &Tuning::refraction, nullptr, 0, 1, 1, "SOTC_NATIVE_NOREFRACT"},
+        };
+        return items;
+    }
+
+    std::string tuningValueText(const TuningItem &item)
+    {
+        const Tuning &t = tuning();
+        if (item.toggle)
+            return t.*item.toggle ? "On" : "Off";
+        char b[32];
+        const float v = t.*item.number;
+        if (item.number == &Tuning::renderScale)
+            std::snprintf(b, sizeof(b), "%gx (%dx%d)", v, static_cast<int>(512 * v + 0.5f), static_cast<int>(448 * v + 0.5f));
+        else
+            std::snprintf(b, sizeof(b), item.step >= 1.0f ? "%.0f" : "%.2f", v);
+        return b;
+    }
+
+    void tuningStep(const TuningItem &item, int dir)
+    {
+        Tuning &t = tuning();
+        if (item.toggle)
+        {
+            t.*item.toggle = !(t.*item.toggle);
+            return;
+        }
+        float &v = t.*item.number;
+        const float n = std::round((v + item.step * static_cast<float>(dir > 0 ? 1 : -1)) / item.step) * item.step;
+        v = std::clamp(n, item.min, item.max);
+    }
+
+    bool tuningRestore(const char *key, float value)
+    {
+        for (const TuningItem &item : tuningItems())
+        {
+            if (std::strcmp(item.key, key) != 0)
+                continue;
+            if (item.env && std::getenv(item.env))
+                return false;
+            if (item.toggle)
+                tuning().*item.toggle = value != 0.0f;
+            else
+                tuning().*item.number = std::clamp(value, item.min, item.max);
+            return true;
+        }
+        return false;
     }
 }
 
