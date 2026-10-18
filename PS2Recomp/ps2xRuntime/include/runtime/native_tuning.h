@@ -33,6 +33,7 @@ namespace native_renderer
 
         // Debugging (the menus' Debug group): what to draw at all.
         uint32_t hiddenLayers = 0;  // bit n: the display list's layer n is not drawn
+        bool showNative = true;     // off: the emulated GS picture of the same moment is shown (the native one still drawn)
         bool draw2D = true;         // sprites, fades, menus, subtitles
         bool drawWorld = true;      // everything that is not 2D
         bool textures = true;       // off: every draw untextured (its vertex colour)

@@ -177,6 +177,9 @@ namespace native_renderer
             item.debug = true;
             v.push_back(item);
         };
+        debugToggle("dbg_show_native", "Show native picture", "Mostrar imagem nativa",
+                    "Off: the emulated PS2 picture of the same moment (F9 flips it), to compare the two.",
+                    "Desligado: a imagem emulada do PS2 no mesmo instante (F9 alterna), pra comparar as duas.", &Tuning::showNative);
         debugToggle("dbg_2d", "Draw 2D", "Desenhar 2D", "Sprites, fades, menus, subtitles.", "Sprites, fades, menus, legendas.", &Tuning::draw2D);
         debugToggle("dbg_world", "Draw world", "Desenhar mundo", "Everything that is not 2D.", "Tudo que não é 2D.", &Tuning::drawWorld);
         debugToggle("dbg_textures", "Textures", "Texturas", "Off: every draw at its vertex colour, no texture.",
