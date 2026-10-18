@@ -847,6 +847,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     void Renderer::render(uint32_t w, uint32_t h)
     {
         ensureTargets(w, h);
+        }
         if (!arena.empty())
         {
             // One upload for every dynamic mesh of the frame (in place of one
@@ -926,7 +927,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             {
                 bindTexture(2, reflection.texture);
 #if defined(PS2X_NATIVE_VITA)
-                bindTexture(3, snapshot.texture);
+                bindTexture(3, previous.texture);
 #else
                 bindTexture(3, refraction.texture);
 #endif
@@ -1256,16 +1257,16 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         }
         auto doRefraction = [&]
         {
-            snapshotColor();
 #if !defined(PS2X_NATIVE_VITA)
+            snapshotColor();
             copy(snapshot, refraction);
             copy(refraction, refractionHalf);
             copy(refractionHalf, refraction);
 #endif
-            // The Vita samples the full-size snapshot itself (bound to unit 3
-            // in pass): its 256 x 256 copy, made mid-frame, came out white
-            // there (the heat haze of layer 23 whitened the screen, the water
-            // of layer 9 broke up).
+            // The Vita samples the last frame's picture instead (bound to
+            // unit 3 in pass): a copy of the picture made mid-frame comes out
+            // white there (vitaGL / Vita3K have not drawn it yet), and the
+            // heat haze of layer 23 (opaque strips of that copy) whitened the screen.
         };
         auto doFog = [&]
         {
