@@ -2217,10 +2217,19 @@ namespace
         {
             // The same list as the player menu's Renderer tab (the Vita's).
             bool changed = false;
-            for (const native_renderer::TuningItem &item : native_renderer::tuningItems())
+            auto show = [&](const native_renderer::TuningItem &item)
             {
                 if (item.toggle)
                     changed |= ImGui::Checkbox(item.label, &(t.*item.toggle));
+                else if (item.mask)
+                {
+                    bool on = !((t.*item.mask >> item.bit) & 1u);
+                    if (ImGui::Checkbox(item.label, &on))
+                    {
+                        t.*item.mask ^= 1u << item.bit;
+                        changed = true;
+                    }
+                }
                 else
                 {
                     float &v = t.*item.number;
@@ -2232,6 +2241,29 @@ namespace
                 }
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("%s", item.help);
+            };
+            for (const native_renderer::TuningItem &item : native_renderer::tuningItems())
+                if (!item.debug)
+                    show(item);
+            if (ImGui::CollapsingHeader("Debug: what is drawn"))
+            {
+                int column = 0;
+                for (const native_renderer::TuningItem &item : native_renderer::tuningItems())
+                {
+                    if (!item.debug)
+                        continue;
+                    if (item.mask) // the layers, four to a row
+                    {
+                        if (column++ % 4 != 0)
+                            ImGui::SameLine(static_cast<float>((column - 1) % 4) * 95.0f + 8.0f);
+                    }
+                    show(item);
+                }
+                if (ImGui::Button("Show every layer"))
+                {
+                    t.hiddenLayers = 0;
+                    changed = true;
+                }
             }
             if (changed)
                 hostmenu::saveSettings();

@@ -899,7 +899,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
             }
             glDisable(GL_CULL_FACE);
-            if (!mirror && !backgroundOnly && !load && fogOn)
+            if (!mirror && !backgroundOnly && !load && fogOn && native_renderer::tuning().skyImage)
             {
                 // The background as the PS2 shows it: bgEnd's reduced copy, stretched back.
                 glDisable(GL_STENCIL_TEST);

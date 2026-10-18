@@ -1883,7 +1883,7 @@ namespace sotc_native
             state.clamp = surfaceClamp(s);
             state.order = surfaceLayer(header, s, fading);
             state.opacity = opacity;
-            static const bool noMips = std::getenv("SOTC_NATIVE_NOMIPS") != nullptr;
+            const bool noMips = !native_renderer::tuning().mipmaps;
             if (!noMips)
                 surfaceLod(header, surface, state);
             if (std::getenv("SOTC_NATIVE_LOG") && state.maxLod > 0.0f)
@@ -1892,7 +1892,7 @@ namespace sotc_native
                 if (told.insert((static_cast<uint64_t>(header) << 16) | surface).second && told.size() < 30)
                     std::fprintf(stderr, "[mip] header %08x surface %u levels %g L x%g K %g\n", header, surface, state.maxLod + 1.0f, state.lodScale, state.lodK);
             }
-            static const bool noRow = std::getenv("SOTC_NATIVE_NOROW") != nullptr;
+            const bool noRow = !native_renderer::tuning().textureScroll;
             if (!noRow && surfaceRow(header, surface, state.uvOffset) && std::getenv("SOTC_NATIVE_LOG"))
             {
                 static std::set<uint64_t> told;

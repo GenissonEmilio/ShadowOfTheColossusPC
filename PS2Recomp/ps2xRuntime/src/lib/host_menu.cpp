@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #if defined(PLATFORM_VITA)
 #include <psp2/apputil.h>
@@ -73,6 +74,7 @@ namespace
             {"System", "Sistema"},
             {"About", "Sobre"},
             {"Renderer", "Gráficos"},
+            {"Debug", "Depuração"},
             {"Exact transparency", "Transparências precisas"},
             {"Show FPS", "Mostrar FPS"},
             {"Screen", "Tela"},
@@ -158,43 +160,69 @@ namespace
     };
     // The Renderer tab lists native_renderer::tuningItems() (the same list
     // as the Mac's F10 panel) and a last "Defaults" row.
-    constexpr int kRendererTab = 1;
+    // The Debug tab: the list's debug items (what to draw at all, the layers).
+    constexpr int kRendererTab = 1, kDebugTab = 2;
     const Tab kTabs[] = {
         {"Video", kVideoItems, 3},
         {"Renderer", nullptr, -1},
+        {"Debug", nullptr, -1},
         {"Sound", kSoundItems, 1},
         {"System", kSystemItems, 2},
         {"About", nullptr, 0},
     };
-    constexpr int kTabCount = 5;
+    constexpr int kTabCount = 6;
+    int g_tabNow = 0; // the tab the renderer helpers below list
+
+    const std::vector<int> &tuningRows(bool debug)
+    {
+        static std::vector<int> normal, dbg;
+        if (normal.empty() && dbg.empty())
+        {
+            const auto &items = native_renderer::tuningItems();
+            for (int i = 0; i < static_cast<int>(items.size()); ++i)
+                (items[i].debug ? dbg : normal).push_back(i);
+        }
+        return debug ? dbg : normal;
+    }
+
+    bool isTuningTab(int tab) { return tab == kRendererTab || tab == kDebugTab; }
 
     int itemCount(int tab)
     {
-        return tab == kRendererTab ? static_cast<int>(native_renderer::tuningItems().size()) + 1 : kTabs[tab].count;
+        return isTuningTab(tab) ? static_cast<int>(tuningRows(tab == kDebugTab).size()) + 1 : kTabs[tab].count;
+    }
+
+    // Row i of the current tuning tab -> the list's item (or -1: the reset row).
+    int tuningIndex(int i)
+    {
+        const auto &rows = tuningRows(g_tabNow == kDebugTab);
+        return i < static_cast<int>(rows.size()) ? rows[i] : -1;
     }
 
     const char *rendererLabel(int i)
     {
-        const auto &items = native_renderer::tuningItems();
-        if (i >= static_cast<int>(items.size()))
+        const int k = tuningIndex(i);
+        if (k < 0)
             return portuguese() ? "Restaurar padrões" : "Reset to defaults";
-        return portuguese() ? items[i].labelPt : items[i].label;
+        const auto &item = native_renderer::tuningItems()[k];
+        return portuguese() ? item.labelPt : item.label;
     }
 
     const char *rendererHelp(int i)
     {
-        const auto &items = native_renderer::tuningItems();
-        if (i >= static_cast<int>(items.size()))
+        const int k = tuningIndex(i);
+        if (k < 0)
             return portuguese() ? "Volta todos os ajustes do renderer aos valores padrão." : "Puts every renderer adjustment back to its default.";
-        return portuguese() ? items[i].helpPt : items[i].help;
+        const auto &item = native_renderer::tuningItems()[k];
+        return portuguese() ? item.helpPt : item.help;
     }
 
     std::string rendererValue(int i)
     {
-        const auto &items = native_renderer::tuningItems();
-        if (i >= static_cast<int>(items.size()))
+        const int k = tuningIndex(i);
+        if (k < 0)
             return "";
-        const std::string v = native_renderer::tuningValueText(items[i]);
+        const std::string v = native_renderer::tuningValueText(native_renderer::tuningItems()[k]);
         if (v == "On" || v == "Off")
             return T(v.c_str());
         return v;
@@ -445,16 +473,17 @@ void update()
         g_item = (g_item + (pressed(kDown) ? 1 : count - 1)) % count;
         g_quitArmed = false;
     }
-    if (g_tab == kRendererTab)
+    if (isTuningTab(g_tab))
     {
-        const auto &items = native_renderer::tuningItems();
+        g_tabNow = g_tab;
         const int dir = (pressed(kCross) || pressed(kRight)) ? 1 : (pressed(kLeft) ? -1 : 0);
         if (dir != 0)
         {
-            if (g_item >= static_cast<int>(items.size()))
+            const int k = tuningIndex(g_item);
+            if (k < 0)
                 native_renderer::tuning() = native_renderer::defaultTuning();
             else
-                native_renderer::tuningStep(items[g_item], dir);
+                native_renderer::tuningStep(native_renderer::tuningItems()[k], dir);
             save();
         }
         if (pressed(kTriangle))
@@ -505,7 +534,8 @@ void draw(int screenWidth, int screenHeight)
     const Tab &tab = kTabs[g_tab];
     const int listY = tabY + size * 2 + size / 2;
     const int helpY = boxY + boxH - size * 5;
-    const bool renderer = g_tab == kRendererTab;
+    const bool renderer = isTuningTab(g_tab);
+    g_tabNow = g_tab;
     if (g_help && itemCount(g_tab) > 0)
     {
         DrawText(renderer ? rendererLabel(g_item) : T(tab.items[g_item].label), boxX + pad, listY, size, accent);

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -29,6 +30,19 @@ namespace native_renderer
         bool feedback = true;       // feedbackBlur: the last frame laid over the new one (SOTC_NATIVE_NOFEEDBACK)
         bool reflections = true;    // SOTC_NATIVE_NOREFLECT
         bool refraction = true;     // SOTC_NATIVE_NOREFRACT
+
+        // Debugging (the menus' Debug group): what to draw at all.
+        uint32_t hiddenLayers = 0;  // bit n: the display list's layer n is not drawn
+        bool draw2D = true;         // sprites, fades, menus, subtitles
+        bool drawWorld = true;      // everything that is not 2D
+        bool textures = true;       // off: every draw untextured (its vertex colour)
+        bool lighting = true;       // off: lit models at their vertex colour
+        bool additive = true;       // draws that add (glows, light shafts)
+        bool subtract = true;       // draws that subtract
+        bool overlays = true;       // second passes over the same geometry
+        bool skyImage = true;       // the sky image laid behind the scene (bgEnd's copy)
+        bool mipmaps = true;        // SOTC_NATIVE_NOMIPS
+        bool textureScroll = true;  // VIF ROW scrolling (SOTC_NATIVE_NOROW)
     };
 
     Tuning &tuning();
@@ -51,6 +65,9 @@ namespace native_renderer
         float Tuning::*number = nullptr; // a value from min to max by step
         float min = 0.0f, max = 1.0f, step = 0.05f;
         const char *env = nullptr;      // the variable that sets it at start
+        uint32_t Tuning::*mask = nullptr; // or one bit of a mask: on = the bit clear
+        int bit = 0;
+        bool debug = false;             // listed in the Debug group
     };
     const std::vector<TuningItem> &tuningItems();
     // The item's value as text ("On", "0.46", "3x").

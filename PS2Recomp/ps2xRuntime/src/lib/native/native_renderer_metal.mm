@@ -786,7 +786,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         [encoder setFragmentTexture:reflectionColor atIndex:2];
                     if (!mirror)
                         [encoder setFragmentTexture:refractionColor atIndex:3];
-                    if (!mirror && !backgroundOnly && !load && fogOn && backdrop)
+                    if (!mirror && !backgroundOnly && !load && fogOn && backdrop && native_renderer::tuning().skyImage)
                     {
                         // The background as the PS2 shows it: bgEnd's reduced copy,
                         // stretched back (bgDraw), under everything.

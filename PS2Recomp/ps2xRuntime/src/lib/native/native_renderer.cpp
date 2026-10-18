@@ -65,6 +65,17 @@ namespace native_renderer
             d.feedback = !on("SOTC_NATIVE_NOFEEDBACK");
             d.reflections = !on("SOTC_NATIVE_NOREFLECT");
             d.refraction = !on("SOTC_NATIVE_NOREFRACT");
+            d.mipmaps = !on("SOTC_NATIVE_NOMIPS");
+            d.textureScroll = !on("SOTC_NATIVE_NOROW");
+            if (const char *h = std::getenv("SOTC_HIDE_LAYERS")) // n,n,n
+                for (const char *c = h; *c;)
+                {
+                    d.hiddenLayers |= 1u << (std::atoi(c) & 31);
+                    while (*c && *c != ',')
+                        ++c;
+                    if (*c)
+                        ++c;
+                }
             return d;
         }();
         return t;
@@ -98,12 +109,22 @@ namespace native_renderer
         for (const auto &[value, env] : offs)
             if (!value)
                 add(env);
+        if (t.hiddenLayers)
+        {
+            std::string layers;
+            for (int i = 0; i < 32; ++i)
+                if ((t.hiddenLayers >> i) & 1u)
+                    layers += (layers.empty() ? "" : ",") + std::to_string(i);
+            add("SOTC_HIDE_LAYERS=" + layers);
+        }
         return out.empty() ? "(the defaults)" : out;
     }
 
     const std::vector<TuningItem> &tuningItems()
     {
-        static const std::vector<TuningItem> items = {
+        static const std::vector<TuningItem> items = []
+        {
+        std::vector<TuningItem> v = {
             {"render_scale", "Resolution", "Resolução",
              "The picture is drawn at 512 x 448 times this: 0.5 is faster, 1 is the PS2's, 2 to 4 are sharper.",
              "A imagem é desenhada em 512 x 448 vezes este valor: 0,5 é mais rápido, 1 é a do PS2, 2 a 4 ficam mais nítidas.",
@@ -142,6 +163,47 @@ namespace native_renderer
             {"refraction", "Water refraction", "Refração da água", "The scene seen through water.", "O cenário visto através da água.",
              &Tuning::refraction, nullptr, 0, 1, 1, "SOTC_NATIVE_NOREFRACT"},
         };
+        auto debugToggle = [&](const char *key, const char *label, const char *labelPt, const char *help, const char *helpPt, bool Tuning::*flag,
+                               const char *env = nullptr)
+        {
+            TuningItem item{key, label, labelPt, help, helpPt, flag, nullptr, 0, 1, 1, env};
+            item.debug = true;
+            v.push_back(item);
+        };
+        debugToggle("dbg_2d", "Draw 2D", "Desenhar 2D", "Sprites, fades, menus, subtitles.", "Sprites, fades, menus, legendas.", &Tuning::draw2D);
+        debugToggle("dbg_world", "Draw world", "Desenhar mundo", "Everything that is not 2D.", "Tudo que não é 2D.", &Tuning::drawWorld);
+        debugToggle("dbg_textures", "Textures", "Texturas", "Off: every draw at its vertex colour, no texture.",
+                    "Desligado: tudo na cor do vértice, sem textura.", &Tuning::textures);
+        debugToggle("dbg_lighting", "Lighting", "Iluminação", "Off: lit models at their vertex colour.", "Desligado: modelos iluminados na cor do vértice.",
+                    &Tuning::lighting);
+        debugToggle("dbg_additive", "Additive draws", "Desenhos aditivos", "Draws that add light (glows, light shafts).",
+                    "Desenhos que somam luz (brilhos, feixes).", &Tuning::additive);
+        debugToggle("dbg_subtract", "Subtract draws", "Desenhos subtrativos", "Draws that darken by subtracting.", "Desenhos que escurecem subtraindo.",
+                    &Tuning::subtract);
+        debugToggle("dbg_overlays", "Second passes", "Segundas passadas", "A second pass drawn over the same geometry.",
+                    "Uma segunda passada desenhada sobre a mesma geometria.", &Tuning::overlays);
+        debugToggle("dbg_sky", "Sky image", "Imagem do céu", "The sky image laid behind the scene.", "A imagem do céu posta atrás da cena.", &Tuning::skyImage);
+        debugToggle("dbg_mips", "Mipmaps", "Mipmaps", "Smaller textures far away.", "Texturas menores ao longe.", &Tuning::mipmaps, "SOTC_NATIVE_NOMIPS");
+        debugToggle("dbg_scroll", "Texture scrolling", "Rolagem de textura", "Water and cloth textures that move.", "Texturas que se movem (água, tecido).",
+                    &Tuning::textureScroll, "SOTC_NATIVE_NOROW");
+        static char labels[32][2][24];
+        for (int i = 0; i < 32; ++i)
+        {
+            std::snprintf(labels[i][0], sizeof(labels[i][0]), "Layer %d", i);
+            std::snprintf(labels[i][1], sizeof(labels[i][1]), "Camada %d", i);
+            TuningItem item{nullptr, labels[i][0], labels[i][1], "Draws of this display list layer (1 sky, 2-3 world, 8 glow, 12-15 mirror, 19 refraction, 29 trail).",
+                            "Desenhos desta camada da lista de exibição (1 céu, 2-3 mundo, 8 glow, 12-15 espelho, 19 refração, 29 rastro).",
+                            nullptr, nullptr, 0, 1, 1, "SOTC_HIDE_LAYERS"};
+            static char keys[32][16];
+            std::snprintf(keys[i], sizeof(keys[i]), "dbg_layer%d", i);
+            item.key = keys[i];
+            item.mask = &Tuning::hiddenLayers;
+            item.bit = i;
+            item.debug = true;
+            v.push_back(item);
+        }
+        return v;
+        }();
         return items;
     }
 
@@ -150,6 +212,8 @@ namespace native_renderer
         const Tuning &t = tuning();
         if (item.toggle)
             return t.*item.toggle ? "On" : "Off";
+        if (item.mask)
+            return ((t.*item.mask >> item.bit) & 1u) ? "Off" : "On";
         char b[32];
         const float v = t.*item.number;
         if (item.number == &Tuning::renderScale)
@@ -167,6 +231,11 @@ namespace native_renderer
             t.*item.toggle = !(t.*item.toggle);
             return;
         }
+        if (item.mask)
+        {
+            t.*item.mask ^= 1u << item.bit;
+            return;
+        }
         float &v = t.*item.number;
         const float n = std::round((v + item.step * static_cast<float>(dir > 0 ? 1 : -1)) / item.step) * item.step;
         v = std::clamp(n, item.min, item.max);
@@ -182,6 +251,8 @@ namespace native_renderer
                 return false;
             if (item.toggle)
                 tuning().*item.toggle = value != 0.0f;
+            else if (item.mask)
+                tuning().*item.mask = (tuning().*item.mask & ~(1u << item.bit)) | (value == 0.0f ? 1u << item.bit : 0u);
             else
                 tuning().*item.number = std::clamp(value, item.min, item.max);
             return true;
@@ -359,6 +430,22 @@ namespace native_renderer
     void draw(uint64_t mesh, const float clip[16], const DrawState &state)
     {
         ++g_uploads.draws;
+        // The menus' Debug group: what is drawn at all.
+        const Tuning &t = tuning();
+        if (((t.hiddenLayers >> (state.order & 31u)) & 1u) || (state.screen ? !t.draw2D : !t.drawWorld) || (state.overlay && !t.overlays) ||
+            (state.blend == Blend::Additive && !t.additive) || (state.blend == Blend::Subtract && !t.subtract))
+            return;
+        if (!t.textures || !t.lighting)
+        {
+            DrawState s = state;
+            if (!t.textures)
+                s.texture = 0;
+            if (!t.lighting)
+                s.lit = false;
+            if (backend())
+                g_backend->draw(mesh, clip, s);
+            return;
+        }
         if (backend())
             g_backend->draw(mesh, clip, state);
     }
