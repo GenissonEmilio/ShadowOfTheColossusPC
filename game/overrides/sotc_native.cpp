@@ -1984,6 +1984,8 @@ namespace sotc_native
                 for (int c = 0; c < 3; ++c)
                     refl.reflectionTint[c] = std::clamp(real(data + 0x30u + c * 4u) / 128.0f, 0.0f, 2.0f);
                 refl.reflectionTint[3] = tintAlpha;
+                if (native_renderer::tuning().rawMirror)
+                    refl.reflectionTint[0] = refl.reflectionTint[1] = refl.reflectionTint[2] = 1.0f;
                 native_renderer::draw(mesh, transform, refl);
                 ++g_frameDraws;
                 // And first in layer 9 the same way, showing the picture as it

@@ -72,6 +72,7 @@ namespace native_renderer
             d.refraction = !on("SOTC_NATIVE_NOREFRACT");
             d.mipmaps = !on("SOTC_NATIVE_NOMIPS");
             d.textureScroll = !on("SOTC_NATIVE_NOROW");
+            d.rawMirror = on("SOTC_RAW_MIRROR");
             d.hazeSource = number("SOTC_HAZE_SOURCE", d.hazeSource);
             d.waterSource = number("SOTC_WATER_SOURCE", d.waterSource);
             if (const char *h = std::getenv("SOTC_HIDE_LAYERS")) // n,n,n
@@ -192,6 +193,8 @@ namespace native_renderer
                     &Tuning::subtract);
         debugToggle("dbg_overlays", "Second passes", "Segundas passadas", "A second pass drawn over the same geometry.",
                     "Uma segunda passada desenhada sobre a mesma geometria.", &Tuning::overlays);
+        debugToggle("dbg_raw_mirror", "Raw mirror image", "Espelho cru", "Water shows the mirror image as it is, without the game's tint.",
+                    "A água mostra a imagem espelhada como ela é, sem o tom do jogo.", &Tuning::rawMirror);
         debugToggle("dbg_sky", "Sky image", "Imagem do céu", "The sky image laid behind the scene.", "A imagem do céu posta atrás da cena.", &Tuning::skyImage);
         for (const auto &[key, label, labelPt, member, env] :
              {std::tuple<const char *, const char *, const char *, float Tuning::*, const char *>{"dbg_haze_source", "Heat haze reads", "Calor lê", &Tuning::hazeSource, "SOTC_HAZE_SOURCE"},

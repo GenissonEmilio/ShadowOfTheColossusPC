@@ -118,8 +118,10 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
     {
         // The mirrored world at this pixel, tinted (debug.w < 0: the tint's alpha).
         constexpr sampler clampLinear(address::clamp_to_edge, filter::linear);
-        float3 r = reflection.sample(clampLinear, in.position.xy / fog.size).rgb;
-        return float4(saturate(r * fog.debug.rgb), -fog.debug.w);
+        // The GS blends by the mirror image's own alpha: where nothing was
+        // mirrored (cleared to 0) the water shows what is under it.
+        float4 r = reflection.sample(clampLinear, in.position.xy / fog.size);
+        return float4(saturate(r.rgb * fog.debug.rgb), saturate(r.a * -fog.debug.w));
     }
     const float lod = fog.maxLod > 0.0 ? clamp(log2(max(in.depth, 1e-3)) * fog.lodScale + fog.lodK, 0.0, fog.maxLod) : 0.0;
     constexpr sampler clampU(address::clamp_to_edge, address::repeat, address::repeat, filter::linear, mip_filter::linear);
@@ -766,7 +768,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     desc.colorAttachments[0].loadAction = load && !apart ? MTLLoadActionLoad : MTLLoadActionClear;
                     // The PS2 frame starts black; the mirror image is cleared to the fog
                     // colour; a layer drawn apart (on the scene's depth) to nothing.
-                    desc.colorAttachments[0].clearColor = mirror ? MTLClearColorMake(fog.colour[0], fog.colour[1], fog.colour[2], 1.0)
+                    desc.colorAttachments[0].clearColor = mirror ? MTLClearColorMake(fog.colour[0], fog.colour[1], fog.colour[2], 0.0)
                                                                  : MTLClearColorMake(0.0, 0.0, 0.0, apart ? 0.0 : 1.0);
                     desc.colorAttachments[0].storeAction = MTLStoreActionStore;
                     id<MTLTexture> depth = mirror ? reflectionDepth : this->depth;

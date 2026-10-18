@@ -41,6 +41,7 @@ namespace native_renderer
         bool additive = true;       // draws that add (glows, light shafts)
         bool subtract = true;       // draws that subtract
         bool overlays = true;       // second passes over the same geometry
+        bool rawMirror = false;     // water shows the mirror image untinted (what the reflection holds)
         bool skyImage = true;       // the sky image laid behind the scene (bgEnd's copy)
         bool mipmaps = true;        // SOTC_NATIVE_NOMIPS
         bool textureScroll = true;  // VIF ROW scrolling (SOTC_NATIVE_NOROW)
