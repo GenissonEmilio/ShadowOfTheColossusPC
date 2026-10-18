@@ -265,7 +265,16 @@ namespace
                      g_settings.showFps ? 1 : 0, g_settings.screenMode.load(), g_settings.volume.load(), g_settings.language.load());
         const native_renderer::Tuning &t = native_renderer::tuning();
         for (const native_renderer::TuningItem &item : native_renderer::tuningItems())
-            std::fprintf(f, "%s=%g\n", item.key, item.toggle ? (t.*item.toggle ? 1.0 : 0.0) : static_cast<double>(t.*item.number));
+        {
+            double value = 0.0;
+            if (item.toggle)
+                value = t.*item.toggle ? 1.0 : 0.0;
+            else if (item.mask) // hidden layers: 1 = hidden
+                value = ((t.*item.mask >> item.bit) & 1u) ? 1.0 : 0.0;
+            else
+                value = static_cast<double>(t.*item.number);
+            std::fprintf(f, "%s=%g\n", item.key, value);
+        }
         std::fclose(f);
     }
 

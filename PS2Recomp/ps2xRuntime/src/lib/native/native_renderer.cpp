@@ -195,7 +195,7 @@ namespace native_renderer
                             "Desenhos desta camada da lista de exibição (1 céu, 2-3 mundo, 8 glow, 12-15 espelho, 19 refração, 29 rastro).",
                             nullptr, nullptr, 0, 1, 1, "SOTC_HIDE_LAYERS"};
             static char keys[32][16];
-            std::snprintf(keys[i], sizeof(keys[i]), "dbg_layer%d", i);
+            std::snprintf(keys[i], sizeof(keys[i]), "dbg_hide_layer%d", i); // saved 1 = hidden
             item.key = keys[i];
             item.mask = &Tuning::hiddenLayers;
             item.bit = i;
@@ -252,7 +252,7 @@ namespace native_renderer
             if (item.toggle)
                 tuning().*item.toggle = value != 0.0f;
             else if (item.mask)
-                tuning().*item.mask = (tuning().*item.mask & ~(1u << item.bit)) | (value == 0.0f ? 1u << item.bit : 0u);
+                tuning().*item.mask = (tuning().*item.mask & ~(1u << item.bit)) | (value != 0.0f ? 1u << item.bit : 0u);
             else
                 tuning().*item.number = std::clamp(value, item.min, item.max);
             return true;
