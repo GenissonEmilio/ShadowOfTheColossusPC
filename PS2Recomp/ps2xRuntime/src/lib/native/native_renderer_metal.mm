@@ -1014,7 +1014,9 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         });
                     }
                     // With the last frame's: bloomTex[1] = mix(history, current), kept as history.
-                    const float amount = bloomHistory ? bloom.temporal : 1.0f;
+                    // The GS draws last frame's bloom over this one's with alpha
+                    // `temporal` (0x7d: 98% history): the glow eases in and out.
+                    const float amount = bloomHistory ? 1.0f - bloom.temporal : 1.0f;
                     quad(bloomTex[1], temporalPipeline, false, [&](id<MTLRenderCommandEncoder> e)
                     {
                         [e setFragmentTexture:bloomTex[0] atIndex:0];

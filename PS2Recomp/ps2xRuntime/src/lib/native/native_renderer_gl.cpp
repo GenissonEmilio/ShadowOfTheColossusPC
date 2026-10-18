@@ -1084,7 +1084,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             const int rounds = std::clamp(static_cast<int>(native_renderer::tuning().bloomRounds + 0.5f), 1, 8); // F10 panel (SOTC_BLOOM_ROUNDS)
             const float spreadGrow = native_renderer::tuning().bloomSpread;
             blur(rounds, spreadGrow);
-            const float amount[4] = {bloomHistory ? bloom.temporal : 1.0f, 0, 0, 0};
+            // Last frame's bloom over this one's with alpha `temporal` (98% history).
+            const float amount[4] = {bloomHistory ? 1.0f - bloom.temporal : 1.0f, 0, 0, 0};
             bindTexture(0, bloomTex[0].texture);
             bindTexture(1, bloomTex[2].texture);
             quad(bloomTex[1], 2, QuadBlend::None, amount);

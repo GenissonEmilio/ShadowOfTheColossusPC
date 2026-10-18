@@ -131,7 +131,7 @@ namespace native_renderer
         float threshold = 0.0f, zA = 0.0f, zB = 0.0f;
         float maskColor[3] = {1, 1, 1};
         float color[4] = {0, 0, 0, 0};
-        float temporal = 1.0f;
+        float temporal = 1.0f; // the history's share: last frame's bloom drawn over this one's with this alpha
     };
     void setBloom(const Bloom &bloom);
 
