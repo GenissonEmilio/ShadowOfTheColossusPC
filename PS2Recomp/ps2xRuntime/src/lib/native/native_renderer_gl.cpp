@@ -860,7 +860,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 haveMirror = true;
                 break;
             }
+#if defined(PS2X_NATIVE_VITA)
+        // The soft path draws a separate mask that must test the picture's
+        // stencil; vitaGL framebuffers cannot share it, so the mask covered
+        // everything (the horizon vanished with shadows on): darken in place.
+        constexpr bool hardShadows = true;
+#else
         static const bool hardShadows = std::getenv("SOTC_SHADOW_HARD") != nullptr;
+#endif
         uint32_t softOrder = 0;
         float softAmount = 0.0f;
         if (!hardShadows)
@@ -912,7 +919,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             if (!mirror)
             {
                 bindTexture(2, reflection.texture);
+#if defined(PS2X_NATIVE_VITA)
+                bindTexture(3, snapshot.texture);
+#else
                 bindTexture(3, refraction.texture);
+#endif
             }
             glEnable(GL_DEPTH_TEST);
             glDepthFunc(GL_LEQUAL); // as the GS's GEQUAL (and far pixels round to the clear value 1.0 in the Vita's depth buffer)
@@ -1227,9 +1238,15 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         auto doRefraction = [&]
         {
             snapshotColor();
+#if !defined(PS2X_NATIVE_VITA)
             copy(snapshot, refraction);
             copy(refraction, refractionHalf);
             copy(refractionHalf, refraction);
+#endif
+            // The Vita samples the full-size snapshot itself (bound to unit 3
+            // in pass): its 256 x 256 copy, made mid-frame, came out white
+            // there (the heat haze of layer 23 whitened the screen, the water
+            // of layer 9 broke up).
         };
         auto doFog = [&]
         {
