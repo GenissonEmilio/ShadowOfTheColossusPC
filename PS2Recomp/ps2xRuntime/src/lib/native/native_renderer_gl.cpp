@@ -1150,7 +1150,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     else
                     {
                         glDepthFunc(GL_LEQUAL); // the GS's GEQUAL: a surface drawn again in place passes
-                        glDepthMask(d.state.blend == native_renderer::Blend::Additive && !d.state.writeDepth ? GL_FALSE : GL_TRUE);
+                        glDepthMask((d.state.blend == native_renderer::Blend::Additive && !d.state.writeDepth) || d.state.noDepthWrite ? GL_FALSE : GL_TRUE);
                     }
                 }
                 auto tex = d.state.texture ? textures.find(d.state.texture) : textures.end();

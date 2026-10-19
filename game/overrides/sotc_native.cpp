@@ -2054,6 +2054,11 @@ namespace sotc_native
                 }
             }
             state.reflectionSource = layer == 12u || layer == 13u;
+            // Reflecting surfaces (the water): the world's TEST (0x5140b: AREF 0x40,
+            // AFAIL FB_ONLY) keeps their colour but not their Z, their vertex alpha
+            // being 0x20; the splash rings drawn after on the surface stay visible.
+            if ((word(s + 0x18u) & 0x2200u) == 0x2200u)
+                state.noDepthWrite = true;
             const bool twoTextures = word(s + 0x1Cu) == 2u && mesh == id && !state.debugColour;
             if (twoTextures)
                 state.writeDepth = true;
