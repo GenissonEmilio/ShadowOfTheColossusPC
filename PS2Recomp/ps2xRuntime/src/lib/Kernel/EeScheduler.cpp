@@ -96,6 +96,8 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_rdram = rdram;
     m_readyQueues = {};
     m_threads.clear();
+    m_threadCacheId = -1;
+    m_threadCache = nullptr;
     m_semaphores.clear();
     m_eventFlags.clear();
     m_alarms.clear();
@@ -166,10 +168,10 @@ void EeScheduler::run()
     assertExecutor();
     m_running.store(true, std::memory_order_release);
 
-    while (!m_stopRequested.load(std::memory_order_acquire))
+    while (!m_stopRequested.load(std::memory_order_relaxed))
     {
         processPendingEvents();
-        if (m_stopRequested.load(std::memory_order_acquire))
+        if (m_stopRequested.load(std::memory_order_relaxed))
         {
             break;
         }
@@ -318,11 +320,7 @@ void EeScheduler::run()
             {
                 // PS2X_SCHED_STATS=1: what changes the VU0 owner (thread or
                 // invocation switches), per second, by thread and guest PC.
-#if defined(PLATFORM_VITA)
-                static const bool schedStats = true;
-#else
-                static const bool schedStats = std::getenv("PS2X_SCHED_STATS") != nullptr;
-#endif
+                static const bool schedStats = std::getenv("PS2X_SCHED_STATS") != nullptr; // the Vita: env.txt
                 if (schedStats)
                 {
                     static std::map<std::tuple<int, size_t, uint32_t>, uint64_t> switches;
@@ -357,15 +355,17 @@ void EeScheduler::run()
         try
         {
             m_insideInterrupt = !running->invocations.empty() && running->invocations.back().kind == GuestInvocationKind::Interrupt;
-            m_guestExecuting.store(true, std::memory_order_release);
+            // Relaxed: a flag for other threads to look at (isExecutingGuest),
+            // set twice per dispatch; a release store is a barrier on ARM.
+            m_guestExecuting.store(true, std::memory_order_relaxed);
             m_unwinding = false;
             function(m_rdram, &context, &m_runtime);
-            m_guestExecuting.store(false, std::memory_order_release);
+            m_guestExecuting.store(false, std::memory_order_relaxed);
             m_insideInterrupt = false;
         }
         catch (const EeDispatcherTransfer &)
         {
-            m_guestExecuting.store(false, std::memory_order_release);
+            m_guestExecuting.store(false, std::memory_order_relaxed);
             m_insideInterrupt = false;
         }
         catch (...)
@@ -421,14 +421,17 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
 {
     accountCycles(cycles);
 
-    if (m_checkpointPending.load(std::memory_order_acquire) ||
-        m_stopRequested.load(std::memory_order_acquire))
+    // Relaxed: these run every few guest instructions, and on ARM an acquire
+    // load is a barrier each. What they flag is taken under m_eventMutex
+    // (processPendingEvents), which orders the rest.
+    if (m_checkpointPending.load(std::memory_order_relaxed) ||
+        m_stopRequested.load(std::memory_order_relaxed))
     {
         m_unwinding = true;
         return true;
     }
 
-    const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
+    const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_relaxed);
     if (nextEventCycle != 0u && m_eeCycle >= nextEventCycle)
     {
         m_checkpointPending.store(true, std::memory_order_release);
@@ -538,6 +541,8 @@ int EeScheduler::deleteThread(int id, uint32_t &ownedStack)
         ownedStack = it->second.stack;
     }
     m_threads.erase(it);
+    m_threadCacheId = -1;
+    m_threadCache = nullptr;
     publishSnapshot();
     return KE_OK;
 }
@@ -586,6 +591,8 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
     if (deleteThreadRecord && id != kMainThreadId)
     {
         m_threads.erase(id);
+        m_threadCacheId = -1;
+        m_threadCache = nullptr;
     }
     if (ownedStack != 0u)
     {
@@ -1487,14 +1494,22 @@ void EeScheduler::completeExternalWait(uint32_t type, uint64_t token, int result
 
 GuestThread *EeScheduler::thread(int id)
 {
+    // The last one found (the running thread, asked for at every dispatch):
+    // an unordered_map lookup divides, which the Vita's CPU does in software.
+    // Map nodes stay put; erase and clear forget the entry.
+    if (id == m_threadCacheId && m_threadCache)
+        return m_threadCache;
     auto it = m_threads.find(id);
-    return it == m_threads.end() ? nullptr : &it->second;
+    if (it == m_threads.end())
+        return nullptr;
+    m_threadCacheId = id;
+    m_threadCache = &it->second;
+    return m_threadCache;
 }
 
 const GuestThread *EeScheduler::thread(int id) const
 {
-    auto it = m_threads.find(id);
-    return it == m_threads.end() ? nullptr : &it->second;
+    return const_cast<EeScheduler *>(this)->thread(id);
 }
 
 EeSemaphore *EeScheduler::semaphore(int id)
@@ -1915,9 +1930,10 @@ void EeScheduler::processPendingEvents()
 {
     assertExecutor();
     // Runs at every dispatch: skip the locks when nothing is posted or due.
-    // Posting an event sets m_checkpointPending.
-    const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
-    if (!m_checkpointPending.load(std::memory_order_acquire) && m_pendingEeTimerInterrupts == 0u &&
+    // Posting an event sets m_checkpointPending. Relaxed (no barrier on ARM):
+    // the work is taken under m_eventMutex below.
+    const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_relaxed);
+    if (!m_checkpointPending.load(std::memory_order_relaxed) && m_pendingEeTimerInterrupts == 0u &&
         (nextEventCycle == 0u || m_eeCycle < nextEventCycle))
     {
         applyPendingPreemption();

@@ -1,3 +1,4 @@
+#include <array>
 #include "ps2_vif1_compact.h"
 #include "runtime/gs/gs_frontend.h"
 #include <cstdio>
@@ -317,7 +318,20 @@ namespace
             wl = 1u;
         uint32_t reads = writes;
         if (cl < wl)
-            reads = (writes / wl) * cl + std::min(writes % wl, cl);
+        {
+            // writes / wl by a reciprocal (writes <= 256, wl < 256: exact):
+            // the Vita's CPU has no divide instruction, and this runs for
+            // every UNPACK of every frame's display list.
+            static const std::array<uint32_t, 256> inverse = []
+            {
+                std::array<uint32_t, 256> t{};
+                for (uint32_t d = 1; d < 256u; ++d)
+                    t[d] = ((1u << 24) + d - 1u) / d;
+                return t;
+            }();
+            const uint32_t q = (writes * inverse[wl]) >> 24;
+            reads = q * cl + std::min(writes - q * wl, cl);
+        }
         return (reads * bytesPerVector + 3u) & ~3u;
     }
 

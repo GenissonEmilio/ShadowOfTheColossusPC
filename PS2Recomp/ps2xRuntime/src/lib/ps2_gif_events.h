@@ -30,8 +30,9 @@ public:
         }
         while (pos + 16u <= bytes)
         {
-            // Data of an IMAGE or REGLIST block: skipped as a whole.
-            if (m_remaining != 0u && m_format != 0u)
+            // Data of an IMAGE or REGLIST block, or a PACKED one with no A+D
+            // register (no event can be in it): skipped as a whole.
+            if (m_remaining != 0u && (m_format != 0u || !m_hasAD))
             {
                 const uint32_t n = std::min<uint32_t>(m_remaining, (bytes - pos) / 16u);
                 m_remaining -= n;
@@ -63,14 +64,19 @@ private:
                 m_nreg = 16u;
             m_regs = hi;
             m_index = 0;
+            m_hasAD = false;
+            for (uint32_t i = 0; i < m_nreg; ++i)
+                m_hasAD |= ((hi >> (i * 4u)) & 0xFu) == 0xEu;
             m_remaining = m_format == 0u ? nloop * m_nreg : m_format == 1u ? (nloop * m_nreg + 1u) / 2u : nloop;
             return;
         }
         --m_remaining;
-        if (m_format != 0u)
+        if (m_format != 0u || !m_hasAD)
             return;
-        const uint32_t reg = static_cast<uint32_t>(m_regs >> ((m_index % m_nreg) * 4u)) & 0xFu;
-        ++m_index;
+        // m_index counts 0..nreg-1 (a modulo here divided in software on the Vita).
+        const uint32_t reg = static_cast<uint32_t>(m_regs >> (m_index * 4u)) & 0xFu;
+        if (++m_index == m_nreg)
+            m_index = 0;
         if (reg == 0xEu) // A+D
         {
             const uint8_t address = static_cast<uint8_t>(hi & 0xFFu);
@@ -84,4 +90,5 @@ private:
     uint32_t m_partial = 0;
     uint32_t m_remaining = 0, m_format = 0, m_nreg = 1, m_index = 0;
     uint64_t m_regs = 0;
+    bool m_hasAD = false; // the PACKED register list has an A+D
 };

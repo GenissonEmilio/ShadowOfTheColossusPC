@@ -26,6 +26,19 @@ public:
 private:
     void append(const void *data, uint32_t bytes)
     {
+        if (bytes == 4u)
+        {
+            // One VIF code: byte pushes, no library calls (resize's fill and a
+            // sized memcpy were two calls per code, thousands a frame on the Vita).
+            if (m_out.capacity() < m_out.size() + 4u)
+                m_out.reserve(std::max<size_t>(m_out.size() * 2u, 4096u));
+            const uint8_t *p = static_cast<const uint8_t *>(data);
+            m_out.push_back(p[0]);
+            m_out.push_back(p[1]);
+            m_out.push_back(p[2]);
+            m_out.push_back(p[3]);
+            return;
+        }
         const size_t at = m_out.size();
         if (m_out.capacity() < at + bytes)
             m_out.reserve(std::max<size_t>(at * 2u, 4096u));

@@ -424,6 +424,8 @@ private:
     uint8_t *m_rdram = nullptr;
     std::array<std::deque<int>, kPriorityCount> m_readyQueues{};
     std::unordered_map<int, GuestThread> m_threads;
+    int m_threadCacheId = -1;                // thread(): the last one found
+    GuestThread *m_threadCache = nullptr;
     // Shared VU0 register state (see EeScheduler::run()).
     struct Vu0OwnerKey
     {
