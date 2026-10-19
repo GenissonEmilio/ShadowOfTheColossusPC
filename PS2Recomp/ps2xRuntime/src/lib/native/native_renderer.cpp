@@ -451,14 +451,40 @@ namespace native_renderer
         if (backend())
             g_backend->uploadTexture(id, width, height, rgba, levels);
     }
+    // requestDrawDump: 1 waiting for a frame start, 2 recording that frame.
+    int g_dumpState = 0;
+    std::string g_dumpPath;
+    FILE *g_dumpFile = nullptr;
+    void requestDrawDump(const std::string &path)
+    {
+        g_dumpPath = path;
+        g_dumpState = 1;
+    }
+
     void beginFrame()
     {
+        if (g_dumpState == 1)
+        {
+            g_dumpFile = std::fopen(g_dumpPath.c_str(), "w");
+            g_dumpState = 2;
+        }
         if (backend())
             g_backend->beginFrame();
     }
     void draw(uint64_t mesh, const float clip[16], const DrawState &state)
     {
         ++g_uploads.draws;
+        if (g_dumpFile)
+        {
+            const DrawState &s = state;
+            std::fprintf(g_dumpFile,
+                         "order %2u mesh %016llx tex %016llx blend %d opacity %.3f screen %d bg %d fogged %d overlay %d writeZ %d lit %d clamp %u "
+                         "shadowVol %d mirrorSrc %d mirrorSample %d refract %d screenCopy %d prev %d tint %.3f %.3f %.3f %.3f uvOff %.3f %.3f lod %.2f/%.2f/%.2f\n",
+                         s.order, (unsigned long long)mesh, (unsigned long long)s.texture, (int)s.blend, s.opacity, s.screen, s.background, s.fogged,
+                         s.overlay, s.writeDepth, s.lit, s.clamp, s.shadowVolume, s.reflectionSource, s.reflectionSample, s.refractionSample,
+                         s.screenCopy, s.previousFrame, s.reflectionTint[0], s.reflectionTint[1], s.reflectionTint[2], s.reflectionTint[3],
+                         s.uvOffset[0], s.uvOffset[1], s.lodK, s.lodScale, s.maxLod);
+        }
         // The menus' Debug group: what is drawn at all.
         const Tuning &t = tuning();
         if (((t.hiddenLayers >> (state.order & 31u)) & 1u) || (state.screen ? !t.draw2D : !t.drawWorld) || (state.overlay && !t.overlays) ||
@@ -505,6 +531,12 @@ namespace native_renderer
     }
     void endFrame(uint32_t width, uint32_t height)
     {
+        if (g_dumpFile)
+        {
+            std::fclose(g_dumpFile);
+            g_dumpFile = nullptr;
+            g_dumpState = 0;
+        }
         if (backend())
             g_backend->endFrame(width, height);
         if (g_uploads.on && ++g_uploads.frames % 60u == 0u)

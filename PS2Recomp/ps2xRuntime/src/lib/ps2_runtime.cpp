@@ -8,6 +8,8 @@
 #include "runtime/ps2_vu1_native.h"
 #include "ps2_runtime.h"
 #include "runtime/native_renderer.h"
+#include <filesystem>
+#include "runtime/native_tuning.h"
 #include "runtime/host_menu.h"
 #include "runtime/gs/gs_direct_frame.h"
 #include "ps2_log.h"
@@ -2994,6 +2996,38 @@ void PS2Runtime::run()
             }
         }
         const Texture2D &shownTex = nativeOnScreen ? nativeTex : (g_directFrame.id ? g_directFrame : frameTex);
+        // F8: the same moment twice, for comparing: the emulated picture (the
+        // native one hidden for a few frames so the GS draws), the native one,
+        // and the list of the native draws of that frame, in shots/f8_<n>_*.
+        {
+            static int f8Wait = 0, f8Count = 0;
+            static bool f8WasNative = true;
+            if (f8Wait == 0 && IsKeyPressed(KEY_F8))
+            {
+                f8WasNative = native_renderer::tuning().showNative;
+                native_renderer::tuning().showNative = false;
+                std::filesystem::create_directories("shots");
+                native_renderer::requestDrawDump("shots/f8_" + std::to_string(f8Count) + "_draws.txt");
+                f8Wait = 8;
+            }
+            else if (f8Wait > 0 && --f8Wait == 0)
+            {
+                const std::string base = "shots/f8_" + std::to_string(f8Count++);
+                Image shot = LoadImageFromTexture(shownTex);
+                ImageCrop(&shot, Rectangle{0.0f, 0.0f, static_cast<float>(presentWidth), static_cast<float>(presentHeight)});
+                ExportImage(shot, (base + "_emulated.png").c_str());
+                UnloadImage(shot);
+                std::vector<uint8_t> rgba;
+                uint32_t nw = 0, nh = 0;
+                if (native_renderer::latestFrame(rgba, nw, nh) && nw && nh)
+                {
+                    Image native{rgba.data(), static_cast<int>(nw), static_cast<int>(nh), 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+                    ExportImage(native, (base + "_native.png").c_str());
+                }
+                native_renderer::tuning().showNative = f8WasNative;
+                std::fprintf(stderr, "[f8] %s_{emulated,native}.png, %s_draws.txt\n", base.c_str(), base.c_str());
+            }
+        }
 #else
         const Texture2D &shownTex = g_directFrame.id ? g_directFrame : frameTex;
 #endif

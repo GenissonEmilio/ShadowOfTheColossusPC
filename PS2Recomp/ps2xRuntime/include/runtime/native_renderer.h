@@ -100,6 +100,8 @@ namespace native_renderer
         float light[32] = {};
     };
     void draw(uint64_t mesh, const float clip[16], const DrawState &state);
+    // The next whole frame's draws, one line each, to `path` (F8 in the runtime).
+    void requestDrawDump(const std::string &path);
     // SotC's zFog: before layer `order`, every pixel blends towards the
     // background image (bgEnd's reduced copy of layer 1) by the fog amount
     // of its depth w: (i x 128 / steps) / 128 for the last i in 0..steps
