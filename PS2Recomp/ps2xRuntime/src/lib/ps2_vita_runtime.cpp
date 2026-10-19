@@ -15,6 +15,9 @@ extern "C" unsigned int _newlib_heap_size_user = 160u * 1024u * 1024u;
 extern "C" unsigned int sceLibcHeapSize = 8u * 1024u * 1024u;
 // Recompiled guest code nests C++ calls deeply: give the main thread room.
 extern "C" unsigned int sceUserMainThreadStackSize = 8u * 1024u * 1024u;
+// The pthread default stack (vitasdk reads it at each pthread_create; 32 KB
+// when left undefined). Raised around the game thread's creation only.
+extern "C" unsigned int _pthread_stack_default_user = 32u * 1024u;
 
 namespace
 {

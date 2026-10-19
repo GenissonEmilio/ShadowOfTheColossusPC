@@ -232,6 +232,11 @@ namespace ps2recomp
             ss << "    ctx->pc = 0x" << std::hex << function.end << "u;\n"
                << std::dec;
         }
+        // Execution runs on past the function's end (into the next one).
+        if (!instructions.empty())
+        {
+            ss << "    runtime->jumpGuest(rdram, ctx, ctx->pc);\n";
+        }
 
         ss << "}\n";
         return ss.str();

@@ -579,6 +579,8 @@ uint32_t PS2Memory::flushEeTimers() noexcept
     if (cycles != 0u)
         mask |= advanceEeTimersNow(cycles);
     m_timerBudget = cyclesUntilNextEeTimerInterruptNow();
+    if (m_eeClock)
+        m_eeClock->gate = 0u;
     return mask;
 }
 
@@ -1390,7 +1392,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
     uint32_t timerOffset = 0u;
     if (decodeEeTimerRegister(address, timerIndex, timerOffset))
     {
-        m_timerIrqLatched |= flushEeTimers();
+        m_timerIrqLatched |= syncAndFlushEeTimers();
         m_timerBudget = 0u; // the timer changes: re-evaluate at the next cycles
         // PS2X_TRACE_TIMERS=1: the first writes of each timer register (who uses the timers).
         static const bool traceTimers = std::getenv("PS2X_TRACE_TIMERS") != nullptr;
@@ -2692,13 +2694,13 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
         const uint32_t value = it != m_ioRegisters.end() ? it->second : 0u;
         if (address == kVif1Stat)
             return value | 0x01000000u; // FQC: data still queued
-        m_timerIrqLatched |= flushEeTimers();
+        m_timerIrqLatched |= syncAndFlushEeTimers();
         return value | 0x00000C00u; // APATH: PATH3 transferring
     }
     if ((address >= 0x10003000u && address < 0x10003100u) || (address >= 0x10003C00u && address < 0x10003E00u))
         syncVu1(); // GIF / VIF1 registers
     if (address == 0x10003020u || address < 0x10002000u)
-        m_timerIrqLatched |= flushEeTimers(); // timers and GIF_STAT.FQC see the elapsed cycles
+        m_timerIrqLatched |= syncAndFlushEeTimers(); // timers and GIF_STAT.FQC see the elapsed cycles
     size_t timerIndex = 0u;
     uint32_t timerOffset = 0u;
     if (decodeEeTimerRegister(address, timerIndex, timerOffset))
@@ -2989,7 +2991,7 @@ void PS2Memory::hostStopEeTimer(size_t index)
 {
     if (index >= m_eeTimers.size())
         return;
-    m_timerIrqLatched |= flushEeTimers();
+    m_timerIrqLatched |= syncAndFlushEeTimers();
     m_timerIrqLatched &= ~(1u << index); // nor an interrupt it raised already
     m_eeTimers[index].mode = 0u;
     m_eeTimers[index].count = 0u;

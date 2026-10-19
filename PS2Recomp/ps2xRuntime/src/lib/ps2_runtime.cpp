@@ -674,40 +674,40 @@ namespace
 
 ps2x::iop::ModuleLoadResult PS2Runtime::loadIopModule(std::string_view path, const void *arguments, uint32_t argumentSize)
 {
-    catchUpIop(m_iopSubsystem.get());
+    catchUpIopNow();
     auto scope = m_iopHost->enterCall(nullptr, m_memory.getRDRAM());
     return m_iopSubsystem->loadModule(path, arguments, argumentSize);
 }
 
 ps2x::iop::ModuleLoadResult PS2Runtime::loadIopModuleBuffer(uint32_t guestAddress, const void *arguments, uint32_t argumentSize)
 {
-    catchUpIop(m_iopSubsystem.get());
+    catchUpIopNow();
     auto scope = m_iopHost->enterCall(nullptr, m_memory.getRDRAM());
     return m_iopSubsystem->loadModuleBuffer(guestAddress, arguments, argumentSize);
 }
 
 bool PS2Runtime::stopIopModule(int32_t moduleId, int32_t *result)
 {
-    catchUpIop(m_iopSubsystem.get());
+    catchUpIopNow();
     auto scope = m_iopHost->enterCall(nullptr, m_memory.getRDRAM());
     return m_iopSubsystem->stopModule(moduleId, result);
 }
 
 ps2x::iop::RpcAbi PS2Runtime::selectIopRpcAbi(const ps2x::iop::RpcAbiRequest &request) const
 {
-    catchUpIop(m_iopSubsystem.get());
+    catchUpIopNow();
     return m_iopSubsystem->selectRpcAbi(request);
 }
 
 bool PS2Runtime::canBindIopRpc(uint32_t sid) const noexcept
 {
-    catchUpIop(m_iopSubsystem.get());
+    catchUpIopNow();
     return m_iopSubsystem->canBindRpc(sid);
 }
 
 ps2x::iop::RpcResult PS2Runtime::handleIopRpc(uint8_t *rdram, R5900Context *ctx, ps2x::iop::RpcRequest request)
 {
-    catchUpIop(m_iopSubsystem.get());
+    catchUpIopNow();
     auto scope = m_iopHost->enterCall(ctx, rdram);
     request.callToken = scope.token();
     return m_iopSubsystem->handleRpc(request);
@@ -715,7 +715,7 @@ ps2x::iop::RpcResult PS2Runtime::handleIopRpc(uint8_t *rdram, R5900Context *ctx,
 
 void PS2Runtime::notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransfer &transfer)
 {
-    catchUpIop(m_iopSubsystem.get());
+    catchUpIopNow();
     auto scope = m_iopHost->enterCall(nullptr, rdram);
     m_iopSubsystem->onSifTransfer(transfer);
 }
@@ -725,6 +725,19 @@ void PS2Runtime::advanceIopEeCycles(uint64_t eeCycles) noexcept
     g_iopPendingEeCycles += eeCycles;
     if (g_iopPendingEeCycles >= kIopBatchEeCycles)
         catchUpIop(m_iopSubsystem.get());
+}
+
+uint64_t PS2Runtime::iopBatchSlack() noexcept
+{
+    return g_iopPendingEeCycles < kIopBatchEeCycles ? kIopBatchEeCycles - g_iopPendingEeCycles : 0u;
+}
+
+void PS2Runtime::catchUpIopNow() const noexcept
+{
+    // The cycles generated code ran since the last scheduler checkpoint.
+    if (m_eeScheduler)
+        m_eeScheduler->syncAccounting();
+    catchUpIop(m_iopSubsystem.get());
 }
 
 void PS2Runtime::resetIop()
@@ -750,19 +763,19 @@ bool PS2Runtime::freeIopMemory(uint32_t address)
 
 bool PS2Runtime::readIopMemory(uint32_t address, void *destination, size_t size) const
 {
-    catchUpIop(m_iopSubsystem.get());
+    catchUpIopNow();
     return m_iopSubsystem && m_iopSubsystem->readMemory(address, destination, size);
 }
 
 bool PS2Runtime::writeIopMemory(uint32_t address, const void *source, size_t size)
 {
-    catchUpIop(m_iopSubsystem.get());
+    catchUpIopNow();
     return m_iopSubsystem && m_iopSubsystem->writeMemory(address, source, size);
 }
 
 bool PS2Runtime::zeroIopMemory(uint32_t address, size_t size)
 {
-    catchUpIop(m_iopSubsystem.get());
+    catchUpIopNow();
     return m_iopSubsystem && m_iopSubsystem->zeroMemory(address, size);
 }
 
@@ -1672,14 +1685,6 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
     }
 }
 
-namespace
-{
-    // Guest jumps dispatched (see dispatchGuestBranch); guest code runs on
-    // the EE scheduler's executor thread only (not thread_local: emutls on
-    // the Vita).
-    uint64_t t_guestJumpSerial = 0;
-}
-
 bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                                      R5900Context *ctx,
                                      uint32_t targetPc,
@@ -1694,14 +1699,14 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     // Every inter-function transfer is also a deterministic EE safe point.
     // Backward edges inside generated functions use eeCheckpointDue(), while
     // this charge bounds straight-line call chains that have no local loop.
-    if (m_eeScheduler && m_eeScheduler->checkpointDue(EeScheduler::kGuestDispatchCycles))
+    if (eeCheckpointDue(kEeDispatchCycles))
     {
         return false;
     }
 
     if (!isCall)
     {
-        ++t_guestJumpSerial;
+        ++m_guestJumpSerial;
         if (!hasFunction(targetPc))
         {
             reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
@@ -1735,12 +1740,30 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
 
     RecompiledFunction targetFn = lookupFunction(targetPc);
     const uint32_t entryPc = ctx->pc;
-    const uint64_t jumpSerial = t_guestJumpSerial;
+    const uint32_t jumpSerial = m_guestJumpSerial;
     targetFn(rdram, ctx, this);
+    return finishGuestCall(ctx, entryPc, fallthroughPc, jumpSerial);
+}
 
+// The parts of callGuest / jumpGuest (ps2_runtime.h) off their fast path.
+bool PS2Runtime::callGuestSlow(uint8_t *rdram, R5900Context *ctx, uint32_t target, uint32_t returnPc,
+                               uint32_t sourcePc, GuestBranchKind kind, const char *debugName)
+{
+    // No function there (reported by dispatchGuestBranch), or the fast paths
+    // are off (PS2X_DIRECT_DISPATCH=0).
+    if (!m_directDispatch || !guestFunctionAt(target))
+        return dispatchGuestBranch(rdram, ctx, target, sourcePc, returnPc, kind, debugName);
+    // Too deep on the host stack: unwind like a checkpoint; the scheduler
+    // runs the callee (and its return comes back through the scheduler).
+    m_eeClock.unwinding = true;
+    return false;
+}
+
+bool PS2Runtime::finishGuestCall(R5900Context *ctx, uint32_t entryPc, uint32_t returnPc, uint32_t jumpSerial)
+{
     // While unwinding to the scheduler, ctx->pc is where the deepest pending
     // call resumes; it can equal this callee's entry in recursive code.
-    if (isStopRequested() || ctx->pc == 0u || (m_eeScheduler && m_eeScheduler->unwinding()))
+    if (isStopRequested() || ctx->pc == 0u || m_eeClock.unwinding)
     {
         return false;
     }
@@ -1749,12 +1772,12 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     // pc -- unless a guest jump ran inside it: a tail jump back to that entry
     // (SotC's script system: SCRFuncSubFunc -> j execSCRBaseFunc) must be
     // dispatched, not taken as a return (found by LightVelox/sotc-pc).
-    if (ctx->pc == entryPc && jumpSerial == t_guestJumpSerial)
+    if (ctx->pc == entryPc && jumpSerial == m_guestJumpSerial)
     {
-        ctx->pc = fallthroughPc;
+        ctx->pc = returnPc;
     }
 
-    return ctx->pc == fallthroughPc;
+    return ctx->pc == returnPc;
 }
 
 void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)
@@ -2590,9 +2613,9 @@ void PS2Runtime::postEeEvent(EeEvent event)
     m_eeScheduler->postEvent(event);
 }
 
-bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
+bool PS2Runtime::eeCheckpointSlow() noexcept
 {
-    return m_eeScheduler->checkpointDue(cycles);
+    return m_eeScheduler->checkpointSlow();
 }
 
 [[noreturn]] void PS2Runtime::eeWaitVSyncTicks(uint32_t ticks, uint32_t resumePc)
@@ -2873,6 +2896,14 @@ void PS2Runtime::run()
             .detach();
     }
 
+#if defined(PLATFORM_VITA)
+    // std::thread takes the pthread default stack, 32 KB on the Vita: the
+    // game thread nests recompiled calls (EeScheduler::run budgets 384 KB of
+    // them), give it 1 MB. pthread_create reads the default when called.
+    extern unsigned int _pthread_stack_default_user;
+    const unsigned int threadStackDefault = _pthread_stack_default_user;
+    _pthread_stack_default_user = 1024u * 1024u;
+#endif
     std::thread gameThread([&]()
                            {
         ThreadNaming::SetCurrentThreadName("GameThread");
@@ -2896,6 +2927,9 @@ void PS2Runtime::run()
             std::cerr << "Error during program execution: unknown exception" << std::endl;
         }
         gameThreadFinished.store(true, std::memory_order_release); });
+#if defined(PLATFORM_VITA)
+    _pthread_stack_default_user = threadStackDefault;
+#endif
 
     uint64_t tick = 0;
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))

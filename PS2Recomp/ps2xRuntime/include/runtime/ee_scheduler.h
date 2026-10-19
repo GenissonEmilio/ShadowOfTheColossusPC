@@ -279,7 +279,13 @@ public:
     void requestStop();
     void postEvent(EeEvent event);
     [[nodiscard]] bool checkpointDue(uint32_t cycles = kGeneratedCheckpointCycles) noexcept;
+    // The part of a checkpoint past the clock's gate (see EeClock).
+    [[nodiscard]] bool checkpointSlow() noexcept;
     void accountCycles(uint32_t cycles) noexcept;
+    // Hand the cycles run since the last checkpoint that reached the
+    // scheduler to the EE timers and the IOP (on the executor thread only:
+    // from elsewhere it does nothing).
+    void syncAccounting() noexcept;
     [[nodiscard]] bool isExecutingGuest() const noexcept;
     [[nodiscard]] bool unwinding() const noexcept
     {
@@ -416,6 +422,7 @@ private:
     void updateNextDeadline();
     [[nodiscard]] bool hasReadyAtOrAbovePriority(int priority) const;
     void renewTimeSlice();
+    void updateGate() noexcept;
     void copyMainContextToRuntime();
     void publishDebugContext(const R5900Context &context);
     void publishIdleDebugContext();
@@ -467,12 +474,13 @@ private:
     bool m_rescheduleRequested = false;
     bool m_timeSliceExpired = false;
     bool m_insideInterrupt = false;
-    // Set when checkpointDue() asks generated code to return to the scheduler.
-    // Until the scheduler re-dispatches, ctx->pc is the resume point of the
-    // deepest pending call, not a callee's return.
-    bool m_unwinding = false;
+    // The clock lives in the runtime, where generated code reads it inline
+    // (EeClock: the cycle count, the gate, the pending and unwinding flags).
+    bool &m_unwinding;
     uint32_t m_pendingEeTimerInterrupts = 0;
-    uint64_t m_eeCycle = 0;
+    uint64_t &m_eeCycle;
+    uint64_t m_accountedCycle = 0; // the EE timers and the IOP have seen the cycles up to here
+    bool m_gateEnabled = true;     // PS2X_EE_GATE=0: every checkpoint goes through the scheduler
     std::chrono::steady_clock::time_point m_hostClockBase{};
     bool m_hostClockSync = false;
     uint64_t m_sliceEndCycle = kDefaultTimeSliceCycles;
@@ -480,7 +488,7 @@ private:
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_guestExecuting{false};
     std::atomic<bool> m_stopRequested{false};
-    std::atomic<bool> m_checkpointPending{false};
+    std::atomic<bool> &m_checkpointPending;
     uint32_t m_debugPublishCountdown = 0u;
 
     mutable std::mutex m_eventMutex;

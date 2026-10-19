@@ -11,6 +11,7 @@
 #include <iostream>
 #include <mutex>
 #include <new>
+#include "runtime/ee_clock.h"
 #include <condition_variable>
 #include <deque>
 #include <thread>
@@ -358,6 +359,22 @@ public:
     }
     uint32_t flushEeTimers() noexcept;
     [[nodiscard]] uint64_t cyclesUntilNextEeTimerInterrupt() const noexcept;
+    // EE cycles that can still collect before advanceEeTimers must flush.
+    [[nodiscard]] uint64_t eeTimerSlack() const noexcept
+    {
+        if (m_timerIrqLatched != 0u)
+            return 0u;
+        return m_timerDeferred < m_timerBudget ? m_timerBudget - m_timerDeferred : 0u;
+    }
+    // The scheduler hands EE cycles to the timers in batches (EeClock):
+    // `sync` brings them up to date before the guest touches a timer; a
+    // flush closes the clock's gate so the scheduler re-reads the timers.
+    void setEeClockSync(void (*sync)(void *), void *arg, EeClock *clock) noexcept
+    {
+        m_eeClockSync = sync;
+        m_eeClockSyncArg = arg;
+        m_eeClock = clock;
+    }
     void resetEeTimers() noexcept;
 
     using GifPacketCallback = std::function<void(const uint8_t *, uint32_t)>;
@@ -431,6 +448,15 @@ public:
     uint64_t m_timerDeferred = 0;  // EE cycles not applied to the timers yet
     uint64_t m_timerBudget = 0;    // apply them once this many have collected
     uint32_t m_timerIrqLatched = 0; // raised by a flush outside advanceEeTimers
+    void (*m_eeClockSync)(void *) = nullptr;
+    void *m_eeClockSyncArg = nullptr;
+    EeClock *m_eeClock = nullptr;
+    uint32_t syncAndFlushEeTimers() noexcept
+    {
+        if (m_eeClockSync)
+            m_eeClockSync(m_eeClockSyncArg);
+        return flushEeTimers();
+    }
     uint32_t advanceEeTimersNow(uint64_t eeCycles) noexcept;
     uint64_t cyclesUntilNextEeTimerInterruptNow() const noexcept;
 

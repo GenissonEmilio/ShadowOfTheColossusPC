@@ -81,7 +81,10 @@ namespace
 }
 
 EeScheduler::EeScheduler(PS2Runtime &runtime)
-    : m_runtime(runtime)
+    : m_runtime(runtime),
+      m_unwinding(runtime.m_eeClock.unwinding),
+      m_eeCycle(runtime.m_eeClock.cycle),
+      m_checkpointPending(runtime.m_eeClock.pending)
 {
 }
 
@@ -122,6 +125,20 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_insideInterrupt = false;
     m_pendingEeTimerInterrupts = 0u;
     m_eeCycle = 0u;
+    m_accountedCycle = 0u;
+    m_runtime.m_eeClock.gate = 0u;
+    m_unwinding = false;
+    // A/B switches for the dispatch fast paths (read here: on the Vita the
+    // environment comes from env.txt, loaded after the runtime is built).
+    {
+        const char *gate = std::getenv("PS2X_EE_GATE");
+        m_gateEnabled = !(gate && gate[0] == '0');
+        const char *direct = std::getenv("PS2X_DIRECT_DISPATCH");
+        m_runtime.m_directDispatch = !(direct && direct[0] == '0');
+    }
+    m_runtime.memory().setEeClockSync([](void *self)
+                                      { static_cast<EeScheduler *>(self)->syncAccounting(); },
+                                      this, &m_runtime.m_eeClock);
     m_hostClockBase = std::chrono::steady_clock::now();
     m_sliceEndCycle = kDefaultTimeSliceCycles;
     m_stopRequested.store(false, std::memory_order_release);
@@ -167,6 +184,15 @@ void EeScheduler::run()
 {
     assertExecutor();
     m_running.store(true, std::memory_order_release);
+    // Host stack budget for nested guest calls and jumps (PS2Runtime::
+    // callGuest / jumpGuest): past it they unwind to here. The game thread
+    // has 512 KB on macOS, 1 MB on the Vita (ps2_runtime.cpp).
+    {
+        const char *kb = std::getenv("PS2X_HOST_STACK_KB");
+        const uintptr_t budget = static_cast<uintptr_t>(kb ? std::strtoul(kb, nullptr, 0) : 384u) * 1024u;
+        const uintptr_t base = reinterpret_cast<uintptr_t>(__builtin_frame_address(0));
+        m_runtime.m_hostStackFloor = base > budget ? base - budget : 0u;
+    }
 
     while (!m_stopRequested.load(std::memory_order_relaxed))
     {
@@ -359,6 +385,7 @@ void EeScheduler::run()
             // set twice per dispatch; a release store is a barrier on ARM.
             m_guestExecuting.store(true, std::memory_order_relaxed);
             m_unwinding = false;
+            updateGate();
             function(m_rdram, &context, &m_runtime);
             m_guestExecuting.store(false, std::memory_order_relaxed);
             m_insideInterrupt = false;
@@ -419,7 +446,12 @@ void EeScheduler::postEvent(EeEvent event)
 
 bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
 {
-    accountCycles(cycles);
+    return m_runtime.eeCheckpointDue(cycles);
+}
+
+bool EeScheduler::checkpointSlow() noexcept
+{
+    syncAccounting();
 
     // Relaxed: these run every few guest instructions, and on ARM an acquire
     // load is a barrier each. What they flag is taken under m_eventMutex
@@ -441,6 +473,7 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
 
     if (m_eeCycle < m_sliceEndCycle)
     {
+        updateGate();
         return false;
     }
 
@@ -459,14 +492,43 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
 
 void EeScheduler::accountCycles(uint32_t cycles) noexcept
 {
-    const uint64_t elapsed = std::max<uint64_t>(1u, cycles);
-    m_eeCycle += elapsed;
+    m_eeCycle += std::max<uint64_t>(1u, cycles);
+    syncAccounting();
+    updateGate();
+}
+
+void EeScheduler::syncAccounting() noexcept
+{
+    const uint64_t elapsed = m_eeCycle - m_accountedCycle;
+    if (elapsed == 0u || std::this_thread::get_id() != m_executorThread)
+    {
+        return;
+    }
+    m_accountedCycle = m_eeCycle;
     m_pendingEeTimerInterrupts |= m_runtime.memory().advanceEeTimers(elapsed);
     m_runtime.advanceIopEeCycles(elapsed);
     if (m_pendingEeTimerInterrupts != 0u)
     {
         m_checkpointPending.store(true, std::memory_order_release);
     }
+}
+
+void EeScheduler::updateGate() noexcept
+{
+    if (!m_gateEnabled)
+    {
+        m_runtime.m_eeClock.gate = 0u;
+        return;
+    }
+    // The nearest of: the next EE timer flush or IOP batch (counted from the
+    // cycles they have seen), the next deadline, the end of the time slice.
+    uint64_t gate = m_accountedCycle + std::min(m_runtime.memory().eeTimerSlack(), PS2Runtime::iopBatchSlack());
+    const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_relaxed);
+    if (nextEventCycle != 0u)
+    {
+        gate = std::min(gate, nextEventCycle);
+    }
+    m_runtime.m_eeClock.gate = std::min(gate, m_sliceEndCycle);
 }
 
 bool EeScheduler::isExecutingGuest() const noexcept
@@ -1900,10 +1962,10 @@ void EeScheduler::requestPreemptionIfHigher(const GuestThread &readyThread, bool
         return;
     }
     m_rescheduleRequested = true;
-    if (interruptSafe || m_insideInterrupt)
-    {
-        m_checkpointPending.store(true, std::memory_order_release);
-    }
+    // Applied by the scheduler: return to it at the next checkpoint (guest
+    // code no longer comes back to it at every call return).
+    (void)interruptSafe;
+    m_checkpointPending.store(true, std::memory_order_release);
 }
 
 void EeScheduler::applyPendingPreemption()
@@ -2282,6 +2344,7 @@ void EeScheduler::updateNextDeadline()
     if (m_deadlines.empty())
     {
         m_nextDeadlineCycle.store(0u, std::memory_order_release);
+        updateGate();
         return;
     }
     const auto it = std::min_element(m_deadlines.begin(), m_deadlines.end(),
@@ -2294,6 +2357,7 @@ void EeScheduler::updateNextDeadline()
                                          return left.sequence < right.sequence;
                                      });
     m_nextDeadlineCycle.store(it->deadlineCycle, std::memory_order_release);
+    updateGate();
 }
 
 bool EeScheduler::hasReadyAtOrAbovePriority(int priority) const
@@ -2388,6 +2452,7 @@ void EeScheduler::renewTimeSlice()
 {
     m_sliceEndCycle = m_eeCycle + kDefaultTimeSliceCycles;
     m_timeSliceExpired = false;
+    updateGate();
 }
 
 void EeScheduler::copyMainContextToRuntime()

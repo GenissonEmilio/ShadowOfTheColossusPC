@@ -30,6 +30,7 @@
 #include "runtime/ps2_address.h"
 #include "runtime/gs/ps2_gif_arbiter.h"
 #include "runtime/ps2_memory.h"
+#include "runtime/ee_clock.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ps2_vu1.h"
 #include "runtime/ps2_audio.h"
@@ -429,7 +430,30 @@ public:
     EeScheduler &eeScheduler();
     const EeScheduler &eeScheduler() const;
     void postEeEvent(EeEvent event);
-    bool eeCheckpointDue(uint32_t cycles = 32u) noexcept;
+
+    // Generated code's view of the EE scheduler (inline below the class).
+    // eeCheckpointDue: charge cycles; true when the code must return to the
+    // scheduler. callGuest: a JAL / JALR, run as a host call; false when the
+    // code must return. jumpGuest: a jump out of the function (J / JR to
+    // another function, a branch or fall-through past its end), run as a
+    // nested host call when it can; the code returns after it either way.
+    static constexpr uint32_t kEeDispatchCycles = 8u;
+    EeClock m_eeClock;
+    // Below this host stack address, calls and jumps no longer nest: they
+    // return to the scheduler, which runs them from the bottom of the stack.
+    uintptr_t m_hostStackFloor = 0;
+    uint32_t m_guestJumpSerial = 0; // guest jumps taken (see dispatchGuestBranch)
+    bool m_directDispatch = true;   // PS2X_DIRECT_DISPATCH=0: every transfer through dispatchGuestBranch / the scheduler
+    inline bool eeCheckpointDue(uint32_t cycles = 32u) noexcept;
+    bool eeCheckpointSlow() noexcept;
+    inline RecompiledFunction guestFunctionAt(uint32_t target) const noexcept;
+    inline bool hostStackDeep() const noexcept;
+    inline bool callGuest(uint8_t *rdram, R5900Context *ctx, uint32_t target, uint32_t returnPc,
+                          uint32_t sourcePc, GuestBranchKind kind, const char *debugName);
+    inline void jumpGuest(uint8_t *rdram, R5900Context *ctx, uint32_t target);
+    bool callGuestSlow(uint8_t *rdram, R5900Context *ctx, uint32_t target, uint32_t returnPc,
+                       uint32_t sourcePc, GuestBranchKind kind, const char *debugName);
+    bool finishGuestCall(R5900Context *ctx, uint32_t entryPc, uint32_t returnPc, uint32_t jumpSerial);
     [[noreturn]] void eeWaitVSyncTicks(uint32_t ticks, uint32_t resumePc);
 
     struct EeExitHandlerRegistration
@@ -519,6 +543,10 @@ private:
     [[nodiscard]] ps2x::iop::RpcResult handleIopRpc(uint8_t *rdram, R5900Context *ctx, ps2x::iop::RpcRequest request);
     void notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransfer &transfer);
     void advanceIopEeCycles(uint64_t eeCycles) noexcept;
+    // EE cycles until the IOP's next batch is due (see advanceIopEeCycles).
+    [[nodiscard]] static uint64_t iopBatchSlack() noexcept;
+    // Brings the IOP up to the EE's current cycle before an EE -> IOP call.
+    void catchUpIopNow() const noexcept;
     void resetIop();
 
     friend class PS2IopTransport;
@@ -587,5 +615,68 @@ extern const uint32_t g_ps2RecompiledFunctionTableBase;
 extern const uint32_t g_ps2RecompiledFunctionTableEnd;
 extern const uint32_t g_ps2RecompiledFunctionTableSlotCount;
 extern PS2Runtime::RecompiledFunction g_ps2RecompiledFunctionTable[];
+
+__attribute__((always_inline)) inline bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
+{
+    m_eeClock.cycle += cycles;
+    // The relaxed load as a builtin: generated code is built with -Os,
+    // where std::atomic's load stays an out-of-line call.
+    if (__builtin_expect(m_eeClock.cycle < m_eeClock.gate &&
+                             !__atomic_load_n(reinterpret_cast<const bool *>(&m_eeClock.pending), __ATOMIC_RELAXED),
+                         1))
+        return false;
+    return eeCheckpointSlow();
+}
+
+__attribute__((always_inline)) inline PS2Runtime::RecompiledFunction PS2Runtime::guestFunctionAt(uint32_t target) const noexcept
+{
+    const uint32_t slot = (target - g_ps2RecompiledFunctionTableBase) >> 2;
+    return ((target & 3u) == 0u && slot < g_ps2RecompiledFunctionTableSlotCount) ? g_ps2RecompiledFunctionTable[slot] : nullptr;
+}
+
+__attribute__((always_inline)) inline bool PS2Runtime::hostStackDeep() const noexcept
+{
+    return reinterpret_cast<uintptr_t>(__builtin_frame_address(0)) < m_hostStackFloor;
+}
+
+// Generated code's JAL / JALR: the callee runs as a host call through the
+// function table (overrides included) after a checkpoint. Inline: no call
+// into the runtime on the way (the Vita reaches it through a veneer).
+__attribute__((always_inline)) inline bool PS2Runtime::callGuest(uint8_t *rdram, R5900Context *ctx, uint32_t target, uint32_t returnPc,
+                                                                 uint32_t sourcePc, GuestBranchKind kind, const char *debugName)
+{
+    const RecompiledFunction fn = guestFunctionAt(target);
+    ctx->pc = target;
+    if (__builtin_expect(!fn || !m_directDispatch || hostStackDeep(), 0))
+        return callGuestSlow(rdram, ctx, target, returnPc, sourcePc, kind, debugName);
+    if (eeCheckpointDue(kEeDispatchCycles))
+        return false;
+    const uint32_t jumpSerial = m_guestJumpSerial;
+    fn(rdram, ctx, this);
+    if (__builtin_expect(ctx->pc == returnPc && !m_eeClock.unwinding, 1))
+        return true;
+    return finishGuestCall(ctx, target, returnPc, jumpSerial);
+}
+
+// A jump out of a generated function (J / JR to another function, a branch
+// or fall-through past its end): the target runs nested when it can, else
+// ctx->pc is left on it for the scheduler. The caller returns either way.
+// Jumps can loop (J and JR between two functions): past the host stack
+// budget they unwind to the scheduler.
+__attribute__((always_inline)) inline void PS2Runtime::jumpGuest(uint8_t *rdram, R5900Context *ctx, uint32_t target)
+{
+    ctx->pc = target;
+    ++m_guestJumpSerial;
+    const RecompiledFunction fn = guestFunctionAt(target);
+    if (__builtin_expect(!fn || !m_directDispatch, 0) || eeCheckpointDue(kEeDispatchCycles))
+        return;
+    if (__builtin_expect(hostStackDeep(), 0))
+    {
+        m_eeClock.unwinding = true;
+        return;
+    }
+    fn(rdram, ctx, this);
+}
+
 
 #endif // PS2_RUNTIME_H

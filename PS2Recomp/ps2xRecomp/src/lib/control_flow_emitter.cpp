@@ -192,6 +192,24 @@ namespace ps2recomp
                                                        std::string_view indent,
                                                        bool returnOnTransfer)
     {
+        // Calls run as host calls through the function table (an inline
+        // checkpoint, no scheduler round trip); jumps out of the function run
+        // nested when they can (PS2Runtime::callGuest / jumpGuest).
+        if (runtimeKind == "DirectCall" || runtimeKind == "IndirectCall")
+        {
+            m_ss << fmt::format(
+                "{}if (!runtime->callGuest(rdram, ctx, {}, 0x{:X}u, 0x{:X}u, PS2Runtime::GuestBranchKind::{}, \"{}\")) {{\n",
+                indent, targetExpression, returnPc, sourcePc, runtimeKind, debugName);
+            m_ss << fmt::format("{}    return;\n", indent);
+            m_ss << fmt::format("{}}}\n", indent);
+            return;
+        }
+        if (runtimeKind == "IndirectJump")
+        {
+            m_ss << fmt::format("{}runtime->jumpGuest(rdram, ctx, {});\n", indent, targetExpression);
+            m_ss << fmt::format("{}return;\n", indent);
+            return;
+        }
         m_ss << fmt::format(
             "{}if (!runtime->dispatchGuestBranch(rdram, ctx, {}, 0x{:X}u, 0x{:X}u, PS2Runtime::GuestBranchKind::{}, \"{}\")) {{\n",
             indent,
@@ -526,7 +544,7 @@ namespace ps2recomp
             }
             else
             {
-                m_ss << fmt::format("            ctx->pc = 0x{:X}u;\n", target);
+                m_ss << fmt::format("            runtime->jumpGuest(rdram, ctx, 0x{:X}u);\n", target);
                 m_ss << "            return;\n";
             }
             m_ss << "        }\n";
@@ -547,7 +565,7 @@ namespace ps2recomp
             }
             else
             {
-                m_ss << fmt::format("            ctx->pc = 0x{:X}u;\n", target);
+                m_ss << fmt::format("            runtime->jumpGuest(rdram, ctx, 0x{:X}u);\n", target);
                 m_ss << "            return;\n";
             }
             m_ss << "        }\n";
