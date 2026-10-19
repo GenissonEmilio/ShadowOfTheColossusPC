@@ -172,6 +172,7 @@ Guide: [`decomp.md`](decomp.md).
   - speed on real hardware is not measured yet.
 - **Long runs on the Vita** need a confirmation run past 80 minutes with the
   bounded VU1 queue.
+- [`worklist.md`](worklist.md) is the ordered list of what is being fixed now.
 - [`known_issues.md`](known_issues.md) has the older ones (the raised-sword
   arm swing, the earlier brightness study).
 
