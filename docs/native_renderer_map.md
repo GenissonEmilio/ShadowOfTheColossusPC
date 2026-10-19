@@ -301,8 +301,22 @@ renderer redoes it with its own passes (quarter resolution, separable
 blur, history texture). The 12 shifted copies blend by ALPHA 0x44 (a lerp,
 alpha 0x40 / 0x20 / 0x10 at 0x118c0fc / 10c / 11c), so the blur is
 normalized; the final add is full strength (colour 0x118c140, alpha
-0x118c14c). Natively: one blur round, scale 1 (SOTC_BLOOM_SCALE,
-SOTC_BLOOM_ROUNDS).
+0x118c14c).
+
+The chain as the GS runs it (traced sprite by sprite): mask in 336 (512 x
+448) -> 448 (256 x 256, bilinear) -> 480 (128) -> 488 (64); 510, the last
+frame's *blurred* result, drawn over 488 with alpha 0x118c12c (0x76:
+0.92); 510 = 488 blurred (a copy, then the 12 shifted lerps); 480 = 488
+blurred the same way at 128 x 128; 448 = 480 enlarged; added over 224
+(UV 0.5..256.5). Since the history is the blurred result, it is blurred
+again every frame: the glow keeps spreading over the sky and swells for a
+dozen frames when the sky comes into view (y = 0.92 B(y) + 0.08 m). The
+sequential lerps weigh the later taps more (+1 after -1), so the glow also
+drifts down and right; the lerps truncate. Natively (Metal, desktop GL)
+the same buffers and steps (`gsBloom`); SOTC_BLOOM_OLD=1 the earlier
+quarter-resolution approximation. At SOTC_BLOOM_SCALE=1 the added light
+measures within ~15% of the GS's (the PS2's bloom isolated with
+PS2X_GS_SKIP_TBP=14336).
 
 Model instance opacity (modelDisp, to the microcode at packet + 0xdc):
 1 - instance[0x91] (+0x244), times 1 - instance[0x92] (+0x248) when the

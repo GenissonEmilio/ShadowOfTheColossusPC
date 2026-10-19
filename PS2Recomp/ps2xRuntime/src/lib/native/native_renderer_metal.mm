@@ -215,6 +215,78 @@ fragment float4 bloomMask(Quad in [[stage_in]], depth2d<float> depth [[texture(0
     return float4(b.maskColor.rgb * (sum / 16.0), 1.0);
 }
 
+// The GS chain (0x109e2a0) in its own buffers. The mask: the PS2 frame
+// (512 x 448) white where GS Z <= the threshold + 1 (the sprite at that Z,
+// ZTST GEQUAL), reduced to 256 x 256 by a bilinear sprite (texel coordinates
+// (p + 0.5) x (2, 1.75): two by two texels averaged).
+fragment float4 bloomMaskGS(Quad in [[stage_in]], depth2d<float> depth [[texture(0)]], constant BloomParams &b [[buffer(0)]])
+{
+    const uint2 size = uint2(depth.get_width(), depth.get_height());
+    const float2 scale = float2(size) / float2(512.0, 448.0);
+    const float2 p = floor(in.position.xy);
+    const float2 t = (p + 0.5) * float2(2.0, 1.75) - 0.5; // texel space, centres at integers
+    const float2 i0 = floor(t), f = t - i0;
+    float m[4];
+    for (int k = 0; k < 4; ++k)
+    {
+        const float2 at = clamp(i0 + float2(k & 1, k >> 1), float2(0.0), float2(511.0, 447.0));
+        const uint2 px = min(uint2((at + 0.5) * scale), size - 1);
+        const float d = depth.read(px);
+        const float gsz = d >= 1.0 ? 0.0 : b.zA + b.zB * (1.0 - d) / kNearW;
+        m[k] = gsz <= b.threshold + 1.0 ? 1.0 : 0.0;
+    }
+    const float v = mix(mix(m[0], m[1], f.x), mix(m[2], m[3], f.x), f.y);
+    return float4(b.maskColor.rgb * v, 1.0);
+}
+
+// The GS chain's blur: a copy of the 64 x 64 source onto a target of R
+// pixels, then 12 sprites shifted by 1, 2, 3 pixels (left, right, up, down)
+// lerped over it (ALPHA 0x44) by 64, 32, 16 / 128, each sampling the source
+// bilinearly at u = 0.5 + (p - d) x 64 / R (the copy at (p + 0.5) x 64 / R),
+// a sprite covering only d <= p < d + R.
+fragment float4 bloomBlur12(Quad in [[stage_in]], texture2d<float> src [[texture(0)]], constant float &targetSize [[buffer(0)]])
+{
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    const float r = targetSize, k = 64.0 / r;
+    const float2 p = floor(in.position.xy);
+    // In 8-bit steps, each lerp truncated as the GS's ((Cs - Cd) x A >> 7):
+    // through the history the truncation compounds frame after frame.
+    float3 acc = floor(src.sample(s, (p + 0.5) * k / 64.0).rgb * 255.0 + 0.001);
+    const float2 d[12] = {float2(-1, 0), float2(1, 0), float2(0, -1), float2(0, 1), float2(-2, 0), float2(2, 0),
+                          float2(0, -2), float2(0, 2), float2(-3, 0), float2(3, 0), float2(0, -3), float2(0, 3)};
+    for (int i = 0; i < 12; ++i)
+    {
+        const float a = i < 4 ? 0.5 : (i < 8 ? 0.25 : 0.125);
+        const float2 q = p - d[i];
+        if (any(q < 0.0) || any(q >= r))
+            continue;
+        const float3 c = floor(src.sample(s, (0.5 + q * k) / 64.0).rgb * 255.0 + 0.001);
+        acc += floor((c - acc) * a);
+    }
+    return float4(acc / 255.0, 1.0);
+}
+
+// The GS chain's temporal step: the history (the last frame's blurred
+// result) drawn over this frame's 64 x 64 with alpha `temporal` (0x44:
+// Cd + ((Cs - Cd) x As >> 7), truncated).
+fragment float4 bloomTemporalGS(Quad in [[stage_in]], texture2d<float> current [[texture(0)]], texture2d<float> history [[texture(1)]],
+                                constant float &alpha [[buffer(0)]])
+{
+    constexpr sampler s(address::clamp_to_edge, filter::nearest);
+    const float3 cd = floor(current.sample(s, in.uv).rgb * 255.0 + 0.001), cs = floor(history.sample(s, in.uv).rgb * 255.0 + 0.001);
+    return float4((cd + floor((cs - cd) * alpha)) / 255.0, 1.0);
+}
+
+// The composite sprite: 0..512 x 0..448 with UV 0.5..256.5 of the 256 x 256
+// result, added (ALPHA 0x48) in the colour 0x118c140 (alpha 0x118c14c).
+fragment float4 bloomCompositeGS(Quad in [[stage_in]], texture2d<float> src [[texture(0)]], constant BloomParams &b [[buffer(0)]])
+{
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    const float2 x = in.position.xy / b.texel - 0.5; // PS2 pixels (b.texel: render pixels per PS2 pixel)
+    const float2 uv = (0.5 + x * float2(256.0 / 512.0, 256.0 / 448.0)) / 256.0;
+    return float4(src.sample(s, uv).rgb * b.color.rgb * b.color.a, 1.0);
+}
+
 fragment float4 bloomBlur(Quad in [[stage_in]], texture2d<float> src [[texture(0)]], constant float2 &step [[buffer(0)]])
 {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
@@ -406,6 +478,12 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
         id<MTLTexture> bloomTex[3] = {nil, nil, nil}; // ping, pong, history
         bool bloomHistory = false;
         id<MTLRenderPipelineState> maskPipeline = nil, blurPipeline = nil, temporalPipeline = nil, compositePipeline = nil;
+        id<MTLRenderPipelineState> maskGsPipeline = nil, blur12Pipeline = nil, compositeGsPipeline = nil, temporalGsPipeline = nil;
+        // The GS chain's buffers: 0 the mask (256), 1 128, 2 64 (this frame),
+        // 3 64 (lerped with the history), 4 64 (history: the blurred 3),
+        // 5 128 (the blurred 3), 6 256 (that, enlarged).
+        id<MTLTexture> gsBloom[7] = {nil, nil, nil, nil, nil, nil, nil};
+        bool gsBloomHistory = false;
         uint32_t width = 0, height = 0;
         std::unordered_map<uint64_t, Mesh> meshes;
         std::unordered_map<uint64_t, id<MTLTexture>> textures;
@@ -517,6 +595,10 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
             blurPipeline = fullscreen(@"bloomBlur", false);
             temporalPipeline = fullscreen(@"bloomTemporal", false);
             compositePipeline = fullscreen(@"bloomComposite", true);
+            maskGsPipeline = fullscreen(@"bloomMaskGS", false);
+            blur12Pipeline = fullscreen(@"bloomBlur12", false);
+            compositeGsPipeline = fullscreen(@"bloomCompositeGS", true);
+            temporalGsPipeline = fullscreen(@"bloomTemporalGS", false);
             copySmall = fullscreen(@"copyTexture", false);
             glowReducePipeline = fullscreen(@"glowReduce", false);
             shadowReducePipeline = fullscreen(@"shadowReduce", false);
@@ -744,6 +826,16 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                 bd.storageMode = MTLStorageModePrivate;
                 t = [device newTextureWithDescriptor:bd];
             }
+            for (int i = 0; i < 7; ++i)
+            {
+                [gsBloom[i] release];
+                const uint32_t size = (i == 0 || i == 6) ? 256u : ((i == 1 || i == 5) ? 128u : 64u);
+                MTLTextureDescriptor *bd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:size height:size mipmapped:NO];
+                bd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+                bd.storageMode = MTLStorageModePrivate;
+                gsBloom[i] = [device newTextureWithDescriptor:bd];
+            }
+            gsBloomHistory = false;
             bloomHistory = false;
             width = w;
             height = h;
@@ -1009,6 +1101,51 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
                         [e endEncoding];
                     };
+                    static const bool oldBloom = std::getenv("SOTC_BLOOM_OLD") != nullptr; // the earlier approximation, to compare
+                    if (!oldBloom && maskGsPipeline && blur12Pipeline && compositeGsPipeline && temporalGsPipeline && copySmall)
+                    {
+                        // As the GS chain does it, frame after frame: mask -> 256 -> 128 ->
+                        // 64; lerp with the history (the last frame's blurred result) by
+                        // `temporal`; the history = that blurred at 64; the output = it
+                        // blurred at 128, enlarged to 256, added over the picture. The
+                        // history being blurred again every frame is what spreads the glow
+                        // far over the sky and makes it swell when the sky comes into view.
+                        bp.texel[0] = static_cast<float>(w) / 512.0f;
+                        bp.texel[1] = static_cast<float>(h) / 448.0f;
+                        quad(gsBloom[0], maskGsPipeline, false, [&](id<MTLRenderCommandEncoder> e)
+                        {
+                            [e setFragmentTexture:depth atIndex:0];
+                            [e setFragmentBytes:&bp length:sizeof(bp) atIndex:0];
+                        });
+                        quad(gsBloom[1], copySmall, false, [&](id<MTLRenderCommandEncoder> e) { [e setFragmentTexture:gsBloom[0] atIndex:0]; });
+                        quad(gsBloom[2], copySmall, false, [&](id<MTLRenderCommandEncoder> e) { [e setFragmentTexture:gsBloom[1] atIndex:0]; });
+                        const float alpha = gsBloomHistory ? bloom.temporal : 0.0f;
+                        quad(gsBloom[3], temporalGsPipeline, false, [&](id<MTLRenderCommandEncoder> e)
+                        {
+                            [e setFragmentTexture:gsBloom[2] atIndex:0];
+                            [e setFragmentTexture:gsBloom[4] atIndex:1];
+                            [e setFragmentBytes:&alpha length:sizeof(alpha) atIndex:0];
+                        });
+                        const float r64 = 64.0f, r128 = 128.0f;
+                        quad(gsBloom[4], blur12Pipeline, false, [&](id<MTLRenderCommandEncoder> e)
+                        {
+                            [e setFragmentTexture:gsBloom[3] atIndex:0];
+                            [e setFragmentBytes:&r64 length:sizeof(r64) atIndex:0];
+                        });
+                        gsBloomHistory = true;
+                        quad(gsBloom[5], blur12Pipeline, false, [&](id<MTLRenderCommandEncoder> e)
+                        {
+                            [e setFragmentTexture:gsBloom[3] atIndex:0];
+                            [e setFragmentBytes:&r128 length:sizeof(r128) atIndex:0];
+                        });
+                        quad(gsBloom[6], copySmall, false, [&](id<MTLRenderCommandEncoder> e) { [e setFragmentTexture:gsBloom[5] atIndex:0]; });
+                        quad(color, compositeGsPipeline, true, [&](id<MTLRenderCommandEncoder> e)
+                        {
+                            [e setFragmentTexture:gsBloom[6] atIndex:0];
+                            [e setFragmentBytes:&bp length:sizeof(bp) atIndex:0];
+                        });
+                        return;
+                    }
                     const float lw = static_cast<float>(bloomTex[0].width), lh = static_cast<float>(bloomTex[0].height);
                     quad(bloomTex[0], maskPipeline, false, [&](id<MTLRenderCommandEncoder> e)
                     {
@@ -1317,7 +1454,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                 if (bloomOn)
                     events.push_back({bloom.order, -1});
                 else
-                    bloomHistory = false;
+                    bloomHistory = gsBloomHistory = false;
                 for (size_t i = 0; i < blurs.size(); ++i)
                     events.push_back({blurs[i].order, static_cast<int>(i)});
                 std::stable_sort(events.begin(), events.end(), [](const Event &x, const Event &y) { return x.order < y.order; });
