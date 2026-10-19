@@ -6,6 +6,7 @@
 #include <SDL2/SDL.h>
 #include <vitaGL.h>
 #include <psp2/ctrl.h>
+#include <psp2/power.h>
 #include <psp2/touch.h>
 
 #include <algorithm>
@@ -118,10 +119,23 @@ void InitWindow(int, int, const char *)
     const int width = 960, height = 544;
     g_width = width;
     g_height = height;
+    // The highest clocks the Vita offers to games (the defaults are 333 MHz
+    // CPU, 111 MHz GPU): the emulated EE, the hooks and vitaGL's draw calls
+    // are CPU-bound, the GPU draws the picture several times a frame.
+    scePowerSetArmClockFrequency(444);
+    scePowerSetBusClockFrequency(222);
+    scePowerSetGpuClockFrequency(222);
+    scePowerSetGpuXbarClockFrequency(166);
+    std::fprintf(stderr, "[vita] clocks: cpu %d MHz, bus %d, gpu %d, xbar %d\n", scePowerGetArmClockFrequency(), scePowerGetBusClockFrequency(),
+                 scePowerGetGpuClockFrequency(), scePowerGetGpuXbarClockFrequency());
     if (SDL_Init(SDL_INIT_AUDIO) != 0)
         std::fprintf(stderr, "[vita] SDL_Init failed: %s\n", SDL_GetError());
     // Shaders are compiled at run time (libshacccg); fast math is fine here.
     vglSetupRuntimeShaderCompiler(SHARK_OPT_FAST, 1, 1, 1);
+    // Some framebuffers get several scenes a frame (the small copies of the
+    // picture, the bloom's): GXM sizes a render target for this many scenes
+    // a frame (vitaGL's default for framebuffers: 1).
+    vglSetupRenderTargetScenesNum(1, 8);
     // vitaGL takes the free main RAM minus the threshold; the runtime's
     // threads (game, VU1, GS, GIF, audio) get their stacks from that RAM too,
     // so leave it plenty. GPU memory (CDRAM) is all vitaGL's.
@@ -157,7 +171,9 @@ void CloseWindow(void)
 bool WindowShouldClose(void) { return g_quit; }
 bool IsWindowReady(void) { return g_glReady; }
 void SetConfigFlags(unsigned int) {}
-void SetTargetFPS(int) {} // presentation follows the display's vsync
+// Presentation follows the display's vsync: 30 or less shows each picture
+// for at least two vblanks (interval 2), else every vblank.
+void SetTargetFPS(int fps) { eglSwapInterval(nullptr, fps > 0 && fps <= 30 ? 2 : 1); }
 int GetFPS(void) { return g_fps; }
 
 double GetTime(void)

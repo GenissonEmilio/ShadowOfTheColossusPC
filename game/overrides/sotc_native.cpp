@@ -52,6 +52,18 @@ namespace sotc_native
     uint32_t g_frameDraws = 0;
     uint32_t g_modelDraws = 0; // 3D draws this frame
 
+    // The frame timing log (Debug 'Frame timing log', SOTC_FRAME_LOG): the
+    // native hooks' own time (after the recompiled call they wrap).
+    struct HookTimer
+    {
+        uint64_t start = native_renderer::tuning().frameLog ? native_renderer::nowUs() : 0u;
+        ~HookTimer()
+        {
+            if (start)
+                native_renderer::frameCounters().hookUs += native_renderer::nowUs() - start;
+        }
+    };
+
     const uint8_t *g_ram = nullptr;
     uint32_t word(uint32_t addr)
     {
@@ -295,6 +307,7 @@ namespace sotc_native
                              g_ram[(header + 0x1Fu) & 0x1FFFFFFu] & 1u);
             return 0;
         }
+        const uint64_t decodeStart = native_renderer::tuning().frameLog ? native_renderer::nowUs() : 0u;
         const uint32_t clut = header + word(header + 0x18u);
         const uint32_t entries = psm == 0x14u ? 16u : 256u;
         uint32_t palette[256];
@@ -384,6 +397,8 @@ namespace sotc_native
                 std::fclose(f);
             }
         }
+        if (decodeStart)
+            native_renderer::frameCounters().decodeUs += native_renderer::nowUs() - decodeStart;
         native_renderer::uploadTexture(key, width, height, rgba.data(), decoded);
         return key;
     }
@@ -770,6 +785,64 @@ namespace sotc_native
         g_cameraContext = GPR_U32(ctx, 2);
     }
 
+    // The frame timing log: every 60 frames the average and the slowest
+    // frame (ms), split into the game's own work (what is left), the native
+    // hooks (decoding and uploads included), the backend's CPU side and the
+    // host's swap; and each frame over 50 ms on its own line (hitches).
+    void frameLog()
+    {
+        native_renderer::FrameCounters &c = native_renderer::frameCounters();
+        static uint64_t last = 0;
+        const uint64_t now = native_renderer::nowUs();
+        if (!native_renderer::tuning().frameLog)
+        {
+            last = 0;
+            c = {};
+            return;
+        }
+        struct Sum
+        {
+            uint64_t frames = 0, period = 0, worst = 0, hooks = 0, decode = 0, tex = 0, mesh = 0, render = 0, present = 0;
+            uint64_t draws = 0, targets = 0, texUploads = 0, texBytes = 0, meshUploads = 0, meshBytes = 0;
+        };
+        static Sum sum;
+        if (last)
+        {
+            const uint64_t period = now - last;
+            if (period > 50000u)
+                std::fprintf(stderr, "[frame] slow %llu: %.1f ms: hooks %.1f (decode %.1f, %u textures %.0f KB, up %.1f; %u meshes %.0f KB, up %.1f) render %.1f present %.1f draws %u targets %u\n",
+                             (unsigned long long)g_frame, period / 1000.0, c.hookUs / 1000.0, c.decodeUs / 1000.0, c.texUploads, c.texBytes / 1024.0, c.texUs / 1000.0,
+                             c.meshUploads, c.meshBytes / 1024.0, c.meshUs / 1000.0, c.renderUs / 1000.0, c.presentUs / 1000.0, c.draws, c.targets);
+            ++sum.frames;
+            sum.period += period;
+            sum.worst = std::max(sum.worst, period);
+            sum.hooks += c.hookUs;
+            sum.decode += c.decodeUs;
+            sum.tex += c.texUs;
+            sum.mesh += c.meshUs;
+            sum.render += c.renderUs;
+            sum.present += c.presentUs;
+            sum.draws += c.draws;
+            sum.targets += c.targets;
+            sum.texUploads += c.texUploads;
+            sum.texBytes += c.texBytes;
+            sum.meshUploads += c.meshUploads;
+            sum.meshBytes += c.meshBytes;
+            if (sum.frames == 60u)
+            {
+                const double n = 60.0, game = (static_cast<double>(sum.period) - sum.hooks - sum.render - sum.present) / n / 1000.0;
+                std::fprintf(stderr, "[frame] %llu: %.1f ms (%.1f fps, slowest %.1f) | game %.1f hooks %.1f (decode %.2f tex up %.2f mesh up %.2f) render %.1f present %.1f | "
+                             "draws %.0f targets %.1f textures %.2f (%.0f KB) meshes %.0f (%.0f KB)\n",
+                             (unsigned long long)g_frame, sum.period / n / 1000.0, n * 1e6 / static_cast<double>(sum.period), sum.worst / 1000.0, game, sum.hooks / n / 1000.0,
+                             sum.decode / n / 1000.0, sum.tex / n / 1000.0, sum.mesh / n / 1000.0, sum.render / n / 1000.0, sum.present / n / 1000.0,
+                             sum.draws / n, sum.targets / n, sum.texUploads / n, sum.texBytes / n / 1024.0, sum.meshUploads / n, sum.meshBytes / n / 1024.0);
+                sum = Sum{};
+            }
+        }
+        last = now;
+        c = {};
+    }
+
     // A frame of the game ends when the display list goes to the VIF1.
     void syncFrame(uint8_t *rdram)
     {
@@ -779,6 +852,7 @@ namespace sotc_native
         if (frame != g_frame)
         {
             endFrame();
+            frameLog();
             native_renderer::beginFrame();
             g_frame = frame;
             g_frameDraws = 0;
@@ -1243,6 +1317,7 @@ namespace sotc_native
         const uint32_t header = g_requested;
         const uint32_t layer = g_layers.empty() ? 2u : g_layers.back();
         g_meshDisp(rdram, ctx, runtime);
+        HookTimer hookTimer;
         if (!g_cameraContext || g_ram[(object + 8u) & 0x1FFFFFFu] != '#')
             return;
         const uint32_t base = object + 0x20u;
@@ -1322,6 +1397,7 @@ namespace sotc_native
         const uint32_t chain = GPR_U32(ctx, 4), model = GPR_U32(ctx, 5);
         const bool skinnedShadow = GPR_U32(ctx, 10) != 0u;
         g_shadowDisp(rdram, ctx, runtime);
+        HookTimer hookTimer;
         const bool shadows = native_renderer::tuning().shadows;
         static const bool idColours = std::getenv("SOTC_NATIVE_IDCOLOR") != nullptr;
         if (!shadows || idColours || !model || !g_cameraContext || ((word(chain) >> 28) & 7u) != 2u)
@@ -1514,6 +1590,7 @@ namespace sotc_native
         const uint32_t a = GPR_U32(ctx, 4), count = GPR_U32(ctx, 5);
         const uint32_t header = g_requested, layer = g_layers.empty() ? 18u : g_layers.back();
         g_ptclVtx(rdram, ctx, runtime);
+        HookTimer hookTimer;
         const bool off = !native_renderer::tuning().particles;
         const ParticleEnv &e = g_ptclEnvState;
         if (off || !g_cameraContext || count == 0u || count > 4096u || (!(e.type >= 1u && e.type <= 5u) && e.type != 7u))
@@ -1748,6 +1825,7 @@ namespace sotc_native
         for (int i = 0; i < 16; ++i)
             model[i] = real(matrix + i * 4u);
         g_modelDisp(rdram, ctx, runtime); // the emulated drawing goes on as before
+        HookTimer hookTimer;
         if (!g_cameraContext)
             return;
 

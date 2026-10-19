@@ -45,12 +45,23 @@ namespace native_renderer
         bool skyImage = true;       // the sky image laid behind the scene (bgEnd's copy)
         bool mipmaps = true;        // SOTC_NATIVE_NOMIPS
         bool textureScroll = true;  // VIF ROW scrolling (SOTC_NATIVE_NOROW)
+        // The picture shown at most 30 times a second, evenly (SOTC_CAP30).
+        // Off by default: the swap that waits for the second vblank runs on
+        // the game thread, so above 30 fps (logos, menus, loading) the game
+        // itself is held back (in Vita3K's speed mode the logos took minutes).
+        bool frameCap30 = false;
+        bool frameLog = false;      // per-frame timing to the log (SOTC_FRAME_LOG; native_renderer::FrameCounters)
         // What the heat haze (layer 23) and the water (layer 9) read as "the
         // picture so far" on the OpenGL renderer: 0 the 256 x 256 copy made at
         // their layer (the PS2's way), 1 a full-size copy made there, 2 the
         // last frame shown. On the Vita a copy made mid-frame came out white.
         float hazeSource = 0.0f;    // SOTC_HAZE_SOURCE
         float waterSource = 0.0f;   // SOTC_WATER_SOURCE
+        // OpenGL: an effect that reads the picture so far (water refraction,
+        // heat haze, screen blur) gets that picture drawn again into a target
+        // of its own instead of the picture being left and taken up again
+        // (which lost it in Vita3K: white screens). On by default on the Vita.
+        bool midFrameRedraw = false; // SOTC_GL_REDRAW=0/1
     };
 
     Tuning &tuning();

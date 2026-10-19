@@ -195,4 +195,20 @@ namespace native_renderer
     bool shown();
     // The last finished frame (RGBA8); false before the first.
     bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height);
+
+    // The frame timing log (Debug 'Frame timing log', SOTC_FRAME_LOG): what
+    // one game frame spent where, filled by the frontend, the backends and the
+    // game's hooks while tuning().frameLog is on; the game override prints
+    // and clears it at each frame's end.
+    struct FrameCounters
+    {
+        uint32_t draws = 0, targets = 0, texUploads = 0, meshUploads = 0;
+        uint64_t texBytes = 0, meshBytes = 0;
+        // Microseconds: backend endFrame (render: its CPU side, present: the
+        // host's swap), uploads into the backend, texture decoding, the
+        // native hooks' own work (decoding and uploads included).
+        uint64_t renderUs = 0, presentUs = 0, texUs = 0, meshUs = 0, decodeUs = 0, hookUs = 0;
+    };
+    FrameCounters &frameCounters();
+    uint64_t nowUs();
 }

@@ -15,6 +15,7 @@
 #include <tuple>
 #include <functional>
 #include <iostream>
+#include <chrono>
 
 #if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
 #define PS2X_NATIVE_GL 1
@@ -39,8 +40,10 @@ namespace native_renderer
         d.renderScale = 3.0f;
 #endif
 #if defined(__vita__)
-        d.hazeSource = 2.0f; // the full-size and 256 x 256 copies came out white
-        d.waterSource = 1.0f;
+        // Copies of the picture made mid-frame came out white in Vita3K when
+        // the picture was taken up again after them: drawn again instead, so
+        // the heat haze and the water read the PS2's 256 x 256 copy as on the Mac.
+        d.midFrameRedraw = true;
 #endif
         return d;
     }
@@ -75,6 +78,11 @@ namespace native_renderer
             d.rawMirror = on("SOTC_RAW_MIRROR");
             d.hazeSource = number("SOTC_HAZE_SOURCE", d.hazeSource);
             d.waterSource = number("SOTC_WATER_SOURCE", d.waterSource);
+            d.frameLog = on("SOTC_FRAME_LOG");
+            if (on("SOTC_CAP30"))
+                d.frameCap30 = std::atoi(std::getenv("SOTC_CAP30")) != 0;
+            if (on("SOTC_GL_REDRAW"))
+                d.midFrameRedraw = std::atoi(std::getenv("SOTC_GL_REDRAW")) != 0;
             if (const char *h = std::getenv("SOTC_HIDE_LAYERS")) // n,n,n
                 for (const char *c = h; *c;)
                 {
@@ -117,6 +125,12 @@ namespace native_renderer
         for (const auto &[value, env] : offs)
             if (!value)
                 add(env);
+        if (t.frameCap30 != d.frameCap30)
+            add(std::string("SOTC_CAP30=") + (t.frameCap30 ? "1" : "0"));
+        if (t.midFrameRedraw != d.midFrameRedraw)
+            add(std::string("SOTC_GL_REDRAW=") + (t.midFrameRedraw ? "1" : "0"));
+        if (t.frameLog)
+            add("SOTC_FRAME_LOG=1");
         if (t.hiddenLayers)
         {
             std::string layers;
@@ -170,6 +184,10 @@ namespace native_renderer
              &Tuning::reflections, nullptr, 0, 1, 1, "SOTC_NATIVE_NOREFLECT"},
             {"refraction", "Water refraction", "Refração da água", "The scene seen through water.", "O cenário visto através da água.",
              &Tuning::refraction, nullptr, 0, 1, 1, "SOTC_NATIVE_NOREFRACT"},
+            {"cap30", "Cap at 30 fps", "Limitar a 30 fps",
+             "The picture changes at most every other screen refresh: steady 30 fps instead of a mix of 30 and 60 (or 20 and 30).",
+             "A imagem muda no máximo a cada duas atualizações da tela: 30 fps estáveis em vez de uma mistura de 30 e 60 (ou 20 e 30).",
+             &Tuning::frameCap30, nullptr, 0, 1, 1, "SOTC_CAP30"},
         };
         auto debugToggle = [&](const char *key, const char *label, const char *labelPt, const char *help, const char *helpPt, bool Tuning::*flag,
                                const char *env = nullptr)
@@ -207,9 +225,17 @@ namespace native_renderer
             item.debug = true;
             v.push_back(item);
         }
+        debugToggle("dbg_redraw", "Redraw for copies", "Redesenhar para cópias",
+                    "OpenGL / Vita: water, heat haze and screen blur get the picture so far drawn again apart, instead of leaving the picture and taking it up again (white screens in Vita3K). Costs those draws twice in such frames.",
+                    "OpenGL / Vita: água, calor e borrão de tela recebem a imagem até ali desenhada de novo à parte, em vez de largar a imagem e retomá-la (telas brancas no Vita3K). Custa esses desenhos duas vezes nesses quadros.",
+                    &Tuning::midFrameRedraw, "SOTC_GL_REDRAW");
         debugToggle("dbg_mips", "Mipmaps", "Mipmaps", "Smaller textures far away.", "Texturas menores ao longe.", &Tuning::mipmaps, "SOTC_NATIVE_NOMIPS");
         debugToggle("dbg_scroll", "Texture scrolling", "Rolagem de textura", "Water and cloth textures that move.", "Texturas que se movem (água, tecido).",
                     &Tuning::textureScroll, "SOTC_NATIVE_NOROW");
+        debugToggle("dbg_frame_log", "Frame timing log", "Log de tempo por quadro",
+                    "Writes to the log every 60 frames where the time went (game, hooks, texture decoding, uploads, drawing, swap) and every slow frame.",
+                    "Escreve no log a cada 60 quadros onde o tempo foi (jogo, ganchos, decodificação de texturas, envios, desenho, troca) e cada quadro lento.",
+                    &Tuning::frameLog, "SOTC_FRAME_LOG");
         static char labels[32][2][24];
         for (int i = 0; i < 32; ++i)
         {
@@ -218,7 +244,7 @@ namespace native_renderer
             TuningItem item{nullptr, labels[i][0], labels[i][1], "Draws of this display list layer (1 sky, 2-3 world, 8 glow, 12-15 mirror, 19 refraction, 29 trail).",
                             "Desenhos desta camada da lista de exibição (1 céu, 2-3 mundo, 8 glow, 12-15 espelho, 19 refração, 29 rastro).",
                             nullptr, nullptr, 0, 1, 1, "SOTC_HIDE_LAYERS"};
-            static char keys[32][16];
+            static char keys[32][24]; // "dbg_hide_layer31" and its terminator
             std::snprintf(keys[i], sizeof(keys[i]), "dbg_hide_layer%d", i); // saved 1 = hidden
             item.key = keys[i];
             item.mask = &Tuning::hiddenLayers;
@@ -422,6 +448,15 @@ namespace native_renderer
             return static_cast<bool>(g_glMakeCurrent); // not created here: this may not be the game thread
         return backend() != nullptr;
     }
+    FrameCounters &frameCounters()
+    {
+        static FrameCounters counters;
+        return counters;
+    }
+    uint64_t nowUs()
+    {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
     bool hasMesh(uint64_t id) { return backend() && g_backend->hasMesh(id); }
     // SOTC_NATIVE_LOG_UPLOADS=1: uploads per frame (meshes: static / per-frame
     // ones, the ids with a top bit set; textures), every 60 frames.
@@ -437,8 +472,19 @@ namespace native_renderer
             (perFrame ? g_uploads.frameMeshes : g_uploads.staticMeshes) += 1;
             (perFrame ? g_uploads.frameBytes : g_uploads.staticBytes) += static_cast<uint64_t>(count) * sizeof(Vertex);
         }
-        if (backend())
+        if (!backend())
+            return;
+        if (!tuning().frameLog)
+        {
             g_backend->uploadMesh(id, vertices, count, perFrame);
+            return;
+        }
+        const uint64_t start = nowUs();
+        g_backend->uploadMesh(id, vertices, count, perFrame);
+        FrameCounters &c = frameCounters();
+        c.meshUs += nowUs() - start;
+        ++c.meshUploads;
+        c.meshBytes += static_cast<uint64_t>(count) * sizeof(Vertex);
     }
     bool hasTexture(uint64_t id) { return backend() && g_backend->hasTexture(id); }
     void uploadTexture(uint64_t id, uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t levels)
@@ -448,8 +494,19 @@ namespace native_renderer
             ++g_uploads.textures;
             g_uploads.textureBytes += static_cast<uint64_t>(width) * height * 4u;
         }
-        if (backend())
+        if (!backend())
+            return;
+        if (!tuning().frameLog)
+        {
             g_backend->uploadTexture(id, width, height, rgba, levels);
+            return;
+        }
+        const uint64_t start = nowUs();
+        g_backend->uploadTexture(id, width, height, rgba, levels);
+        FrameCounters &c = frameCounters();
+        c.texUs += nowUs() - start;
+        ++c.texUploads;
+        c.texBytes += static_cast<uint64_t>(width) * height * 4u;
     }
     // requestDrawDump: 1 waiting for a frame start, 2 recording that frame.
     int g_dumpState = 0;
@@ -499,10 +556,12 @@ namespace native_renderer
                 s.lit = false;
             if (backend())
                 g_backend->draw(mesh, clip, s);
+            ++frameCounters().draws;
             return;
         }
         if (backend())
             g_backend->draw(mesh, clip, state);
+        ++frameCounters().draws;
     }
     void setFog(const Fog &fog)
     {
@@ -538,7 +597,18 @@ namespace native_renderer
             g_dumpState = 0;
         }
         if (backend())
-            g_backend->endFrame(width, height);
+        {
+            if (tuning().frameLog)
+            {
+                // The backend adds its present (swap) time itself: the rest is render.
+                FrameCounters &c = frameCounters();
+                const uint64_t start = nowUs(), present = c.presentUs;
+                g_backend->endFrame(width, height);
+                c.renderUs += (nowUs() - start) - (c.presentUs - present);
+            }
+            else
+                g_backend->endFrame(width, height);
+        }
         if (g_uploads.on && ++g_uploads.frames % 60u == 0u)
         {
             UploadStats &u = g_uploads;

@@ -2900,6 +2900,18 @@ void PS2Runtime::run()
     uint64_t tick = 0;
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
     {
+        {
+            // Renderer setting 'Cap at 30 fps': the picture shown every other
+            // vblank at most (the Vita: vsync interval 2), so a game frame
+            // that takes a little over 33 ms does not alternate 60/30 shows.
+            static int presentedFps = 60;
+            const int wantFps = native_renderer::tuning().frameCap30 ? 30 : 60;
+            if (wantFps != presentedFps)
+            {
+                presentedFps = wantFps;
+                SetTargetFPS(wantFps);
+            }
+        }
         PS2_IF_AGRESSIVE_LOGS({
             tick++;
             if ((tick % 120) == 0)

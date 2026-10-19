@@ -402,7 +402,20 @@ void main(float2 aPos, uniform float4 uQuad,
 }
 )";
 
-    // No depth textures: the depth modes (8, 11, 12) are not used on the Vita.
+    // The bloom mask's quad (mode 8), at a depth of its own: uQuad.x the NDC z.
+    const char *kQuadVertexDepth = R"(
+void main(float2 aPos, uniform float4 uQuad,
+          float4 out oPosition : POSITION,
+          float4 out vUV : TEXCOORD0)
+{
+    oPosition = float4(aPos, uQuad.x, 1.0);
+    vUV = float4(aPos * 0.5 + 0.5, 0.0, 0.0);
+}
+)";
+
+    // No depth textures: the depth modes (8, 11, 12) of the Mac are not used
+    // on the Vita; 8 and 11 are the bloom's there (its mask kept in the
+    // picture's alpha, see Renderer::bloomMask).
     // One program per mode (MODE defined in front): an "uber" shader with a
     // run-time mode and a loop is more than Vita3K's shader translation (and
     // the real GPU's branching) handles well.
@@ -442,8 +455,23 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     sum += tex2D(uSrc, (base + float2(0, 3)) * uSize.xy).r + tex2D(uSrc, (base + float2(1, 3)) * uSize.xy).r;
     sum += tex2D(uSrc, (base + float2(2, 3)) * uSize.xy).r + tex2D(uSrc, (base + float2(3, 3)) * uSize.xy).r;
     return float4(sum / 16.0, sum / 16.0, sum / 16.0, 1.0);
+#elif MODE == 8
+    return float4(0.0, 0.0, 0.0, uA.x);
 #elif MODE == 9
     return float4(0.0, 0.0, 0.0, saturate(tex2D(uSrc, uv).r * uA.x));
+#elif MODE == 11
+    // 4 x 4 reduction of the bloom mask in the picture's alpha, in the mask colour uB.rgb.
+    float2 base = floor(uv / uSize.xy / 4.0) * 4.0 + 0.5;
+    float sum = 0.0;
+    sum += tex2D(uSrc, (base + float2(0, 0)) * uSize.xy).a + tex2D(uSrc, (base + float2(1, 0)) * uSize.xy).a;
+    sum += tex2D(uSrc, (base + float2(2, 0)) * uSize.xy).a + tex2D(uSrc, (base + float2(3, 0)) * uSize.xy).a;
+    sum += tex2D(uSrc, (base + float2(0, 1)) * uSize.xy).a + tex2D(uSrc, (base + float2(1, 1)) * uSize.xy).a;
+    sum += tex2D(uSrc, (base + float2(2, 1)) * uSize.xy).a + tex2D(uSrc, (base + float2(3, 1)) * uSize.xy).a;
+    sum += tex2D(uSrc, (base + float2(0, 2)) * uSize.xy).a + tex2D(uSrc, (base + float2(1, 2)) * uSize.xy).a;
+    sum += tex2D(uSrc, (base + float2(2, 2)) * uSize.xy).a + tex2D(uSrc, (base + float2(3, 2)) * uSize.xy).a;
+    sum += tex2D(uSrc, (base + float2(0, 3)) * uSize.xy).a + tex2D(uSrc, (base + float2(1, 3)) * uSize.xy).a;
+    sum += tex2D(uSrc, (base + float2(2, 3)) * uSize.xy).a + tex2D(uSrc, (base + float2(3, 3)) * uSize.xy).a;
+    return float4(uB.rgb * (sum / 16.0), 1.0);
 #else
     return float4(tex2D(uSrc, uv).rgb * uB.rgb * uB.a, 1.0);
 #endif
@@ -465,12 +493,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     struct Texture
     {
         GLuint name = 0;
+        uint32_t clamp = 0; // the wrap set on it (bit 0 s, bit 1 t clamp): new textures repeat
         uint64_t used = 0;
         uint64_t bytes = 0;
     };
 
     struct Draw
     {
+        Draw(uint64_t m, const float c[16], const native_renderer::DrawState &s) : mesh(m), state(s) { std::memcpy(clip, c, sizeof(clip)); }
         uint64_t mesh;
         native_renderer::DrawState state;
         float clip[16];
@@ -488,7 +518,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     {
         GLuint mainProgram = 0, quadProgram = 0;
 #if defined(PS2X_NATIVE_VITA)
-        GLuint quadPrograms[11] = {}; // by mode (8: depth, not on the Vita)
+        GLuint quadPrograms[12] = {}; // by mode (8 and 11: the bloom mask's, see kQuadFragment)
 #endif
         GLuint quadBuffer = 0, blurBuffer = 0, vao = 0;
         // Uniform locations by (program, name): the names are string literals,
@@ -508,6 +538,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         Target colorPlain; // the picture's colour alone (passes that read its depth)
         Target color, background, backgroundSmall, reflection, refraction, refractionHalf, snapshot, shadowMask;
         Target previous; // the last frame shown (feedbackBlur)
+        // Tuning midFrameRedraw: the picture up to a mid-frame effect's layer
+        // drawn again into a target of its own (one per effect), and the
+        // heat haze's 256 x 256 copy apart from the water's.
+        Target prefix[3], hazeSmall;
         Target shownFrame[2]; // what the host shows, alternately (the GPU draws later: never the target being drawn)
         int shownIndex = 0;
         Target glowLayer, glowSmall[4]; // bossDeathEffect: layer 8 apart (on the picture's depth); 256, 128, 64, 64
@@ -517,9 +551,52 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         Target gsBloom[7];
         bool gsBloomHistory = false;
         uint32_t width = 0, height = 0;
+        // What is bound now (render() starts from nothing known: the host
+        // draws with its own state between frames). Binding only on a change
+        // keeps vitaGL from redoing its per-call work every draw.
+        GLuint boundFbo = ~0u, boundProgram = ~0u;
+        // Vita bloom: after its mask is written into the picture's alpha
+        // (bloomMask), the rest of the frame leaves the alpha alone.
+        bool keepAlpha = false;
         std::unordered_map<uint64_t, Mesh> meshes;
         std::unordered_map<uint64_t, Texture> textures;
         std::vector<Draw> draws;
+        std::vector<uint64_t> drawOrder; // layer << 32 | index: the draws in layer order, stable (sorting the draws themselves moved ~450 bytes each)
+        // The draw loop's state as last set (pass() forgets it whenever
+        // something else may have changed it): a call is made only for a
+        // change. vitaGL redoes work on every call (a blend change patches
+        // the fragment program; each uniform call looks its parameter up).
+        struct DrawCache
+        {
+            int blend = -1, depthTest = -1, depthMask = -1;
+            GLuint buffer = ~0u, texture = ~0u;
+        } cache;
+        // The main program's per-draw uniforms: locations looked up once, the
+        // last values sent (kept across frames: nothing else sets them).
+        enum MainUniform
+        {
+            uClip, uDirections, uColours, uMisc, uFogA, uFogB, uFogC, uFogColour, uDebug, kMainUniforms
+        };
+        GLint mainLocation[kMainUniforms] = {};
+        float mainLast[kMainUniforms][16] = {};
+        int mainLastCount[kMainUniforms] = {};
+        void uniform4(MainUniform slot, const float *v, int count)
+        {
+            float *last = mainLast[slot];
+            const int n = count * 4;
+            if (mainLastCount[slot] == count)
+            {
+                bool same = true;
+                for (int i = 0; i < n && same; ++i)
+                    same = last[i] == v[i];
+                if (same)
+                    return;
+            }
+            for (int i = 0; i < n; ++i)
+                last[i] = v[i];
+            mainLastCount[slot] = count;
+            glUniform4fv(mainLocation[slot], count, v);
+        }
         std::vector<native_renderer::Vertex> arena; // this frame's dynamic vertices
         GLuint arenaBuffers[3] = {};                 // in turn: the GPU may still read the last two
         int arenaIndex = 0;
@@ -598,22 +675,30 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         void useQuad(int mode)
         {
 #if defined(PS2X_NATIVE_VITA)
-            if (mode >= 0 && mode < 11 && quadPrograms[mode])
+            if (mode >= 0 && mode < 12 && quadPrograms[mode])
                 quadProgram = quadPrograms[mode];
 #else
             (void)mode;
 #endif
-            glUseProgram(quadProgram);
+            useProgram(quadProgram);
+        }
+
+        void useProgram(GLuint p)
+        {
+            if (p == boundProgram)
+                return;
+            glUseProgram(p);
+            boundProgram = p;
         }
 
         bool init()
         {
             mainProgram = program(kMainVertex, kMainFragment, {"aPos", "aNormal", "aColor", "aUV"});
 #if defined(PS2X_NATIVE_VITA)
-            for (int mode : {0, 1, 2, 3, 4, 5, 6, 7, 9, 10})
+            for (int mode : {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11})
             {
                 const std::string source = "#define MODE " + std::to_string(mode) + "\n" + kQuadFragment;
-                quadPrograms[mode] = program(mode == 3 ? kQuadVertexTurned : kQuadVertex, source.c_str(), {"aPos"});
+                quadPrograms[mode] = program(mode == 3 ? kQuadVertexTurned : (mode == 8 ? kQuadVertexDepth : kQuadVertex), source.c_str(), {"aPos"});
                 if (!quadPrograms[mode])
                     return false;
                 quadProgram = quadPrograms[mode];
@@ -640,6 +725,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             glBindBuffer(GL_ARRAY_BUFFER, blurBuffer);
             glBufferData(GL_ARRAY_BUFFER, sizeof(corners), corners, GL_STATIC_DRAW);
             glUseProgram(mainProgram);
+            {
+                const char *names[kMainUniforms] = {"uClip", "uDirections", "uColours", "uMisc", "uFogA", "uFogB", "uFogC", "uFogColour", "uDebug"};
+                for (int i = 0; i < kMainUniforms; ++i)
+                    mainLocation[i] = glGetUniformLocation(mainProgram, names[i]);
+            }
             glUniform1i(uniform(true, "uTex"), 0);
             glUniform1i(uniform(true, "uBackground"), 1);
             glUniform1i(uniform(true, "uReflection"), 2);
@@ -721,6 +811,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             makeTarget(reflection, 256, 256, true);
 #endif
             makeTarget(refraction, 256, 256, false);
+            makeTarget(hazeSmall, 256, 256, false);
+            for (Target &t : prefix)
+                if (t.texture)
+                    makeTarget(t, w, h, true);
             makeTarget(refractionHalf, 128, 128, false);
             for (Target &t : bloomTex)
                 makeTarget(t, std::max(w / 4u, 1u), std::max(h / 4u, 1u), false);
@@ -754,36 +848,50 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             height = h;
         }
 
-        // Blending as the Metal pipelines set it (alpha: source kept).
-        static void setBlend(native_renderer::Blend blend)
+        // Blending as the Metal pipelines set it (alpha: source kept), or
+        // with the destination's alpha kept (keepAlpha: the Vita bloom's mask
+        // lives there; blending, not glColorMask, which vitaGL did not hold).
+        static void setBlend(native_renderer::Blend blend, bool keepAlpha = false)
         {
+            const GLenum alphaSrc = keepAlpha ? GL_ZERO : GL_ONE, alphaDst = keepAlpha ? GL_ONE : GL_ZERO;
             switch (blend)
             {
             case native_renderer::Blend::Opaque:
-                glDisable(GL_BLEND);
+                if (!keepAlpha)
+                {
+                    glDisable(GL_BLEND);
+                    return;
+                }
+                glEnable(GL_BLEND);
+                glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
+                glBlendFuncSeparate(GL_ONE, GL_ZERO, GL_ZERO, GL_ONE);
                 return;
             case native_renderer::Blend::Additive:
                 glEnable(GL_BLEND);
                 glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
-                glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE, GL_ONE, GL_ZERO);
+                glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE, alphaSrc, alphaDst);
                 return;
             case native_renderer::Blend::Subtract:
                 glEnable(GL_BLEND);
                 glBlendEquationSeparate(GL_FUNC_REVERSE_SUBTRACT, GL_FUNC_ADD);
-                glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE, GL_ONE, GL_ZERO);
+                glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE, alphaSrc, alphaDst);
                 return;
             default:
                 glEnable(GL_BLEND);
                 glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
-                glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ZERO);
+                glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, alphaSrc, alphaDst);
                 return;
             }
         }
 
         void bindTarget(const Target &t)
         {
+            if (t.fbo == boundFbo)
+                return;
             glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
             glViewport(0, 0, static_cast<GLsizei>(t.width), static_cast<GLsizei>(t.height));
+            boundFbo = t.fbo;
+            ++native_renderer::frameCounters().targets;
         }
 
         static void bindTexture(int unit, GLuint texture)
@@ -936,6 +1044,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     void Renderer::render(uint32_t w, uint32_t h)
     {
         ensureTargets(w, h);
+        boundFbo = boundProgram = ~0u;
         if (!arena.empty())
         {
             // One upload for every dynamic mesh of the frame (in place of one
@@ -946,7 +1055,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             glBindBuffer(GL_ARRAY_BUFFER, arenaBuffers[arenaIndex]);
             glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(arena.size() * sizeof(native_renderer::Vertex)), arena.data(), GL_STREAM_DRAW);
         }
-        std::stable_sort(draws.begin(), draws.end(), [](const Draw &a, const Draw &b) { return a.state.order < b.state.order; });
+        drawOrder.clear();
+        drawOrder.reserve(draws.size());
+        for (size_t i = 0; i < draws.size(); ++i)
+            drawOrder.push_back((static_cast<uint64_t>(draws[i].state.order) << 32) | i);
+        std::sort(drawOrder.begin(), drawOrder.end());
         const bool fogOn = fog.enabled && fog.width > 0.0f;
         bool haveMirror = false;
         for (const Draw &d : draws)
@@ -963,6 +1076,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #else
         static const bool hardShadows = std::getenv("SOTC_SHADOW_HARD") != nullptr;
 #endif
+        // What the water (textured 3) and the heat haze (4) read when the
+        // mid-frame redraw made them their own copies (0: the usual sources).
+        GLuint waterSource = 0, hazeSourceTexture = 0;
         uint32_t softOrder = 0;
         float softAmount = 0.0f;
         if (!hardShadows)
@@ -1008,7 +1124,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 bindTexture(0, backgroundSmall.texture);
                 quad(target, 0, QuadBlend::None);
             }
-            glUseProgram(mainProgram);
+            useProgram(mainProgram);
             if (!backgroundOnly)
                 bindTexture(1, backgroundSmall.texture);
             if (!mirror)
@@ -1038,16 +1154,21 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 const float a[4] = {shadowAmount, 0, 0, 0};
                 quad(target, 5, QuadBlend::Darken, a);
                 glDisable(GL_STENCIL_TEST);
-                glUseProgram(mainProgram);
+                useProgram(mainProgram);
                 // quad() turned the depth test off: the rest of the pass needs
                 // it (without it, everything after layer 7 covered the scene).
                 glEnable(GL_DEPTH_TEST);
                 glDepthFunc(GL_LEQUAL);
                 glDepthMask(GL_TRUE);
                 shadowAmount = 0.0f;
+                cache.blend = cache.depthTest = cache.depthMask = -1;
+                cache.buffer = cache.texture = ~0u;
             };
-            for (const Draw &d : draws)
+            cache.blend = cache.depthTest = cache.depthMask = -1;
+            cache.buffer = cache.texture = ~0u;
+            for (const uint64_t key : drawOrder)
             {
+                const Draw &d = draws[static_cast<size_t>(key & 0xFFFFFFFFu)];
                 if (backgroundOnly && !d.state.background)
                     continue;
                 if (mirror != d.state.reflectionSource)
@@ -1064,9 +1185,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 if (mesh == meshes.end() || mesh->second.count == 0)
                     continue;
                 mesh->second.used = arenaFrame;
-                glBindFramebuffer(GL_FRAMEBUFFER, target.fbo);
-                glViewport(0, 0, static_cast<GLsizei>(target.width), static_cast<GLsizei>(target.height));
-                glUseProgram(mainProgram);
+                bindTarget(target);
+                useProgram(mainProgram);
                 static const bool checkArena = std::getenv("SOTC_GL_ARENA_LOG") != nullptr;
                 if (checkArena && mesh->second.dynamic && mesh->second.frame != arenaFrame)
                 {
@@ -1081,30 +1201,38 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 // attribute offset: past 64 KB it read garbage).
                 const size_t base = 0u;
                 const GLint firstVertex = mesh->second.dynamic ? static_cast<GLint>(mesh->second.first) : 0;
-                glBindBuffer(GL_ARRAY_BUFFER, mesh->second.dynamic ? arenaBuffers[arenaIndex] : mesh->second.buffer);
-                glEnableVertexAttribArray(0);
-                glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, x)));
-                glEnableVertexAttribArray(1);
-                glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, nx)));
-                glEnableVertexAttribArray(2);
-                glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, r)));
-                glEnableVertexAttribArray(3);
-                glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, u)));
-                glUniform4fv(uniform(true, "uClip"), 4, d.clip);
-                glUniform4fv(uniform(true, "uDirections"), 4, d.state.light);
-                glUniform4fv(uniform(true, "uColours"), 4, d.state.light + 16);
+                const GLuint vertexBuffer = mesh->second.dynamic ? arenaBuffers[arenaIndex] : mesh->second.buffer;
+                if (vertexBuffer != cache.buffer) // the frame's dynamic meshes share one buffer: set once
+                {
+                    cache.buffer = vertexBuffer;
+                    glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer);
+                    glEnableVertexAttribArray(0);
+                    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, x)));
+                    glEnableVertexAttribArray(1);
+                    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, nx)));
+                    glEnableVertexAttribArray(2);
+                    glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, r)));
+                    glEnableVertexAttribArray(3);
+                    glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, u)));
+                }
+                uniform4(uClip, d.clip, 4);
+                if (d.state.lit || d.state.fresnel) // read by the vertex program only then
+                {
+                    uniform4(uDirections, d.state.light, 4);
+                    uniform4(uColours, d.state.light + 16, 4);
+                }
                 if (d.state.shadowVolume)
                 {
                     if (backgroundOnly)
                         continue;
                     // The count where the faces pass the depth test: front +1, back -1.
                     const float misc[4] = {0, 1, 0, 0}, none[4] = {0, 0, 0, 0};
-                    glUniform4fv(uniform(true, "uMisc"), 1, misc);
-                    glUniform4fv(uniform(true, "uFogB"), 1, none);
-                    glUniform4fv(uniform(true, "uFogC"), 1, none);
-                    glUniform4fv(uniform(true, "uFogA"), 1, none);
-                    glUniform4fv(uniform(true, "uFogColour"), 1, none);
-                    glUniform4fv(uniform(true, "uDebug"), 1, none);
+                    uniform4(uMisc, misc, 1);
+                    uniform4(uFogB, none, 1);
+                    uniform4(uFogC, none, 1);
+                    uniform4(uFogA, none, 1);
+                    uniform4(uFogColour, none, 1);
+                    uniform4(uDebug, none, 1);
                     glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
 #if defined(PS2X_NATIVE_VITA)
                     // vitaGL bakes the colour mask into the fragment program's
@@ -1133,44 +1261,67 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     glDisable(GL_STENCIL_TEST);
                     shadowOrder = d.state.order;
                     shadowAmount = d.state.shadow;
+                    cache.blend = cache.depthTest = cache.depthMask = -1;
                     continue;
                 }
-                setBlend(d.state.blend);
-                const bool backdrop = d.state.screen || d.state.background;
-                if (backdrop)
-                    glDisable(GL_DEPTH_TEST);
-                else
+                if (static_cast<int>(d.state.blend) != cache.blend)
                 {
-                    glEnable(GL_DEPTH_TEST);
-                    if (d.state.overlay)
+                    setBlend(d.state.blend, keepAlpha);
+                    cache.blend = static_cast<int>(d.state.blend);
+                }
+                // The depth function is always LEQUAL here (the GS's GEQUAL: a
+                // surface drawn again in place passes); test and writes vary.
+                const bool backdrop = d.state.screen || d.state.background;
+                const int depthTest = backdrop ? 0 : 1;
+                const int depthMask = backdrop ? cache.depthMask
+                                               : (d.state.overlay || (d.state.blend == native_renderer::Blend::Additive && !d.state.writeDepth) || d.state.noDepthWrite ? 0 : 1);
+                if (depthTest != cache.depthTest)
+                {
+                    if (depthTest)
                     {
+                        glEnable(GL_DEPTH_TEST);
                         glDepthFunc(GL_LEQUAL);
-                        glDepthMask(GL_FALSE);
                     }
                     else
-                    {
-                        glDepthFunc(GL_LEQUAL); // the GS's GEQUAL: a surface drawn again in place passes
-                        glDepthMask((d.state.blend == native_renderer::Blend::Additive && !d.state.writeDepth) || d.state.noDepthWrite ? GL_FALSE : GL_TRUE);
-                    }
+                        glDisable(GL_DEPTH_TEST);
+                    cache.depthTest = depthTest;
+                }
+                if (depthMask != cache.depthMask)
+                {
+                    glDepthMask(depthMask ? GL_TRUE : GL_FALSE);
+                    cache.depthMask = depthMask;
                 }
                 auto tex = d.state.texture ? textures.find(d.state.texture) : textures.end();
                 if (d.state.texture && tex == textures.end())
                     ++texStats.missing;
                 const int textured = d.state.previousFrame ? 5 : d.state.reflectionSample ? 2 : (d.state.refractionSample ? 3 : (d.state.screenCopy ? 4 : (tex != textures.end() ? 1 : 0)));
                 if (textured == 5)
+                {
                     bindTexture(0, previous.texture);
+                    cache.texture = ~0u;
+                }
                 if (textured == 3 || textured == 4)
                 {
                     const native_renderer::Tuning &t = native_renderer::tuning();
                     const int source = static_cast<int>((textured == 4 ? t.hazeSource : t.waterSource) + 0.5f);
-                    bindTexture(3, source == 2 ? previous.texture : (source == 1 ? snapshot.texture : refraction.texture));
+                    const GLuint redrawn = textured == 4 ? hazeSourceTexture : waterSource;
+                    bindTexture(3, redrawn && source != 2 ? redrawn : (source == 2 ? previous.texture : (source == 1 ? snapshot.texture : refraction.texture)));
                 }
                 if (textured == 1)
                 {
                     tex->second.used = arenaFrame;
-                    bindTexture(0, tex->second.name);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, (d.state.clamp & 1u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, (d.state.clamp & 2u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+                    if (cache.texture != tex->second.name)
+                    {
+                        bindTexture(0, tex->second.name);
+                        cache.texture = tex->second.name;
+                    }
+                    if (tex->second.clamp != (d.state.clamp & 3u)) // a texture's wrap is its own state: set when it changes
+                    {
+                        tex->second.clamp = d.state.clamp & 3u;
+                        bindTexture(0, tex->second.name); // unit 0 active (a refraction draw may have left unit 3)
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, (d.state.clamp & 1u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, (d.state.clamp & 2u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+                    }
                 }
                 const float misc[4] = {d.state.fresnel ? -1.0f : (d.state.lit ? 1.0f : 0.0f), d.state.opacity, d.state.uvOffset[0], d.state.uvOffset[1]};
                 const bool vertexFog = fog.vertexFog && !d.state.screen && (!d.state.background || bgFog);
@@ -1195,12 +1346,12 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         debug[k] = d.state.reflectionTint[k];
                     debug[3] = -d.state.reflectionTint[3];
                 }
-                glUniform4fv(uniform(true, "uMisc"), 1, misc);
-                glUniform4fv(uniform(true, "uFogA"), 1, fogA);
-                glUniform4fv(uniform(true, "uFogB"), 1, fogB);
-                glUniform4fv(uniform(true, "uFogC"), 1, fogC);
-                glUniform4fv(uniform(true, "uFogColour"), 1, fogColour);
-                glUniform4fv(uniform(true, "uDebug"), 1, debug);
+                uniform4(uMisc, misc, 1);
+                uniform4(uFogA, fogA, 1);
+                uniform4(uFogB, fogB, 1);
+                uniform4(uFogC, fogC, 1);
+                uniform4(uFogColour, fogColour, 1);
+                uniform4(uDebug, debug, 1);
                 glDrawArrays(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(mesh->second.count));
             }
             resolveShadows();
@@ -1216,7 +1367,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             copy(background, backgroundSmall); // bgEnd: reduced to 256 x 256
         }
 #if defined(PS2X_NATIVE_VITA)
-        const bool bloomOn = false; // reads depth
+        const bool bloomOn = false; // the Mac's reads depth; the Vita's is vitaBloom
+        const bool vitaBloom = bloom.enabled && bloom.color[3] > 0.0f;
         const bool dofOn = false;
 #else
         const bool bloomOn = bloom.enabled;
@@ -1270,12 +1422,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             bindTexture(0, bloomTex[2].texture);
             quad(colorPlain, 10, QuadBlend::Add, nullptr, colour);
         };
-        auto doBlur = [&](const native_renderer::ScreenBlur &b)
+        auto doBlur = [&](const native_renderer::ScreenBlur &b, const Target *redrawn)
         {
             if (b.steps <= 0)
                 return;
-            snapshotColor();
-            bindTexture(0, snapshot.texture);
+            if (!redrawn)
+                snapshotColor();
+            bindTexture(0, redrawn ? redrawn->texture : snapshot.texture);
             for (int i = 0; i < b.steps; ++i)
             {
                 const float f = static_cast<float>(b.steps - i) / static_cast<float>(b.steps);
@@ -1412,10 +1565,62 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             bindTexture(2, color.depth);
             quad(colorPlain, 11, QuadBlend::Over, a);
         };
+        // The Vita's bloom (no depth textures): at the bloom's layer, the
+        // picture's alpha becomes its mask: 0 everywhere, then 1 where a
+        // full-screen quad at the threshold's depth passes the depth test
+        // (what lies beyond GS Z threshold + 1: the sky and the far
+        // landscape). The rest of the frame keeps that alpha; the mask is
+        // reduced and blurred after the frame, and that glow is added here,
+        // at the bloom's layer, the next frame (under the 2D drawn later, as
+        // the PS2 adds it: one frame late, under the game's own 98% history).
+        auto bloomMask = [&]
+        {
+            if (bloomHistory)
+            {
+                // Strength x 0.46: this glow is the narrow one the Mac had
+                // before the GS chain (its strength was set by eye then).
+                const float colour[4] = {bloom.color[0], bloom.color[1], bloom.color[2], bloom.color[3] * 0.46f};
+                bindTexture(0, bloomTex[2].texture);
+                quad(color, 10, QuadBlend::Add, nullptr, colour);
+            }
+            float dt = 1.0f;
+            if (bloom.zB > 0.0f)
+                dt = std::clamp(1.0f - 0.1f * (bloom.threshold + 1.0f - bloom.zA) / bloom.zB, 0.0f, 1.0f);
+            bindTarget(color);
+            useQuad(8);
+            glEnable(GL_BLEND); // colour kept, alpha written
+            glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
+            glBlendFuncSeparate(GL_ZERO, GL_ONE, GL_ONE, GL_ZERO);
+            glDisable(GL_CULL_FACE);
+            glDisable(GL_STENCIL_TEST);
+            glDepthMask(GL_FALSE);
+            glBindBuffer(GL_ARRAY_BUFFER, quadBuffer);
+            glEnableVertexAttribArray(0);
+            glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+            for (GLuint i = 1; i < 4; ++i)
+                glDisableVertexAttribArray(i);
+            for (int k = 0; k < 2; ++k)
+            {
+                const float a[4] = {k ? 1.0f : 0.0f, 0, 0, 0}, q[4] = {k ? 2.0f * dt - 1.0f : -1.0f, 0, 0, 0};
+                if (k)
+                {
+                    glEnable(GL_DEPTH_TEST);
+                    glDepthFunc(GL_LEQUAL);
+                }
+                else
+                    glDisable(GL_DEPTH_TEST);
+                glUniform4fv(uniform(false, "uA"), 1, a);
+                glUniform4fv(uniform(false, "uQuad"), 1, q);
+                glDrawArrays(GL_TRIANGLES, 0, 3);
+            }
+            keepAlpha = true;
+            glDepthFunc(GL_LEQUAL);
+        };
         struct Event
         {
             uint32_t order;
             int blur; // -1 bloom, -2 glow, -3 shadows, -4 refraction copy, -5 depth of field
+            int prefix = -1; // midFrameRedraw: the target its picture so far was drawn into
         };
         std::vector<Event> events;
         if (dofOn)
@@ -1436,19 +1641,72 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #endif
         if (bloomOn)
             events.push_back({bloom.order, -1});
+#if defined(PS2X_NATIVE_VITA)
+        else if (vitaBloom)
+            events.push_back({bloom.order, -8});
+#endif
         else
             bloomHistory = gsBloomHistory = false;
         for (size_t i = 0; i < blurs.size(); ++i)
             events.push_back({blurs[i].order, static_cast<int>(i)});
         std::stable_sort(events.begin(), events.end(), [](const Event &x, const Event &y) { return x.order < y.order; });
+        // Mid-frame redraw (Tuning midFrameRedraw; the Vita's default): an
+        // effect that reads the picture so far (water refraction, heat haze,
+        // screen blur) gets it drawn again into a target of its own, before
+        // the picture itself, which is then drawn in one go. Taking the
+        // picture up again after drawing elsewhere lost it in Vita3K (what was
+        // drawn before came back as an older frame; with the effects that add
+        // light, the screen went white). Costs the draws below that layer a
+        // second time, only in frames with such an effect.
+        if (native_renderer::tuning().midFrameRedraw)
+        {
+            const native_renderer::Tuning &t = native_renderer::tuning();
+            const int hazeFrom = static_cast<int>(t.hazeSource + 0.5f), waterFrom = static_cast<int>(t.waterSource + 0.5f);
+            int k = 0;
+            for (Event &ev : events)
+            {
+                const bool water = ev.blur == -4 && haveRefraction && ev.order == 9u && waterFrom != 2;
+                const bool haze = ev.blur == -4 && screenCopyOrder && ev.order == screenCopyOrder && hazeFrom != 2;
+                if (!(ev.blur >= 0 || water || haze) || k >= 3)
+                    continue;
+                Target &pre = prefix[k];
+                if (!pre.texture)
+                    makeTarget(pre, w, h, true);
+                boundFbo = ~0u;
+                pass(pre, false, 0, ev.order, false);
+                ev.prefix = k++;
+                auto small = [&](Target &to) // the PS2's: 256 x 256, blurred once through 128 x 128
+                {
+                    copy(pre, to);
+                    copy(to, refractionHalf);
+                    copy(refractionHalf, to);
+                };
+                if (water)
+                {
+                    if (waterFrom == 0)
+                        small(refraction);
+                    waterSource = waterFrom == 0 ? refraction.texture : pre.texture;
+                }
+                if (haze)
+                {
+                    if (hazeFrom == 0)
+                        small(hazeSmall);
+                    hazeSourceTexture = hazeFrom == 0 ? hazeSmall.texture : pre.texture;
+                }
+            }
+        }
         uint32_t from = 0;
         bool loaded = false;
         for (const Event &ev : events)
         {
+            if (ev.prefix >= 0 && ev.blur == -4)
+                continue; // its copies are made
             pass(color, false, from, ev.order, loaded);
             loaded = true;
             from = ev.order;
-            if (ev.blur == -6)
+            if (ev.blur == -8)
+                bloomMask();
+            else if (ev.blur == -6)
                 doFog();
             else if (ev.blur == -5)
                 doDof();
@@ -1464,9 +1722,31 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             else if (ev.blur < 0)
                 doBloom();
             else
-                doBlur(blurs[static_cast<size_t>(ev.blur)]);
+                doBlur(blurs[static_cast<size_t>(ev.blur)], ev.prefix >= 0 ? &prefix[ev.prefix] : nullptr);
         }
         pass(color, false, from, ~0u, loaded);
+        const bool bloomAdd = keepAlpha;
+        keepAlpha = false;
+        if (bloomAdd)
+        {
+            // The mask (alpha) reduced 4 x 4 in the mask colour, blurred,
+            // over last frame's at the game's temporal share (bloomTex[2]),
+            // added by the next frame's bloomMask.
+            useQuad(11);
+            const float texel[4] = {1.0f / static_cast<float>(width), 1.0f / static_cast<float>(height), 0, 0};
+            glUniform4fv(uniform(false, "uSize"), 1, texel);
+            const float maskColour[4] = {bloom.maskColor[0], bloom.maskColor[1], bloom.maskColor[2], 1};
+            bindTexture(0, color.texture);
+            quad(bloomTex[0], 11, QuadBlend::None, nullptr, maskColour);
+            const int rounds = std::clamp(static_cast<int>(native_renderer::tuning().bloomRounds + 0.5f), 1, 8);
+            blur(rounds, native_renderer::tuning().bloomSpread);
+            const float amount[4] = {bloomHistory ? 1.0f - bloom.temporal : 1.0f, 0, 0, 0};
+            bindTexture(0, bloomTex[0].texture);
+            bindTexture(1, bloomTex[2].texture);
+            quad(bloomTex[1], 2, QuadBlend::None, amount);
+            std::swap(bloomTex[1], bloomTex[2]);
+            bloomHistory = true;
+        }
         copy(colorPlain, previous);
 
 
@@ -1477,7 +1757,12 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             shownIndex ^= 1;
             copy(colorPlain, shownFrame[shownIndex]);
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            boundFbo = boundProgram = ~0u;
+            const bool timed = native_renderer::tuning().frameLog;
+            const uint64_t start = timed ? native_renderer::nowUs() : 0u;
             hook(shownFrame[shownIndex].texture, w, h);
+            if (timed)
+                native_renderer::frameCounters().presentUs += native_renderer::nowUs() - start;
             return;
         }
         // Read back, top row first (the GL picture is y-up).
@@ -1558,6 +1843,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+            t.clamp = 0;
+            r->cache.texture = ~0u;
         }
         void beginFrame() override
         {
@@ -1568,11 +1855,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         }
         void draw(uint64_t mesh, const float clip[16], const native_renderer::DrawState &state) override
         {
-            Draw d;
-            d.mesh = mesh;
-            d.state = state;
-            std::memcpy(d.clip, clip, sizeof(d.clip));
-            r->draws.push_back(d);
+            r->draws.emplace_back(mesh, clip, state);
         }
         void setFog(const native_renderer::Fog &fog) override { r->fog = fog; }
         void setBloom(const native_renderer::Bloom &bloom) override { r->bloom = bloom; }
