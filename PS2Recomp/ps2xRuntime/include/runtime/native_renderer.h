@@ -89,6 +89,12 @@ namespace native_renderer
         // reduced and blurred, at its own screen position, times
         // reflectionTint (the same packet's).
         bool refractionSample = false;
+        // SotC's water microcode 1: the vertex alpha times 0.2 + 0.8 (1 - |n . v|),
+        // v the normalised camera-space position, n the model's up axis, with
+        // light[0..15] the model-view matrix (columns) instead of the lights.
+        bool fresnel = false;
+        // reflectionBegin's ripple of the mirror image (t, H; H = 0: none).
+        float mirrorRipple[2] = {0.0f, 0.0f};
         // A screen-copy draw (SotC's 0x10f37c8 at layer 23): its texture is
         // the picture before its layer reduced to 256 x 256, at its own UV.
         bool screenCopy = false;

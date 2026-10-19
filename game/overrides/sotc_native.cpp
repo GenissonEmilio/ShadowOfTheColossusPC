@@ -1529,7 +1529,7 @@ namespace sotc_native
                     out[r] = e.axes[0][r] * x + e.axes[1][r] * y;
             else
                 for (int r = 0; r < 3; ++r)
-                    out[r] = e.m[r] * x + e.m[4 + r] * y + ((e.type == 2u || e.type == 4u || e.type == 7u) ? e.m[12 + r] : 0.0f); // types 2, 4, 7 add the matrix's translation row
+                    out[r] = e.m[r] * x + e.m[4 + r] * y + ((e.type == 2u || e.type == 4u || e.type == 7u) ? e.m[12 + r] : 0.0f); // types 2, 4, 7 add the matrix's translation row (5 is a streak)
         };
         // Type 3 (streaks) side vectors: (p - eye) x (p1 - p2), half the width
         // long; the eye is VU 16, the 17th qword of the constants at *0x118bff4.
@@ -1575,9 +1575,11 @@ namespace sotc_native
                 col(c, 1.0f);
                 return c;
             };
-            if (e.type == 3u)
+            if (e.type == 3u || e.type == 5u)
             {
                 // A streak from p (q0, width in w) to p2 (q2): corners p +- a, p2 +- b.
+                // Type 5 (microcode 7 at 0xba8) is the same streak drawn as type
+                // 4's lit fan (routine 0xe48) around the corners' mean.
                 const float p2[3] = {real(q + 32u), real(q + 36u), real(q + 40u)};
                 const float d[3] = {p[0] - p2[0], p[1] - p2[1], p[2] - p2[2]};
                 const float half = real(q + 12u) * 0.5f;
@@ -1595,9 +1597,36 @@ namespace sotc_native
                     col(c, 1.0f);
                     return c;
                 };
-                const native_renderer::Vertex c16 = corner(p, sa, 1, 0, 0), c17 = corner(p, sa, -1, e.vec[0], 0), c18 = corner(p2, sb, 1, 0, e.vec[1]),
-                                              c19 = corner(p2, sb, -1, e.vec[0], e.vec[1]);
-                tris.insert(tris.end(), {c16, c17, c18, c17, c19, c18});
+                native_renderer::Vertex c16 = corner(p, sa, 1, 0, 0), c17 = corner(p, sa, -1, e.vec[0], 0), c18 = corner(p2, sb, 1, 0, e.vec[1]),
+                                        c19 = corner(p2, sb, -1, e.vec[0], e.vec[1]);
+                if (e.type == 3u)
+                {
+                    tris.insert(tris.end(), {c16, c17, c18, c17, c19, c18});
+                    continue;
+                }
+                native_renderer::Vertex c = v;
+                c.x = (c16.x + c17.x + c18.x + c19.x) * 0.25f;
+                c.y = (c16.y + c17.y + c18.y + c19.y) * 0.25f;
+                c.z = (c16.z + c17.z + c18.z + c19.z) * 0.25f;
+                c.u = e.vec[0] * 0.5f;
+                c.v = e.vec[1] * 0.5f;
+                auto shade = [&](native_renderer::Vertex &o, const float *n)
+                {
+                    const float dd = n[0] * e.light[0] + n[1] * e.light[1] + e.shade[3] * n[2] * e.light[2] + e.shade[3];
+                    float t = std::min(dd * 0.5f, 1.0f);
+                    t *= t;
+                    col(o, t * e.shade[1] + e.shade[0]);
+                };
+                shade(c, e.axes[2]);
+                for (native_renderer::Vertex *o : {&c16, &c17, &c18, &c19})
+                {
+                    float n[3] = {c.x - o->x, c.y - o->y, c.z - o->z};
+                    const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+                    for (int k = 0; k < 3; ++k)
+                        n[k] = len > 0.0f ? n[k] / len : 0.0f;
+                    shade(*o, n);
+                }
+                tris.insert(tris.end(), {c, c16, c17, c, c17, c19, c, c19, c18, c, c18, c16});
                 continue;
             }
             // Type 7: each particle's own texture cell offset (q2 z / w).
@@ -1681,6 +1710,34 @@ namespace sotc_native
         if (native_renderer::tuning().screenBlur && b.steps > 0 && b.steps < 64)
             native_renderer::addScreenBlur(b);
         g_screenBlur(rdram, ctx, runtime);
+    }
+
+    // A 4 x 4 inverse (column-major); false when singular.
+    bool invert4(const float *m, float *out)
+    {
+        float inv[16];
+        inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+        inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+        inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+        inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+        inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+        inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+        inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+        inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+        inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+        inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+        inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+        inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+        inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+        inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+        inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+        inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+        const float det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+        if (det == 0.0f || !std::isfinite(det))
+            return false;
+        for (int i = 0; i < 16; ++i)
+            out[i] = inv[i] / det;
+        return true;
     }
 
     void modelDispHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -2020,13 +2077,17 @@ namespace sotc_native
                 native_renderer::draw(id ^ (1ull << 61), transform, second);
                 ++g_frameDraws;
             }
-            // Reflecting surfaces (flags 0x2200, modelDisp): again in layer 15,
-            // showing the mirror image (layers 12/13, reflectionBegin) at their
-            // own screen position, in the colour their pass packet unpacks to
-            // VU 0x3f3 (the per-surface packets at header +0x14 [1], 0x40 each).
+            // Reflecting surfaces (flags 0x2200, modelDisp): their pass packet
+            // (header +0x14 [1] + s x 0x40 + 0x20, a CALL to the constants
+            // unpacked to VU 0x3f3) and their vertices again, in layer 9
+            // (microcode 2) over waterRefractionBegin's blurred copy and in
+            // layer 15 (microcode 1) over reflectionBegin's rippled mirror;
+            // surfaces with bit 25 go to layer 14 instead (unrippled mirror,
+            // ALPHA 0x8000000064: written as is).
             uint64_t sflags;
             std::memcpy(&sflags, g_ram + ((s + 0x18u) & 0x1FFFFF8u), 8);
-            if ((sflags & 0x2200u) == 0x2200u && !noReflect && !state.debugColour)
+            const bool layer14 = ((sflags >> 25) & 1u) != 0;
+            if ((layer14 || (sflags & 0x2200u) == 0x2200u) && !noReflect && !state.debugColour)
             {
                 const uint32_t rec = word(word(header + 0x14u) + 4u) + surface * 0x40u + 0x20u;
                 const uint32_t data = word(rec + 4u); // CALL target: its VU constants
@@ -2035,26 +2096,63 @@ namespace sotc_native
                 refl.reflectionSample = true;
                 refl.overlay = true;
                 refl.writeDepth = false;
+                refl.lit = false;
+                refl.maxLod = 0.0f;
                 refl.blend = native_renderer::Blend::Normal;
-                refl.order = 15;
+                refl.order = layer14 ? 14u : 15u;
+                // Microcode 1 (VU1 image 98a396b7, routine 0x648): ST from the
+                // screen position, RGB the vertex colour as is, alpha = vertex
+                // alpha x (VU 0x3f3 w / 128) x (0.2 + 0.8 (1 - |n . v|)), v the
+                // normalised camera-space position, n the model's up axis in
+                // camera space (VU 972-975, the part's model-view matrix).
+                refl.fresnel = true;
+                const float *mv = nullptr;
+                float modelView[16];
+                if (transform == clip && invert4(projection, modelView))
+                {
+                    float m[16];
+                    for (int c = 0; c < 4; ++c)
+                        for (int r = 0; r < 4; ++r)
+                        {
+                            float sum = 0.0f;
+                            for (int k = 0; k < 4; ++k)
+                                sum += modelView[k * 4 + r] * clip[c * 4 + k];
+                            m[c * 4 + r] = sum;
+                        }
+                    std::memcpy(modelView, m, sizeof(m));
+                    mv = modelView;
+                }
+                static const float identity4[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+                std::memcpy(refl.light, mv ? mv : identity4, 16 * sizeof(float));
                 static const float tintAlpha = std::getenv("SOTC_REFLECT_ALPHA") ? static_cast<float>(std::atof(std::getenv("SOTC_REFLECT_ALPHA"))) : 1.0f;
-                for (int c = 0; c < 3; ++c)
-                    refl.reflectionTint[c] = std::clamp(real(data + 0x30u + c * 4u) / 128.0f, 0.0f, 2.0f);
-                refl.reflectionTint[3] = tintAlpha;
-                if (native_renderer::tuning().rawMirror)
-                    refl.reflectionTint[0] = refl.reflectionTint[1] = refl.reflectionTint[2] = 1.0f;
+                refl.reflectionTint[0] = refl.reflectionTint[1] = refl.reflectionTint[2] = 1.0f;
+                refl.reflectionTint[3] = std::clamp(real(data + 0x3Cu) / 128.0f, 0.0f, 2.0f) * tintAlpha;
+                // reflectionBegin's ripple: the mirror copied to fbp + 0x20 in 32
+                // bands of 8 rows, band i shifted by (sin(2 (12 i + t) x 24 pi / H)
+                // + 1) (0.8 x 8 i / H + 0.2) texels, t = *0x118c030 (+0.1 x the
+                // frame step), H = *0x1192090.
+                refl.mirrorRipple[0] = real(0x0118C030u);
+                refl.mirrorRipple[1] = static_cast<float>(static_cast<int32_t>(word(0x01192090u)));
+                if (layer14)
+                {
+                    refl.mirrorRipple[1] = 0.0f;
+                    refl.blend = native_renderer::Blend::Opaque;
+                }
                 native_renderer::draw(mesh, transform, refl);
                 ++g_frameDraws;
-                // And first in layer 9 the same way, showing the picture as it
-                // was before that layer (waterRefractionBegin's reduced copy).
+                // Microcode 2 in layer 9: the copy's colour as is (RGB 128), the
+                // vertex alpha under PABE (below 0x80 not blended): opaque.
                 const bool noRefract = !native_renderer::tuning().refraction;
                 static const float refractAlpha = std::getenv("SOTC_REFRACT_ALPHA") ? static_cast<float>(std::atof(std::getenv("SOTC_REFRACT_ALPHA"))) : 1.0f;
-                if (!noRefract)
+                if (!noRefract && !layer14)
                 {
                     native_renderer::DrawState refr = refl;
                     refr.reflectionSample = false;
                     refr.refractionSample = true;
+                    refr.fresnel = false;
+                    refr.blend = native_renderer::Blend::Normal;
                     refr.order = 9;
+                    refr.reflectionTint[0] = refr.reflectionTint[1] = refr.reflectionTint[2] = 1.0f;
                     refr.reflectionTint[3] = refractAlpha;
                     if (std::getenv("SOTC_REFRACT_SHOW")) // debugging: where it lands, in red
                     {

@@ -60,7 +60,13 @@ void main()
     vUV = vec4(aUV + uMisc.zw, c.w, fog * c.w);
     vColor = aColor / 128.0;
     vColor.a *= uMisc.y;
-    if (uMisc.x > 0.5)
+    if (uMisc.x < -0.5) // water (microcode 1): alpha x (0.2 + 0.8 (1 - |n . v|)) in camera space
+    {
+        vec4 p = uDirections[0] * aPos.x + uDirections[1] * aPos.y + uDirections[2] * aPos.z + uDirections[3];
+        float c = dot(normalize(p.xyz), uDirections[1].xyz);
+        vColor.a *= 0.2 + 0.8 * (1.0 - abs(c));
+    }
+    else if (uMisc.x > 0.5)
     {
         vec4 d = max(uDirections[0] * aNormal.x + uDirections[1] * aNormal.y + uDirections[2] * aNormal.z + uDirections[3], 0.0);
         d.w = 1.0;
@@ -106,7 +112,15 @@ void main()
     }
     if (textured > 1.5)
     {
-        oColor = vec4(clamp(texture(uReflection, screen).rgb * uDebug.rgb, 0.0, 1.0), -uDebug.w); // TEX0 TCC 0: the mirror's alpha is not read
+        // TEX0 TCC 0: the mirror's alpha is not read; the vertex alpha (microcode 1) x VU 0x3f3 w.
+        // reflectionBegin's ripple: band i of 32 (from the top) shifted by (sin(2 (12 i + t) 24 pi / H) + 1) (6.4 i / H + 0.2) texels.
+        vec2 uv = screen;
+        if (uFogC.z > 0.0)
+        {
+            float band = floor(clamp(1.0 - uv.y, 0.0, 0.999) * 32.0);
+            uv.x += (sin(2.0 * (12.0 * band + uFogC.y) * 75.39822 / uFogC.z) + 1.0) * (6.4 * band / uFogC.z + 0.2) / 256.0;
+        }
+        oColor = vec4(clamp(texture(uReflection, uv).rgb * uDebug.rgb * vColor.rgb, 0.0, 1.0), clamp(vColor.a * -uDebug.w, 0.0, 1.0));
         return;
     }
     float lod = uFogC.w > 0.0 ? clamp(log2(max(depth, 1e-3)) * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
@@ -249,7 +263,13 @@ void main(float3 aPos, float3 aNormal, float4 aColor, float2 aUV,
     vUV = float4(aUV + uMisc.zw, c.w, fog * c.w);
     vColor = aColor / 128.0;
     vColor.a *= uMisc.y;
-    if (uMisc.x > 0.5)
+    if (uMisc.x < -0.5) // water (microcode 1): alpha x (0.2 + 0.8 (1 - |n . v|)) in camera space
+    {
+        float4 p = uDirections[0] * aPos.x + uDirections[1] * aPos.y + uDirections[2] * aPos.z + uDirections[3];
+        float c = dot(normalize(p.xyz), uDirections[1].xyz);
+        vColor.a *= 0.2 + 0.8 * (1.0 - abs(c));
+    }
+    else if (uMisc.x > 0.5)
     {
         float4 d = max(uDirections[0] * aNormal.x + uDirections[1] * aNormal.y + uDirections[2] * aNormal.z + uDirections[3], 0.0);
         d.w = 1.0;
@@ -279,8 +299,16 @@ float4 main(float4 vUV : TEXCOORD0, float4 vColor : TEXCOORD1, float4 vScreen : 
     }
     if (textured > 2.5)
         return float4(saturate(tex2D(uRefraction, screen).rgb * uDebug.rgb), -uDebug.w);
-    if (textured > 1.5)
-        return float4(saturate(tex2D(uReflection, screen).rgb * uDebug.rgb), -uDebug.w); // TEX0 TCC 0: the mirror's alpha is not read
+    if (textured > 1.5) // TEX0 TCC 0: the mirror's alpha is not read; reflectionBegin's ripple
+    {
+        float2 uv = screen;
+        if (uFogC.z > 0.0)
+        {
+            float band = floor(clamp(1.0 - uv.y, 0.0, 0.999) * 32.0);
+            uv.x += (sin(2.0 * (12.0 * band + uFogC.y) * 75.39822 / uFogC.z) + 1.0) * (6.4 * band / uFogC.z + 0.2) / 256.0;
+        }
+        return float4(saturate(tex2D(uReflection, uv).rgb * uDebug.rgb * vColor.rgb), saturate(vColor.a * -uDebug.w));
+    }
     float lod = uFogC.w > 0.0 ? clamp(log2(max(depth, 1e-3)) * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
     float4 t = textured > 0.5 ? tex2Dlod(uTex, float4(vUV.xy, 0.0, lod)) : float4(1.0, 1.0, 1.0, 1.0);
     float alpha = saturate(t.a * (textured > 0.5 ? 2.0 : 1.0) * vColor.a);
@@ -1083,7 +1111,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, (d.state.clamp & 1u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, (d.state.clamp & 2u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
                 }
-                const float misc[4] = {d.state.lit ? 1.0f : 0.0f, d.state.opacity, d.state.uvOffset[0], d.state.uvOffset[1]};
+                const float misc[4] = {d.state.fresnel ? -1.0f : (d.state.lit ? 1.0f : 0.0f), d.state.opacity, d.state.uvOffset[0], d.state.uvOffset[1]};
                 const bool vertexFog = fog.vertexFog && !d.state.screen && (!d.state.background || bgFog);
 #if defined(PS2X_NATIVE_VITA)
                 // No depth texture for the zFog pass: the world before its layer
@@ -1094,7 +1122,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #endif
                 const float fogA[4] = {fog.start, fog.width, static_cast<float>(fog.steps), (!backgroundOnly && fogOn && (d.state.fogged || zFogged)) ? 1.0f : 0.0f};
                 const float fogB[4] = {static_cast<float>(w), static_cast<float>(h), vertexFog ? 1.0f : 0.0f, fog.base};
-                const float fogC[4] = {fog.scale, d.state.lodK, d.state.lodScale, d.state.maxLod};
+                // The mirror's ripple (t, H) where a reflection reads no mip level.
+                const float fogC[4] = {fog.scale, d.state.reflectionSample ? d.state.mirrorRipple[0] : d.state.lodK,
+                                       d.state.reflectionSample ? d.state.mirrorRipple[1] : d.state.lodScale, d.state.reflectionSample ? 0.0f : d.state.maxLod};
                 const float fogColour[4] = {fog.colour[0], fog.colour[1], fog.colour[2], static_cast<float>(textured)};
                 float debug[4] = {static_cast<float>(d.state.debugColour & 0xFFu) / 255.0f, static_cast<float>((d.state.debugColour >> 8) & 0xFFu) / 255.0f,
                                   static_cast<float>((d.state.debugColour >> 16) & 0xFFu) / 255.0f, d.state.debugColour ? 1.0f : 0.0f};

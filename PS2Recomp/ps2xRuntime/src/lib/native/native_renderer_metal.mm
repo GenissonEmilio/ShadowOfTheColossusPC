@@ -53,6 +53,7 @@ struct FogParams
     float3 colour;
     float4 debug; // w > 0: flat debug colour
     int clamp;    // the GS's CLAMP: bit 0 u, bit 1 v
+    float2 ripple; // the mirror's ripple (t, H; H = 0: none)
 };
 
 struct Light
@@ -77,7 +78,15 @@ vertex VOut nativeVertex(VIn in [[stage_in]], constant float4x4 &clip [[buffer(1
     out.uv = in.uv + light.uvOffset;
     out.color = float4(in.color) / 128.0; // 0x80 = 1.0
     out.color.a *= light.opacity;
-    if (light.lit != 0)
+    if (light.lit < 0)
+    {
+        // Water (microcode 1): alpha x (0.2 + 0.8 (1 - |n . v|)) in camera space.
+        float4 p = light.directions * float4(in.position, 1.0);
+        float4 n = light.directions * float4(0.0, 1.0, 0.0, 0.0);
+        float c = dot(normalize(p.xyz), n.xyz);
+        out.color.a *= 0.2 + 0.8 * (1.0 - abs(c));
+    }
+    else if (light.lit != 0)
     {
         float4 d = max(light.directions * float4(in.normal, 1.0), 0.0);
         d.w = 1.0;
@@ -120,9 +129,17 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
         constexpr sampler clampLinear(address::clamp_to_edge, filter::linear);
         // reflectionBegin's layer 15 TEX0 is PSMCT24 with TCC 0: the mirror
         // image's alpha is never read; ALPHA 0x44 blends by the vertex alpha
-        // (the tint's, 128: opaque).
-        float3 r = reflection.sample(clampLinear, in.position.xy / fog.size).rgb;
-        return float4(saturate(r * fog.debug.rgb), -fog.debug.w);
+        // (microcode 1's, x VU 0x3f3 w in debug.w). The mirror as reflectionBegin
+        // ripples it: band i of 32 (8 rows of its 256) shifted right by
+        // (sin(2 (12 i + t) 24 pi / H) + 1) (0.8 x 8 i / H + 0.2) texels.
+        float2 uv = in.position.xy / fog.size;
+        if (fog.ripple.y > 0.0)
+        {
+            const float band = floor(saturate(uv.y) * 32.0);
+            uv.x += (sin(2.0 * (12.0 * band + fog.ripple.x) * 75.39822 / fog.ripple.y) + 1.0) * (0.8 * 8.0 * band / fog.ripple.y + 0.2) / 256.0;
+        }
+        float3 r = reflection.sample(clampLinear, uv).rgb;
+        return float4(saturate(r * fog.debug.rgb * in.color.rgb), saturate(in.color.a * -fog.debug.w));
     }
     const float lod = fog.maxLod > 0.0 ? clamp(log2(max(in.depth, 1e-3)) * fog.lodScale + fog.lodK, 0.0, fog.maxLod) : 0.0;
     constexpr sampler clampU(address::clamp_to_edge, address::repeat, address::repeat, filter::linear, mip_filter::linear);
@@ -905,7 +922,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                             float uvOffset[2];
                         } light;
                         std::memcpy(light.light, d.state.light, sizeof(light.light));
-                        light.lit = d.state.lit ? 1 : 0;
+                        light.lit = d.state.fresnel ? -1 : (d.state.lit ? 1 : 0);
                         light.opacity = d.state.opacity;
                         light.uvOffset[0] = d.state.uvOffset[0];
                         light.uvOffset[1] = d.state.uvOffset[1];
@@ -928,7 +945,8 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                             float colour[4];
                             float debug[4];
                             int clamp;
-                            int pad[3];
+                            int pad; // Metal aligns float2 to 8
+                            float ripple[2];
                         } fp = {fog.start, fog.width, (showFog && !d.state.screen) ? -1.0f : static_cast<float>(fog.steps), (!backgroundOnly && fogOn && d.state.fogged) ? 1 : 0,
                                 {static_cast<float>(w), static_cast<float>(h)},
                                 (fog.vertexFog && !d.state.screen && (!d.state.background || bgFog) && !(d.state.overlay && noOverlayFog)) ? 1 : 0, fog.base, fog.scale,
@@ -936,7 +954,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                                 {fog.colour[0], fog.colour[1], fog.colour[2], 0},
                                 {static_cast<float>(d.state.debugColour & 0xFFu) / 255.0f, static_cast<float>((d.state.debugColour >> 8) & 0xFFu) / 255.0f,
                                  static_cast<float>((d.state.debugColour >> 16) & 0xFFu) / 255.0f, d.state.debugColour ? 1.0f : 0.0f},
-                                d.state.clamp, {0, 0, 0}};
+                                d.state.clamp, 0, {d.state.mirrorRipple[0], d.state.mirrorRipple[1]}};
                         if (d.state.reflectionSample || d.state.refractionSample)
                         {
                             for (int k = 0; k < 3; ++k)
