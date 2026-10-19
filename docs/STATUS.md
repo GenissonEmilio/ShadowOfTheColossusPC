@@ -168,7 +168,6 @@ Guide: [`decomp.md`](decomp.md).
   under investigation.
 - **Vita:**
   - bloom and glow are off (no depth textures);
-  - the heat-haze screen copy shows white in one close-up of the bird;
   - speed on real hardware is not measured yet.
 - **Long runs on the Vita** need a confirmation run past 80 minutes with the
   bounded VU1 queue.

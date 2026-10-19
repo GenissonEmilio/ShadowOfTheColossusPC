@@ -92,14 +92,16 @@ void main()
     float textured = uFogColour.w;
     vec2 screen = vScreen.xy / vScreen.z * 0.5 + 0.5;
     float depth = vUV.z;
+    // Textured 5 and 4 sample pictures this renderer drew (y-up in GL) at
+    // the draw's PS2 UV (v down the screen): v is turned over.
     if (textured > 4.5) // the last frame shown, at the draw's UV
     {
-        oColor = vec4(texture(uTex, vUV.xy).rgb, 1.0) * vColor;
+        oColor = vec4(texture(uTex, vec2(vUV.x, 1.0 - vUV.y)).rgb, 1.0) * vColor;
         return;
     }
     if (textured > 3.5)
     {
-        vec4 c = vec4(texture(uRefraction, vUV.xy).rgb, 1.0) * vColor;
+        vec4 c = vec4(texture(uRefraction, vec2(vUV.x, 1.0 - vUV.y)).rgb, 1.0) * vColor;
         if (c.a < 0.02)
             discard;
         oColor = c;
@@ -338,11 +340,13 @@ float4 main(float4 vUV : TEXCOORD0, float4 vColor : TEXCOORD1, float4 vScreen : 
     float textured = uFogColour.w;
     float2 screen = vScreen.xy / vScreen.z * 0.5 + 0.5;
     float depth = vUV.z;
+    // Textured 5 and 4 sample pictures this renderer drew (y-up) at the
+    // draw's PS2 UV (v down the screen): v is turned over.
     if (textured > 4.5)
-        return float4(tex2D(uTex, vUV.xy).rgb, 1.0) * vColor;
+        return float4(tex2D(uTex, float2(vUV.x, 1.0 - vUV.y)).rgb, 1.0) * vColor;
     if (textured > 3.5)
     {
-        float4 c = float4(tex2D(uRefraction, vUV.xy).rgb, 1.0) * vColor;
+        float4 c = float4(tex2D(uRefraction, float2(vUV.x, 1.0 - vUV.y)).rgb, 1.0) * vColor;
         if (c.a < 0.02)
             discard;
         return c;
@@ -1272,8 +1276,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 // The depth function is always LEQUAL here (the GS's GEQUAL: a
                 // surface drawn again in place passes); test and writes vary.
                 const bool backdrop = d.state.screen || d.state.background;
-                const int depthTest = backdrop ? 0 : 1;
-                const int depthMask = backdrop ? cache.depthMask
+                const int depthTest = backdrop && !d.state.screenDepthTest ? 0 : 1;
+                const int depthMask = d.state.screenDepthTest ? 0
+                                      : backdrop ? cache.depthMask
                                                : (d.state.overlay || (d.state.blend == native_renderer::Blend::Additive && !d.state.writeDepth) || d.state.noDepthWrite ? 0 : 1);
                 if (depthTest != cache.depthTest)
                 {

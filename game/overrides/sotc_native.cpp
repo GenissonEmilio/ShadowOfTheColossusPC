@@ -969,7 +969,10 @@ namespace sotc_native
                       : (mode == 0x48u ? native_renderer::Blend::Additive : native_renderer::Blend::Normal);
         state.order = a.batchLayer;
         static const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
-        native_renderer::draw(mesh, identity, state);
+        // (x w, y w, w) -> clip (x w, y w, -, w): the backends take depth from w.
+        static const float fromDepth[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0};
+        state.screenDepthTest = state.screenCopy;
+        native_renderer::draw(mesh, state.screenDepthTest ? fromDepth : identity, state);
         ++g_frameDraws;
         a.batch.clear();
         a.batchKey = ~0ull;
@@ -993,13 +996,34 @@ namespace sotc_native
         a.batch.push_back(v2);
     }
 
-    void vertex2D(uint64_t xyz, bool kick)
+    // The view depth of a GS Z (the camera's zA + zB / w, as the bloom's
+    // threshold), for 2D draws tested against the picture's depth.
+    float viewDepth(uint32_t z)
+    {
+        if (!g_cameraContext)
+            return 1.0f;
+        const float zA = real(g_cameraContext + 0x4A0u + 10u * 4u), zB = real(g_cameraContext + 0x4A0u + 14u * 4u);
+        const float d = static_cast<float>(z) - zA;
+        const float w = d > 0.0f ? zB / d : 1e6f;
+        return std::isfinite(w) ? std::clamp(w, 0.11f, 1e6f) : 1e6f;
+    }
+
+    // z: the GS Z of XYZ2 / XYZ3 (32 bits) or XYZF2 / XYZF3 (24).
+    void vertex2D(uint64_t xyz, bool kick, uint32_t z)
     {
         Assembler &a = g_2d;
         native_renderer::Vertex o{};
         o.x = ((static_cast<float>(xyz & 0xFFFFu) / 16.0f) - 2048.0f) / 256.0f;
         o.y = -((static_cast<float>((xyz >> 16) & 0xFFFFu) / 16.0f) - 2048.0f) / 224.0f;
         o.nz = 1.0f;
+        if (a.header == kScreenCopy)
+        {
+            // The heat haze is depth tested (TEST ZTE, GEQUAL): (x w, y w, w).
+            const float w = viewDepth(z);
+            o.x *= w;
+            o.y *= w;
+            o.z = w;
+        }
         o.r = static_cast<uint8_t>(a.rgbaq);
         o.g = static_cast<uint8_t>(a.rgbaq >> 8);
         o.b = static_cast<uint8_t>(a.rgbaq >> 16);
@@ -1126,8 +1150,10 @@ namespace sotc_native
             std::memcpy(&a.t, reinterpret_cast<const uint8_t *>(&value) + 4, 4);
             break;
         case 0x03u: a.u = value & 0x3FFFu; a.v = (value >> 16) & 0x3FFFu; break;
-        case 0x04u: case 0x05u: vertex2D(value, true); break;   // XYZF2, XYZ2
-        case 0x0Cu: case 0x0Du: vertex2D(value, false); break;  // XYZF3, XYZ3: no drawing kick
+        case 0x04u: vertex2D(value, true, static_cast<uint32_t>(value >> 32) & 0xFFFFFFu); break; // XYZF2
+        case 0x05u: vertex2D(value, true, static_cast<uint32_t>(value >> 32)); break;             // XYZ2
+        case 0x0Cu: vertex2D(value, false, static_cast<uint32_t>(value >> 32) & 0xFFFFFFu); break; // XYZF3: no drawing kick
+        case 0x0Du: vertex2D(value, false, static_cast<uint32_t>(value >> 32)); break;             // XYZ3
         case 0x42u: a.alpha = value; break;
         }
     }

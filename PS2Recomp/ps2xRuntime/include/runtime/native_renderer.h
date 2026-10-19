@@ -77,6 +77,11 @@ namespace native_renderer
         bool noDepthWrite = false;
         bool overlay = false; // a second pass over the same geometry: depth equal passes, no depth write
         bool screen = false; // 2D: positions already in clip space, no depth test or write
+        // A 2D draw tested against the picture's depth (no write), as the GS
+        // tests it: positions (x w, y w, w) with w the view depth of its GS Z,
+        // and the draw's matrix turns them into clip space (SotC's heat haze
+        // behind the eagle, ZTE GEQUAL: it stays behind the bird).
+        bool screenDepthTest = false;
         // A shadow volume: no colour; its faces count on the stencil (front +1,
         // back -1) where they pass the depth test, and before the first draw
         // of a later layer the pixels with a non-zero count are darkened by
