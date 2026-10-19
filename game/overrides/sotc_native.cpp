@@ -1734,7 +1734,13 @@ namespace sotc_native
         if ((word(header + 0x18u) & 1u) && lod >= word(header + 0x1Cu) && word(header + 0x1Cu) != 0u)
             lod = word(header + 0x1Cu) - 1u;
         const uint32_t table = word(header + 0x30u + lod * 4u);
-        const uint32_t packets = word(header + 0x60u), count = word(header + 0x64u);
+        // modelDisp (0x1097118) tests the parts against the camera, writing
+        // their visibility at +0x2c, only when the model has bit 0 of +0x18
+        // clear and +0x54 != 1; otherwise every packet of the LOD is drawn and
+        // +0x2c holds whatever an earlier frame left (parts vanished by camera).
+        const bool partCulled = (word(header + 0x18u) & 1u) == 0u && word(header + 0x54u) != 1u;
+        // Its packet list ends at a packet of size 0 (32 bytes each), not at a count.
+        const uint32_t packets = word(header + 0x60u), count = 0x10000u;
         static std::vector<native_renderer::Vertex> vertices;
         static std::vector<Strip> strips;
         static std::vector<float> palette;
@@ -1745,10 +1751,12 @@ namespace sotc_native
         for (uint32_t k = 0; k < count; ++k)
         {
             const uint32_t pk = packets + k * 32u;
+            if (word(pk) == 0u)
+                break;
             if (word(pk + 4u) != lod)
                 continue;
             const uint32_t part = word(pk + 12u);
-            if (part != 0xFFFFFFFFu && table)
+            if (partCulled && part != 0xFFFFFFFFu && table)
             {
                 const uint32_t visibility = word(table + part * 0x30u + 0x2Cu);
                 if (visibility != 0u && visibility != 2u)
