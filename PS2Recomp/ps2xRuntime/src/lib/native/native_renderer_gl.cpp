@@ -106,7 +106,7 @@ void main()
     }
     if (textured > 1.5)
     {
-        { vec4 r = texture(uReflection, screen); oColor = vec4(clamp(r.rgb * uDebug.rgb, 0.0, 1.0), clamp(r.a * -uDebug.w, 0.0, 1.0)); }
+        oColor = vec4(clamp(texture(uReflection, screen).rgb * uDebug.rgb, 0.0, 1.0), -uDebug.w); // TEX0 TCC 0: the mirror's alpha is not read
         return;
     }
     float lod = uFogC.w > 0.0 ? clamp(log2(max(depth, 1e-3)) * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
@@ -280,7 +280,7 @@ float4 main(float4 vUV : TEXCOORD0, float4 vColor : TEXCOORD1, float4 vScreen : 
     if (textured > 2.5)
         return float4(saturate(tex2D(uRefraction, screen).rgb * uDebug.rgb), -uDebug.w);
     if (textured > 1.5)
-        { float4 r = tex2D(uReflection, screen); return float4(saturate(r.rgb * uDebug.rgb), saturate(r.a * -uDebug.w)); }
+        return float4(saturate(tex2D(uReflection, screen).rgb * uDebug.rgb), -uDebug.w); // TEX0 TCC 0: the mirror's alpha is not read
     float lod = uFogC.w > 0.0 ? clamp(log2(max(depth, 1e-3)) * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
     float4 t = textured > 0.5 ? tex2Dlod(uTex, float4(vUV.xy, 0.0, lod)) : float4(1.0, 1.0, 1.0, 1.0);
     float alpha = saturate(t.a * (textured > 0.5 ? 2.0 : 1.0) * vColor.a);
@@ -897,8 +897,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             }
             if (!load)
             {
-                if (mirror) // alpha 0: the water shows through where nothing is mirrored
-                    glClearColor(fog.colour[0], fog.colour[1], fog.colour[2], 0.0f);
+                if (mirror) // reflectionBegin clears with alpha 0x80
+                    glClearColor(fog.colour[0], fog.colour[1], fog.colour[2], 1.0f);
                 else
                     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 #if defined(PS2X_NATIVE_VITA)

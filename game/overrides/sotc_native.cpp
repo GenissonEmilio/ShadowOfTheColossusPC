@@ -1734,11 +1734,64 @@ namespace sotc_native
         if ((word(header + 0x18u) & 1u) && lod >= word(header + 0x1Cu) && word(header + 0x1Cu) != 0u)
             lod = word(header + 0x1Cu) - 1u;
         const uint32_t table = word(header + 0x30u + lod * 4u);
-        // modelDisp (0x1097118) tests the parts against the camera, writing
-        // their visibility at +0x2c, only when the model has bit 0 of +0x18
-        // clear and +0x54 != 1; otherwise every packet of the LOD is drawn and
-        // +0x2c holds whatever an earlier frame left (parts vanished by camera).
+        // modelDisp (0x1097118) tests the parts against the camera only when
+        // the model has bit 0 of +0x18 clear and +0x54 != 1; otherwise every
+        // packet of the LOD is drawn. The test is made here again rather than
+        // read from the parts' +0x2c: the recompiled modelDisp can come back
+        // to this hook before its test has run (a checkpoint inside
+        // manager_sub_01099A08 returns with pc there, the rest of modelDisp
+        // runs after), so +0x2c still held another instance's or an earlier
+        // frame's result (on-screen parts skipped, off-screen ones drawn).
         const bool partCulled = (word(header + 0x18u) & 1u) == 0u && word(header + 0x54u) != 1u;
+        if (partCulled && table == 0u)
+            return; // modelDisp returns too (bVar4 stays set): nothing drawn
+        static std::vector<uint8_t> partVisible;
+        if (partCulled)
+        {
+            partVisible.clear();
+            // The box (node +0 min, +0x10 max) through camera x model, VCLIP
+            // against |w|: 1 every corner out past one plane, 2 all inside, 0 partly.
+            const auto test = [&](uint32_t node) -> uint32_t
+            {
+                uint32_t all = 0x3Fu, any = 0u;
+                for (int c = 0; c < 8; ++c)
+                {
+                    const float x = real(node + ((c & 1) ? 0x10u : 0u)), y = real(node + ((c & 2) ? 0x14u : 4u)), z = real(node + ((c & 4) ? 0x18u : 8u));
+                    float v[4];
+                    for (int r = 0; r < 4; ++r)
+                        v[r] = clip[r] * x + clip[4 + r] * y + clip[8 + r] * z + clip[12 + r];
+                    const float w = std::fabs(v[3]);
+                    const uint32_t flags = (v[0] > w ? 1u : 0u) | (v[0] < -w ? 2u : 0u) | (v[1] > w ? 4u : 0u) | (v[1] < -w ? 8u : 0u) | (v[2] > w ? 16u : 0u) |
+                                           (v[2] < -w ? 32u : 0u);
+                    all &= flags;
+                    any |= flags;
+                }
+                return all ? 1u : (any ? 0u : 2u);
+            };
+            // manager_sub_01099A08: a node takes its parent's result unless
+            // that is 0 (partly inside), then it is tested; +0x20 / +0x24 the
+            // two nodes under it.
+            const auto visit = [&](auto &&self, uint32_t index, uint32_t inherited, int depth) -> void
+            {
+                if (index >= 4096u || depth > 64)
+                    return;
+                const uint32_t node = table + index * 0x30u;
+                const uint32_t state = inherited ? inherited : test(node);
+                if (partVisible.size() <= index)
+                    partVisible.resize(index + 1u, 0u); // not reached: drawn
+                partVisible[index] = static_cast<uint8_t>(state);
+                for (uint32_t link : {0x20u, 0x24u})
+                    if (word(node + link) != 0xFFFFFFFFu)
+                        self(self, word(node + link), state, depth + 1);
+            };
+            const uint32_t root = test(table);
+            if (root == 1u)
+                return; // modelDisp returns: nothing of the model is drawn
+            partVisible.assign(1u, static_cast<uint8_t>(root));
+            for (uint32_t link : {0x20u, 0x24u})
+                if (word(table + link) != 0xFFFFFFFFu)
+                    visit(visit, word(table + link), root, 1);
+        }
         // Its packet list ends at a packet of size 0 (32 bytes each), not at a count.
         const uint32_t packets = word(header + 0x60u), count = 0x10000u;
         static std::vector<native_renderer::Vertex> vertices;
@@ -1756,12 +1809,8 @@ namespace sotc_native
             if (word(pk + 4u) != lod)
                 continue;
             const uint32_t part = word(pk + 12u);
-            if (partCulled && part != 0xFFFFFFFFu && table)
-            {
-                const uint32_t visibility = word(table + part * 0x30u + 0x2Cu);
-                if (visibility != 0u && visibility != 2u)
-                    continue;
-            }
+            if (partCulled && part != 0xFFFFFFFFu && part < partVisible.size() && partVisible[part] == 1u)
+                continue;
             const uint32_t surface = word(pk + 8u), s = word(header + 0x50u) + surface * 0x120u;
             if (!surfaceDrawn(s))
                 continue;
