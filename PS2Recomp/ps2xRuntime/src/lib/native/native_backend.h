@@ -58,6 +58,12 @@ namespace native_renderer::detail
         virtual void setDepthOfField(const DepthOfField &dof) = 0;
         virtual void endFrame(uint32_t width, uint32_t height) = 0;
         virtual bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height) = 0;
+        // A backend that draws on a thread of its own: returns once every
+        // frame handed over is drawn.
+        virtual void finishFrames() {}
+        // It fills the frame log's render / present times itself (else the
+        // front times endFrame).
+        virtual bool timesItself() { return false; }
 
     private:
         std::vector<Vertex> m_frameScratch, m_expanded;
@@ -66,7 +72,8 @@ namespace native_renderer::detail
 
     // nullptr when the platform or the device does not have it.
     Backend *createMetalBackend();
-    Backend *createGlBackend();
+    // makeCurrent: makes the OpenGL context current (on the thread that will draw).
+    Backend *createGlBackend(std::function<void()> makeCurrent);
     // The host's present hook (native_renderer::setPresentHook), for the GL backend.
     const std::function<void(uint32_t, uint32_t, uint32_t)> &presentHook();
 }

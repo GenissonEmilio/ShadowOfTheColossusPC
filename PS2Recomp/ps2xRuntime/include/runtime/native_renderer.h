@@ -22,11 +22,12 @@ namespace native_renderer
 
     bool available();
     // OpenGL backends: makes the renderer's context current on the calling
-    // thread (the game thread, where every call below comes from).
+    // thread (the backend's render thread; every call below comes from the
+    // game thread).
     void setGlContext(std::function<void()> makeCurrent);
     // OpenGL backends: hands each finished picture's GL texture (y-up) to the
     // host instead of reading it back (the Vita: Vita3K's CPU reads of render
-    // targets do not see the GPU's output). Called from endFrame's thread.
+    // targets do not see the GPU's output). Called from the render thread.
     void setPresentHook(std::function<void(uint32_t texture, uint32_t width, uint32_t height)> hook);
 
     bool hasMesh(uint64_t id);
@@ -248,6 +249,12 @@ namespace native_renderer
         // host's swap), uploads into the backend, texture decoding, the
         // native hooks' own work (decoding and uploads included).
         uint64_t renderUs = 0, presentUs = 0, texUs = 0, meshUs = 0, decodeUs = 0, hookUs = 0;
+        // A backend drawing on a thread of its own (the OpenGL one): render and
+        // present are that thread's, for the last frame it drew (they overlap
+        // the game); waitUs is the game thread's wait at endFrame (for the
+        // frame before when renderThread, for its own frame when not).
+        uint64_t waitUs = 0;
+        bool renderThread = false;
     };
     FrameCounters &frameCounters();
     uint64_t nowUs();

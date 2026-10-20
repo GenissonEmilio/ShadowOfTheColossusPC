@@ -46,10 +46,17 @@ namespace native_renderer
         bool mipmaps = true;        // SOTC_NATIVE_NOMIPS
         bool textureScroll = true;  // VIF ROW scrolling (SOTC_NATIVE_NOROW)
         // The picture shown at most 30 times a second, evenly (SOTC_CAP30).
-        // Off by default: the swap that waits for the second vblank runs on
-        // the game thread, so above 30 fps (logos, menus, loading) the game
-        // itself is held back (in Vita3K's speed mode the logos took minutes).
+        // Off by default: above 30 fps (logos, menus, loading) the game
+        // thread is held back, and with it every guest thread (in Vita3K's
+        // speed mode the boot's loading screen took ~170 s instead of ~5).
+        // With the render thread the swap is that thread's, but the game
+        // still waits for it when a whole frame ahead.
         bool frameCap30 = false;
+        // OpenGL / Vita: drawing and showing a frame on a thread of its own
+        // while the game makes the next (at most one frame ahead); off: the
+        // game waits for each frame to be drawn (SOTC_RENDER_THREAD=0/1; on
+        // by default on the Vita).
+        bool renderThread = false;
         bool frameLog = false;      // per-frame timing to the log (SOTC_FRAME_LOG; native_renderer::FrameCounters)
         // The game hooks' faster paths (skinned meshes posed once per vertex
         // and written in place, a texture's and a packet's id sampled once a

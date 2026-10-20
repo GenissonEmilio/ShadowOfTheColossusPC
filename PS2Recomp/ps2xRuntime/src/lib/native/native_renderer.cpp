@@ -27,7 +27,7 @@ namespace native_renderer::detail
     Backend *createMetalBackend() { return nullptr; }
 #endif
 #if !defined(PS2X_NATIVE_GL)
-    Backend *createGlBackend() { return nullptr; }
+    Backend *createGlBackend(std::function<void()>) { return nullptr; }
 #endif
 }
 
@@ -44,6 +44,9 @@ namespace native_renderer
         // the picture was taken up again after them: drawn again instead, so
         // the heat haze and the water read the PS2's 256 x 256 copy as on the Mac.
         d.midFrameRedraw = true;
+        // Render and present on a core of their own while the game makes the
+        // next frame.
+        d.renderThread = true;
 #endif
         return d;
     }
@@ -84,6 +87,8 @@ namespace native_renderer
                 d.gpuSkinning = std::atoi(std::getenv("SOTC_GPU_SKIN")) != 0;
             if (on("SOTC_CAP30"))
                 d.frameCap30 = std::atoi(std::getenv("SOTC_CAP30")) != 0;
+            if (on("SOTC_RENDER_THREAD"))
+                d.renderThread = std::atoi(std::getenv("SOTC_RENDER_THREAD")) != 0;
             if (on("SOTC_GL_REDRAW"))
                 d.midFrameRedraw = std::atoi(std::getenv("SOTC_GL_REDRAW")) != 0;
             if (const char *h = std::getenv("SOTC_HIDE_LAYERS")) // n,n,n
@@ -132,6 +137,8 @@ namespace native_renderer
             add(std::string("SOTC_CAP30=") + (t.frameCap30 ? "1" : "0"));
         if (t.midFrameRedraw != d.midFrameRedraw)
             add(std::string("SOTC_GL_REDRAW=") + (t.midFrameRedraw ? "1" : "0"));
+        if (t.renderThread != d.renderThread)
+            add(std::string("SOTC_RENDER_THREAD=") + (t.renderThread ? "1" : "0"));
         if (t.frameLog)
             add("SOTC_FRAME_LOG=1");
         if (!t.fastHooks)
@@ -251,6 +258,10 @@ namespace native_renderer
                     "OpenGL / Vita: characters posed by the GPU from their bind pose (off: posed on the CPU every frame). Metal always poses on the CPU.",
                     "OpenGL / Vita: personagens posados pela GPU a partir da pose base (desligado: posados na CPU a cada quadro). O Metal sempre posa na CPU.",
                     &Tuning::gpuSkinning, "SOTC_GPU_SKIN");
+        debugToggle("dbg_render_thread", "Render thread", "Thread de renderização",
+                    "OpenGL / Vita: each frame drawn and shown on a thread of its own while the game makes the next (off: the game waits for each frame to be drawn).",
+                    "OpenGL / Vita: cada quadro desenhado e mostrado numa thread própria enquanto o jogo faz o próximo (desligado: o jogo espera cada quadro ser desenhado).",
+                    &Tuning::renderThread, "SOTC_RENDER_THREAD");
         static char labels[32][2][24];
         for (int i = 0; i < 32; ++i)
         {
@@ -356,6 +367,7 @@ namespace
         {
             a->endFrame(w, h);
             b->endFrame(w, h);
+            b->finishFrames(); // the same frame from both
             if (++m_frames % 60u != 0u)
                 return;
             std::vector<uint8_t> x, y;
@@ -414,8 +426,9 @@ namespace
 #endif
     }
 
-    // OpenGL: created by the first call after available(), from the game
-    // thread, which keeps the renderer's context current from then on.
+    // OpenGL: created by the first call after available() (the Vita: by
+    // setGlContext, on the main thread); the context is made current on the
+    // backend's render thread, which makes every GL call from then on.
     native_renderer::detail::Backend *backend()
     {
         if (!g_tried)
@@ -423,8 +436,7 @@ namespace
             g_tried = true;
             if (wantGl() && g_glMakeCurrent)
             {
-                g_glMakeCurrent();
-                g_backend = native_renderer::detail::createGlBackend();
+                g_backend = native_renderer::detail::createGlBackend(g_glMakeCurrent);
                 std::cerr << "[native] OpenGL renderer " << (g_backend ? "up" : "failed") << std::endl;
                 const char *mode = std::getenv("SOTC_NATIVE_GL");
                 if (g_backend && mode && std::string(mode) == "check")
@@ -658,7 +670,7 @@ namespace native_renderer
         }
         if (backend())
         {
-            if (tuning().frameLog)
+            if (tuning().frameLog && !g_backend->timesItself())
             {
                 // The backend adds its present (swap) time itself: the rest is render.
                 FrameCounters &c = frameCounters();

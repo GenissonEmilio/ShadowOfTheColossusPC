@@ -41,6 +41,10 @@
 #include <thread>
 #include <unordered_map>
 #include <sstream>
+#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+#include <psp2/kernel/cpu.h>
+#include <psp2/kernel/threadmgr.h>
+#endif
 #include <cstdio>
 #include <cstdlib>
 
@@ -2838,7 +2842,8 @@ void PS2Runtime::run()
                                     drawHostFrame(Texture2D{texture | 0x80000000u, static_cast<int>(width), static_cast<int>(height), 1,
                                                             PIXELFORMAT_UNCOMPRESSED_R8G8B8A8},
                                                   width, height); });
-    // The native renderer's pictures go on screen the same way, from the game thread.
+    // The native renderer's pictures go on screen the same way, from its
+    // render thread (the FPS overlay and the player menu drawn with them).
     native_renderer::setPresentHook([&](uint32_t texture, uint32_t width, uint32_t height)
                                     {
                                         if (!native_renderer::shown())
@@ -2907,6 +2912,10 @@ void PS2Runtime::run()
     std::thread gameThread([&]()
                            {
         ThreadNaming::SetCurrentThreadName("GameThread");
+#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+        // Cores 0 and 1: the native renderer's render thread has core 2.
+        sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), SCE_KERNEL_CPU_MASK_USER_0 | SCE_KERNEL_CPU_MASK_USER_1);
+#endif
         ps2_load::setThreadSlot(ps2_load::kGame);
         // Guest float code runs like the EE: round toward zero, no denormals.
         ps2SetEeFloatingPointMode();
