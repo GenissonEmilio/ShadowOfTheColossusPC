@@ -74,6 +74,7 @@ namespace
             {"System", "Sistema"},
             {"About", "Sobre"},
             {"Renderer", "Gráficos"},
+            {"Quality", "Qualidade"},
             {"Debug", "Depuração"},
             {"Exact transparency", "Transparências precisas"},
             {"Show FPS", "Mostrar FPS"},
@@ -158,44 +159,47 @@ namespace
         {kLanguage, "Language", "Language of this menu. Automatic follows the system language."},
         {kQuit, "Quit game", "Closes the game. Unsaved progress is lost."},
     };
-    // The Renderer tab lists native_renderer::tuningItems() (the same list
-    // as the Mac's F10 panel) and a last "Defaults" row.
-    // The Debug tab: the list's debug items (what to draw at all, the layers).
-    constexpr int kRendererTab = 1, kDebugTab = 2;
+    // The Quality, Renderer and Debug tabs list native_renderer::tuningItems()
+    // (the same list as the Mac's F10 panel), each with a last "Defaults" row:
+    // Quality the preset, resolution, filtering...; Debug what to draw at
+    // all, the layers; Renderer the rest.
+    constexpr int kQualityTab = 1, kRendererTab = 2, kDebugTab = 3;
     const Tab kTabs[] = {
         {"Video", kVideoItems, 3},
+        {"Quality", nullptr, -1},
         {"Renderer", nullptr, -1},
         {"Debug", nullptr, -1},
         {"Sound", kSoundItems, 1},
         {"System", kSystemItems, 2},
         {"About", nullptr, 0},
     };
-    constexpr int kTabCount = 6;
+    constexpr int kTabCount = 7;
     int g_tabNow = 0; // the tab the renderer helpers below list
 
-    const std::vector<int> &tuningRows(bool debug)
+    // The list's items of a tuning tab.
+    const std::vector<int> &tuningRows(int tab)
     {
-        static std::vector<int> normal, dbg;
+        static std::vector<int> normal, dbg, quality;
         if (normal.empty() && dbg.empty())
         {
             const auto &items = native_renderer::tuningItems();
             for (int i = 0; i < static_cast<int>(items.size()); ++i)
-                (items[i].debug ? dbg : normal).push_back(i);
+                (items[i].debug ? dbg : (items[i].quality ? quality : normal)).push_back(i);
         }
-        return debug ? dbg : normal;
+        return tab == kDebugTab ? dbg : (tab == kQualityTab ? quality : normal);
     }
 
-    bool isTuningTab(int tab) { return tab == kRendererTab || tab == kDebugTab; }
+    bool isTuningTab(int tab) { return tab == kQualityTab || tab == kRendererTab || tab == kDebugTab; }
 
     int itemCount(int tab)
     {
-        return isTuningTab(tab) ? static_cast<int>(tuningRows(tab == kDebugTab).size()) + 1 : kTabs[tab].count;
+        return isTuningTab(tab) ? static_cast<int>(tuningRows(tab).size()) + 1 : kTabs[tab].count;
     }
 
     // Row i of the current tuning tab -> the list's item (or -1: the reset row).
     int tuningIndex(int i)
     {
-        const auto &rows = tuningRows(g_tabNow == kDebugTab);
+        const auto &rows = tuningRows(g_tabNow);
         return i < static_cast<int>(rows.size()) ? rows[i] : -1;
     }
 
@@ -214,6 +218,14 @@ namespace
         if (k < 0)
             return portuguese() ? "Volta todos os ajustes do renderer aos valores padrão." : "Puts every renderer adjustment back to its default.";
         const auto &item = native_renderer::tuningItems()[k];
+        if (!native_renderer::tuningApplies(item))
+        {
+            // Said first: it changes nothing on this renderer.
+            static std::string text;
+            text = std::string(portuguese() ? "Sem efeito no renderer " : "No effect on the ") + native_renderer::backendName() +
+                   (portuguese() ? " em uso. " : " renderer in use. ") + (portuguese() ? item.helpPt : item.help);
+            return text.c_str();
+        }
         return portuguese() ? item.helpPt : item.help;
     }
 
@@ -222,9 +234,12 @@ namespace
         const int k = tuningIndex(i);
         if (k < 0)
             return "";
-        const std::string v = native_renderer::tuningValueText(native_renderer::tuningItems()[k]);
+        const auto &item = native_renderer::tuningItems()[k];
+        std::string v = native_renderer::tuningValueText(item, portuguese());
         if (v == "On" || v == "Off")
-            return T(v.c_str());
+            v = T(v.c_str());
+        if (!native_renderer::tuningApplies(item)) // listed, but this renderer ignores it
+            v += portuguese() ? (item.backends == 1 ? " (só Metal)" : " (só OpenGL)") : (item.backends == 1 ? " (Metal only)" : " (OpenGL only)");
         return v;
     }
 
@@ -360,12 +375,17 @@ namespace
 
     // ---- Drawing --------------------------------------------------------------
 
-    void drawWrapped(const char *text, int x, int y, int maxWidth, int size, Color color, int lineGap)
+    // Draws `text` wrapped at maxWidth; returns the number of lines (none
+    // drawn when `draw` is false).
+    int drawWrapped(const char *text, int x, int y, int maxWidth, int size, Color color, int lineGap, bool draw = true)
     {
         std::string line, word;
+        int lines = 0;
         auto flush = [&]
         {
-            DrawText(line.c_str(), x, y, size, color);
+            ++lines;
+            if (draw)
+                DrawText(line.c_str(), x, y, size, color);
             y += size + lineGap;
             line.clear();
         };
@@ -390,6 +410,7 @@ namespace
         }
         if (!line.empty())
             flush();
+        return lines;
     }
 }
 
@@ -526,17 +547,32 @@ void draw(int screenWidth, int screenHeight)
     DrawRectangle(boxX, boxY, boxW, 2, accent);
     DrawText(T("SETTINGS"), boxX + pad, boxY + pad * 2 / 3, size, accent);
 
-    // Tabs
+    // Tabs (smaller when they do not fit the box)
     int tabX = boxX + pad;
     const int tabY = boxY + pad * 2;
+    int tabSize = size, tabGap = size * 3 / 2;
+    {
+        int total = 0;
+        for (int i = 0; i < kTabCount; ++i)
+            total += MeasureText(T(kTabs[i].label), size) + tabGap;
+        if (total > boxW - 2 * pad)
+        {
+            tabGap = size;
+            total = 0;
+            for (int i = 0; i < kTabCount; ++i)
+                total += MeasureText(T(kTabs[i].label), size) + tabGap;
+            if (total > boxW - 2 * pad)
+                tabSize = small;
+        }
+    }
     for (int i = 0; i < kTabCount; ++i)
     {
         const char *label = T(kTabs[i].label);
-        const int w = MeasureText(label, size);
+        const int w = MeasureText(label, tabSize);
         if (i == g_tab)
             DrawRectangle(tabX - size / 3, tabY + size + size / 4, w + size * 2 / 3, 2, accent);
-        DrawText(label, tabX, tabY, size, i == g_tab ? text : dim);
-        tabX += w + size * 3 / 2;
+        DrawText(label, tabX, tabY, tabSize, i == g_tab ? text : dim);
+        tabX += w + tabGap;
     }
     DrawRectangle(boxX + pad, tabY + size * 3 / 2 + 2, boxW - 2 * pad, 1, line);
 
@@ -583,7 +619,13 @@ void draw(int screenWidth, int screenHeight)
         if (first + rows < count)
             DrawText("v", boxX + boxW - pad, listY + (rows - 1) * size * 3 / 2, small, dim);
         DrawRectangle(boxX + pad, helpY - size / 2, boxW - 2 * pad, 1, line);
-        drawWrapped(renderer ? rendererHelp(g_item) : T(tab.items[g_item].help), boxX + pad, helpY, boxW - 2 * pad, small, dim, small / 3);
+        // The help in the space above the controls line, smaller when long.
+        const char *help = renderer ? rendererHelp(g_item) : T(tab.items[g_item].help);
+        const int helpRoom = boxY + boxH - size * 3 / 2 - helpY;
+        int helpSize = small;
+        while (helpSize > 10 && drawWrapped(help, 0, 0, boxW - 2 * pad, helpSize, dim, helpSize / 3, false) * (helpSize + helpSize / 3) > helpRoom)
+            helpSize -= 2;
+        drawWrapped(help, boxX + pad, helpY, boxW - 2 * pad, helpSize, dim, helpSize / 3);
     }
     DrawText(T("L/R: tab   D-pad: choose   X: change   Triangle: help   O: close"), boxX + pad, boxY + boxH - size * 3 / 2, small, dim);
 }

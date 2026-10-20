@@ -53,8 +53,16 @@ struct FogParams
     float3 colour;
     float4 debug; // w > 0: flat debug colour
     int clamp;    // the GS's CLAMP: bit 0 u, bit 1 v
+    int hwLod;    // texture filtering anisotropic: the GPU picks the mip level (by the pixel's footprint), not the GS rule
     float2 ripple; // the mirror's ripple (t, H; H = 0: none)
 };
+
+// A model's texture: the filtering the player picked (the samplers bound at
+// 0-3, one per CLAMP mode), at the GS's mip level or the GPU's own.
+float4 sampleModel(texture2d<float> tex, sampler s, float2 uv, float lod, bool hw)
+{
+    return hw ? tex.sample(s, uv) : tex.sample(s, uv, level(lod));
+}
 
 struct Light
 {
@@ -97,9 +105,10 @@ vertex VOut nativeVertex(VIn in [[stage_in]], constant float4x4 &clip [[buffer(1
 
 fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], texture2d<float> background [[texture(1)]],
                                texture2d<float> reflection [[texture(2)]], texture2d<float> refraction [[texture(3)]],
-                               constant int &textured [[buffer(0)]], constant FogParams &fog [[buffer(1)]])
+                               constant int &textured [[buffer(0)]], constant FogParams &fog [[buffer(1)]],
+                               sampler sRepeat [[sampler(0)]], sampler sClampU [[sampler(1)]], sampler sClampV [[sampler(2)]],
+                               sampler sClampUV [[sampler(3)]])
 {
-    constexpr sampler repeatLinear(address::repeat, filter::linear, mip_filter::linear);
     float3 shade = in.color.rgb;
     if (textured == 5)
     {
@@ -142,15 +151,13 @@ fragment float4 nativeFragment(VOut in [[stage_in]], texture2d<float> tex [[text
         return float4(saturate(r * fog.debug.rgb * in.color.rgb), saturate(in.color.a * -fog.debug.w));
     }
     const float lod = fog.maxLod > 0.0 ? clamp(log2(max(in.depth, 1e-3)) * fog.lodScale + fog.lodK, 0.0, fog.maxLod) : 0.0;
-    constexpr sampler clampU(address::clamp_to_edge, address::repeat, address::repeat, filter::linear, mip_filter::linear);
-    constexpr sampler clampV(address::repeat, address::clamp_to_edge, address::repeat, filter::linear, mip_filter::linear);
-    constexpr sampler clampUV(address::clamp_to_edge, filter::linear, mip_filter::linear);
+    const bool hw = fog.hwLod != 0 && fog.maxLod > 0.0; // a texture the game samples at level 0 only stays there
     float4 t = float4(1.0);
     if (textured != 0)
-        t = fog.clamp == 3 ? tex.sample(clampUV, in.uv, level(lod))
-            : fog.clamp == 2 ? tex.sample(clampV, in.uv, level(lod))
-            : fog.clamp == 1 ? tex.sample(clampU, in.uv, level(lod))
-                             : tex.sample(repeatLinear, in.uv, level(lod));
+        t = fog.clamp == 3 ? sampleModel(tex, sClampUV, in.uv, lod, hw)
+            : fog.clamp == 2 ? sampleModel(tex, sClampV, in.uv, lod, hw)
+            : fog.clamp == 1 ? sampleModel(tex, sClampU, in.uv, lod, hw)
+                             : sampleModel(tex, sRepeat, in.uv, lod, hw);
     float alpha = saturate(t.a * (textured != 0 ? 2.0 : 1.0) * in.color.a); // texture alpha 0x80 = opaque
     if (alpha < 0.02)
         discard_fragment();
@@ -394,6 +401,31 @@ fragment float4 copyTexture(Quad in [[stage_in]], texture2d<float> src [[texture
     return float4(src.sample(s, in.uv).rgb, 1.0);
 }
 
+// Effect detail >= 1: a reduction of the picture (to the PS2's 256 x 256
+// copies) as the average of each destination pixel's whole footprint. At
+// the PS2's size one bilinear tap is that average (2 x 2 texels); at 3x
+// the same tap took 2 x 2 of 6 x 6 texels: the DoF / zFog / refraction
+// copies came out aliased (blocky far cliffs).
+fragment float4 reduceBox(Quad in [[stage_in]], texture2d<float> src [[texture(0)]], constant float2 &dstSize [[buffer(0)]])
+{
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    const float2 foot = float2(src.get_width(), src.get_height()) / dstSize; // source texels per destination pixel
+    const int2 n = int2(clamp(ceil(foot / 2.0), 1.0, 8.0));                    // bilinear taps, 2 x 2 texels each
+    const float2 corner = floor(in.position.xy) / dstSize;
+    float4 sum = float4(0.0);
+    for (int y = 0; y < n.y; ++y)
+        for (int x = 0; x < n.x; ++x)
+            sum += src.sample(s, corner + (float2(x, y) + 0.5) / float2(n) / dstSize);
+    return sum / float(n.x * n.y);
+}
+
+// MSAA: the picture as the full-screen effects left it, put back into every
+// sample before the next layers are drawn (exact texels, alpha kept).
+fragment float4 reloadColor(Quad in [[stage_in]], texture2d<float> src [[texture(0)]])
+{
+    return src.read(uint2(in.position.xy));
+}
+
 fragment float4 shadowDarken(Quad in [[stage_in]], constant float &amount [[buffer(0)]])
 {
     return float4(0.0, 0.0, 0.0, amount);
@@ -464,6 +496,23 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
         id<MTLTexture> reflectionColor = nil, reflectionDepth = nil; // the mirrored world, 256 x 256
         id<MTLTexture> refractionColor = nil, refractionHalf = nil;  // the picture before layer 9, 256 x 256 (via 128 x 128)
         id<MTLRenderPipelineState> copySmall = nil, backdrop = nil;
+        id<MTLRenderPipelineState> reducePipeline = nil; // reduceBox
+        bool smoothReduce = false;                       // this frame: Tuning::effectDetail >= 1
+
+        // A reduction from -> to: the whole footprint averaged (effect
+        // detail >= 1, from more than twice as large), else `plain`.
+        bool setReduce(id<MTLRenderCommandEncoder> e, id<MTLTexture> from, id<MTLTexture> to, id<MTLRenderPipelineState> plain)
+        {
+            if (smoothReduce && reducePipeline && (from.width > to.width * 2u || from.height > to.height * 2u))
+            {
+                const float size[2] = {static_cast<float>(to.width), static_cast<float>(to.height)};
+                [e setRenderPipelineState:reducePipeline];
+                [e setFragmentBytes:size length:sizeof(size) atIndex:0];
+                return true;
+            }
+            [e setRenderPipelineState:plain];
+            return false;
+        }
         id<MTLRenderPipelineState> blurCopy = nil, tintOver = nil, glowOver = nil, glowReducePipeline = nil;
         id<MTLTexture> previousColor = nil; // the last frame shown (feedbackBlur)
         id<MTLTexture> glowLayer = nil;     // layer 8 alone (bossDeathEffectBegin's buffer), full size
@@ -489,6 +538,24 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
         std::unordered_map<uint64_t, id<MTLTexture>> textures;
         std::vector<Draw> draws;
 
+        id<MTLLibrary> library = nil; // kept: the MSAA pipelines are built when first asked for
+        // Texture filtering (Tuning::textureFilter, 0-6): per mode, a sampler
+        // per CLAMP (repeat, u clamped, v clamped, both).
+        id<MTLSamplerState> samplers[7][4] = {};
+        // MSAA (Tuning::msaa): the scene's pipelines at a sample count, and
+        // the multisampled targets, resolved into color / depth / glowLayer /
+        // shadowMask at the end of each pass.
+        struct ScenePipelines
+        {
+            id<MTLRenderPipelineState> normal = nil, additive = nil, opaque = nil, subtract = nil, volume = nil, darken = nil, shadowMask = nil,
+                                       backdrop = nil, reload = nil;
+        };
+        ScenePipelines msPipelines[4]; // by log2(samples); [0] unused
+        id<MTLTexture> colorMS = nil, depthMS = nil, glowMS = nil, shadowMaskMS = nil;
+        NSUInteger samples = 1;        // the targets'
+        uint32_t reflectionSize = 256; // the mirror image's (Tuning::effectDetail)
+        bool colorDirty = false;       // MSAA: color changed by a full-screen effect since the last resolve
+
         std::mutex outputMutex;
         std::vector<uint8_t> output;
         uint32_t outputWidth = 0, outputHeight = 0;
@@ -501,7 +568,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                 return false;
             queue = [device newCommandQueue];
             NSError *error = nil;
-            id<MTLLibrary> library = [device newLibraryWithSource:[NSString stringWithUTF8String:kShaders] options:nil error:&error];
+            library = [device newLibraryWithSource:[NSString stringWithUTF8String:kShaders] options:nil error:&error];
             if (!library)
             {
                 std::cerr << "[native] shader compile failed: " << [[error localizedDescription] UTF8String] << std::endl;
@@ -600,6 +667,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
             compositeGsPipeline = fullscreen(@"bloomCompositeGS", true);
             temporalGsPipeline = fullscreen(@"bloomTemporalGS", false);
             copySmall = fullscreen(@"copyTexture", false);
+            reducePipeline = fullscreen(@"reduceBox", false);
             glowReducePipeline = fullscreen(@"glowReduce", false);
             shadowReducePipeline = fullscreen(@"shadowReduce", false);
             {
@@ -690,7 +758,20 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                 [d.fragmentFunction release];
                 [d release];
             }
-            [library release];
+            for (int mode = 0; mode < 7; ++mode)
+                for (int c = 0; c < 4; ++c)
+                {
+                    // 0 nearest, 1 bilinear, 2 trilinear (the old fixed samplers), 3-6 anisotropic 2x-16x.
+                    MTLSamplerDescriptor *sd = [[MTLSamplerDescriptor alloc] init];
+                    sd.minFilter = sd.magFilter = mode == 0 ? MTLSamplerMinMagFilterNearest : MTLSamplerMinMagFilterLinear;
+                    sd.mipFilter = mode <= 1 ? MTLSamplerMipFilterNearest : MTLSamplerMipFilterLinear;
+                    sd.sAddressMode = (c & 1) ? MTLSamplerAddressModeClampToEdge : MTLSamplerAddressModeRepeat;
+                    sd.tAddressMode = (c & 2) ? MTLSamplerAddressModeClampToEdge : MTLSamplerAddressModeRepeat;
+                    sd.rAddressMode = c == 3 ? MTLSamplerAddressModeClampToEdge : MTLSamplerAddressModeRepeat;
+                    sd.maxAnisotropy = mode >= 3 ? (1u << (mode - 2)) : 1u;
+                    samplers[mode][c] = [device newSamplerStateWithDescriptor:sd];
+                    [sd release];
+                }
             if (!pipeline)
             {
                 std::cerr << "[native] pipeline failed: " << [[error localizedDescription] UTF8String] << std::endl;
@@ -734,10 +815,111 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
             return true;
         }
 
-        void ensureTargets(uint32_t w, uint32_t h)
+        // The scene's pipelines at 2^k samples (as init's, plus the reload).
+        bool buildMsPipelines(int k)
         {
-            if (color && width == w && height == h)
+            ScenePipelines &p = msPipelines[k];
+            if (p.normal)
+                return true;
+            MTLVertexDescriptor *layout = [MTLVertexDescriptor vertexDescriptor];
+            layout.attributes[0].format = MTLVertexFormatFloat3;
+            layout.attributes[0].offset = offsetof(native_renderer::Vertex, x);
+            layout.attributes[1].format = MTLVertexFormatFloat3;
+            layout.attributes[1].offset = offsetof(native_renderer::Vertex, nx);
+            layout.attributes[2].format = MTLVertexFormatUChar4;
+            layout.attributes[2].offset = offsetof(native_renderer::Vertex, r);
+            layout.attributes[3].format = MTLVertexFormatFloat2;
+            layout.attributes[3].offset = offsetof(native_renderer::Vertex, u);
+            layout.layouts[0].stride = sizeof(native_renderer::Vertex);
+            NSError *error = nil;
+            id<MTLFunction> vertex = [library newFunctionWithName:@"nativeVertex"], fragment = [library newFunctionWithName:@"nativeFragment"];
+            id<MTLFunction> full = [library newFunctionWithName:@"fullscreenVertex"];
+            MTLRenderPipelineDescriptor *desc = [[MTLRenderPipelineDescriptor alloc] init];
+            desc.rasterSampleCount = 1u << k;
+            desc.vertexFunction = vertex;
+            desc.fragmentFunction = fragment;
+            desc.vertexDescriptor = layout;
+            desc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+            desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+            desc.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+            auto blend = desc.colorAttachments[0];
+            blend.blendingEnabled = YES;
+            blend.rgbBlendOperation = MTLBlendOperationAdd;
+            blend.sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+            blend.destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+            blend.alphaBlendOperation = MTLBlendOperationAdd;
+            blend.sourceAlphaBlendFactor = MTLBlendFactorOne;
+            blend.destinationAlphaBlendFactor = MTLBlendFactorZero;
+            p.normal = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+            blend.destinationRGBBlendFactor = MTLBlendFactorOne;
+            p.additive = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+            blend.rgbBlendOperation = MTLBlendOperationReverseSubtract;
+            p.subtract = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+            blend.rgbBlendOperation = MTLBlendOperationAdd;
+            blend.blendingEnabled = NO;
+            p.opaque = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+            blend.writeMask = MTLColorWriteMaskNone;
+            p.volume = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+            blend.writeMask = MTLColorWriteMaskAll;
+            desc.vertexFunction = full;
+            desc.vertexDescriptor = nil;
+            const std::pair<NSString *, id<MTLRenderPipelineState> *> plain[] = {
+                {@"shadowMaskWrite", &p.shadowMask}, {@"copyTexture", &p.backdrop}, {@"reloadColor", &p.reload}};
+            for (const auto &[name, out] : plain)
+            {
+                id<MTLFunction> f = [library newFunctionWithName:name];
+                desc.fragmentFunction = f;
+                *out = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+                [f release];
+            }
+            {
+                id<MTLFunction> f = [library newFunctionWithName:@"shadowDarken"];
+                desc.fragmentFunction = f;
+                blend.blendingEnabled = YES;
+                blend.sourceRGBBlendFactor = MTLBlendFactorZero;
+                blend.destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+                blend.sourceAlphaBlendFactor = MTLBlendFactorZero;
+                blend.destinationAlphaBlendFactor = MTLBlendFactorOne;
+                p.darken = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+                [f release];
+            }
+            [desc release];
+            [vertex release];
+            [fragment release];
+            [full release];
+            const bool ok = p.normal && p.additive && p.subtract && p.opaque && p.volume && p.shadowMask && p.backdrop && p.reload && p.darken;
+            if (!ok)
+            {
+                std::cerr << "[native] MSAA x" << (1u << k) << " pipelines failed: " << (error ? [[error localizedDescription] UTF8String] : "?") << std::endl;
+                p = ScenePipelines{};
+            }
+            return ok;
+        }
+
+        void ensureTargets(uint32_t w, uint32_t h, NSUInteger wantSamples, uint32_t wantReflection)
+        {
+            if (color && width == w && height == h && samples == wantSamples && reflectionSize == wantReflection)
                 return;
+            samples = wantSamples;
+            reflectionSize = wantReflection;
+            for (id<MTLTexture> *t : {&colorMS, &depthMS, &glowMS, &shadowMaskMS})
+            {
+                [*t release];
+                *t = nil;
+            }
+            if (samples > 1u)
+            {
+                MTLTextureDescriptor *m = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
+                m.textureType = MTLTextureType2DMultisample;
+                m.sampleCount = samples;
+                m.usage = MTLTextureUsageRenderTarget;
+                m.storageMode = MTLStorageModePrivate;
+                colorMS = [device newTextureWithDescriptor:m];
+                glowMS = [device newTextureWithDescriptor:m];
+                shadowMaskMS = [device newTextureWithDescriptor:m];
+                m.pixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+                depthMS = [device newTextureWithDescriptor:m];
+            }
             [color release];
             [depth release];
             [backgroundColor release];
@@ -768,11 +950,11 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
             [reflectionColor release];
             [reflectionDepth release];
             {
-                MTLTextureDescriptor *rd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:256 height:256 mipmapped:NO];
+                MTLTextureDescriptor *rd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:reflectionSize height:reflectionSize mipmapped:NO];
                 rd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
                 rd.storageMode = MTLStorageModePrivate;
                 reflectionColor = [device newTextureWithDescriptor:rd];
-                MTLTextureDescriptor *rz = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8 width:256 height:256 mipmapped:NO];
+                MTLTextureDescriptor *rz = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8 width:reflectionSize height:reflectionSize mipmapped:NO];
                 rz.usage = MTLTextureUsageRenderTarget;
                 rz.storageMode = MTLStorageModePrivate;
                 reflectionDepth = [device newTextureWithDescriptor:rz];
@@ -845,7 +1027,18 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
         {
             @autoreleasepool
             {
-                ensureTargets(w, h);
+                {
+                    // The player's quality: MSAA as far as the GPU has it, the mirror's size.
+                    const native_renderer::Tuning &q = native_renderer::tuning();
+                    int k = std::clamp(static_cast<int>(q.msaa + 0.5f), 0, 3);
+                    while (k > 0 && (![device supportsTextureSampleCount:(1u << k)] || !buildMsPipelines(k)))
+                        --k;
+                    ensureTargets(w, h, 1u << k, 256u << std::clamp(static_cast<int>(q.effectDetail + 0.5f), 0, 2));
+                }
+                const ScenePipelines &msp = msPipelines[samples > 1u ? __builtin_ctz(static_cast<unsigned>(samples)) : 0];
+                const int filterMode = std::clamp(static_cast<int>(native_renderer::tuning().textureFilter + 0.5f), 0, 6);
+                colorDirty = false;
+                smoothReduce = native_renderer::tuning().effectDetail >= 0.5f;
                 std::stable_sort(draws.begin(), draws.end(), [](const Draw &a, const Draw &b) { return a.state.order < b.state.order; });
                 id<MTLCommandBuffer> commands = [queue commandBuffer];
                 const bool fogOn = fog.enabled && fog.width > 0.0f;
@@ -873,8 +1066,22 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                 auto pass = [&](id<MTLTexture> target, bool backgroundOnly, uint32_t fromOrder = 0, uint32_t toOrder = ~0u, bool load = false,
                                 bool mirror = false, bool apart = false)
                 {
+                    // MSAA: the picture and the glow layer are drawn multisampled and
+                    // resolved at the end of the pass (the depth too, for the effects).
+                    const bool ms = samples > 1u && !mirror && (target == color || target == glowLayer);
+                    if (ms && load && !apart && colorDirty)
+                    {
+                        // The full-screen effects drew on the resolved picture: read back below.
+                        id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+                        [blit copyFromTexture:color toTexture:snapshot];
+                        [blit endEncoding];
+                    }
+                    id<MTLRenderPipelineState> pNormal = ms ? msp.normal : pipeline, pAdditive = ms ? msp.additive : additive,
+                                               pOpaque = ms ? msp.opaque : opaque, pSubtract = ms ? msp.subtract : subtract,
+                                               pVolume = ms ? msp.volume : volume, pDarken = ms ? msp.darken : darken,
+                                               pBackdrop = ms ? msp.backdrop : backdrop;
                     MTLRenderPassDescriptor *desc = [MTLRenderPassDescriptor renderPassDescriptor];
-                    desc.colorAttachments[0].texture = target;
+                    desc.colorAttachments[0].texture = ms ? (target == color ? colorMS : glowMS) : target;
                     desc.colorAttachments[0].loadAction = load && !apart ? MTLLoadActionLoad : MTLLoadActionClear;
                     // The PS2 frame starts black; the mirror image is cleared to the fog
                     // colour (reflectionBegin: alpha 0x80); a layer drawn apart (on the
@@ -882,7 +1089,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     desc.colorAttachments[0].clearColor = mirror ? MTLClearColorMake(fog.colour[0], fog.colour[1], fog.colour[2], 1.0)
                                                                  : MTLClearColorMake(0.0, 0.0, 0.0, apart ? 0.0 : 1.0);
                     desc.colorAttachments[0].storeAction = MTLStoreActionStore;
-                    id<MTLTexture> depth = mirror ? reflectionDepth : this->depth;
+                    id<MTLTexture> depth = ms ? depthMS : (mirror ? reflectionDepth : this->depth);
                     desc.depthAttachment.texture = depth;
                     desc.depthAttachment.loadAction = load ? MTLLoadActionLoad : MTLLoadActionClear;
                     desc.depthAttachment.clearDepth = 1.0;
@@ -891,19 +1098,39 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     desc.stencilAttachment.loadAction = load ? MTLLoadActionLoad : MTLLoadActionClear;
                     desc.stencilAttachment.clearStencil = 0;
                     desc.stencilAttachment.storeAction = MTLStoreActionStore;
+                    if (ms)
+                    {
+                        desc.colorAttachments[0].resolveTexture = target;
+                        desc.colorAttachments[0].storeAction = MTLStoreActionStoreAndMultisampleResolve;
+                        desc.depthAttachment.resolveTexture = this->depth;
+                        desc.depthAttachment.depthResolveFilter = MTLMultisampleDepthResolveFilterSample0;
+                        desc.depthAttachment.storeAction = MTLStoreActionStoreAndMultisampleResolve;
+                    }
                     id<MTLRenderCommandEncoder> encoder = [commands renderCommandEncoderWithDescriptor:desc];
                     [encoder setCullMode:MTLCullModeNone];
+                    int boundFilter = 2; // the samplers bound: the player's for 3D, trilinear for 2D
+                    for (int c = 0; c < 4; ++c)
+                        [encoder setFragmentSamplerState:samplers[2][c] atIndex:c];
+                    if (ms && load && !apart && colorDirty && msp.reload)
+                    {
+                        [encoder setRenderPipelineState:msp.reload];
+                        [encoder setDepthStencilState:depthOff];
+                        [encoder setFragmentTexture:snapshot atIndex:0];
+                        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                    }
+                    if (ms && target == color)
+                        colorDirty = false;
                     if (!backgroundOnly)
                         [encoder setFragmentTexture:backgroundSmall atIndex:1];
                     if (!mirror)
                         [encoder setFragmentTexture:reflectionColor atIndex:2];
                     if (!mirror)
                         [encoder setFragmentTexture:refractionColor atIndex:3];
-                    if (!mirror && !backgroundOnly && !load && fogOn && backdrop && native_renderer::tuning().skyImage)
+                    if (!mirror && !backgroundOnly && !load && fogOn && pBackdrop && native_renderer::tuning().skyImage)
                     {
                         // The background as the PS2 shows it: bgEnd's reduced copy,
                         // stretched back (bgDraw), under everything.
-                        [encoder setRenderPipelineState:backdrop];
+                        [encoder setRenderPipelineState:pBackdrop];
                         [encoder setDepthStencilState:depthOff];
                         [encoder setFragmentTexture:backgroundSmall atIndex:0];
                         [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
@@ -925,7 +1152,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                             shadowAmount = 0.0f;
                             return;
                         }
-                        [encoder setRenderPipelineState:darken];
+                        [encoder setRenderPipelineState:pDarken];
                         [encoder setDepthStencilState:shadowedState];
                         [encoder setStencilReferenceValue:0];
                         [encoder setFragmentBytes:&shadowAmount length:sizeof(shadowAmount) atIndex:0];
@@ -956,7 +1183,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                             auto it = meshes.find(d.mesh);
                             if (it == meshes.end() || it->second.count == 0)
                                 continue;
-                            [encoder setRenderPipelineState:volume];
+                            [encoder setRenderPipelineState:pVolume];
                             [encoder setDepthStencilState:volumeState];
                             // The GS does not cut at the near plane: the caps microcode 8
                             // puts at z = 0.1 stay, nearer than everything.
@@ -993,7 +1220,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                                          (d.state.screenDepthTest ? 128 : 0);
                         if (mode != bound)
                         {
-                            [encoder setRenderPipelineState:blendMode == 1 ? additive : (blendMode == 2 ? opaque : (blendMode == 3 ? subtract : pipeline))];
+                            [encoder setRenderPipelineState:blendMode == 1 ? pAdditive : (blendMode == 2 ? pOpaque : (blendMode == 3 ? pSubtract : pNormal))];
                             // Additive glows do not hide what is drawn after them; 2D and the
                             // background (the sky, a small dome drawn first) ignore depth; a
                             // second pass lands on its first.
@@ -1028,6 +1255,14 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         else if (textured == 5)
                             [encoder setFragmentTexture:previousColor atIndex:0];
                         [encoder setFragmentBytes:&textured length:sizeof(textured) atIndex:0];
+                        // Texture filtering is the 3D's: 2D (menus, text, the map) keeps the default.
+                        const int drawFilter = d.state.screen ? 2 : filterMode;
+                        if (drawFilter != boundFilter)
+                        {
+                            for (int c = 0; c < 4; ++c)
+                                [encoder setFragmentSamplerState:samplers[drawFilter][c] atIndex:c];
+                            boundFilter = drawFilter;
+                        }
                         struct
                         {
                             float start, width, steps;
@@ -1039,7 +1274,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                             float colour[4];
                             float debug[4];
                             int clamp;
-                            int pad; // Metal aligns float2 to 8
+                            int hwLod; // anisotropic filtering: the GPU's own mip level
                             float ripple[2];
                         } fp = {fog.start, fog.width, (showFog && !d.state.screen) ? -1.0f : static_cast<float>(fog.steps), (!backgroundOnly && fogOn && d.state.fogged) ? 1 : 0,
                                 {static_cast<float>(w), static_cast<float>(h)},
@@ -1048,7 +1283,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                                 {fog.colour[0], fog.colour[1], fog.colour[2], 0},
                                 {static_cast<float>(d.state.debugColour & 0xFFu) / 255.0f, static_cast<float>((d.state.debugColour >> 8) & 0xFFu) / 255.0f,
                                  static_cast<float>((d.state.debugColour >> 16) & 0xFFu) / 255.0f, d.state.debugColour ? 1.0f : 0.0f},
-                                d.state.clamp, 0, {d.state.mirrorRipple[0], d.state.mirrorRipple[1]}};
+                                d.state.clamp, drawFilter >= 3 ? 1 : 0, {d.state.mirrorRipple[0], d.state.mirrorRipple[1]}};
                         if (d.state.reflectionSample || d.state.refractionSample)
                         {
                             for (int k = 0; k < 3; ++k)
@@ -1073,7 +1308,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     desc.colorAttachments[0].loadAction = MTLLoadActionDontCare;
                     desc.colorAttachments[0].storeAction = MTLStoreActionStore;
                     id<MTLRenderCommandEncoder> e = [commands renderCommandEncoderWithDescriptor:desc];
-                    [e setRenderPipelineState:copySmall];
+                    setReduce(e, backgroundColor, backgroundSmall, copySmall);
                     [e setFragmentTexture:backgroundColor atIndex:0];
                     [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
                     [e endEncoding];
@@ -1248,7 +1483,8 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         quad(to, glowReducePipeline, false, [&](id<MTLRenderCommandEncoder> e)
                         {
                             [e setFragmentTexture:from atIndex:0];
-                            [e setFragmentBytes:offset length:sizeof(offset) atIndex:0];
+                            if (shift != 0.0f || !setReduce(e, from, to, glowReducePipeline))
+                                [e setFragmentBytes:offset length:sizeof(offset) atIndex:0];
                         });
                     };
                     reduce(glowLayer, glowSmall[0], 0.0f);
@@ -1289,19 +1525,26 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                 };
                 auto doShadow = [&]
                 {
+                    // MSAA: the volumes' count is in the multisampled stencil; the mask resolved.
+                    const bool ms = samples > 1u && msp.shadowMask;
                     MTLRenderPassDescriptor *desc = [MTLRenderPassDescriptor renderPassDescriptor];
-                    desc.colorAttachments[0].texture = shadowMask;
+                    desc.colorAttachments[0].texture = ms ? shadowMaskMS : shadowMask;
                     desc.colorAttachments[0].loadAction = MTLLoadActionClear;
                     desc.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
                     desc.colorAttachments[0].storeAction = MTLStoreActionStore;
-                    desc.depthAttachment.texture = depth;
+                    if (ms)
+                    {
+                        desc.colorAttachments[0].resolveTexture = shadowMask;
+                        desc.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
+                    }
+                    desc.depthAttachment.texture = ms ? depthMS : depth;
                     desc.depthAttachment.loadAction = MTLLoadActionLoad;
                     desc.depthAttachment.storeAction = MTLStoreActionStore;
-                    desc.stencilAttachment.texture = depth;
+                    desc.stencilAttachment.texture = ms ? depthMS : depth;
                     desc.stencilAttachment.loadAction = MTLLoadActionLoad;
                     desc.stencilAttachment.storeAction = MTLStoreActionStore;
                     id<MTLRenderCommandEncoder> e = [commands renderCommandEncoderWithDescriptor:desc];
-                    [e setRenderPipelineState:shadowMaskPipeline];
+                    [e setRenderPipelineState:ms ? msp.shadowMask : shadowMaskPipeline];
                     [e setDepthStencilState:shadowedState]; // where the count is not 0; clears it
                     [e setStencilReferenceValue:0];
                     [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
@@ -1369,7 +1612,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         qd.colorAttachments[0].loadAction = MTLLoadActionDontCare;
                         qd.colorAttachments[0].storeAction = MTLStoreActionStore;
                         id<MTLRenderCommandEncoder> q = [commands renderCommandEncoderWithDescriptor:qd];
-                        [q setRenderPipelineState:copySmall];
+                        setReduce(q, from, to, copySmall);
                         [q setFragmentTexture:from atIndex:0];
                         [q drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
                         [q endEncoding];
@@ -1398,7 +1641,11 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                         [q endEncoding];
                     };
                     // refractionColor / refractionHalf are free after layer 9.
-                    quad(refractionColor, copySmall, false, [&](id<MTLRenderCommandEncoder> q) { [q setFragmentTexture:snapshot atIndex:0]; });
+                    quad(refractionColor, copySmall, false, [&](id<MTLRenderCommandEncoder> q)
+                    {
+                        setReduce(q, snapshot, refractionColor, copySmall);
+                        [q setFragmentTexture:snapshot atIndex:0];
+                    });
                     for (int i = 0; i < dof.rounds; ++i)
                     {
                         quad(refractionHalf, copySmall, false, [&](id<MTLRenderCommandEncoder> q) { [q setFragmentTexture:refractionColor atIndex:0]; });
@@ -1467,6 +1714,8 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                     pass(color, false, from, ev.order, loaded);
                     loaded = true;
                     from = ev.order;
+                    if (ev.blur != -4) // every effect but the refraction copy draws on the resolved picture
+                        colorDirty = true;
                     if (ev.blur == -6)
                         doFog();
                     else if (ev.blur == -5)

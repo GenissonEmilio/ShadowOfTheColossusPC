@@ -258,4 +258,9 @@ namespace native_renderer
     };
     FrameCounters &frameCounters();
     uint64_t nowUs();
+
+    // Host memory the game's hooks hold, for the backend's memory log
+    // ([gl:mem]): the skinned packets' bind poses (kept on the CPU).
+    void noteFrontendMemory(uint64_t skinnedPackets);
+    uint64_t frontendMemory();
 }

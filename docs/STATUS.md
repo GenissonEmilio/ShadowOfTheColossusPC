@@ -60,28 +60,70 @@ unnecessary for drawing.
 
 ## Settings
 
-**Player menu** (F1 on the Mac; Select twice on the Vita), in Portuguese or
-English:
-- Video: exact transparency, show FPS, screen fit (4:3, stretch, whole scale);
-- Sound: volume;
-- System: language, quit.
+Two menus show the same list of renderer settings
+(`native_renderer::tuningItems()`), saved with the player settings
+(`celosia_settings.cfg` next to the game on the Mac,
+`ux0:data/celosia/settings.cfg` on the Vita); a `SOTC_*` variable set at
+start wins over the saved value.
 
-**Native renderer panel** (F10, macOS) changes the effects while the game
-runs. Each strength multiplies the game's own, which it keeps changing per
+- **Player menu**: F1 on the Mac (fn+F1 on a Mac keyboard with media keys),
+  Select twice on the Vita; Portuguese or English. Tabs: Video (exact
+  transparency, show FPS, screen fit), Quality, Renderer (the effects),
+  Debug (what is drawn, the layers), Sound, System, About. Each renderer tab
+  ends with "Reset to defaults".
+- **F10 panel** (Mac, ImGui): the same items in Quality / Effects / Debug
+  groups, the named values as lists; "Print to log" writes the current
+  values as variables.
+
+An item that does nothing on the renderer in use is still listed: its value
+says "(Metal only)" / "(OpenGL only)" and its help starts with "No effect on
+the ... renderer in use" (the F10 panel greys it).
+
+### Quality
+
+| Item | What it does on Metal (Mac) | On OpenGL / Vita | Variable |
+| --- | --- | --- | --- |
+| Graphics preset | sets the five below at once; changing any of them shows Custom | same | `SOTC_PRESET=0..3` |
+| Resolution | the picture drawn at 512×448 × 0.5–4 ("1x native", "3x (1536x1344)") | same | `SOTC_RENDER_SCALE` |
+| Anti-aliasing (MSAA) | off / 2x / 4x / 8x samples a pixel (as many as the GPU has); the 3D layers and the glow layer drawn multisampled and resolved before each full-screen effect | not available (vitaGL's MSAA is for the screen only) | `SOTC_MSAA=1/2/4/8` |
+| Texture filtering | nearest / bilinear / trilinear at the game's mip level (the PS2's rule, the default) / anisotropic 2x–16x (the GPU picks the mip level from each pixel's footprint: sharp ground and slopes at a high resolution). 3D only: 2D stays as it was | nearest / bilinear / trilinear; anisotropic falls back to trilinear | `SOTC_TEXTURE_FILTER=0..6` |
+| Model detail | game's choice / one level finer / always the finest of a model's LOD tables; the parts are then tested against the camera here (the game's results are for its own level). On the shrine-to-plain route the game already draws every model at level 0, so it changed nothing there; it applies to models the game draws at a coarser level | same | `SOTC_MODEL_DETAIL=0..2` |
+| Effect detail | PS2: the effects' buffers as the PS2 has them. High: the picture reduced to the 256×256 copies (depth of field, zFog's sky, water refraction, the glow) by averaging each copy pixel's whole footprint, and the mirror image at 512. Very high: the mirror at 1024. At 3x one bilinear tap per copy pixel read 2×2 of 6×6 texels: the DoF-blurred far cliffs came out blocky and pixelated (what the user saw on the plain); High fixes that | always the PS2's | `SOTC_EFFECT_DETAIL=0..2` |
+
+| Preset | Resolution | MSAA | Filtering | Model detail | Effect detail |
+| --- | --- | --- | --- | --- | --- |
+| Low | 0.5x (256×224) | off | bilinear | game's | PS2 |
+| Medium (Vita default) | 1x (512×448) | off | trilinear | game's | PS2 |
+| High (Mac default) | 3x (1536×1344) | off | trilinear | game's | PS2 |
+| Ultra | 4x (2048×1792) | 4x | anisotropic 16x | finest | High |
+
+Medium and High are exactly the earlier Vita and Mac defaults.
+
+### Renderer (effects)
+
+Each strength multiplies the game's own, which it keeps changing per
 scene and camera:
 
 | Control | Default | Variable to set it at start |
 | --- | --- | --- |
-| Resolution × | 3 (Mac), 1 (Vita) | `SOTC_RENDER_SCALE` |
-| Bloom on / strength | on / 0.46 | `SOTC_BLOOM_SCALE` (0 turns it off) |
-| Bloom blur rounds / spread | 1 / 1.0 | `SOTC_BLOOM_ROUNDS`, `SOTC_BLOOM_SPREAD` |
+| Bloom on / strength | on / 1 | `SOTC_BLOOM_SCALE` (0 turns it off) |
+| Bloom blur rounds / spread (OpenGL; Metal draws the GS chain at its fixed sizes, these only with `SOTC_BLOOM_OLD=1`) | 1 / 1.0 | `SOTC_BLOOM_ROUNDS`, `SOTC_BLOOM_SPREAD` |
 | Vertex fog on / amount | on / 0.55 | `SOTC_NATIVE_NOVFOG=1`, `SOTC_FOG_AMOUNT` |
 | Depth fog into the sky | on | `SOTC_NATIVE_ZFOG=0` |
-| Glow, depth of field, shadows, particles, screen blur, reflections, water refraction | on | `SOTC_NATIVE_NOGLOW`, `_NODOF`, `_NOSHADOWS`, `_NOPTCL`, `_NOSBLUR`, `_NOREFLECT`, `_NOREFRACT` |
+| Glow, depth of field, shadows, particles, screen blur, motion trail, reflections, water refraction | on | `SOTC_NATIVE_NOGLOW`, `_NODOF`, `_NOSHADOWS`, `_NOPTCL`, `_NOSBLUR`, `_NOFEEDBACK`, `_NOREFLECT`, `_NOREFRACT` |
+| Cap at 30 fps | off | `SOTC_CAP30=1` |
 
-"Print to log" writes the current setting as these variables. On the Vita,
-`ux0:data/celosia/env.txt` holds `NAME=value` lines (the Vita has no
-environment).
+The Debug tab / group: show the native picture (F9), draw 2D / world,
+textures, lighting, additive / subtract draws, second passes, raw mirror,
+sky image, mipmaps, texture scrolling, frame timing log, fast hooks, PS2
+lists, and the OpenGL-only heat haze / water sources, redraw for copies,
+GPU skinning and render thread; then the 32 display-list layers.
+
+`PS2X_TUNING_PANEL=1` opens the F10 panel at start (`PS2X_SETTINGS_OPEN=<tab>` the
+player menu). `SOTC_QUALITY_CYCLE=N` (development) steps through the presets and single
+quality options every N frames, logging `[quality]` lines, to compare them
+on one scene. On the Vita, `ux0:data/celosia/env.txt` holds `NAME=value`
+lines (the Vita has no environment).
 
 Renderer selection: `SOTC_NATIVE=1` draws natively (the default),
 `SOTC_NATIVE=2` draws natively without showing it (side-by-side checks),

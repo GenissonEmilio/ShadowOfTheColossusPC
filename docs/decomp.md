@@ -35,11 +35,20 @@ Not a matching decomp: nothing has to rebuild a PS2 binary.
 `SOTC_DECOMP=0` puts every recompiled function back; `SOTC_DECOMP_SKIP=name`
 one of them.
 
+A function the recompiled code reaches by a tail jump (`j` at the end of
+its caller) is called directly as C++, not through the function table, so
+its registration is never seen there: replace the caller as well (see
+decomp_keyboard.cpp). Check with SOTC_DIFFTEST that the checks count up.
+Difftest runs are slow enough that the scripted route's inputs (timed in
+VBlanks) land elsewhere: compare pictures from a run without it.
+
 ## Done
 
 | Module | Functions | Checks on the route | Notes |
 |---|---|---|---|
 | decomp_softfloat.cpp | dpadd, dpsub, dpmul, dpdiv, dpcmp, litodp, dptoli, fptodp, dptofp, __floatdisf | ~93 000, 0 mismatches (dptoli not called on the route) | the SDK's software doubles: no rounding (truncation), denormals as zero; ~3% of the EE's busy time |
+| decomp_sortlist.cpp | GetNextSortObj, ClearSortList | 19 000 + 3 000, 0 mismatches | the display's sort buckets; 4% of the Vita's game thread recompiled (throttled attract demo) |
+| decomp_keyboard.cpp | kbGetStatus, usbdevFrameInit | 1 500, 0 mismatches | 256 keys copied every frame (1.2%). usbdevFrameInit tail-jumps to kbGetStatus and the recompiler makes that a direct C++ call past the function table: replaced in the caller too |
 
 ## Next candidates (profile 2026-10-17, native route)
 

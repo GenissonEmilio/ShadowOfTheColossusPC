@@ -19,14 +19,18 @@
 #if defined(__APPLE__)
 #define GL_SILENCE_DEPRECATION
 #include <OpenGL/gl3.h>
+#include <malloc/malloc.h>
 #else
 #include <mutex>
+#include <malloc.h>
 #include <vitaGL.h>
 #include <psp2/kernel/cpu.h>
+#include <psp2/kernel/sysmem.h>
 #include <psp2/kernel/threadmgr.h>
 #define PS2X_NATIVE_VITA 1
 std::recursive_mutex &ps2xVitaGlMutex();
 extern "C" unsigned int _pthread_stack_default_user; // ps2_vita_runtime.cpp
+extern "C" unsigned int _newlib_heap_size_user;      // ps2_vita_runtime.cpp
 #endif
 
 #include "ThreadNaming.h"
@@ -40,6 +44,7 @@ extern "C" unsigned int _pthread_stack_default_user; // ps2_vita_runtime.cpp
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -49,6 +54,46 @@ extern "C" unsigned int _pthread_stack_default_user; // ps2_vita_runtime.cpp
 namespace
 {
     constexpr float kNearW = 0.1f;
+
+    // The host heap in use (the Vita's newlib heap, 160 MB; the Mac's malloc
+    // zones): the memory log and the eviction under pressure read it.
+    uint64_t heapUsed()
+    {
+#if defined(PS2X_NATIVE_VITA)
+        return mallinfo().uordblks;
+#else
+        malloc_statistics_t stats{};
+        malloc_zone_statistics(nullptr, &stats);
+        return stats.size_in_use;
+#endif
+    }
+
+    // vitaGL puts what does not fit its GPU pools (CDRAM, then its share of
+    // main RAM) into the newlib heap (use_extra_mem): textures there are
+    // counted apart. False elsewhere.
+    bool inHostHeap(const void *p)
+    {
+#if defined(PS2X_NATIVE_VITA)
+        static uintptr_t base = 0, end = 0;
+        if (!base)
+        {
+            void *probe = std::malloc(16);
+            SceKernelMemBlockInfo info{};
+            info.size = sizeof(info);
+            if (probe && sceKernelGetMemBlockInfoByAddr(probe, &info) >= 0)
+            {
+                base = reinterpret_cast<uintptr_t>(info.mappedBase);
+                end = base + info.mappedSize;
+            }
+            std::free(probe);
+        }
+        const uintptr_t a = reinterpret_cast<uintptr_t>(p);
+        return a >= base && a < end;
+#else
+        (void)p;
+        return false;
+#endif
+    }
 
 #if !defined(PS2X_NATIVE_VITA)
     // ---- GLSL (macOS) ----
@@ -515,8 +560,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     {
         GLuint name = 0;
         uint32_t clamp = 0; // the wrap set on it (bit 0 s, bit 1 t clamp): new textures repeat
+        uint32_t filter = 2; // the min / mag filter set on it (Tuning::textureFilter; 2 trilinear, as uploaded)
+        bool mipped = false; // has mip levels
         uint64_t used = 0;
         uint64_t bytes = 0;
+        bool inHeap = false; // vitaGL put it in the newlib heap (its pools were full)
     };
 
     struct Draw
@@ -582,6 +630,21 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         bool keepAlpha = false;
         std::unordered_map<uint64_t, Mesh> meshes;
         std::unordered_map<uint64_t, Texture> textures;
+        // What they hold (GPU memory: on the Vita vitaGL's pools, else the
+        // newlib heap), kept as they change: the eviction budget and [gl:mem].
+        uint64_t textureBytes = 0, textureHeapBytes = 0, meshBytes = 0, skinnedBytes = 0;
+        void forget(const Mesh &m)
+        {
+            meshBytes -= m.bytes;
+            if (m.skinned)
+                skinnedBytes -= m.bytes;
+        }
+        void forget(const Texture &t)
+        {
+            textureBytes -= t.bytes;
+            if (t.inHeap)
+                textureHeapBytes -= t.bytes;
+        }
         std::vector<Draw> draws;
         std::vector<uint64_t> drawOrder; // layer << 32 | index: the draws in layer order, stable (sorting the draws themselves moved ~450 bytes each)
         // The draw loop's state as last set (pass() forgets it whenever
@@ -636,12 +699,18 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             size_t size() const { return count; }
             const T *data() const { return items.get(); }
             void clear() { count = 0; }
+            size_t bytes() const { return capacity * sizeof(T); }
+            // nullptr when the heap has no room (the caller leaves the mesh out).
             T *grow(size_t n)
             {
                 if (count + n > capacity)
                 {
-                    const size_t want = std::max(count + n, capacity * 2u + 4096u);
-                    std::unique_ptr<T[]> bigger(new T[want]);
+                    // Doubling, but by at most 1M items past what is asked
+                    // (the old and the new block are both held while copying).
+                    const size_t want = std::max(count + n, std::min(capacity * 2u + 4096u, count + n + (1u << 20)));
+                    std::unique_ptr<T[]> bigger(new (std::nothrow) T[want]);
+                    if (!bigger)
+                        return nullptr;
                     if (count)
                         std::memcpy(bigger.get(), items.get(), count * sizeof(T));
                     items = std::move(bigger);
@@ -651,10 +720,25 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 count += n;
                 return at;
             }
-            void append(const T *from, size_t n)
+            bool append(const T *from, size_t n)
             {
-                if (n)
-                    std::memcpy(grow(n), from, n * sizeof(T));
+                if (!n)
+                    return true;
+                T *at = grow(n);
+                if (at)
+                    std::memcpy(at, from, n * sizeof(T));
+                return at != nullptr;
+            }
+            // Gives back room a bigger frame left (empty arenas only).
+            void trim(size_t keep)
+            {
+                if (count || capacity <= keep)
+                    return;
+                std::unique_ptr<T[]> smaller(keep ? new (std::nothrow) T[keep] : nullptr);
+                if (keep && !smaller)
+                    return;
+                items = std::move(smaller);
+                capacity = keep;
             }
         };
         Arena<native_renderer::Vertex> arena;
@@ -1208,6 +1292,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     glDeleteBuffers(1, &m.buffer);
                 if (m.indexBuffer)
                     glDeleteBuffers(1, &m.indexBuffer);
+                forget(m);
                 it = meshes.erase(it);
             }
             else
@@ -1218,6 +1303,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     void Renderer::uploadMesh(uint64_t id, const native_renderer::Vertex *vertices, uint32_t count)
     {
         Mesh &mesh = meshes[id];
+        forget(mesh);
         mesh.used = arenaFrame;
         mesh.dynamic = mesh.indexed = mesh.skinned = false;
         if (!mesh.buffer)
@@ -1226,12 +1312,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(count * sizeof(native_renderer::Vertex)), vertices, GL_STATIC_DRAW);
         mesh.count = count;
         mesh.bytes = static_cast<uint64_t>(count) * sizeof(native_renderer::Vertex);
+        meshBytes += mesh.bytes;
         cache.buffer = ~0u;
     }
 
     void Renderer::uploadSkinned(uint64_t id, const native_renderer::SkinVertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount)
     {
         Mesh &mesh = meshes[id];
+        forget(mesh);
         mesh.used = arenaFrame;
         mesh.dynamic = false;
         mesh.skinned = true;
@@ -1246,6 +1334,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(indexCount * sizeof(uint32_t)), indices, GL_STATIC_DRAW);
         mesh.count = indexCount;
         mesh.bytes = static_cast<uint64_t>(count) * sizeof(native_renderer::SkinVertex) + static_cast<uint64_t>(indexCount) * 4u;
+        meshBytes += mesh.bytes;
+        skinnedBytes += mesh.bytes;
         cache.buffer = ~0u;
     }
 
@@ -1253,6 +1343,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     {
         levels = std::max(1u, levels);
         Texture &t = textures[key];
+        forget(t);
         ++texStats.uploads;
         t.used = arenaFrame;
         t.bytes = static_cast<uint64_t>(width) * height * 4u * (levels > 1u ? 4u : 3u) / 3u;
@@ -1272,14 +1363,21 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             w = std::max(1u, w / 2u);
             h = std::max(1u, h / 2u);
         }
+        textureBytes += t.bytes;
 #if !defined(PS2X_NATIVE_VITA)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(levels - 1u));
+#else
+        t.inHeap = inHostHeap(vglGetTexDataPointer(GL_TEXTURE_2D));
+        if (t.inHeap)
+            textureHeapBytes += t.bytes;
 #endif
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, levels > 1u ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
         t.clamp = 0;
+        t.filter = 2;
+        t.mipped = levels > 1u;
         cache.texture = ~0u;
     }
 
@@ -1638,6 +1736,18 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         bindTexture(0, tex->second.name); // unit 0 active (a refraction draw may have left unit 3)
                         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, (d.state.clamp & 1u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
                         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, (d.state.clamp & 2u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+                    }
+                    // Quality "Texture filtering": nearest, bilinear, trilinear (anisotropic: Metal only, trilinear here).
+                    const uint32_t filter = d.state.screen ? 2u : static_cast<uint32_t>(std::clamp(native_renderer::tuning().textureFilter + 0.5f, 0.0f, 2.0f)); // 2D keeps the default
+                    if (tex->second.filter != filter)
+                    {
+                        tex->second.filter = filter;
+                        bindTexture(0, tex->second.name);
+                        const bool mipped = tex->second.mipped;
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                                        filter == 0 ? (mipped ? GL_NEAREST_MIPMAP_NEAREST : GL_NEAREST)
+                                                    : (filter == 1 ? (mipped ? GL_LINEAR_MIPMAP_NEAREST : GL_LINEAR) : (mipped ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR)));
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter == 0 ? GL_NEAREST : GL_LINEAR);
                     }
                 }
                 const float misc[4] = {d.state.fresnel ? -1.0f : (d.state.lit ? 1.0f : 0.0f), d.state.opacity, d.state.uvOffset[0], d.state.uvOffset[1]};
@@ -2109,7 +2219,33 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     class GlBackend final : public native_renderer::detail::Backend
     {
     public:
-        explicit GlBackend(Renderer *renderer) : r(renderer) {}
+        explicit GlBackend(Renderer *renderer) : r(renderer)
+        {
+            const auto mb = [](const char *name, double fallback)
+            {
+                const char *v = std::getenv(name);
+                return static_cast<uint64_t>((v ? std::atof(v) : fallback) * 1048576.0);
+            };
+#if defined(PS2X_NATIVE_VITA)
+            // vitaGL's GPU pools (112 MB CDRAM + ~100 MB of main RAM) also
+            // hold the render targets and its own buffers; past them it takes
+            // the newlib heap, which the game needs (see evictKept).
+            m_cacheBudget = mb("SOTC_GL_CACHE_MB", 96.0);
+            m_heapHigh = mb("SOTC_GL_HEAP_MB", 104.0);
+            m_heapLimit = static_cast<uint64_t>(_newlib_heap_size_user) - mb("SOTC_GL_HEAP_RESERVE_MB", 12.0);
+            m_flushBytes = mb("SOTC_GL_UPLOAD_FLUSH_MB", 8.0);
+            m_memLog = true;
+#else
+            m_cacheBudget = mb("SOTC_GL_CACHE_MB", 0.0);
+            if (!m_cacheBudget)
+                m_cacheBudget = ~0ull;
+            m_heapHigh = mb("SOTC_GL_HEAP_MB", 0.0);
+            m_heapLimit = 0;
+            m_flushBytes = mb("SOTC_GL_UPLOAD_FLUSH_MB", 64.0);
+            m_memLog = std::getenv("SOTC_GL_MEM_LOG") || std::getenv("SOTC_GL_CACHE_LOG");
+#endif
+            m_startUs = native_renderer::nowUs();
+        }
 
         // Starts the render thread. makeCurrent: called there first (macOS:
         // the context becomes that thread's); initThere: the renderer is
@@ -2138,15 +2274,20 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             if (perFrame && !noArena())
             {
                 const uint32_t first = static_cast<uint32_t>(m_rec.arena.size());
-                m_rec.arena.append(vertices, count);
+                if (!m_rec.arena.append(vertices, count))
+                {
+                    ++m_skipped; // no room: this frame goes without it
+                    return;
+                }
                 m_rec.frameMeshes.push_back({id, first, count, 0u, false});
                 return;
             }
-            Renderer::Upload &u = queue(Renderer::Upload::MeshKind, id);
-            u.count = count;
-            u.bytes.assign(reinterpret_cast<const uint8_t *>(vertices), reinterpret_cast<const uint8_t *>(vertices + count));
+            const auto *from = reinterpret_cast<const uint8_t *>(vertices);
+            if (!queue(Renderer::Upload::MeshKind, id, count, from, count * sizeof(native_renderer::Vertex)))
+                return;
             if (!perFrame)
                 m_knownMeshes.insert(id);
+            flushIfLarge();
         }
         native_renderer::Vertex *frameMesh(uint32_t count) override
         {
@@ -2186,11 +2327,23 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         bool canSkin() override { return r->skinProgram != 0; } // set once by init
         void uploadSkinnedMesh(uint64_t id, const native_renderer::SkinVertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount) override
         {
-            Renderer::Upload &u = queue(Renderer::Upload::SkinnedKind, id);
-            u.count = count;
-            u.bytes.assign(reinterpret_cast<const uint8_t *>(vertices), reinterpret_cast<const uint8_t *>(vertices + count));
-            u.indices.assign(indices, indices + indexCount);
+            const auto *from = reinterpret_cast<const uint8_t *>(vertices);
+            Renderer::Upload *u = queue(Renderer::Upload::SkinnedKind, id, count, from, count * sizeof(native_renderer::SkinVertex), indexCount * 4u);
+            if (!u)
+                return;
+            try
+            {
+                u->indices.assign(indices, indices + indexCount);
+            }
+            catch (const std::bad_alloc &)
+            {
+                m_recUploadBytes -= u->bytes.size() + indexCount * 4u;
+                m_rec.uploads.pop_back();
+                ++m_skipped;
+                return;
+            }
             m_knownMeshes.insert(id);
+            flushIfLarge();
         }
         uint32_t framePalette(const float *qwords, uint32_t count) override
         {
@@ -2211,12 +2364,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 w = std::max(1u, w / 2u);
                 h = std::max(1u, h / 2u);
             }
-            Renderer::Upload &u = queue(Renderer::Upload::TextureKind, key);
-            u.width = width;
-            u.height = height;
-            u.levels = levels;
-            u.bytes.assign(rgba, rgba + bytes);
+            Renderer::Upload *u = queue(Renderer::Upload::TextureKind, key, 0u, rgba, bytes);
+            if (!u)
+                return; // not known: asked for again next time
+            u->width = width;
+            u->height = height;
+            u->levels = levels;
             m_knownTextures.insert(key);
+            flushIfLarge();
         }
         void beginFrame() override { clearFrame(); }
         void draw(uint64_t mesh, const float clip[16], const native_renderer::DrawState &state) override { m_rec.draws.emplace_back(mesh, clip, state); }
@@ -2254,7 +2409,15 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             r->dof = m_rec.dof;
             clearFrame();
             m_rec.uploads.clear();
+            m_uploadPeak = std::max(m_uploadPeak, m_frameUploadBytes + m_recUploadBytes);
+            m_frameUploadBytes = m_recUploadBytes = 0;
             evictKept();
+            trimRecording();
+            if (m_memLog && native_renderer::nowUs() >= m_nextMemLog)
+            {
+                m_nextMemLog = native_renderer::nowUs() + 5000000u;
+                logMemory();
+            }
             m_width = width;
             m_height = height;
             m_queued = true;
@@ -2327,64 +2490,241 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             m_rec.frameMeshes.clear();
         }
 
-        Renderer::Upload &queue(Renderer::Upload::Kind kind, uint64_t id)
+        // An upload with its own copy of the data (the caller's buffer is
+        // reused at once). nullptr when the heap has no room for it (the
+        // caller does not count it as uploaded: it is asked for again).
+        Renderer::Upload *queue(Renderer::Upload::Kind kind, uint64_t id, uint32_t count, const uint8_t *data, size_t bytes, size_t extra = 0)
         {
-            m_rec.uploads.emplace_back();
-            Renderer::Upload &u = m_rec.uploads.back();
-            u.kind = kind;
-            u.id = id;
-            return u;
+            if (m_heapLimit && m_heap + m_recUploadBytes + bytes + extra > m_heapLimit)
+            {
+                m_heap = heapUsed(); // the last reading may be old
+                if (m_heap + m_recUploadBytes + bytes + extra > m_heapLimit)
+                {
+                    ++m_skipped;
+                    return nullptr;
+                }
+            }
+            bool added = false;
+            try
+            {
+                m_rec.uploads.emplace_back();
+                added = true;
+                Renderer::Upload &u = m_rec.uploads.back();
+                u.kind = kind;
+                u.id = id;
+                u.count = count;
+                u.bytes.assign(data, data + bytes);
+            }
+            catch (const std::bad_alloc &)
+            {
+                if (added)
+                    m_rec.uploads.pop_back();
+                ++m_skipped;
+                return nullptr;
+            }
+            m_recUploadBytes += bytes + extra;
+            return &m_rec.uploads.back();
+        }
+
+        // A scene load asks for hundreds of textures in one frame: each
+        // copy waited in the queue until the hand-over (the frame being
+        // recorded and the one drawn held up to ~2 x 30 MB). Past
+        // m_flushBytes the render thread applies what is queued now (the
+        // game thread waits for it) and the copies go.
+        void flushIfLarge()
+        {
+            if (m_recUploadBytes >= m_flushBytes)
+                flushUploads();
+        }
+        void flushUploads()
+        {
+            std::unique_lock<std::mutex> lock(m_mutex);
+            waitIdle(lock);
+            // The render thread is idle: the frame handed over is drawn, its
+            // upload list empty.
+            r->uploads.swap(m_rec.uploads);
+            m_rec.uploads.clear();
+            m_uploadsOnly = true;
+            m_queued = true;
+            m_work.notify_one();
+            waitIdle(lock);
+            m_frameUploadBytes += m_recUploadBytes;
+            m_recUploadBytes = 0;
+            ++m_flushes;
+        }
+
+        // The recording's arenas and draw list grow to the largest frame and
+        // kept that size: given back when the last ~600 frames needed less
+        // than half (a scene's peak does not stay for the rest of the run).
+        void trimRecording()
+        {
+            m_vertexPeak = std::max(m_vertexPeak, r->arena.size());
+            m_indexPeak = std::max(m_indexPeak, r->indexArena.size());
+            m_drawPeak = std::max(m_drawPeak, r->draws.size());
+            if (++m_trimFrames >= 600u)
+            {
+                m_vertexPeakPrev = m_vertexPeak;
+                m_indexPeakPrev = m_indexPeak;
+                m_drawPeakPrev = m_drawPeak;
+                m_vertexPeak = m_indexPeak = m_drawPeak = 0;
+                m_trimFrames = 0;
+            }
+            const size_t vertices = std::max(m_vertexPeak, m_vertexPeakPrev), indices = std::max(m_indexPeak, m_indexPeakPrev),
+                         draws = std::max(m_drawPeak, m_drawPeakPrev);
+            if (m_rec.arena.capacity > vertices * 2u + 65536u)
+                m_rec.arena.trim(vertices + vertices / 4u + 4096u);
+            if (m_rec.indexArena.capacity > indices * 2u + 65536u)
+                m_rec.indexArena.trim(indices + indices / 4u + 4096u);
+            if (m_rec.draws.capacity() > draws * 2u + 1024u)
+            {
+                std::vector<Draw>().swap(m_rec.draws);
+                try
+                {
+                    m_rec.draws.reserve(draws + draws / 4u + 256u);
+                }
+                catch (const std::bad_alloc &)
+                {
+                }
+            }
+        }
+
+        // [gl:mem] every 5 s (the Vita; SOTC_GL_MEM_LOG elsewhere): what each
+        // pool holds, next to the heap. GPU: textures and kept meshes (vitaGL's
+        // pools; "in heap": vitaGL had to put them in the newlib heap). Host:
+        // uploads waiting (the most one frame queued), the frame arenas and
+        // draw lists (both frames), the hooks' skinned packets (bind poses).
+        void logMemory()
+        {
+            // The working set: drawn in the last 120 frames (what a budget
+            // could not evict).
+            const uint64_t recent = r->arenaFrame > 120u ? r->arenaFrame - 120u : 0u;
+            uint32_t kept = 0;
+            uint64_t recentBytes = 0;
+            for (const auto &m : r->meshes)
+                if (!m.second.dynamic)
+                {
+                    ++kept;
+                    recentBytes += m.second.used >= recent ? m.second.bytes : 0u;
+                }
+            for (const auto &t : r->textures)
+                recentBytes += t.second.used >= recent ? t.second.bytes : 0u;
+            const uint64_t skinnedPackets = native_renderer::frontendMemory();
+            const double MB = 1048576.0;
+            const uint64_t arenas = r->arena.bytes() + r->indexArena.bytes() + m_rec.arena.bytes() + m_rec.indexArena.bytes();
+            const uint64_t lists = (r->draws.capacity() + m_rec.draws.capacity()) * sizeof(Draw) + (r->palettes.capacity() + m_rec.palettes.capacity()) * sizeof(float);
+            m_heap = heapUsed();
+            std::fprintf(stderr,
+                         "[gl:mem] t=%.0f heap %.1f MB | textures %u %.1f MB (in heap %.1f) | meshes %u %.1f MB (skinned %.1f) | drawn in 120 frames %.1f MB, budget %.0f MB | "
+                         "uploads peak %.1f MB a frame, flushes %u | arenas %.1f MB, draw lists %.1f MB | hooks' skinned packets %.1f MB | "
+                         "evicted aged %u, budget %u (%.1f MB), pressure %u (%.1f MB) | skipped %u\n",
+                         (native_renderer::nowUs() - m_startUs) / 1e6, m_heap / MB, static_cast<unsigned>(r->textures.size()), r->textureBytes / MB,
+                         r->textureHeapBytes / MB, kept, r->meshBytes / MB, r->skinnedBytes / MB, recentBytes / MB, m_cacheBudget == ~0ull ? 0.0 : m_cacheBudget / MB,
+                         m_uploadPeak / MB, m_flushes, arenas / MB, lists / MB, skinnedPackets / MB, m_evictedAged, m_evictedBudget,
+                         m_evictedBudgetBytes / MB, m_evictedPressure, m_evictedPressureBytes / MB, m_skipped);
+            m_uploadPeak = 0;
+            m_flushes = m_evictedAged = m_evictedBudget = m_evictedPressure = m_skipped = 0;
+            m_evictedBudgetBytes = m_evictedPressureBytes = 0;
         }
 
         // Ids hash a model's or a texture's content: when the game loads another
         // area into the same memory, the old ones are never asked for again (the
         // title's demo filled the Vita's 160 MB in ~12 min). What no frame drew
-        // for ~30 s goes; drawn again, the frontend uploads it anew (hasMesh
-        // false). Done at a hand-over, with the render thread waiting: the
-        // frame handed over (its draws and uploads) keeps what it uses, and the
-        // game thread's list of what is here loses the rest before it records
-        // the next frame. The GL objects go on the render thread.
+        // for 1800 frames goes; drawn again, the frontend uploads it anew
+        // (hasMesh false). Sooner when the textures and kept meshes pass
+        // m_cacheBudget: the least recently drawn first, unused for
+        // kBudgetAge frames at least, down to 7/8 of the budget. Sooner still
+        // when the host heap passes m_heapHigh: all unused for kPressureAge
+        // frames. On the Vita the budget keeps vitaGL inside its GPU pools: a
+        // scene change kept the last area's textures for ~1800 frames next
+        // to the new one's (~100 MB), vitaGL put the rest in the newlib heap
+        // (heap used 75 -> 145 MB) and the next allocation failed (72 min run).
+        // Done at a hand-over, with the render thread waiting: the frame handed
+        // over (its draws and uploads) keeps what it uses, and the game
+        // thread's list of what is here loses the rest before it records the
+        // next frame. The GL objects go on the render thread.
         void evictKept()
         {
-            constexpr uint64_t kEvery = 256, kUnused = 1800;
+            constexpr uint64_t kEvery = 256, kUnused = 1800, kBudgetAge = 120, kPressureAge = 30, kHeapEvery = 16;
             const uint64_t frame = r->arenaFrame + 1u; // the frame handed over
-            if (frame % kEvery != 0 || frame < kUnused)
+            if (m_heapHigh && frame % kHeapEvery == 0)
+                m_heap = heapUsed();
+            const bool aging = frame % kEvery == 0 && frame >= kUnused;
+            const bool pressure = m_heapHigh && m_heap > m_heapHigh && frame >= m_nextPressure;
+            const bool overBudget = r->textureBytes + r->meshBytes > m_cacheBudget && frame >= m_nextBudget;
+            if (!aging && !pressure && !overBudget)
                 return;
-            const uint64_t before = frame - kUnused;
-            std::unordered_set<uint64_t> meshes, textures;
-            for (const auto &[id, m] : r->meshes)
-                if (!m.dynamic && m.used < before)
-                    meshes.insert(id);
-            for (const auto &[id, t] : r->textures)
-                if (t.used < before)
-                    textures.insert(id);
-            if (meshes.empty() && textures.empty())
-                return;
+            m_keepMeshes.clear();
+            m_keepTextures.clear();
             for (const Draw &d : r->draws)
             {
-                meshes.erase(d.mesh);
+                m_keepMeshes.insert(d.mesh);
                 if (d.state.texture)
-                    textures.erase(d.state.texture);
+                    m_keepTextures.insert(d.state.texture);
             }
             for (const Renderer::Upload &u : r->uploads)
-                (u.kind == Renderer::Upload::TextureKind ? textures : meshes).erase(u.id);
-            for (const uint64_t id : meshes)
+                (u.kind == Renderer::Upload::TextureKind ? m_keepTextures : m_keepMeshes).insert(u.id);
+            const uint64_t agedBefore = aging ? frame - kUnused : 0u;
+            const uint64_t pressureBefore = pressure && frame > kPressureAge ? frame - kPressureAge : 0u;
+            const uint64_t budgetBefore = overBudget && frame > kBudgetAge ? frame - kBudgetAge : 0u;
+            const uint64_t oldest = std::max({agedBefore, pressureBefore, budgetBefore});
+            m_candidates.clear();
+            for (const auto &[id, m] : r->meshes)
+                if (!m.dynamic && m.used < oldest && !m_keepMeshes.count(id))
+                    m_candidates.push_back({m.used, id, m.bytes, false});
+            for (const auto &[id, t] : r->textures)
+                if (t.used < oldest && !m_keepTextures.count(id))
+                    m_candidates.push_back({t.used, id, t.bytes, true});
+            std::sort(m_candidates.begin(), m_candidates.end(), [](const Candidate &a, const Candidate &b) { return a.used < b.used; });
+            uint64_t cached = r->textureBytes + r->meshBytes;
+            const uint64_t target = m_cacheBudget - m_cacheBudget / 8u;
+            for (const Candidate &c : m_candidates)
             {
-                auto it = r->meshes.find(id);
-                if (it->second.buffer)
-                    r->deadBuffers.push_back(it->second.buffer);
-                if (it->second.indexBuffer)
-                    r->deadBuffers.push_back(it->second.indexBuffer);
-                r->meshes.erase(it);
-                m_knownMeshes.erase(id);
+                const bool aged = c.used < agedBefore, pressed = c.used < pressureBefore, budget = c.used < budgetBefore && cached > target;
+                if (!aged && !pressed && !budget)
+                    continue;
+                if (aged)
+                    ++m_evictedAged;
+                else if (pressed)
+                {
+                    ++m_evictedPressure;
+                    m_evictedPressureBytes += c.bytes;
+                }
+                else
+                {
+                    ++m_evictedBudget;
+                    m_evictedBudgetBytes += c.bytes;
+                }
+                cached -= c.bytes;
+                if (c.texture)
+                {
+                    auto it = r->textures.find(c.id);
+                    if (it->second.name)
+                        r->deadTextures.push_back(it->second.name);
+                    r->forget(it->second);
+                    r->textures.erase(it);
+                    m_knownTextures.erase(c.id);
+                }
+                else
+                {
+                    auto it = r->meshes.find(c.id);
+                    if (it->second.buffer)
+                        r->deadBuffers.push_back(it->second.buffer);
+                    if (it->second.indexBuffer)
+                        r->deadBuffers.push_back(it->second.indexBuffer);
+                    r->forget(it->second);
+                    r->meshes.erase(it);
+                    m_knownMeshes.erase(c.id);
+                }
             }
-            for (const uint64_t id : textures)
+            // A scene that needs more than the budget: looked at again later
+            // (not every frame); under pressure, after the next heap reading.
+            if (overBudget && cached > m_cacheBudget)
+                m_nextBudget = frame + 64u;
+            if (pressure)
             {
-                auto it = r->textures.find(id);
-                if (it->second.name)
-                    r->deadTextures.push_back(it->second.name);
-                r->textures.erase(it);
-                m_knownTextures.erase(id);
+                m_nextPressure = frame + kHeapEvery;
+                m_rec.arena.trim(0);
+                m_rec.indexArena.trim(0);
             }
         }
 
@@ -2414,7 +2754,15 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 m_queued = false;
                 m_busy = true;
                 const uint32_t width = m_width, height = m_height;
+                const bool uploadsOnly = m_uploadsOnly; // flushUploads
+                m_uploadsOnly = false;
                 lock.unlock();
+                if (uploadsOnly)
+                {
+                    Lock gl;
+                    r->applyUploads();
+                }
+                else
                 {
                     Lock gl;
                     const uint64_t start = native_renderer::nowUs(), present = r->stats.presentUs;
@@ -2435,6 +2783,23 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         Recording m_rec;
         std::unordered_set<uint64_t> m_knownMeshes, m_knownTextures; // what hasMesh / hasTexture answer
         size_t m_pendingFirst = 0, m_pendingIndexFirst = 0;
+        // Memory (see evictKept, flushUploads, trimRecording, logMemory).
+        struct Candidate
+        {
+            uint64_t used, id, bytes;
+            bool texture;
+        };
+        std::vector<Candidate> m_candidates;
+        std::unordered_set<uint64_t> m_keepMeshes, m_keepTextures;
+        uint64_t m_cacheBudget = ~0ull, m_heapHigh = 0, m_heapLimit = 0, m_flushBytes = 0, m_heap = 0;
+        uint64_t m_nextBudget = 0, m_nextPressure = 0;
+        uint64_t m_recUploadBytes = 0, m_frameUploadBytes = 0, m_uploadPeak = 0;
+        size_t m_vertexPeak = 0, m_indexPeak = 0, m_drawPeak = 0, m_vertexPeakPrev = 0, m_indexPeakPrev = 0, m_drawPeakPrev = 0;
+        uint32_t m_trimFrames = 0;
+        bool m_memLog = false;
+        uint64_t m_startUs = 0, m_nextMemLog = 0;
+        uint32_t m_flushes = 0, m_evictedAged = 0, m_evictedBudget = 0, m_evictedPressure = 0, m_skipped = 0;
+        uint64_t m_evictedBudgetBytes = 0, m_evictedPressureBytes = 0;
         // The hand-over.
         // One condition each way. The waits also look again every few ms: in
         // Vita3K a wake-up of the newlib pthread condition got lost now and
@@ -2450,6 +2815,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         bool m_started = false, m_initOk = false;
         bool m_queued = false; // a frame handed over, not started yet
         bool m_busy = false;   // the render thread drawing
+        bool m_uploadsOnly = false; // what is handed over is uploads alone (flushUploads)
         uint32_t m_width = 0, m_height = 0;
     };
 }

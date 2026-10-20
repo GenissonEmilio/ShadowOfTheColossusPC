@@ -25,6 +25,7 @@
 #include "ps2_runtime_macros.h"
 #include "runtime/native_tuning.h"
 #include "runtime/native_renderer.h"
+#include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
 #include "runtime/gs/ps2_gs_psmt4.h"
 #include "runtime/gs/ps2_gs_psmt8.h"
@@ -347,6 +348,24 @@ namespace sotc_native
         const uint8_t swizzleBits = g_ram[(header + 0x1Fu) & 0x1FFFFFFu];
         std::vector<uint8_t> rgba;
         std::vector<uint8_t> scratch;
+        // Room for every level at once (growing level by level copied the
+        // levels before each time); no room in the heap: no texture this time
+        // (asked for again at the next draw), rather than an abort.
+        {
+            size_t total = 0;
+            for (uint32_t level = 0, lw = width, lh = height; level < levels && lw >= 1u && lh >= 1u; ++level, lw /= 2u, lh /= 2u)
+                total += static_cast<size_t>(lw) * lh * 4u;
+            try
+            {
+                rgba.reserve(total);
+                if (psm != 0x00u)
+                    scratch.reserve(static_cast<size_t>(std::max(width, 64u)) * std::max(height, 64u) + 0x4000u);
+            }
+            catch (const std::bad_alloc &)
+            {
+                return 0;
+            }
+        }
         uint32_t pixels = header + word(header + 0x14u), w = width, h = height, decoded = 0;
         for (uint32_t level = 0; level < levels && w >= 1u && h >= 1u; ++level)
         {
@@ -685,6 +704,7 @@ namespace sotc_native
         bool gpu = false;
         uint32_t lo = 0, hi = 0;
         uint64_t used = 0;              // the last frame (g_frame) that drew it
+        uint64_t bytes = 0;             // held here (the [gl:mem] log)
     };
 
     SkinnedPacket makeSkinnedPacket(std::vector<Strip> &&strips)
@@ -727,6 +747,9 @@ namespace sotc_native
         packet.hi = std::max(hi, packet.lo);
         packet.gpu = (!packet.lit || !noNormal) && packet.hi - packet.lo <= native_renderer::kSkinPaletteQwords;
         packet.strips = std::move(strips);
+        packet.bytes = packet.strips.capacity() * sizeof(Strip) + packet.bind.capacity() * sizeof(SkinBind) + packet.stripEnd.capacity() * 4u;
+        for (const Strip &strip : packet.strips)
+            packet.bytes += strip.capacity() * sizeof(BatchVertex);
         return packet;
     }
 
@@ -905,6 +928,7 @@ namespace sotc_native
         return mesh;
     }
     std::unordered_map<uint64_t, SkinnedPacket> g_skinnedPackets; // by packet
+    uint64_t g_skinnedPacketBytes = 0;                               // what they hold
     std::unordered_set<uint64_t> g_litPackets;                        // packets with normals
     uint64_t g_skinnedDraws = 0;                                       // this frame's skinned meshes
 
@@ -1199,10 +1223,12 @@ namespace sotc_native
                     if (it->second.used + 1800u < frame)
                     {
                         g_litPackets.erase(it->first);
+                        g_skinnedPacketBytes -= it->second.bytes;
                         it = g_skinnedPackets.erase(it);
                     }
                     else
                         ++it;
+            native_renderer::noteFrontendMemory(g_skinnedPacketBytes);
         }
     }
 
@@ -2209,6 +2235,282 @@ namespace sotc_native
         return true;
     }
 
+    // modelDisp (0x1097118) without its display list: what it leaves in RAM
+    // for the rest of the game, the VIF packets it links for VU1 (CALL tags
+    // into each layer's chain: the instance's header, the microcode, every
+    // packet of the LOD, the texture requests) left out. Nothing reads those
+    // any more with the native renderer drawing, and walking them was most of
+    // the VIF1 chain (Vif1Walker) besides modelDisp's own time. Kept:
+    //   the parts' camera test results (LOD table node +0x2c),
+    //   the instance packet's opacity (+0xdc) and +0xd0,
+    //   setShadowEffect (0x1186294) for a drawn part with bit 24,
+    //   the last surface per layer (*0x118bfc8, modelSetSurface reads it too).
+    // Left out with the lists: texTransRequest (VRAM uploads for the GS that
+    // draws nothing; native textures come from RAM) and iosDlLockObj (holds a
+    // deletion until the frame's DMA is done; no DMA reads the model now).
+    // SOTC_PS2_LISTS=1 / Debug "PS2 model lists": the recompiled modelDisp.
+    // VU0 macro arithmetic as the recompiled code does it (PS2_VMUL /
+    // PS2_VADD: operands and result with denormals flushed and infinities
+    // clamped, a multiply and an add rounded apart) and its CLIP judgement.
+    float vuNorm(float v)
+    {
+        uint32_t b;
+        std::memcpy(&b, &v, 4);
+        const uint32_t e = b & 0x7F800000u;
+        if (e == 0u)
+            b &= 0x80000000u;
+        else if (e == 0x7F800000u)
+            b = (b & 0x80000000u) | 0x7F7FFFFFu;
+        std::memcpy(&v, &b, 4);
+        return v;
+    }
+    // vmulax / vmadday / vmaddaz / vmaddw: m (4 columns) x (x, y, z, w),
+    // every operand already through vuNorm (each product and sum is again).
+    void vuTransform(const float m[16], float x, float y, float z, float w, float out[4])
+    {
+        for (int r = 0; r < 4; ++r)
+        {
+            const float a = vuNorm(vuNorm(m[r] * x) + vuNorm(m[4 + r] * y));
+            const float b = vuNorm(a + vuNorm(m[8 + r] * z));
+            out[r] = vuNorm(b + vuNorm(m[12 + r] * w));
+        }
+    }
+    // ps2VuClipFlags(v, v): +x 0, -x 1, +y 2, -y 3, +z 4, -z 5 against |w|.
+    uint32_t vuClipFlags(const float v[4])
+    {
+        uint32_t wBits;
+        std::memcpy(&wBits, &v[3], 4);
+        const int32_t limit = (wBits & 0x7F800000u) != 0u ? static_cast<int32_t>(wBits & 0x7FFFFFFFu) : 0x007FFFFF;
+        uint32_t flags = 0u;
+        for (int c = 0; c < 3; ++c)
+        {
+            uint32_t bits;
+            std::memcpy(&bits, &v[c], 4);
+            if (static_cast<int32_t>(bits) > limit)
+                flags |= 1u << (2 * c);
+            if (static_cast<int32_t>(bits ^ 0x80000000u) > limit)
+                flags |= 2u << (2 * c);
+        }
+        return flags;
+    }
+
+    void modelDispState(R5900Context *ctx, uint32_t instance, const float model[16])
+    {
+        const uint32_t header = word(word(instance) + 0x20u);
+        uint64_t lodWord;
+        std::memcpy(&lodWord, g_ram + ((instance + 0x250u) & 0x1FFFFF8u), 8);
+        // dsll 21, dsra32 29: bits 40-42, signed.
+        uint32_t lod = static_cast<uint32_t>(static_cast<int64_t>(lodWord << 21) >> 61);
+        const uint32_t flags18 = word(header + 0x18u) & 1u;
+        const bool partCulled = flags18 == 0u && word(header + 0x54u) != 1u;
+        if (word(header + 0x1Cu) <= lod && flags18 != 0u)
+            lod = word(header + 0x1Cu) - 1u;
+        const uint32_t table = word(header + 0x30u + lod * 4u);
+        if (partCulled)
+        {
+            if (table == 0u)
+                return;
+            // camera context +0x5a0 x the model matrix, on VU0.
+            float camera[16], clip[16];
+            for (int i = 0; i < 16; ++i)
+                camera[i] = vuNorm(real(g_cameraContext + 0x5A0u + i * 4u));
+            for (int c = 0; c < 4; ++c)
+                vuTransform(camera, vuNorm(model[c * 4]), vuNorm(model[c * 4 + 1]), vuNorm(model[c * 4 + 2]), vuNorm(model[c * 4 + 3]), clip + c * 4);
+            // modelDisp / manager_sub_01099A08: the box's eight corners in this
+            // order through vclipw, the CLIP register (24 bits, the last four
+            // judgements) read after each: all of them sharing a plane -> 1
+            // (out), the register 0 at every read (this box's corners and the
+            // three judgements before them all inside) -> 2, else 0 (partly).
+            uint32_t clipRegister = ctx->vu0_clip_flags & 0xFFFFFFu;
+            const auto test = [&](uint32_t node) -> uint32_t
+            {
+                static constexpr uint8_t kCorners[8] = {0, 6, 5, 3, 4, 2, 1, 7}; // bit 0 x, 1 y, 2 z: max
+                uint32_t all = 0x3Fu, any = 0u;
+                for (uint8_t corner : kCorners)
+                {
+                    const float x = vuNorm(real(node + ((corner & 1) ? 0x10u : 0u))), y = vuNorm(real(node + ((corner & 2) ? 0x14u : 4u))),
+                                z = vuNorm(real(node + ((corner & 4) ? 0x18u : 8u)));
+                    float v[4];
+                    vuTransform(clip, x, y, z, 1.0f, v);
+                    clipRegister = ((clipRegister << 6) | vuClipFlags(v)) & 0xFFFFFFu;
+                    all &= clipRegister;
+                    any |= clipRegister;
+                }
+                return all ? 1u : (any ? 0u : 2u);
+            };
+            struct ClipBack // the register as modelDisp leaves it
+            {
+                R5900Context *ctx;
+                uint32_t &value;
+                ~ClipBack() { ctx->vu0_clip_flags = value; }
+            } clipBack{ctx, clipRegister};
+            const auto put = [](uint32_t addr, uint32_t value) { std::memcpy(const_cast<uint8_t *>(g_ram) + (addr & 0x1FFFFFCu), &value, 4); };
+            // manager_sub_01099A08: a node takes its parent's result unless
+            // that is 0 (partly inside), then it is tested; written at +0x2c.
+            const auto visit = [&](auto &&self, uint32_t node, uint32_t inherited, int depth) -> void
+            {
+                if (depth > 64)
+                    return;
+                const uint32_t state = inherited ? inherited : test(node);
+                put(node + 0x2Cu, state);
+                for (uint32_t link : {0x20u, 0x24u})
+                    if (word(node + link) != 0xFFFFFFFFu)
+                        self(self, table + word(node + link) * 0x30u, state, depth + 1);
+            };
+            const uint32_t root = test(table);
+            put(table + 0x2Cu, root);
+            if (root == 1u)
+                return;
+            for (uint32_t link : {0x20u, 0x24u})
+                if (word(table + link) != 0xFFFFFFFFu)
+                    visit(visit, table + word(table + link) * 0x30u, root, 1);
+        }
+        const auto put = [](uint32_t addr, uint32_t value) { std::memcpy(const_cast<uint8_t *>(g_ram) + (addr & 0x1FFFFFCu), &value, 4); };
+        uint64_t drawFlags;
+        std::memcpy(&drawFlags, g_ram + ((instance + 0x260u) & 0x1FFFFF8u), 8);
+        if ((drawFlags & 4u) == 0u)
+        {
+            float opacity = 1.0f - real(instance + 0x244u);
+            if (word(header + 0xCu) != 0u)
+                opacity *= 1.0f - real(instance + 0x248u);
+            const uint32_t packet = word(instance + 0xCu);
+            uint32_t bits;
+            std::memcpy(&bits, &opacity, 4);
+            if (flags18 == 0u)
+            {
+                if (!(1.0f <= opacity))
+                    put(packet + 0xDCu, bits);
+            }
+            else
+            {
+                if (real(packet + 0xD0u) != real(instance + 0x24Cu))
+                    put(packet + 0xD0u, word(instance + 0x24Cu));
+                if (opacity < 1.0f)
+                    put(packet + 0xDCu, bits);
+            }
+        }
+        const bool fading = 0.0f < real(instance + 0x244u);
+        const uint32_t boss = word(0x1186290u), cache = word(0x118BFC8u);
+        for (uint32_t pk = word(header + 0x60u); word(pk) != 0u; pk += 32u)
+        {
+            if (word(pk + 4u) != lod)
+                continue;
+            const uint32_t s = word(pk + 8u) * 0x120u + word(header + 0x50u);
+            uint64_t flags;
+            std::memcpy(&flags, g_ram + ((s + 0x18u) & 0x1FFFFF8u), 8);
+            if ((flags >> 29) & 1u)
+                continue;
+            if (partCulled && word(pk + 12u) != 0xFFFFFFFFu)
+            {
+                const uint32_t state = word(table + word(pk + 12u) * 0x30u + 0x2Cu);
+                if (state != 0u && state != 2u)
+                    continue;
+            }
+            if ((flags >> 17) & 1u)
+                continue; // the boss effect's surfaces: no cached surface
+            if ((flags >> 24) & 1u)
+            {
+                put(0x1186294u, 1u); // setShadowEffect
+                if (!(boss & 2u))
+                    continue;
+            }
+            if (((flags >> 26) & 1u) && word(0x1186328u) != 0u)
+                continue;
+            put(cache + surfaceLayer(header, s, fading) * 4u, s);
+        }
+    }
+
+    // SOTC_MODELDISP_CHECK=1 (debugging): modelDispState against the
+    // recompiled modelDisp on the same input, on what it leaves behind: the
+    // values modelDispState writes are taken, put back, then modelDisp runs
+    // to its return and its values are compared (a log line per mismatch).
+    void modelDispCheck(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t instance, const float model[16])
+    {
+        static uint64_t checks = 0, mismatches = 0;
+        std::vector<uint32_t> at;
+        const uint32_t header = word(word(instance) + 0x20u);
+        for (uint32_t i = 0; i < 32u; ++i)
+            at.push_back(word(0x118BFC8u) + i * 4u);
+        at.push_back(0x1186294u);
+        at.push_back(word(instance + 0xCu) + 0xD0u);
+        at.push_back(word(instance + 0xCu) + 0xDCu);
+        for (uint32_t lod = 0; lod < 4u; ++lod)
+        {
+            const uint32_t table = word(header + 0x30u + lod * 4u);
+            if (!table || (word(header + 0x18u) & 1u) || word(header + 0x54u) == 1u)
+                continue;
+            std::vector<uint32_t> todo{0u};
+            std::set<uint32_t> seen;
+            while (!todo.empty() && seen.size() < 4096u)
+            {
+                const uint32_t node = todo.back();
+                todo.pop_back();
+                if (!seen.insert(node).second)
+                    continue;
+                at.push_back(table + node * 0x30u + 0x2Cu);
+                for (uint32_t link : {0x20u, 0x24u})
+                    if (word(table + node * 0x30u + link) != 0xFFFFFFFFu)
+                        todo.push_back(word(table + node * 0x30u + link));
+            }
+        }
+        std::vector<uint32_t> before(at.size()), mine(at.size());
+        for (size_t i = 0; i < at.size(); ++i)
+            before[i] = word(at[i]);
+        const uint32_t clipBefore = ctx->vu0_clip_flags;
+        modelDispState(ctx, instance, model);
+        const uint32_t clipMine = ctx->vu0_clip_flags;
+        ctx->vu0_clip_flags = clipBefore;
+        for (size_t i = 0; i < at.size(); ++i)
+        {
+            mine[i] = word(at[i]);
+            std::memcpy(rdram + (at[i] & 0x1FFFFFCu), &before[i], 4);
+        }
+        // modelDisp to its return (it can leave on a continuation).
+        const uint32_t ra = GPR_U32(ctx, 31), sp = GPR_U32(ctx, 29);
+        g_modelDisp(rdram, ctx, runtime);
+        while (!(ctx->pc == ra && GPR_U32(ctx, 29) == sp))
+        {
+            PS2Runtime::RecompiledFunction next = runtime->hasFunction(ctx->pc) ? runtime->lookupFunction(ctx->pc) : nullptr;
+            if (!next)
+                break;
+            next(rdram, ctx, runtime);
+        }
+        ++checks;
+        if ((ctx->vu0_clip_flags & 0xFFFFFFu) != (clipMine & 0xFFFFFFu))
+        {
+            ++mismatches;
+            if (mismatches < 200u)
+                std::fprintf(stderr, "[modeldisp-check] header %08x CLIP recompiled %06x native %06x\n", header, ctx->vu0_clip_flags & 0xFFFFFFu, clipMine & 0xFFFFFFu);
+        }
+        for (size_t i = 0; i < at.size(); ++i)
+            if (word(at[i]) != mine[i])
+            {
+                ++mismatches;
+                if (mismatches < 200u)
+                    std::fprintf(stderr, "[modeldisp-check] header %08x at %08x (#%zu) recompiled %08x native %08x before %08x\n", header, at[i], i, word(at[i]), mine[i], before[i]);
+            }
+        if ((checks & (checks - 1u)) == 0u || checks % 10000u == 0u)
+            std::fprintf(stderr, "[modeldisp-check] %llu checks, %llu mismatched values\n", (unsigned long long)checks, (unsigned long long)mismatches);
+    }
+
+    // spriteTexFast (0x1c5548): a textured sprite of the screen effects
+    // (reflection, bloom, refraction copies...) written as GS registers
+    // straight into the gsReg packet, never through gsReg (the 2D hooks do
+    // not see it; the native renderer makes those effects itself). Nothing
+    // else is changed: left out with the PS2 lists.
+    constexpr uint32_t kSpriteTexFast = 0x001C5548u;
+    PS2Runtime::RecompiledFunction g_spriteTexFast = nullptr;
+
+    void spriteTexFastHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (native_renderer::tuning().ps2Lists || !GS::skipRaster())
+        {
+            g_spriteTexFast(rdram, ctx, runtime);
+            return;
+        }
+        ctx->pc = GPR_U32(ctx, 31); // jr ra
+    }
+
     void modelDispHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         syncFrame(rdram);
@@ -2216,7 +2518,18 @@ namespace sotc_native
         float model[16];
         for (int i = 0; i < 16; ++i)
             model[i] = real(matrix + i * 4u);
-        g_modelDisp(rdram, ctx, runtime); // the emulated drawing goes on as before
+        // The lists are built while the GS draws (the emulated picture shown).
+        const bool ps2Lists = native_renderer::tuning().ps2Lists || !GS::skipRaster();
+        static const bool check = std::getenv("SOTC_MODELDISP_CHECK") != nullptr;
+        if (ps2Lists && !check)
+            g_modelDisp(rdram, ctx, runtime); // the emulated drawing goes on as before
+        else
+        {
+            // iosgluGetCameraContext -> get_cur_camera_context, as modelDisp asks.
+            g_cameraContext = word(0x0122A8F0u + word(0x0118FE4Cu) * 4u);
+            if (!check)
+                ctx->pc = GPR_U32(ctx, 31); // jr ra
+        }
         HookTimer hookTimer;
         if (!g_cameraContext)
             return;
@@ -2232,6 +2545,10 @@ namespace sotc_native
                     sum += camera[k * 4 + r] * model[c * 4 + k];
                 clip[c * 4 + r] = sum;
             }
+        if (check)
+            modelDispCheck(rdram, ctx, runtime, instance, model);
+        else if (!ps2Lists)
+            modelDispState(ctx, instance, model);
 
         const uint32_t header = word(word(instance) + 0x20u);
         static const uint32_t skipHeader = std::getenv("SOTC_NATIVE_SKIP") ? static_cast<uint32_t>(std::strtoul(std::getenv("SOTC_NATIVE_SKIP"), nullptr, 16)) : 0u; // debugging
@@ -2260,6 +2577,17 @@ namespace sotc_native
         uint32_t lod = static_cast<uint32_t>((lodWord >> 40) & 7u);
         if ((word(header + 0x18u) & 1u) && lod >= word(header + 0x1Cu) && word(header + 0x1Cu) != 0u)
             lod = word(header + 0x1Cu) - 1u;
+        // Quality "Model detail" (SOTC_MODEL_DETAIL): one level finer than
+        // the game's, or always level 0 (the finest; far hills and colossi
+        // lose their blocky outlines). The parts are then tested here, as
+        // the game's results (+0x2c) are for its own level's table.
+        const uint32_t gameLod = lod;
+        if (const int finer = static_cast<int>(native_renderer::tuning().modelDetail + 0.5f); finer > 0 && lod > 0u)
+        {
+            lod = finer >= 2 ? 0u : lod - 1u;
+            if (word(header + 0x30u + lod * 4u) == 0u && word(header + 0x30u + gameLod * 4u) != 0u)
+                lod = gameLod; // no part table there: as the game has it
+        }
         const uint32_t table = word(header + 0x30u + lod * 4u);
         // modelDisp (0x1097118) tests the parts against the camera only when
         // the model has bit 0 of +0x18 clear and +0x54 != 1; otherwise every
@@ -2278,8 +2606,12 @@ namespace sotc_native
             partVisible.clear();
             // The box (node +0 min, +0x10 max) through camera x model, VCLIP
             // against |w|: 1 every corner out past one plane, 2 all inside, 0 partly.
+            // Without the PS2 lists modelDispState has made the game's own
+            // test already (left at +0x2c, as modelDisp would): taken as is.
             const auto test = [&](uint32_t node) -> uint32_t
             {
+                if (!ps2Lists && !check && lod == gameLod)
+                    return word(node + 0x2Cu); // modelDispState's (the game's own) result
                 uint32_t all = 0x3Fu, any = 0u;
                 for (int c = 0; c < 8; ++c)
                 {
@@ -2355,7 +2687,17 @@ namespace sotc_native
                 if (skinned(strips) && lit(strips))
                     g_litPackets.insert(id);
                 if (skinned(strips))
-                    skinnedPacket = g_skinnedPackets.emplace(id, makeSkinnedPacket(std::move(strips))).first;
+                {
+                    try
+                    {
+                        skinnedPacket = g_skinnedPackets.emplace(id, makeSkinnedPacket(std::move(strips))).first;
+                    }
+                    catch (const std::bad_alloc &)
+                    {
+                        continue; // no room in the heap: not drawn this time
+                    }
+                    g_skinnedPacketBytes += skinnedPacket->second.bytes;
+                }
                 else
                 {
                     vertices.clear();
@@ -2712,6 +3054,11 @@ void installSotcNative(PS2Runtime &runtime)
             g_glEnd = runtime.lookupFunction(kGlEnd);
             runtime.registerFunction(kGlEnd, glEndHook);
         }
+    }
+    if (runtime.hasFunction(kSpriteTexFast))
+    {
+        g_spriteTexFast = runtime.lookupFunction(kSpriteTexFast);
+        runtime.registerFunction(kSpriteTexFast, spriteTexFastHook);
     }
     if (runtime.hasFunction(kShadowDisp))
     {

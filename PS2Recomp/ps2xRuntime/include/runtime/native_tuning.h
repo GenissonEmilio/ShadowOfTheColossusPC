@@ -15,6 +15,14 @@ namespace native_renderer
     struct Tuning
     {
         float renderScale = 1.0f;   // the picture drawn at 512 x 448 times this, 0.5 to 4 (SOTC_RENDER_SCALE; 3 on the Mac)
+        // Quality (the menus' Quality group). The graphics preset sets these
+        // and the render scale together; `preset` is the one they match
+        // (kPresetCustom: none), kept up to date by the menus.
+        float preset = 2.0f;        // SOTC_PRESET (0 Low .. 3 Ultra); High on the Mac, Medium on the Vita
+        float msaa = 0.0f;          // Metal: 0 off, 1 2x, 2 4x, 3 8x samples a pixel, as far as the GPU has them (SOTC_MSAA=0/2/4/8)
+        float textureFilter = 2.0f; // 0 nearest, 1 bilinear, 2 trilinear at the game's mip level, 3-6 anisotropic 2x-16x (Metal) (SOTC_TEXTURE_FILTER)
+        float modelDetail = 0.0f;   // 0 the game's level of detail, 1 one level finer, 2 always the finest (SOTC_MODEL_DETAIL)
+        float effectDetail = 0.0f;  // Metal: 0 the PS2's effect buffers; 1 reductions averaged over their footprint, the mirror 512; 2 the mirror 1024 (SOTC_EFFECT_DETAIL)
         bool bloom = true;          // SOTC_BLOOM_SCALE=0 turns it off
         float bloomStrength = 1.0f; // x the game's add strength (SOTC_BLOOM_SCALE); 1 = the PS2 (measured 2026-10-19 against the GS chain)
         float bloomRounds = 1.0f;   // blur rounds of +-3 texels at a quarter size, whole (SOTC_BLOOM_ROUNDS)
@@ -62,6 +70,12 @@ namespace native_renderer
         // and written in place, a texture's and a packet's id sampled once a
         // frame); off: the earlier code, to compare (SOTC_NATIVE_SLOWHOOKS).
         bool fastHooks = true;
+        // The game's own PS2 display lists for what the native renderer
+        // draws: modelDisp's VIF packets and texture requests, the screen
+        // effects' sprites (spriteTexFast). Off: only what the rest of the
+        // game reads back is kept (SOTC_PS2_LISTS=1: built as before). They
+        // are built anyway while the GS draws (the emulated picture shown).
+        bool ps2Lists = false;
         // OpenGL / Vita: skinned meshes posed by the GPU (the bind pose kept,
         // the bone palette sent per draw) instead of on the CPU (SOTC_GPU_SKIN=0/1).
         bool gpuSkinning = true;
@@ -101,12 +115,39 @@ namespace native_renderer
         uint32_t Tuning::*mask = nullptr; // or one bit of a mask: on = the bit clear
         int bit = 0;
         bool debug = false;             // listed in the Debug group
+        bool quality = false;           // listed in the Quality group
+        uint8_t backends = 3;           // bit 0: Metal, bit 1: OpenGL (the Vita) - where it changes anything
     };
     const std::vector<TuningItem> &tuningItems();
-    // The item's value as text ("On", "0.46", "3x").
-    std::string tuningValueText(const TuningItem &item);
-    // One step up (dir > 0) or down; a switch flips.
+    // The item's value as text ("On", "0.46", "3x"), in Portuguese when asked.
+    std::string tuningValueText(const TuningItem &item, bool portuguese = false);
+    // Named values (the preset, filtering, MSAA...): how many there are
+    // (0: a plain number or switch), for the F10 panel's lists.
+    int tuningChoices(const TuningItem &item);
+    // One step up (dir > 0) or down; a switch flips. The preset item applies
+    // its preset; any other quality item makes the preset follow (Custom).
     void tuningStep(const TuningItem &item, int dir);
+    // After a menu changed a value in place (the F10 panel): the preset item
+    // applies its preset, the others update the preset shown.
+    void tuningChanged(const TuningItem &item);
+    // False when the item changes nothing on the renderer in use (an
+    // OpenGL-only switch on Metal...); the menus say so.
+    bool tuningApplies(const TuningItem &item);
+    // "Metal" or "OpenGL".
+    const char *backendName();
+
+    enum Preset
+    {
+        kPresetLow,
+        kPresetMedium,
+        kPresetHigh,
+        kPresetUltra,
+        kPresetCustom
+    };
+    // Sets the render scale and the quality items to a preset's values.
+    void applyPreset(Tuning &t, int preset);
+    // The preset these values match, or kPresetCustom.
+    int matchingPreset(const Tuning &t);
     // A saved value (0/1 for a switch); false when the key is unknown or
     // its variable was set at start.
     bool tuningRestore(const char *key, float value);

@@ -2211,40 +2211,88 @@ namespace
         native_renderer::Tuning &t = native_renderer::tuning();
         const native_renderer::Tuning d = native_renderer::defaultTuning();
         ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(330.0f, 0.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(400.0f, 0.0f), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowBgAlpha(0.82f);
         if (ImGui::Begin("Native renderer (F10)", &open))
         {
-            // The same list as the player menu's Renderer tab (the Vita's).
+            // The same list as the player menu's Quality, Renderer and Debug tabs (the Vita's).
             bool changed = false;
             auto show = [&](const native_renderer::TuningItem &item)
             {
+                ImGui::PushID(item.key);
+                const bool applies = native_renderer::tuningApplies(item);
+                if (!applies)
+                    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.55f);
+                bool itemChanged = false;
                 if (item.toggle)
-                    changed |= ImGui::Checkbox(item.label, &(t.*item.toggle));
+                    itemChanged = ImGui::Checkbox(item.label, &(t.*item.toggle));
                 else if (item.mask)
                 {
                     bool on = !((t.*item.mask >> item.bit) & 1u);
                     if (ImGui::Checkbox(item.label, &on))
                     {
                         t.*item.mask ^= 1u << item.bit;
-                        changed = true;
+                        itemChanged = true;
+                    }
+                }
+                else if (const int choices = native_renderer::tuningChoices(item))
+                {
+                    // Named values: a list. The preset shows the one the values match.
+                    float &v = t.*item.number;
+                    const std::string current = native_renderer::tuningValueText(item);
+                    if (ImGui::BeginCombo(item.label, current.c_str()))
+                    {
+                        const float saved = v;
+                        for (int i = 0; i < choices; ++i)
+                        {
+                            if (item.number == &native_renderer::Tuning::preset && i == native_renderer::kPresetCustom)
+                                continue; // not a choice: what any other mix of values is
+                            v = static_cast<float>(i);
+                            const std::string name = native_renderer::tuningValueText(item);
+                            v = saved;
+                            if (ImGui::Selectable(name.c_str(), name == current))
+                            {
+                                v = static_cast<float>(i);
+                                itemChanged = true;
+                            }
+                        }
+                        ImGui::EndCombo();
                     }
                 }
                 else
                 {
                     float &v = t.*item.number;
-                    if (ImGui::SliderFloat(item.label, &v, item.min, item.max, item.step >= 1.0f ? "%.0f" : (item.step >= 0.5f ? "%.1f" : "%.2f")))
+                    const std::string text = native_renderer::tuningValueText(item);
+                    if (ImGui::SliderFloat(item.label, &v, item.min, item.max, text.c_str()))
                     {
                         v = std::clamp(std::round(v / item.step) * item.step, item.min, item.max);
-                        changed = true;
+                        itemChanged = true;
                     }
                 }
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("%s", item.help);
+                    ImGui::SetTooltip("%s%s", applies ? "" : (item.backends == 1 ? "(Metal only: no effect on OpenGL) " : "(OpenGL / Vita only: no effect on Metal) "), item.help);
+                if (!applies)
+                {
+                    ImGui::PopStyleVar();
+                    ImGui::SameLine();
+                    ImGui::TextDisabled(item.backends == 1 ? "(Metal)" : "(OpenGL)");
+                }
+                if (itemChanged)
+                {
+                    native_renderer::tuningChanged(item);
+                    changed = true;
+                }
+                ImGui::PopID();
             };
-            for (const native_renderer::TuningItem &item : native_renderer::tuningItems())
-                if (!item.debug)
-                    show(item);
+            ImGui::TextDisabled("Renderer: %s", native_renderer::backendName());
+            if (ImGui::CollapsingHeader("Quality", ImGuiTreeNodeFlags_DefaultOpen))
+                for (const native_renderer::TuningItem &item : native_renderer::tuningItems())
+                    if (item.quality)
+                        show(item);
+            if (ImGui::CollapsingHeader("Effects", ImGuiTreeNodeFlags_DefaultOpen))
+                for (const native_renderer::TuningItem &item : native_renderer::tuningItems())
+                    if (!item.debug && !item.quality)
+                        show(item);
             if (ImGui::CollapsingHeader("Debug: what is drawn"))
             {
                 int column = 0;
@@ -2297,6 +2345,8 @@ void PS2DebugPanel::draw(PS2Runtime &runtime)
         initialised = true;
         if (std::getenv("PS2X_DEBUG_UI"))
             m_visible = true;
+        if (std::getenv("PS2X_TUNING_PANEL")) // the F10 panel open at start
+            m_tuningVisible = true;
     }
     if (IsKeyPressed(KEY_F12)) // F1 is the player's settings menu
     {

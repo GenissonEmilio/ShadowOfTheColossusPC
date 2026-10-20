@@ -6,7 +6,9 @@ at its own addresses, 0x81000000): each is put in the function that holds it
 (symbols from arm-vita-eabi-nm, demangled). Prints the top functions by
 self weight, with their main callers, and the split by thread.
 
-Usage: tools/vita_profile.py <profile> [--top 40] [--elf path]
+Usage: tools/vita_profile.py <profile> [--top 40] [--elf path] [--thread N | --busiest]
+  --thread N: only that thread's samples; --busiest: only the busiest
+  thread's (the game thread when it is the bottleneck).
 """
 import bisect
 import os
@@ -35,6 +37,14 @@ def main():
     top = int(sys.argv[sys.argv.index('--top') + 1]) if '--top' in sys.argv else 40
     elf = sys.argv[sys.argv.index('--elf') + 1] if '--elf' in sys.argv else os.path.join(ROOT, 'build/vita/ps2xRuntime/ps2EntryRunner')
     addrs, names = symbols(elf)
+    only = int(sys.argv[sys.argv.index('--thread') + 1]) if '--thread' in sys.argv else None
+    if '--busiest' in sys.argv:
+        weights = Counter()
+        for line in open(path):
+            p = line.split()
+            if len(p) == 4:
+                weights[int(p[0])] += int(p[3])
+        only = weights.most_common(1)[0][0]
 
     def name(a):
         i = bisect.bisect_right(addrs, a & ~1) - 1
@@ -49,6 +59,8 @@ def main():
         if len(p) != 4:
             continue
         thread, pc, lr, w = int(p[0]), int(p[1], 16), int(p[2], 16), int(p[3])
+        if only is not None and thread != only:
+            continue
         fn = name(pc)
         self_w[fn] += w
         callers[fn][name(lr) if lr else '-'] += w
