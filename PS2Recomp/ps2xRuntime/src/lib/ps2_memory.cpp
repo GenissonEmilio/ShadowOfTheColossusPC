@@ -1383,6 +1383,23 @@ namespace
 
 void ps2DumpMmioCensus() { g_mmioCensus.dump(); }
 
+namespace
+{
+    // PS2X_VIF1_FULL=1: VIF1 DMA with the native renderer drawing goes the old
+    // way (chain copied without UNPACK data, run on the VU1 worker) instead
+    // of being walked in place (Vif1Walker).
+    bool vif1Full()
+    {
+        static const bool full = std::getenv("PS2X_VIF1_FULL") && std::atoi(std::getenv("PS2X_VIF1_FULL")) != 0;
+        return full;
+    }
+    bool vu1RunForced()
+    {
+        static const bool run = std::getenv("PS2X_VU1_RUN") && std::atoi(std::getenv("PS2X_VU1_RUN")) != 0;
+        return run;
+    }
+}
+
 bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 {
     g_mmioCensus.count(address, true);
@@ -1642,6 +1659,40 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     }
                     m_gifScanned = true;
                 }
+                else if (mode == 0 && qwc > 0 && channelBase == 0x10009000u && GS::skipRaster() && m_gsEventWrite && !vif1Full() && !vu1RunForced())
+                {
+                    // A normal-mode VIF1 transfer, walked in place likewise.
+                    syncVu1();
+                    GifEventScanner gifEvents(m_gsEventWrite);
+                    const Vif1Walker::Path3Mask path3Mask = [this](bool masked)
+                    {
+                        const bool was = m_path3Masked;
+                        m_path3Masked = masked;
+                        if (was && !masked)
+                            flushMaskedPath3Packets();
+                    };
+                    Vif1Walker walker(vif1_regs, gifEvents, path3Mask);
+                    const bool scratch = isScratchpad(madr);
+                    const uint8_t *base = scratch ? m_scratchpad : m_rdram;
+                    const uint32_t limit = scratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
+                    uint32_t src = translateAddress(madr);
+                    uint32_t bytes = qwc * 16u;
+                    while (bytes != 0u)
+                    {
+                        if (src >= limit)
+                            src = 0;
+                        const uint32_t chunk = std::min(bytes, limit - src);
+                        walker.feed(base + src, chunk);
+                        bytes -= chunk;
+                        src += chunk;
+                    }
+                    walker.finish();
+                    PendingTransfer pt;
+                    pt.fromScratchpad = false;
+                    pt.srcAddr = 0;
+                    pt.qwc = 0;
+                    m_pendingVif1Transfers.push_back(std::move(pt));
+                }
                 else if (mode == 0 && qwc > 0)
                 {
                     enqueueTransfer(madr, qwc);
@@ -1663,8 +1714,29 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     const bool eventsOnly = GS::skipRaster() && m_gsEventWrite;
                     GifEventScanner gifEvents(m_gsEventWrite);
                     std::optional<Vif1Compactor> compactor;
+                    // By default the chain is not even gathered: its VIFcodes are
+                    // walked where they lie (Vif1Walker), on this thread, with no
+                    // VU1 worker job. PS2X_VIF1_FULL=1: the compacted copy
+                    // through the VU1 worker as before (A/B).
+                    std::optional<Vif1Walker> walker;
+                    Vif1Walker::Path3Mask path3Mask;
                     if (channelBase == 0x10009000u && !runVu1 && eventsOnly)
-                        compactor.emplace(vif1_regs.cycle, chainBuf, gifEvents);
+                    {
+                        if (vif1Full())
+                            compactor.emplace(vif1_regs.cycle, chainBuf, gifEvents);
+                        else
+                        {
+                            syncVu1(); // the worker is done with vif1_regs
+                            path3Mask = [this](bool masked)
+                            {
+                                const bool was = m_path3Masked;
+                                m_path3Masked = masked;
+                                if (was && !masked)
+                                    flushMaskedPath3Packets();
+                            };
+                            walker.emplace(vif1_regs, gifEvents, path3Mask);
+                        }
+                    }
                     // The GIF channel's chain, likewise: read for its events only.
                     const bool gifEventsOnly = channelBase == 0x1000A000u && eventsOnly;
                     if (gifEventsOnly)
@@ -1699,7 +1771,9 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                 chunk = maxSz2 - src;
                             if (chunk == 0)
                                 break;
-                            if (compactor)
+                            if (walker)
+                                walker->feed(base2 + src, chunk);
+                            else if (compactor)
                                 compactor->feed(base2 + src, chunk);
                             else if (gifEventsOnly)
                                 gifEvents.feed(base2 + src, chunk);
@@ -1723,7 +1797,9 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
                         // CHCR.TTE sends the DMAtag's upper 64 bits to the channel before
                         // the tag payload. VIF chains use those bytes for two VIFcodes.
-                        if (compactor)
+                        if (walker)
+                            walker->feed(localBase + tagPhys + 8u, 8u);
+                        else if (compactor)
                             compactor->feed(localBase + tagPhys + 8u, 8u);
                         else
                             chainBuf.insert(chainBuf.end(), localBase + tagPhys + 8u, localBase + tagPhys + 16u);
@@ -1885,7 +1961,18 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     chcr = (chcr & 0x0000FFFFu) | (lastTagUpper << 16);
                     m_ioRegisters[channelBase + 0x00] = chcr;
 
-                    if (!chainBuf.empty())
+                    if (walker)
+                    {
+                        // Walked already: only the channel's completion is left
+                        // (an empty transfer: D_STAT, CHCR.STR, the interrupt).
+                        walker->finish();
+                        PendingTransfer pt;
+                        pt.fromScratchpad = false;
+                        pt.srcAddr = 0;
+                        pt.qwc = 0;
+                        m_pendingVif1Transfers.push_back(std::move(pt));
+                    }
+                    else if (!chainBuf.empty())
                     {
                         PendingTransfer pt;
                         pt.fromScratchpad = false;
@@ -2024,11 +2111,12 @@ void PS2Memory::processPendingTransfers()
         // Keep PATH3 and VIF1 in submission order on the worker; the DMA
         // completion below is reported right away, as the data is copied.
         const uint32_t fbrst = m_vu0FbrstProvider ? m_vu0FbrstProvider() : 0u;
-        for (const auto &transfer : m_pendingGifTransfers)
+        // A gathered chain moves into the job (it is not read again here).
+        for (auto &transfer : m_pendingGifTransfers)
         {
             MtvuJob job;
             job.gif = true;
-            job.data = copyTransferData(transfer);
+            job.data = transfer.chainData.empty() ? copyTransferData(transfer) : std::move(transfer.chainData);
             if (job.data.size() >= 16u)
             {
                 m_seenGifCopy = true;
@@ -2036,11 +2124,11 @@ void PS2Memory::processPendingTransfers()
                 mtvuEnqueue(std::move(job));
             }
         }
-        for (const auto &transfer : m_pendingVif1Transfers)
+        for (auto &transfer : m_pendingVif1Transfers)
         {
             MtvuJob job;
             job.fbrst = fbrst;
-            job.data = copyTransferData(transfer);
+            job.data = transfer.chainData.empty() ? copyTransferData(transfer) : std::move(transfer.chainData);
             if (!job.data.empty())
                 mtvuEnqueue(std::move(job));
         }

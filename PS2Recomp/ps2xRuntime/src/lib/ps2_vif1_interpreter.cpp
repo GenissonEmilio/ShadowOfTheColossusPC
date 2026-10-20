@@ -416,6 +416,146 @@ void Vif1Compactor::feed(const uint8_t *data, uint32_t bytes)
     }
 }
 
+void Vif1Walker::feed(const uint8_t *data, uint32_t bytes)
+{
+    m_bytes += bytes;
+    VIFRegisters &r = m_regs;
+    uint32_t pos = 0;
+    while (pos < bytes)
+    {
+        if (m_skip != 0u)
+        {
+            const uint32_t n = std::min(m_skip, bytes - pos);
+            m_skip -= n;
+            pos += n;
+            continue;
+        }
+        if (m_gif != 0u)
+        {
+            const uint32_t n = std::min(m_gif, bytes - pos);
+            m_direct.feed(data + pos, n);
+            m_gif -= n;
+            pos += n;
+            continue;
+        }
+        if (m_want != 0u)
+        {
+            const uint32_t n = std::min(m_want - m_have, bytes - pos);
+            std::memcpy(m_data + m_have, data + pos, n);
+            m_have += n;
+            pos += n;
+            if (m_have < m_want)
+                continue;
+            if (m_dataOp == VIF_STMASK)
+                std::memcpy(&r.mask, m_data, 4);
+            else if (m_dataOp == VIF_STROW)
+                std::memcpy(r.row, m_data, 16);
+            else
+                std::memcpy(r.col, m_data, 16);
+            m_want = m_have = 0;
+            continue;
+        }
+        if (pos + 4u > bytes)
+            break;
+        uint32_t cmd;
+        std::memcpy(&cmd, data + pos, 4);
+        pos += 4u;
+        const uint8_t opcode = (cmd >> 24) & 0x7Fu;
+        const uint16_t imm = cmd & 0xFFFFu;
+        const uint8_t num = (cmd >> 16) & 0xFFu;
+        r.code = cmd;
+        r.num = num;
+        if (cmd & 0x80000000u)
+            r.stat |= (1u << 11); // INT
+        if ((opcode & 0x60u) == 0x60u)
+        {
+            // Most UNPACKs write as many vectors as they read (CL >= WL):
+            // their size without a call (unpackDataBytes was 2.5% of the
+            // Vita's time on its own).
+            static constexpr uint8_t kBytesPerVector[16] = {4, 2, 1, 1, 8, 4, 2, 1, 12, 6, 3, 2, 16, 8, 4, 2};
+            ++m_unpack;
+            const uint32_t cl = r.cycle & 0xFFu, wl = (r.cycle >> 8) & 0xFFu;
+            if (wl <= cl || wl <= 1u)
+                m_skip = ((num == 0u ? 256u : num) * kBytesPerVector[opcode & 0xFu] + 3u) & ~3u;
+            else
+                m_skip = unpackDataBytes(opcode, num, r.cycle);
+            continue;
+        }
+        switch (opcode)
+        {
+        case VIF_STCYCL:
+            r.cycle = imm;
+            break;
+        case VIF_OFFSET:
+            r.ofst = imm & 0x3FFu;
+            r.tops = r.base & 0x3FFu;
+            r.stat &= ~(1u << 7);
+            break;
+        case VIF_BASE:
+            r.base = imm & 0x3FFu;
+            break;
+        case VIF_ITOP:
+            r.itops = imm & 0x3FFu;
+            break;
+        case VIF_STMOD:
+            r.mode = imm & 3u;
+            break;
+        case VIF_MSKPATH3:
+            m_mask((imm & 0x8000u) != 0u);
+            break;
+        case VIF_MARK:
+            r.mark = imm;
+            r.stat |= (1u << 6);
+            break;
+        case VIF_MSCAL:
+        case VIF_MSCALF:
+        case VIF_MSCNT:
+        {
+            r.top = r.tops & 0x3FFu;
+            r.itop = r.itops & 0x3FFu;
+            const bool dbf = (r.stat & (1u << 7)) != 0u;
+            r.tops = (dbf ? r.base : r.base + r.ofst) & 0x3FFu;
+            r.stat ^= (1u << 7);
+            ++(opcode == VIF_MSCNT ? m_mscnt : m_mscal);
+            break;
+        }
+        case VIF_STMASK:
+            m_dataOp = opcode;
+            m_want = 4u;
+            break;
+        case VIF_STROW:
+        case VIF_STCOL:
+            m_dataOp = opcode;
+            m_want = 16u;
+            break;
+        case VIF_MPG:
+            m_skip = (num == 0u ? 256u : num) * 8u;
+            break;
+        case VIF_DIRECT:
+        case VIF_DIRECTHL:
+            m_gif = (imm == 0u ? 65536u : imm) * 16u;
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+void Vif1Walker::finish()
+{
+    ps2_stats::vif1Bytes.fetch_add(m_bytes, std::memory_order_relaxed);
+    if (m_mscal)
+        ps2_stats::vu1Mscal.fetch_add(m_mscal, std::memory_order_relaxed);
+    if (m_mscnt)
+        ps2_stats::vu1Mscnt.fetch_add(m_mscnt, std::memory_order_relaxed);
+    if (m_mscal + m_mscnt)
+        ps2_stats::vu1Programs.fetch_add(m_mscal + m_mscnt, std::memory_order_relaxed);
+    if (m_unpack)
+        ps2_stats::vifUnpack.fetch_add(m_unpack, std::memory_order_relaxed);
+    m_bytes = 0;
+    m_mscal = m_mscnt = m_unpack = 0;
+}
+
 void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 {
     ps2_stats::vif1Bytes.fetch_add(sizeBytes, std::memory_order_relaxed);
