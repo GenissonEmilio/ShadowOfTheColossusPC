@@ -34,6 +34,38 @@ namespace native_renderer
     // perFrame: made again every frame (skinned, 2D, particles...): kept only
     // for this frame (one shared buffer per frame on GL).
     void uploadMesh(uint64_t id, const Vertex *vertices, uint32_t count, bool perFrame = false);
+    // A per-frame mesh written in place (no copy): room for `count` vertices,
+    // then commitFrameMesh(id, n) keeps the first n as uploadMesh(id, ...,
+    // n, true) would. The room is valid until that commit; no other renderer
+    // call in between. nullptr when there is no renderer.
+    Vertex *frameMesh(uint32_t count);
+    // Indexed: after frameMesh, room for `count` indices (32-bit), each
+    // `base` + the vertex's place in this mesh, three a triangle; the
+    // commit's indexCount says how many were written. Drawn as the triangle
+    // list the indices pick out (backends without indices expand it).
+    uint32_t *frameMeshIndices(uint32_t count, uint32_t &base);
+    void commitFrameMesh(uint64_t id, uint32_t count, uint32_t indexCount = 0);
+    void cancelFrameMesh(); // the room given back, no mesh made
+
+    // Skinned meshes posed by the GPU (the OpenGL backend; gpuSkinning() says
+    // whether this backend does it and the tuning wants it). The bind pose is
+    // kept like a mesh under `id`, each vertex with three palette matrices
+    // (the first qword of each, counted from the start of the draw's
+    // palette) and their weights (0 for the ones not used); drawn as the
+    // triangles the indices pick out. A draw names its palette with
+    // DrawState::skinPalette, a frame's copy of the matrices (framePalette:
+    // `qwords` qwords, four a matrix, columns as the VU1 has them).
+    struct SkinVertex
+    {
+        float x, y, z, nx, ny, nz, u, v; // as Vertex
+        uint8_t r, g, b, a;
+        float bone[3];   // a matrix's first qword in the palette
+        float weight[3];
+    };
+    constexpr uint32_t kSkinPaletteQwords = 192; // the most a draw's palette holds
+    bool gpuSkinning();
+    void uploadSkinnedMesh(uint64_t id, const SkinVertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount);
+    uint32_t framePalette(const float *qwords, uint32_t count); // 0: not kept
 
     bool hasTexture(uint64_t id);
     // RGBA8 (alpha 0x80 = opaque, as the PS2's), kept on the GPU under `id`.
@@ -112,6 +144,9 @@ namespace native_renderer
         // over the new frame at layer 29), at its own UV, times the colour.
         bool previousFrame = false;
         uint32_t debugColour = 0; // non-zero: drawn flat in this RGB (who drew what)
+        // A mesh from uploadSkinnedMesh: its palette (framePalette's handle)
+        // and how many qwords of it the draw reads.
+        uint32_t skinPalette = 0, skinPaletteCount = 0;
         bool lit = false;
         float light[32] = {};
     };

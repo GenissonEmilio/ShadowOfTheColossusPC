@@ -79,6 +79,9 @@ namespace native_renderer
             d.hazeSource = number("SOTC_HAZE_SOURCE", d.hazeSource);
             d.waterSource = number("SOTC_WATER_SOURCE", d.waterSource);
             d.frameLog = on("SOTC_FRAME_LOG");
+            d.fastHooks = !on("SOTC_NATIVE_SLOWHOOKS");
+            if (on("SOTC_GPU_SKIN"))
+                d.gpuSkinning = std::atoi(std::getenv("SOTC_GPU_SKIN")) != 0;
             if (on("SOTC_CAP30"))
                 d.frameCap30 = std::atoi(std::getenv("SOTC_CAP30")) != 0;
             if (on("SOTC_GL_REDRAW"))
@@ -131,6 +134,10 @@ namespace native_renderer
             add(std::string("SOTC_GL_REDRAW=") + (t.midFrameRedraw ? "1" : "0"));
         if (t.frameLog)
             add("SOTC_FRAME_LOG=1");
+        if (!t.fastHooks)
+            add("SOTC_NATIVE_SLOWHOOKS=1");
+        if (t.gpuSkinning != d.gpuSkinning)
+            add(std::string("SOTC_GPU_SKIN=") + (t.gpuSkinning ? "1" : "0"));
         if (t.hiddenLayers)
         {
             std::string layers;
@@ -236,6 +243,14 @@ namespace native_renderer
                     "Writes to the log every 60 frames where the time went (game, hooks, texture decoding, uploads, drawing, swap) and every slow frame.",
                     "Escreve no log a cada 60 quadros onde o tempo foi (jogo, ganchos, decodificação de texturas, envios, desenho, troca) e cada quadro lento.",
                     &Tuning::frameLog, "SOTC_FRAME_LOG");
+        debugToggle("dbg_fast_hooks", "Fast hooks", "Ganchos rápidos",
+                    "Characters posed by the faster path and textures looked up once a frame. Off: the earlier code, to compare (the picture should not change).",
+                    "Personagens posados pelo caminho mais rápido e texturas buscadas uma vez por quadro. Desligado: o código anterior, pra comparar (a imagem não deve mudar).",
+                    &Tuning::fastHooks, "SOTC_NATIVE_SLOWHOOKS");
+        debugToggle("dbg_gpu_skin", "GPU skinning", "Skinning na GPU",
+                    "OpenGL / Vita: characters posed by the GPU from their bind pose (off: posed on the CPU every frame). Metal always poses on the CPU.",
+                    "OpenGL / Vita: personagens posados pela GPU a partir da pose base (desligado: posados na CPU a cada quadro). O Metal sempre posa na CPU.",
+                    &Tuning::gpuSkinning, "SOTC_GPU_SKIN");
         static char labels[32][2][24];
         for (int i = 0; i < 32; ++i)
         {
@@ -485,6 +500,51 @@ namespace native_renderer
         c.meshUs += nowUs() - start;
         ++c.meshUploads;
         c.meshBytes += static_cast<uint64_t>(count) * sizeof(Vertex);
+    }
+    Vertex *frameMesh(uint32_t count) { return backend() ? g_backend->frameMesh(count) : nullptr; }
+    uint32_t *frameMeshIndices(uint32_t count, uint32_t &base)
+    {
+        base = 0;
+        return backend() ? g_backend->frameMeshIndices(count, base) : nullptr;
+    }
+    void commitFrameMesh(uint64_t id, uint32_t count, uint32_t indexCount)
+    {
+        const uint64_t bytes = static_cast<uint64_t>(count) * sizeof(Vertex) + static_cast<uint64_t>(indexCount) * 4u;
+        if (g_uploads.on)
+        {
+            g_uploads.frameMeshes += 1;
+            g_uploads.frameBytes += bytes;
+        }
+        if (!backend())
+            return;
+        g_backend->commitFrameMesh(id, count, indexCount);
+        if (tuning().frameLog)
+        {
+            FrameCounters &c = frameCounters();
+            ++c.meshUploads;
+            c.meshBytes += bytes;
+        }
+    }
+    bool gpuSkinning() { return tuning().gpuSkinning && backend() && g_backend->canSkin(); }
+    void uploadSkinnedMesh(uint64_t id, const SkinVertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount)
+    {
+        if (!backend())
+            return;
+        const uint64_t start = tuning().frameLog ? nowUs() : 0u;
+        g_backend->uploadSkinnedMesh(id, vertices, count, indices, indexCount);
+        if (start)
+        {
+            FrameCounters &c = frameCounters();
+            c.meshUs += nowUs() - start;
+            ++c.meshUploads;
+            c.meshBytes += static_cast<uint64_t>(count) * sizeof(SkinVertex) + static_cast<uint64_t>(indexCount) * 4u;
+        }
+    }
+    uint32_t framePalette(const float *qwords, uint32_t count) { return backend() ? g_backend->framePalette(qwords, count) : 0u; }
+    void cancelFrameMesh()
+    {
+        if (backend())
+            g_backend->cancelFrameMesh();
     }
     bool hasTexture(uint64_t id) { return backend() && g_backend->hasTexture(id); }
     void uploadTexture(uint64_t id, uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t levels)

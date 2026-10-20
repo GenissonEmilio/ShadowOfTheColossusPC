@@ -28,6 +28,7 @@ std::recursive_mutex &ps2xVitaGlMutex();
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -489,6 +490,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         uint32_t count = 0;
         bool dynamic = false; // in this frame's arena, from vertex `first`
         uint32_t first = 0;
+        bool indexed = false; // `count` indices: dynamic from indexArena[firstIndex], else in indexBuffer
+        uint32_t firstIndex = 0;
+        GLuint indexBuffer = 0;
+        bool skinned = false; // uploadSkinnedMesh: SkinVertex, posed by skinProgram
         uint64_t frame = 0;   // the arena it went into (debugging)
         uint64_t used = 0;    // the last frame that drew it (eviction)
         uint64_t bytes = 0;
@@ -521,6 +526,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     struct Renderer
     {
         GLuint mainProgram = 0, quadProgram = 0;
+        GLuint skinProgram = 0; // the main program posing a skinned mesh's bind pose first (0: not built)
 #if defined(PS2X_NATIVE_VITA)
         GLuint quadPrograms[12] = {}; // by mode (8 and 11: the bloom mask's, see kQuadFragment)
 #endif
@@ -581,14 +587,19 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         {
             uClip, uDirections, uColours, uMisc, uFogA, uFogB, uFogC, uFogColour, uDebug, kMainUniforms
         };
-        GLint mainLocation[kMainUniforms] = {};
-        float mainLast[kMainUniforms][16] = {};
-        int mainLastCount[kMainUniforms] = {};
+        // [0] mainProgram, [1] skinProgram (the same uniforms, kept apart).
+        GLint mainLocation[2][kMainUniforms] = {};
+        float mainLast[2][kMainUniforms][16] = {};
+        int mainLastCount[2][kMainUniforms] = {};
+        int mainSlot = 0; // the one in use
+        GLint skinPaletteLocation = -1;
+        uint64_t skinPaletteSent = ~0ull; // frame << 32 | handle: what skinProgram's palette holds
+        std::vector<float> palettes;      // this frame's skin palettes (framePalette)
         void uniform4(MainUniform slot, const float *v, int count)
         {
-            float *last = mainLast[slot];
+            float *last = mainLast[mainSlot][slot];
             const int n = count * 4;
-            if (mainLastCount[slot] == count)
+            if (mainLastCount[mainSlot][slot] == count)
             {
                 bool same = true;
                 for (int i = 0; i < n && same; ++i)
@@ -598,11 +609,46 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             }
             for (int i = 0; i < n; ++i)
                 last[i] = v[i];
-            mainLastCount[slot] = count;
-            glUniform4fv(mainLocation[slot], count, v);
+            mainLastCount[mainSlot][slot] = count;
+            glUniform4fv(mainLocation[mainSlot][slot], count, v);
         }
-        std::vector<native_renderer::Vertex> arena; // this frame's dynamic vertices
+        // This frame's dynamic vertices (and the indices of the indexed ones).
+        // Grown without clearing what is added (frameMesh hands out room
+        // that is written once, in place).
+        template <typename T>
+        struct Arena
+        {
+            std::unique_ptr<T[]> items;
+            size_t count = 0, capacity = 0;
+            bool empty() const { return count == 0; }
+            size_t size() const { return count; }
+            const T *data() const { return items.get(); }
+            void clear() { count = 0; }
+            T *grow(size_t n)
+            {
+                if (count + n > capacity)
+                {
+                    const size_t want = std::max(count + n, capacity * 2u + 4096u);
+                    std::unique_ptr<T[]> bigger(new T[want]);
+                    if (count)
+                        std::memcpy(bigger.get(), items.get(), count * sizeof(T));
+                    items = std::move(bigger);
+                    capacity = want;
+                }
+                T *at = items.get() + count;
+                count += n;
+                return at;
+            }
+            void append(const T *from, size_t n)
+            {
+                if (n)
+                    std::memcpy(grow(n), from, n * sizeof(T));
+            }
+        };
+        Arena<native_renderer::Vertex> arena;
+        Arena<uint32_t> indexArena;
         GLuint arenaBuffers[3] = {};                 // in turn: the GPU may still read the last two
+        GLuint indexBuffers[3] = {};                 // the same for indexArena
         int arenaIndex = 0;
         uint64_t arenaFrame = 0;
         // [gl:tex] every 300 frames (the Vita's log; SOTC_GL_TEX_LOG elsewhere):
@@ -693,6 +739,55 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 return;
             glUseProgram(p);
             boundProgram = p;
+            mainSlot = p == skinProgram && skinProgram ? 1 : 0;
+        }
+
+        // The main vertex program posing a skinned mesh first: up to three
+        // palette matrices by weight, position and normal (camera space),
+        // then the main program's own work on them.
+        static std::string skinnedVertex(const char *main)
+        {
+            std::string head = main;
+            const size_t open = head.find("{\n", head.find("void main("));
+            if (open == std::string::npos)
+                return std::string();
+            std::string body = head.substr(open + 2);
+            head.resize(open + 2);
+            for (const auto &[from, to] : {std::pair<std::string, std::string>{"aPos", "sPos"}, {"aNormal", "sNormal"}})
+                for (size_t at = body.find(from); at != std::string::npos; at = body.find(from, at + to.size()))
+                    body.replace(at, from.size(), to);
+            const std::string size = std::to_string(native_renderer::kSkinPaletteQwords);
+#if !defined(PS2X_NATIVE_VITA)
+            const std::string uv = "layout(location = 3) in vec2 aUV;\n";
+            const size_t at = head.find(uv);
+            if (at == std::string::npos)
+                return std::string();
+            head.insert(at + uv.size(), "layout(location = 4) in vec3 aBones;\nlayout(location = 5) in vec3 aWeights;\nuniform vec4 uPalette[" + size + "];\n");
+            const std::string pose = R"(    vec3 sPos = vec3(0.0), sNormal = vec3(0.0);
+    for (int k = 0; k < 3; ++k)
+    {
+        int b = int(aBones[k] + 0.5);
+        float w = aWeights[k];
+        sPos += w * (uPalette[b].xyz * aPos.x + uPalette[b + 1].xyz * aPos.y + uPalette[b + 2].xyz * aPos.z + uPalette[b + 3].xyz);
+        sNormal += w * (uPalette[b].xyz * aNormal.x + uPalette[b + 1].xyz * aNormal.y + uPalette[b + 2].xyz * aNormal.z);
+    }
+)";
+#else
+            const std::string uv = "float2 aUV,";
+            const size_t at = head.find(uv);
+            if (at == std::string::npos)
+                return std::string();
+            head.insert(at + uv.size(), " float3 aBones, float3 aWeights, uniform float4 uPalette[" + size + "],");
+            std::string pose = "    float3 sPos = float3(0.0, 0.0, 0.0), sNormal = float3(0.0, 0.0, 0.0);\n";
+            for (const char *k : {"x", "y", "z"})
+            {
+                const std::string b = std::string("(int)(aBones.") + k + " + 0.5)", w = std::string("aWeights.") + k;
+                pose += "    {\n        int b = " + b + ";\n";
+                pose += "        sPos += " + w + " * (uPalette[b].xyz * aPos.x + uPalette[b + 1].xyz * aPos.y + uPalette[b + 2].xyz * aPos.z + uPalette[b + 3].xyz);\n";
+                pose += "        sNormal += " + w + " * (uPalette[b].xyz * aNormal.x + uPalette[b + 1].xyz * aNormal.y + uPalette[b + 2].xyz * aNormal.z);\n    }\n";
+            }
+#endif
+            return head + pose + body;
         }
 
         bool init()
@@ -728,16 +823,33 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             glGenBuffers(1, &blurBuffer);
             glBindBuffer(GL_ARRAY_BUFFER, blurBuffer);
             glBufferData(GL_ARRAY_BUFFER, sizeof(corners), corners, GL_STATIC_DRAW);
-            glUseProgram(mainProgram);
             {
+                const std::string skin = skinnedVertex(kMainVertex);
+                skinProgram = skin.empty() ? 0 : program(skin.c_str(), kMainFragment, {"aPos", "aNormal", "aColor", "aUV", "aBones", "aWeights"});
+                if (!skinProgram)
+                    std::cerr << "[native:gl] no skinning program: skinned meshes posed on the CPU" << std::endl;
+            }
+            for (int slot = 0; slot < 2; ++slot)
+            {
+                const GLuint p = slot ? skinProgram : mainProgram;
+                if (!p)
+                    continue;
+                glUseProgram(p);
                 const char *names[kMainUniforms] = {"uClip", "uDirections", "uColours", "uMisc", "uFogA", "uFogB", "uFogC", "uFogColour", "uDebug"};
                 for (int i = 0; i < kMainUniforms; ++i)
-                    mainLocation[i] = glGetUniformLocation(mainProgram, names[i]);
+                    mainLocation[slot][i] = glGetUniformLocation(p, names[i]);
+                glUniform1i(glGetUniformLocation(p, "uTex"), 0);
+                glUniform1i(glGetUniformLocation(p, "uBackground"), 1);
+                glUniform1i(glGetUniformLocation(p, "uReflection"), 2);
+                glUniform1i(glGetUniformLocation(p, "uRefraction"), 3);
+                if (slot)
+                    skinPaletteLocation = glGetUniformLocation(p, "uPalette");
             }
-            glUniform1i(uniform(true, "uTex"), 0);
-            glUniform1i(uniform(true, "uBackground"), 1);
-            glUniform1i(uniform(true, "uReflection"), 2);
-            glUniform1i(uniform(true, "uRefraction"), 3);
+            if (skinProgram && skinPaletteLocation < 0)
+            {
+                std::cerr << "[native:gl] the skinning program has no palette: skinned meshes posed on the CPU" << std::endl;
+                skinProgram = 0;
+            }
             glUseProgram(quadProgram);
             glUniform1i(uniform(false, "uSrc"), 0);
             glUniform1i(uniform(false, "uSrc2"), 1);
@@ -983,6 +1095,21 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         }
 
         void render(uint32_t w, uint32_t h);
+
+        // A mesh's triangles: the list as it is, or the indexed one's
+        // indices (the frame's index buffer, bound with the frame's
+        // vertices: the indices count from the start of the arena).
+        void drawMesh(const Mesh &mesh, GLint firstVertex)
+        {
+            if (!mesh.indexed)
+            {
+                glDrawArrays(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(mesh.count));
+                return;
+            }
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.dynamic ? indexBuffers[arenaIndex] : mesh.indexBuffer);
+            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh.count), GL_UNSIGNED_INT,
+                           reinterpret_cast<const void *>(static_cast<uintptr_t>(mesh.dynamic ? mesh.firstIndex : 0u) * sizeof(uint32_t)));
+        }
     };
 
     // Ids hash a model's or a texture's content: when the game loads another
@@ -1028,6 +1155,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             {
                 if (m.buffer)
                     glDeleteBuffers(1, &m.buffer);
+                if (m.indexBuffer)
+                    glDeleteBuffers(1, &m.indexBuffer);
                 it = meshes.erase(it);
             }
             else
@@ -1058,6 +1187,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 glGenBuffers(1, &arenaBuffers[arenaIndex]);
             glBindBuffer(GL_ARRAY_BUFFER, arenaBuffers[arenaIndex]);
             glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(arena.size() * sizeof(native_renderer::Vertex)), arena.data(), GL_STREAM_DRAW);
+            if (!indexArena.empty())
+            {
+                if (!indexBuffers[arenaIndex])
+                    glGenBuffers(1, &indexBuffers[arenaIndex]);
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexBuffers[arenaIndex]);
+                glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(indexArena.size() * sizeof(uint32_t)), indexArena.data(), GL_STREAM_DRAW);
+            }
         }
         drawOrder.clear();
         drawOrder.reserve(draws.size());
@@ -1190,7 +1326,22 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     continue;
                 mesh->second.used = arenaFrame;
                 bindTarget(target);
-                useProgram(mainProgram);
+                const bool skinned = mesh->second.skinned;
+                if (skinned && (!skinProgram || !d.state.skinPalette))
+                    continue;
+                useProgram(skinned ? skinProgram : mainProgram);
+                if (skinned)
+                {
+                    // The draw's palette (skinProgram keeps the last one sent).
+                    const uint64_t key = (arenaFrame << 32) | (static_cast<uint64_t>(d.state.skinPalette) << 8) | std::min(d.state.skinPaletteCount, 255u);
+                    const size_t from = static_cast<size_t>(d.state.skinPalette - 1u) * 4u;
+                    const uint32_t count = std::min(d.state.skinPaletteCount, native_renderer::kSkinPaletteQwords);
+                    if (key != skinPaletteSent && from + count * 4u <= palettes.size())
+                    {
+                        glUniform4fv(skinPaletteLocation, static_cast<GLsizei>(count), palettes.data() + from);
+                        skinPaletteSent = key;
+                    }
+                }
                 static const bool checkArena = std::getenv("SOTC_GL_ARENA_LOG") != nullptr;
                 if (checkArena && mesh->second.dynamic && mesh->second.frame != arenaFrame)
                 {
@@ -1199,7 +1350,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         std::fprintf(stderr, "[arena] mesh %016llx drawn in arena %llu, uploaded in %llu (order %u)\n", (unsigned long long)d.mesh,
                                      (unsigned long long)arenaFrame, (unsigned long long)mesh->second.frame, d.state.order);
                 }
-                const GLsizei stride = sizeof(native_renderer::Vertex);
+                const GLsizei stride = skinned ? sizeof(native_renderer::SkinVertex) : sizeof(native_renderer::Vertex);
                 // A dynamic mesh is a range of the frame's buffer: its start goes
                 // to glDrawArrays (vitaGL keeps a pointer offset in GXM's 16-bit
                 // attribute offset: past 64 KB it read garbage).
@@ -1218,6 +1369,17 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, r)));
                     glEnableVertexAttribArray(3);
                     glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, u)));
+                    for (GLuint i = 4; i < 6; ++i)
+                    {
+                        if (!skinned)
+                        {
+                            glDisableVertexAttribArray(i);
+                            continue;
+                        }
+                        glEnableVertexAttribArray(i);
+                        glVertexAttribPointer(i, 3, GL_FLOAT, GL_FALSE, stride,
+                                              reinterpret_cast<const void *>(i == 4 ? offsetof(native_renderer::SkinVertex, bone) : offsetof(native_renderer::SkinVertex, weight)));
+                    }
                 }
                 uniform4(uClip, d.clip, 4);
                 if (d.state.lit || d.state.fresnel) // read by the vertex program only then
@@ -1257,7 +1419,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #if !defined(PS2X_NATIVE_VITA)
                     glEnable(GL_DEPTH_CLAMP); // the GS does not cut at the near plane
 #endif
-                    glDrawArrays(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(mesh->second.count));
+                    drawMesh(mesh->second, firstVertex);
 #if !defined(PS2X_NATIVE_VITA)
                     glDisable(GL_DEPTH_CLAMP);
 #endif
@@ -1357,10 +1519,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 uniform4(uFogC, fogC, 1);
                 uniform4(uFogColour, fogColour, 1);
                 uniform4(uDebug, debug, 1);
-                glDrawArrays(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(mesh->second.count));
+                drawMesh(mesh->second, firstVertex);
             }
             resolveShadows();
-            for (GLuint i = 1; i < 4; ++i)
+            for (GLuint i = 1; i < 6; ++i)
                 glDisableVertexAttribArray(i);
         };
 
@@ -1793,26 +1955,95 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         bool hasMesh(uint64_t id) override { return r->meshes.count(id) != 0; }
         void uploadMesh(uint64_t id, const native_renderer::Vertex *vertices, uint32_t count, bool perFrame) override
         {
-            static const bool noArena = std::getenv("SOTC_GL_NOARENA") != nullptr; // debugging: one buffer per mesh
-            if (perFrame && !noArena)
+            if (perFrame && !noArena())
             {
                 Mesh &mesh = r->meshes[id];
                 mesh.dynamic = true;
                 mesh.frame = r->arenaFrame;
                 mesh.first = static_cast<uint32_t>(r->arena.size());
                 mesh.count = count;
-                r->arena.insert(r->arena.end(), vertices, vertices + count);
+                mesh.indexed = mesh.skinned = false;
+                r->arena.append(vertices, count);
                 return;
             }
             Lock lock;
             Mesh &mesh = r->meshes[id];
             mesh.used = r->arenaFrame;
+            mesh.indexed = mesh.skinned = false;
             if (!mesh.buffer)
                 glGenBuffers(1, &mesh.buffer);
             glBindBuffer(GL_ARRAY_BUFFER, mesh.buffer);
             glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(count * sizeof(native_renderer::Vertex)), vertices, GL_STATIC_DRAW);
             mesh.count = count;
             mesh.bytes = static_cast<uint64_t>(count) * sizeof(native_renderer::Vertex);
+        }
+        native_renderer::Vertex *frameMesh(uint32_t count) override
+        {
+            if (noArena())
+                return Backend::frameMesh(count);
+            m_pendingFirst = r->arena.size();
+            m_pendingIndexFirst = r->indexArena.size();
+            return r->arena.grow(count);
+        }
+        uint32_t *frameMeshIndices(uint32_t count, uint32_t &base) override
+        {
+            if (noArena())
+                return Backend::frameMeshIndices(count, base);
+            base = static_cast<uint32_t>(m_pendingFirst);
+            r->indexArena.count = m_pendingIndexFirst;
+            return r->indexArena.grow(count);
+        }
+        void commitFrameMesh(uint64_t id, uint32_t count, uint32_t indexCount) override
+        {
+            if (noArena())
+            {
+                Backend::commitFrameMesh(id, count, indexCount);
+                return;
+            }
+            Mesh &mesh = r->meshes[id];
+            mesh.dynamic = true;
+            mesh.frame = r->arenaFrame;
+            mesh.first = static_cast<uint32_t>(m_pendingFirst);
+            mesh.skinned = false;
+            mesh.indexed = indexCount != 0u;
+            mesh.firstIndex = static_cast<uint32_t>(m_pendingIndexFirst);
+            mesh.count = indexCount ? indexCount : count;
+            r->arena.count = m_pendingFirst + count; // the room not used goes back
+            r->indexArena.count = m_pendingIndexFirst + indexCount;
+        }
+        void cancelFrameMesh() override
+        {
+            if (noArena())
+                return;
+            r->arena.count = m_pendingFirst;
+            r->indexArena.count = m_pendingIndexFirst;
+        }
+        bool canSkin() override { return r->skinProgram != 0; }
+        void uploadSkinnedMesh(uint64_t id, const native_renderer::SkinVertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount) override
+        {
+            Lock lock;
+            Mesh &mesh = r->meshes[id];
+            mesh.used = r->arenaFrame;
+            mesh.dynamic = false;
+            mesh.skinned = true;
+            mesh.indexed = true;
+            if (!mesh.buffer)
+                glGenBuffers(1, &mesh.buffer);
+            if (!mesh.indexBuffer)
+                glGenBuffers(1, &mesh.indexBuffer);
+            glBindBuffer(GL_ARRAY_BUFFER, mesh.buffer);
+            glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(count * sizeof(native_renderer::SkinVertex)), vertices, GL_STATIC_DRAW);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.indexBuffer);
+            glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(indexCount * sizeof(uint32_t)), indices, GL_STATIC_DRAW);
+            mesh.count = indexCount;
+            mesh.bytes = static_cast<uint64_t>(count) * sizeof(native_renderer::SkinVertex) + static_cast<uint64_t>(indexCount) * 4u;
+            r->cache.buffer = ~0u;
+        }
+        uint32_t framePalette(const float *qwords, uint32_t count) override
+        {
+            const size_t at = r->palettes.size();
+            r->palettes.insert(r->palettes.end(), qwords, qwords + count * 4u);
+            return static_cast<uint32_t>(at / 4u) + 1u;
         }
         bool hasTexture(uint64_t id) override { return r->textures.count(id) != 0; }
         void uploadTexture(uint64_t key, uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t levels) override
@@ -1855,6 +2086,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         {
             r->draws.clear();
             r->arena.clear();
+            r->indexArena.clear();
+            r->palettes.clear();
             ++r->arenaFrame;
             r->blurs.clear();
         }
@@ -1892,7 +2125,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             std::lock_guard<std::recursive_mutex> guard{ps2xVitaGlMutex()};
 #endif
         };
+        static bool noArena()
+        {
+            static const bool on = std::getenv("SOTC_GL_NOARENA") != nullptr; // debugging: one buffer per mesh
+            return on;
+        }
         Renderer *r;
+        size_t m_pendingFirst = 0, m_pendingIndexFirst = 0;
     };
 }
 

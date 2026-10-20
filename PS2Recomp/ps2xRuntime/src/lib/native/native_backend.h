@@ -15,6 +15,38 @@ namespace native_renderer::detail
         virtual ~Backend() = default;
         virtual bool hasMesh(uint64_t id) = 0;
         virtual void uploadMesh(uint64_t id, const Vertex *vertices, uint32_t count, bool perFrame) = 0;
+        // native_renderer::frameMesh: by default a scratch buffer handed to
+        // uploadMesh at the commit (the GL backend writes into its frame arena).
+        virtual Vertex *frameMesh(uint32_t count)
+        {
+            if (m_frameScratch.size() < count)
+                m_frameScratch.resize(count);
+            return m_frameScratch.data();
+        }
+        virtual uint32_t *frameMeshIndices(uint32_t count, uint32_t &base)
+        {
+            base = 0;
+            if (m_indexScratch.size() < count)
+                m_indexScratch.resize(count);
+            return m_indexScratch.data();
+        }
+        virtual void commitFrameMesh(uint64_t id, uint32_t count, uint32_t indexCount)
+        {
+            if (!indexCount)
+            {
+                uploadMesh(id, m_frameScratch.data(), count, true);
+                return;
+            }
+            m_expanded.resize(indexCount); // the triangle list
+            for (uint32_t i = 0; i < indexCount; ++i)
+                m_expanded[i] = m_frameScratch[m_indexScratch[i]];
+            uploadMesh(id, m_expanded.data(), indexCount, true);
+        }
+        virtual void cancelFrameMesh() {}
+        // native_renderer::gpuSkinning: none by default (the CPU poses).
+        virtual bool canSkin() { return false; }
+        virtual void uploadSkinnedMesh(uint64_t, const SkinVertex *, uint32_t, const uint32_t *, uint32_t) {}
+        virtual uint32_t framePalette(const float *, uint32_t) { return 0; }
         virtual bool hasTexture(uint64_t id) = 0;
         virtual void uploadTexture(uint64_t id, uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t levels) = 0;
         virtual void beginFrame() = 0;
@@ -26,6 +58,10 @@ namespace native_renderer::detail
         virtual void setDepthOfField(const DepthOfField &dof) = 0;
         virtual void endFrame(uint32_t width, uint32_t height) = 0;
         virtual bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height) = 0;
+
+    private:
+        std::vector<Vertex> m_frameScratch, m_expanded;
+        std::vector<uint32_t> m_indexScratch;
     };
 
     // nullptr when the platform or the device does not have it.

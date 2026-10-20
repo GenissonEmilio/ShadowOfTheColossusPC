@@ -34,6 +34,7 @@
 #include <map>
 #include <cmath>
 #include <cstdio>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -287,7 +288,28 @@ namespace sotc_native
         return h;
     }
 
+    uint64_t decodedTexture(uint32_t header);
+    // texture() asked again for a header in the same frame: the key it gave
+    // (the contents sampled once a frame; was every draw).
+    struct TextureMemo
+    {
+        uint32_t header = 0;
+        uint64_t frame = ~0ull, key = 0;
+    };
+    TextureMemo g_textureMemo[256];
     uint64_t texture(uint32_t header)
+    {
+        if (!native_renderer::tuning().fastHooks)
+            return decodedTexture(header);
+        TextureMemo &memo = g_textureMemo[(header ^ (header >> 9)) & 255u];
+        if (memo.header == header && memo.frame == g_frame)
+            return memo.key;
+        const uint64_t key = decodedTexture(header);
+        memo = {header, g_frame, key};
+        return key;
+    }
+
+    uint64_t decodedTexture(uint32_t header)
     {
         if (!header || word(header) != 0x324F544Eu) // "NTO2"
             return 0;
@@ -401,6 +423,27 @@ namespace sotc_native
             native_renderer::frameCounters().decodeUs += native_renderer::nowUs() - decodeStart;
         native_renderer::uploadTexture(key, width, height, rgba.data(), decoded);
         return key;
+    }
+
+    // A model packet's id: its address and size, and a sample of its
+    // contents (another area loaded in its place makes new ids). The same
+    // packet drawn again in a frame (instances) takes the id it had.
+    struct PacketMemo
+    {
+        uint32_t data = 0, size = 0;
+        uint64_t frame = ~0ull, id = 0;
+    };
+    PacketMemo g_packetMemo[512];
+    uint64_t packetId(uint32_t data, uint32_t size, bool fast)
+    {
+        const auto id = [&] { return ((static_cast<uint64_t>(size) << 32) | data) ^ (sample(data, size, 32u) & 0x7FFF000000000000ull); };
+        if (!fast)
+            return id();
+        PacketMemo &memo = g_packetMemo[((data >> 4) ^ (data >> 13)) & 511u];
+        if (memo.data == data && memo.size == size && memo.frame == g_frame)
+            return memo.id;
+        memo = {data, size, g_frame, id()};
+        return memo.id;
     }
 
     // The surface's texture: +0x2c, or +0x3c for the second (texture mode 2).
@@ -553,19 +596,32 @@ namespace sotc_native
     // bone palette to VU1 qword 0 (modelSetMatrixTransTag), each matrix
     // bone x view (camera space, the projection comes after). Rigid parts
     // upload one matrix there (5 qwords). False when there is no palette.
-    bool readChainPalette(uint32_t own, std::vector<float> &vu);
-    bool readPalette(uint32_t instance, std::vector<float> &vu)
+    // VU1 data memory as the palette leaves it (1024 qwords, zero where it
+    // wrote nothing). Only the qwords the last palette wrote are cleared
+    // again (was the whole 16 KB per skinned instance).
+    struct VuPalette
+    {
+        std::vector<float> vu = std::vector<float>(1024u * 4u, 0.0f);
+        uint32_t lo = 0, hi = 0; // qwords written by the last palette
+        const float *data() const { return vu.data(); }
+        const float &operator[](size_t i) const { return vu[i]; }
+    };
+    bool readChainPalette(uint32_t own, VuPalette &vu);
+    bool readPalette(uint32_t instance, VuPalette &vu)
     {
         return readChainPalette(word(instance + 0xCu), vu);
     }
-    bool readChainPalette(uint32_t own, std::vector<float> &vu)
+    bool readChainPalette(uint32_t own, VuPalette &palette)
     {
         if (((word(own) >> 28) & 7u) != 2u)
             return false;
         const uint32_t ret = word(own + 4u), qwc = word(ret) & 0xFFFFu;
         if (qwc <= 5u)
             return false;
-        vu.assign(1024u * 4u, 0.0f);
+        std::vector<float> &vu = palette.vu;
+        if (palette.hi > palette.lo)
+            std::fill(vu.begin() + palette.lo * 4u, vu.begin() + palette.hi * 4u, 0.0f);
+        uint32_t lo = 1024u, hi = 0u;
         const uint32_t end = ret + 16u + qwc * 16u;
         for (uint32_t p = ret + 8u; p < end;)
         {
@@ -575,19 +631,279 @@ namespace sotc_native
             if ((cmd & 0x6Fu) != 0x6Cu)
                 continue; // NOP / STCYCL / MSCAL: one word
             const uint32_t n = ((code >> 16) & 0xFFu) ? ((code >> 16) & 0xFFu) : 256u, at = code & 0x3FFu;
-            for (uint32_t q = 0; q < n && at + q < 1024u; ++q)
-                for (uint32_t k = 0; k < 4u; ++k)
-                    vu[(at + q) * 4u + k] = real(p + q * 16u + k * 4u);
+            const uint32_t last = std::min(at + n, 1024u);
+            for (uint32_t q = at; q < last; ++q)
+            {
+                const uint32_t from = p + (q - at) * 16u;
+                if ((from & 0x1FFFFFCu) + 16u <= 0x2000000u)
+                    std::memcpy(&vu[q * 4u], g_ram + (from & 0x1FFFFFCu), 16);
+                else
+                    for (uint32_t k = 0; k < 4u; ++k)
+                        vu[q * 4u + k] = real(from + k * 4u);
+            }
+            if (last > at)
+            {
+                lo = std::min(lo, at);
+                hi = std::max(hi, last);
+            }
             p += n * 16u;
         }
+        palette.lo = lo;
+        palette.hi = hi;
         return true;
     }
 
+    // A skinned packet's strip vertices as the posing reads them: bind pose,
+    // each bone as its matrix's offset in the palette (floats), the weights,
+    // and what is copied as is (ST, colour).
+    struct SkinBind
+    {
+        float x, y, z, nx, ny, nz;
+        float weight[3];
+        uint16_t at[3];
+        uint8_t bones;
+        float u, v;         // as native_renderer::Vertex has them:
+        uint8_t r, g, b, a; // u, v, then the colour
+    };
+    static_assert(offsetof(SkinBind, r) == offsetof(SkinBind, u) + 8u && offsetof(native_renderer::Vertex, u) == 24u &&
+                      offsetof(native_renderer::Vertex, r) == 32u && sizeof(native_renderer::Vertex) == 36u,
+                  "poseSkinned copies u, v and the colour as 12 bytes");
     struct SkinnedPacket
     {
-        std::vector<Strip> strips; // bind pose
-        uint64_t used = 0;         // the last frame (g_frame) that drew it
+        std::vector<Strip> strips;      // bind pose
+        std::vector<SkinBind> bind;     // the strips' vertices, one strip after another
+        std::vector<uint32_t> stripEnd; // where each strip ends in `bind`
+        uint32_t maxVertices = 0;       // 3 x the strips' triangles (joins included)
+        // Drawn lit (lit(strips), g_litPackets). Unlit draws do not read the
+        // normals (the vertex programs use them only for lighting): they are
+        // left at 0 instead of posed.
+        bool lit = false;
+        // Posed by the GPU when it can be (native_renderer::gpuSkinning): its
+        // matrices within kSkinPaletteQwords of each other (qwords lo..hi of
+        // the palette), and no lit vertex without a normal (those take each
+        // triangle's own normal).
+        bool gpu = false;
+        uint32_t lo = 0, hi = 0;
+        uint64_t used = 0;              // the last frame (g_frame) that drew it
     };
+
+    SkinnedPacket makeSkinnedPacket(std::vector<Strip> &&strips)
+    {
+        SkinnedPacket packet;
+        for (const Strip &strip : strips)
+        {
+            for (const BatchVertex &v : strip)
+            {
+                SkinBind b{};
+                b.x = v.x, b.y = v.y, b.z = v.z;
+                b.nx = v.nx, b.ny = v.ny, b.nz = v.nz;
+                b.bones = v.bones;
+                for (uint32_t k = 0; k < v.bones; ++k)
+                {
+                    b.weight[k] = v.weight[k];
+                    b.at[k] = static_cast<uint16_t>((v.bone[k] * 4u % 1024u) * 4u);
+                }
+                b.u = v.u, b.v = v.v;
+                b.r = v.r, b.g = v.g, b.b = v.b, b.a = v.a;
+                packet.bind.push_back(b);
+            }
+            packet.stripEnd.push_back(static_cast<uint32_t>(packet.bind.size()));
+            if (strip.size() > 2u)
+                packet.maxVertices += static_cast<uint32_t>(strip.size() - 2u) * 3u;
+        }
+        packet.lit = lit(strips);
+        uint32_t lo = ~0u, hi = 0u;
+        bool noNormal = false;
+        for (const SkinBind &b : packet.bind)
+        {
+            for (uint32_t k = 0; k < b.bones; ++k)
+            {
+                lo = std::min<uint32_t>(lo, b.at[k] / 4u);
+                hi = std::max<uint32_t>(hi, b.at[k] / 4u + 4u);
+            }
+            noNormal = noNormal || (b.nx == 0.0f && b.ny == 0.0f && b.nz == 0.0f);
+        }
+        packet.lo = lo == ~0u ? 0u : lo;
+        packet.hi = std::max(hi, packet.lo);
+        packet.gpu = (!packet.lit || !noNormal) && packet.hi - packet.lo <= native_renderer::kSkinPaletteQwords;
+        packet.strips = std::move(strips);
+        return packet;
+    }
+
+    // A skinned packet's bind pose for the GPU (native_renderer::uploadSkinnedMesh):
+    // the strip vertices, and the strips' triangles as indices (those with two
+    // corners the same vertex left out: no matrix pulls them apart).
+    void uploadSkinned(uint64_t id, const SkinnedPacket &packet)
+    {
+        static std::vector<native_renderer::SkinVertex> vertices;
+        static std::vector<uint32_t> indices;
+        vertices.resize(packet.bind.size());
+        for (size_t i = 0; i < packet.bind.size(); ++i)
+        {
+            const SkinBind &b = packet.bind[i];
+            native_renderer::SkinVertex &o = vertices[i];
+            o = {};
+            o.x = b.x, o.y = b.y, o.z = b.z;
+            o.nx = b.nx, o.ny = b.ny, o.nz = b.nz;
+            o.u = b.u, o.v = b.v;
+            o.r = b.r, o.g = b.g, o.b = b.b, o.a = b.a;
+            for (uint32_t k = 0; k < b.bones; ++k)
+            {
+                o.bone[k] = static_cast<float>(b.at[k] / 4u - packet.lo);
+                o.weight[k] = b.weight[k];
+            }
+        }
+        const auto same = [&](uint32_t a, uint32_t b) { return std::memcmp(&packet.bind[a], &packet.bind[b], sizeof(SkinBind)) == 0; };
+        indices.clear();
+        uint32_t first = 0;
+        for (const uint32_t end : packet.stripEnd)
+        {
+            for (uint32_t i = first + 2u; i < end; ++i)
+                if (!same(i - 2u, i - 1u) && !same(i - 1u, i) && !same(i - 2u, i))
+                    indices.insert(indices.end(), {i - 2u, i - 1u, i});
+            first = end;
+        }
+        native_renderer::uploadSkinnedMesh(id, vertices.data(), static_cast<uint32_t>(vertices.size()), indices.data(), static_cast<uint32_t>(indices.size()));
+    }
+
+    // Poses a skinned packet (camera space) into `out` (room for
+    // max(bind.size(), maxVertices)): the triangles triangulate() with the
+    // posing lambda of modelDispHook gives, each strip vertex posed once.
+    // Written as the strip vertices plus indices (a third of the vertices to
+    // write and to upload); as the triangle list itself when a lit packet
+    // has a posed normal of 0 (that vertex takes each triangle's own face
+    // normal, so it cannot be shared). The vertices keep the same values
+    // either way: the same picture.
+    struct Posed
+    {
+        float p[3], n[3];
+    };
+    struct PosedMesh
+    {
+        uint32_t vertices = 0, indices = 0;
+        const uint32_t *index = nullptr; // indexed: the indices (from `base`)
+        uint32_t base = 0;
+    };
+    PosedMesh poseSkinned(const SkinnedPacket &packet, const float *palette, native_renderer::Vertex *out)
+    {
+        static std::vector<Posed> posed;
+        const size_t count = packet.bind.size();
+        if (posed.size() < count)
+            posed.resize(count);
+        const bool lit = packet.lit;
+        uint32_t zeroNormals = 0;
+        for (size_t i = 0; i < count; ++i)
+        {
+            const SkinBind &v = packet.bind[i];
+            float x = 0.0f, y = 0.0f, z = 0.0f, nx = 0.0f, ny = 0.0f, nz = 0.0f;
+            if (v.bones == 1u)
+            {
+                // One bone, weight 1: 0 + 1 x t is t (the sign of a zero aside).
+                const float *m = palette + v.at[0];
+                x = m[0] * v.x + m[4] * v.y + m[8] * v.z + m[12];
+                y = m[1] * v.x + m[5] * v.y + m[9] * v.z + m[13];
+                z = m[2] * v.x + m[6] * v.y + m[10] * v.z + m[14];
+                if (lit)
+                {
+                    nx = m[0] * v.nx + m[4] * v.ny + m[8] * v.nz;
+                    ny = m[1] * v.nx + m[5] * v.ny + m[9] * v.nz;
+                    nz = m[2] * v.nx + m[6] * v.ny + m[10] * v.nz;
+                }
+            }
+            else
+            for (uint32_t b = 0; b < v.bones; ++b)
+            {
+                const float *m = palette + v.at[b];
+                const float w = v.weight[b];
+                x += w * (m[0] * v.x + m[4] * v.y + m[8] * v.z + m[12]);
+                y += w * (m[1] * v.x + m[5] * v.y + m[9] * v.z + m[13]);
+                z += w * (m[2] * v.x + m[6] * v.y + m[10] * v.z + m[14]);
+                if (!lit)
+                    continue;
+                nx += w * (m[0] * v.nx + m[4] * v.ny + m[8] * v.nz);
+                ny += w * (m[1] * v.nx + m[5] * v.ny + m[9] * v.nz);
+                nz += w * (m[2] * v.nx + m[6] * v.ny + m[10] * v.nz);
+            }
+            Posed &o = posed[i];
+            o.p[0] = x, o.p[1] = y, o.p[2] = z;
+            o.n[0] = nx, o.n[1] = ny, o.n[2] = nz;
+            if (lit)
+                zeroNormals |= static_cast<uint32_t>(nx == 0.0f && ny == 0.0f && nz == 0.0f);
+        }
+        // A triangle's (doubled) area: degenerate ones (strip joins) are left
+        // out, as triangulate() does (its sqrt of this is not > 0 either).
+        const auto cross = [](const Posed &a, const Posed &b, const Posed &c, float n[3])
+        {
+            const float ux = b.p[0] - a.p[0], uy = b.p[1] - a.p[1], uz = b.p[2] - a.p[2];
+            const float vx = c.p[0] - a.p[0], vy = c.p[1] - a.p[1], vz = c.p[2] - a.p[2];
+            n[0] = uy * vz - uz * vy, n[1] = uz * vx - ux * vz, n[2] = ux * vy - uy * vx;
+            return n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
+        };
+        const auto put = [&](native_renderer::Vertex &o, size_t i, const float *normal)
+        {
+            const Posed &p = posed[i];
+            const SkinBind &src = packet.bind[i];
+            o.x = p.p[0], o.y = p.p[1], o.z = p.p[2];
+            o.nx = normal[0], o.ny = normal[1], o.nz = normal[2];
+            o.u = src.u, o.v = src.v;
+            o.r = src.r, o.g = src.g, o.b = src.b, o.a = src.a;
+        };
+        PosedMesh mesh;
+        uint32_t first = 0;
+        uint32_t base = 0, *indices = zeroNormals ? nullptr : native_renderer::frameMeshIndices(packet.maxVertices, base);
+        if (indices)
+        {
+            static const float none[3] = {0.0f, 0.0f, 0.0f}; // unlit: not read
+            for (size_t i = 0; i < count; ++i)
+                put(out[i], i, lit ? posed[i].n : none);
+            mesh.vertices = static_cast<uint32_t>(count);
+            for (const uint32_t end : packet.stripEnd)
+            {
+                for (uint32_t i = first + 2u; i < end; ++i)
+                {
+                    float n[3];
+                    if (!(cross(posed[i - 2u], posed[i - 1u], posed[i], n) > 0.0f))
+                        continue;
+                    indices[mesh.indices++] = base + i - 2u;
+                    indices[mesh.indices++] = base + i - 1u;
+                    indices[mesh.indices++] = base + i;
+                }
+                first = end;
+            }
+            mesh.index = indices;
+            mesh.base = base;
+            return mesh;
+        }
+        for (const uint32_t end : packet.stripEnd)
+        {
+            for (uint32_t i = first + 2u; i < end; ++i)
+            {
+                float n[3];
+                const float squared = cross(posed[i - 2u], posed[i - 1u], posed[i], n);
+                if (!(squared > 0.0f))
+                    continue;
+                float face[3];
+                bool haveFace = false;
+                for (uint32_t k = i - 2u; k <= i; ++k)
+                {
+                    const float *normal = posed[k].n;
+                    if (normal[0] == 0.0f && normal[1] == 0.0f && normal[2] == 0.0f) // unlit: all 0, so the face's
+                    {
+                        if (!haveFace)
+                        {
+                            const float len = std::sqrt(squared);
+                            face[0] = n[0] / len, face[1] = n[1] / len, face[2] = n[2] / len;
+                            haveFace = true;
+                        }
+                        normal = face;
+                    }
+                    put(out[mesh.vertices++], k, normal);
+                }
+            }
+            first = end;
+        }
+        return mesh;
+    }
     std::unordered_map<uint64_t, SkinnedPacket> g_skinnedPackets; // by packet
     std::unordered_set<uint64_t> g_litPackets;                        // packets with normals
     uint64_t g_skinnedDraws = 0;                                       // this frame's skinned meshes
@@ -1374,15 +1690,39 @@ namespace sotc_native
             return v;
         };
         static std::vector<native_renderer::Vertex> tris;
-        tris.clear();
-        for (uint32_t r = 0; r + 1u < rows; ++r)
-            for (uint32_t c = 0; c + 1u < columns; ++c)
-            {
-                const native_renderer::Vertex a = vertexAt(r, c), b = vertexAt(r, c + 1u), d = vertexAt(r + 1u, c), e = vertexAt(r + 1u, c + 1u);
-                tris.insert(tris.end(), {a, b, d, b, e, d});
-            }
         const uint64_t mesh = (1ull << 60) | g_skinnedDraws++;
-        native_renderer::uploadMesh(mesh, tris.data(), static_cast<uint32_t>(tris.size()), true);
+        if (native_renderer::tuning().fastHooks)
+        {
+            // Each grid vertex read once, the triangles written in place.
+            static std::vector<native_renderer::Vertex> grid;
+            grid.resize(rows * columns);
+            for (uint32_t r = 0; r < rows; ++r)
+                for (uint32_t c = 0; c < columns; ++c)
+                    grid[r * columns + c] = vertexAt(r, c);
+            const uint32_t total = (rows - 1u) * (columns - 1u) * 6u;
+            if (native_renderer::Vertex *out = native_renderer::frameMesh(total))
+            {
+                for (uint32_t r = 0; r + 1u < rows; ++r)
+                    for (uint32_t c = 0; c + 1u < columns; ++c)
+                    {
+                        const native_renderer::Vertex &a = grid[r * columns + c], &b = grid[r * columns + c + 1u], &d = grid[(r + 1u) * columns + c],
+                                                      &e = grid[(r + 1u) * columns + c + 1u];
+                        *out++ = a, *out++ = b, *out++ = d, *out++ = b, *out++ = e, *out++ = d;
+                    }
+                native_renderer::commitFrameMesh(mesh, total);
+            }
+        }
+        else
+        {
+            tris.clear();
+            for (uint32_t r = 0; r + 1u < rows; ++r)
+                for (uint32_t c = 0; c + 1u < columns; ++c)
+                {
+                    const native_renderer::Vertex a = vertexAt(r, c), b = vertexAt(r, c + 1u), d = vertexAt(r + 1u, c), e = vertexAt(r + 1u, c + 1u);
+                    tris.insert(tris.end(), {a, b, d, b, e, d});
+                }
+            native_renderer::uploadMesh(mesh, tris.data(), static_cast<uint32_t>(tris.size()), true);
+        }
         float camera[16];
         for (int i = 0; i < 16; ++i)
             camera[i] = real(g_cameraContext + 0x5A0u + i * 4u);
@@ -1429,7 +1769,7 @@ namespace sotc_native
         if (!shadows || idColours || !model || !g_cameraContext || ((word(chain) >> 28) & 7u) != 2u)
             return;
         const uint32_t ret = word(chain + 4u);
-        static std::vector<float> palette;
+        static VuPalette palette;
         float m[16];
         if (skinnedShadow)
         {
@@ -1535,7 +1875,8 @@ namespace sotc_native
         const uint64_t mesh = (1ull << 59) | g_skinnedDraws++;
         native_renderer::uploadMesh(mesh, g_volume.data(), static_cast<uint32_t>(g_volume.size()), true);
         native_renderer::DrawState state;
-        if (std::getenv("SOTC_SHADOW_SHOW")) // debugging: the volumes in red
+        static const bool showVolumes = std::getenv("SOTC_SHADOW_SHOW") != nullptr; // debugging: the volumes in red
+        if (showVolumes)
         {
             state.debugColour = 0x0000FFu;
             state.order = 15;
@@ -1621,8 +1962,18 @@ namespace sotc_native
         const ParticleEnv &e = g_ptclEnvState;
         if (off || !g_cameraContext || count == 0u || count > 4096u || (!(e.type >= 1u && e.type <= 5u) && e.type != 7u))
             return;
+        // Written straight into the frame's vertex buffer (at most 12 a particle).
+        native_renderer::Vertex *room = native_renderer::tuning().fastHooks ? native_renderer::frameMesh(count * 12u) : nullptr;
+        uint32_t written = 0;
         static std::vector<native_renderer::Vertex> tris;
         tris.clear();
+        const auto put = [&](const auto &...corners)
+        {
+            if (room)
+                ((room[written++] = corners), ...);
+            else
+                (tris.push_back(corners), ...);
+        };
         auto mul3 = [&](const float *dir, float x, float y, float out[3])
         {
             for (int r = 0; r < 3; ++r)
@@ -1667,6 +2018,7 @@ namespace sotc_native
                 o.b = static_cast<uint8_t>(std::clamp(real(q + 24u) * 255.0f * scale, 0.0f, 255.0f));
                 o.a = static_cast<uint8_t>(std::clamp(real(q + 28u) * 128.0f, 0.0f, 255.0f));
             };
+            col(v, 1.0f); // every corner's colour (the lit ones set their own)
             auto at = [&](const float *o, float sign, float u, float vv)
             {
                 native_renderer::Vertex c = v;
@@ -1675,8 +2027,7 @@ namespace sotc_native
                 c.z = p[2] + sign * o[2];
                 c.u = u;
                 c.v = vv;
-                col(c, 1.0f);
-                return c;
+                                return c;
             };
             if (e.type == 3u || e.type == 5u)
             {
@@ -1697,14 +2048,13 @@ namespace sotc_native
                     c.z = base[2] + sign * o[2];
                     c.u = u;
                     c.v = vv;
-                    col(c, 1.0f);
-                    return c;
+                                        return c;
                 };
                 native_renderer::Vertex c16 = corner(p, sa, 1, 0, 0), c17 = corner(p, sa, -1, e.vec[0], 0), c18 = corner(p2, sb, 1, 0, e.vec[1]),
                                         c19 = corner(p2, sb, -1, e.vec[0], e.vec[1]);
                 if (e.type == 3u)
                 {
-                    tris.insert(tris.end(), {c16, c17, c18, c17, c19, c18});
+                    put(c16, c17, c18, c17, c19, c18);
                     continue;
                 }
                 native_renderer::Vertex c = v;
@@ -1729,7 +2079,7 @@ namespace sotc_native
                         n[k] = len > 0.0f ? n[k] / len : 0.0f;
                     shade(*o, n);
                 }
-                tris.insert(tris.end(), {c, c16, c17, c, c17, c19, c, c19, c18, c, c18, c16});
+                put(c, c16, c17, c, c17, c19, c, c19, c18, c, c18, c16);
                 continue;
             }
             // Type 7: each particle's own texture cell offset (q2 z / w).
@@ -1771,18 +2121,25 @@ namespace sotc_native
                     towardCentre(*o, n);
                     lit(*o, n);
                 }
-                tris.insert(tris.end(), {c, f16, f17, c, f17, f19, c, f19, f18, c, f18, f16});
+                put(c, f16, f17, c, f17, f19, c, f19, f18, c, f18, f16);
             }
             else
-                tris.insert(tris.end(), {v16, v17, v18, v17, v19, v18});
+                put(v16, v17, v18, v17, v19, v18);
         }
-        if (tris.empty())
+        if (room ? written == 0u : tris.empty())
+        {
+            if (room)
+                native_renderer::cancelFrameMesh();
             return;
+        }
         float camera[16];
         for (int i = 0; i < 16; ++i)
             camera[i] = real(g_cameraContext + 0x5A0u + i * 4u);
         const uint64_t mesh = (1ull << 58) | g_skinnedDraws++;
-        native_renderer::uploadMesh(mesh, tris.data(), static_cast<uint32_t>(tris.size()), true);
+        if (room)
+            native_renderer::commitFrameMesh(mesh, written);
+        else
+            native_renderer::uploadMesh(mesh, tris.data(), static_cast<uint32_t>(tris.size()), true);
         native_renderer::DrawState state;
         state.texture = texture(header);
         state.blend = g_ptclBlend == 1u ? native_renderer::Blend::Additive : (g_ptclBlend == 2u ? native_renderer::Blend::Subtract : native_renderer::Blend::Normal);
@@ -1957,8 +2314,10 @@ namespace sotc_native
         const uint32_t packets = word(header + 0x60u), count = 0x10000u;
         static std::vector<native_renderer::Vertex> vertices;
         static std::vector<Strip> strips;
-        static std::vector<float> palette;
+        static VuPalette palette;
         const bool hasPalette = readPalette(instance, palette);
+        const bool fast = native_renderer::tuning().fastHooks;
+        uint32_t paletteHandle = 0, paletteLo = 0, paletteHi = 0; // this instance's palette as last sent
         float projection[16];
         for (int i = 0; i < 16; ++i)
             projection[i] = real(g_cameraContext + 0x40u + i * 4u);
@@ -1976,7 +2335,7 @@ namespace sotc_native
             if (!surfaceDrawn(s))
                 continue;
             const uint32_t size = word(pk), data = word(pk + 16u);
-            const uint64_t id = ((static_cast<uint64_t>(size) << 32) | data) ^ (sample(data, size, 32u) & 0x7FFF000000000000ull);
+            const uint64_t id = packetId(data, size, fast);
             auto skinnedPacket = g_skinnedPackets.find(id);
             const bool twoPasses = word(s + 0x1Cu) == 2u;
             if (skinnedPacket == g_skinnedPackets.end() &&
@@ -1987,7 +2346,7 @@ namespace sotc_native
                 if (skinned(strips) && lit(strips))
                     g_litPackets.insert(id);
                 if (skinned(strips))
-                    skinnedPacket = g_skinnedPackets.emplace(id, SkinnedPacket{std::move(strips), 0}).first;
+                    skinnedPacket = g_skinnedPackets.emplace(id, makeSkinnedPacket(std::move(strips))).first;
                 else
                 {
                     vertices.clear();
@@ -2014,31 +2373,67 @@ namespace sotc_native
             }
             uint64_t mesh = id;
             const float *transform = clip;
+            bool posed = false;                         // skinned: camera space
+            uint32_t skinPalette = 0, skinPaletteCount = 0; // posed by the GPU: its palette
             if (skinnedPacket != g_skinnedPackets.end())
             {
                 skinnedPacket->second.used = g_frame;
                 if (!hasPalette)
                     continue;
-                // Posed on the CPU (camera space), one mesh per draw this frame.
-                vertices.clear();
-                triangulate(skinnedPacket->second.strips, [](const BatchVertex &v, native_renderer::Vertex &o)
+                posed = true;
+                SkinnedPacket &packet = skinnedPacket->second;
+                if (fast && packet.gpu && native_renderer::gpuSkinning())
                 {
-                    o.x = o.y = o.z = o.nx = o.ny = o.nz = 0.0f;
-                    for (uint32_t b = 0; b < v.bones; ++b)
+                    // Posed by the GPU: the bind pose kept under the packet's
+                    // id, this instance's matrices sent with the draw.
+                    if (!native_renderer::hasMesh(id))
+                        uploadSkinned(id, packet);
+                    if (!paletteHandle || paletteLo != packet.lo || paletteHi != packet.hi)
                     {
-                        const float *m = &palette[(v.bone[b] * 4u % 1024u) * 4u];
-                        const float w = v.weight[b];
-                        o.x += w * (m[0] * v.x + m[4] * v.y + m[8] * v.z + m[12]);
-                        o.y += w * (m[1] * v.x + m[5] * v.y + m[9] * v.z + m[13]);
-                        o.z += w * (m[2] * v.x + m[6] * v.y + m[10] * v.z + m[14]);
-                        o.nx += w * (m[0] * v.nx + m[4] * v.ny + m[8] * v.nz);
-                        o.ny += w * (m[1] * v.nx + m[5] * v.ny + m[9] * v.nz);
-                        o.nz += w * (m[2] * v.nx + m[6] * v.ny + m[10] * v.nz);
+                        paletteHandle = native_renderer::framePalette(palette.data() + packet.lo * 4u, packet.hi - packet.lo);
+                        paletteLo = packet.lo;
+                        paletteHi = packet.hi;
                     }
-                }, vertices);
-                mesh = (1ull << 63) | g_skinnedDraws++;
-                native_renderer::uploadMesh(mesh, vertices.data(), static_cast<uint32_t>(vertices.size()), true);
-                transform = projection;
+                    if (!paletteHandle)
+                        continue;
+                    skinPalette = paletteHandle;
+                    skinPaletteCount = packet.hi - packet.lo;
+                    transform = projection;
+                }
+                // Posed on the CPU (camera space), one mesh per draw this frame.
+                else if (fast)
+                {
+                    // Written straight into the frame's vertex buffer.
+                    mesh = (1ull << 63) | g_skinnedDraws++;
+                    if (native_renderer::Vertex *out = native_renderer::frameMesh(std::max<uint32_t>(packet.maxVertices, static_cast<uint32_t>(packet.bind.size()))))
+                    {
+                        const PosedMesh written = poseSkinned(packet, palette.data(), out);
+                        native_renderer::commitFrameMesh(mesh, written.vertices, written.indices);
+                    }
+                    transform = projection;
+                }
+                else
+                {
+                    vertices.clear();
+                    triangulate(skinnedPacket->second.strips, [](const BatchVertex &v, native_renderer::Vertex &o)
+                    {
+                        o.x = o.y = o.z = o.nx = o.ny = o.nz = 0.0f;
+                        for (uint32_t b = 0; b < v.bones; ++b)
+                        {
+                            const float *m = &palette[(v.bone[b] * 4u % 1024u) * 4u];
+                            const float w = v.weight[b];
+                            o.x += w * (m[0] * v.x + m[4] * v.y + m[8] * v.z + m[12]);
+                            o.y += w * (m[1] * v.x + m[5] * v.y + m[9] * v.z + m[13]);
+                            o.z += w * (m[2] * v.x + m[6] * v.y + m[10] * v.z + m[14]);
+                            o.nx += w * (m[0] * v.nx + m[4] * v.ny + m[8] * v.nz);
+                            o.ny += w * (m[1] * v.nx + m[5] * v.ny + m[9] * v.nz);
+                            o.nz += w * (m[2] * v.nx + m[6] * v.ny + m[10] * v.nz);
+                        }
+                    }, vertices);
+                    mesh = (1ull << 63) | g_skinnedDraws++;
+                    native_renderer::uploadMesh(mesh, vertices.data(), static_cast<uint32_t>(vertices.size()), true);
+                    transform = projection;
+                }
             }
             static const bool logPasses = std::getenv("SOTC_NATIVE_LOG") != nullptr;
             if (logPasses)
@@ -2096,6 +2491,8 @@ namespace sotc_native
             if ((skipLayers >> (layer & 31u)) & 1u)
                 continue;
             native_renderer::DrawState state;
+            state.skinPalette = skinPalette;
+            state.skinPaletteCount = skinPaletteCount;
             state.texture = surfaceTexture(header, surface);
             state.blend = surfaceBlend(s);
             state.clamp = surfaceClamp(s);
@@ -2104,14 +2501,14 @@ namespace sotc_native
             const bool noMips = !native_renderer::tuning().mipmaps;
             if (!noMips)
                 surfaceLod(header, surface, state);
-            if (std::getenv("SOTC_NATIVE_LOG") && state.maxLod > 0.0f)
+            if (logPasses && state.maxLod > 0.0f)
             {
                 static std::set<uint64_t> told;
                 if (told.insert((static_cast<uint64_t>(header) << 16) | surface).second && told.size() < 30)
                     std::fprintf(stderr, "[mip] header %08x surface %u levels %g L x%g K %g\n", header, surface, state.maxLod + 1.0f, state.lodScale, state.lodK);
             }
             const bool noRow = !native_renderer::tuning().textureScroll;
-            if (!noRow && surfaceRow(header, surface, state.uvOffset) && std::getenv("SOTC_NATIVE_LOG"))
+            if (!noRow && surfaceRow(header, surface, state.uvOffset) && logPasses)
             {
                 static std::set<uint64_t> told;
                 if (told.insert((static_cast<uint64_t>(header) << 16) | surface).second)
@@ -2151,7 +2548,7 @@ namespace sotc_native
                 const uint32_t own = word(instance + 0xCu);
                 for (uint32_t i = 0; i < 32u; ++i)
                     state.light[i] = real(own + 0x10u + i * 4u);
-                if (mesh != id) // skinned: its lights are in camera space
+                if (posed) // skinned: its lights are in camera space
                 {
                     std::memcpy(g_viewLights, state.light, sizeof(g_viewLights));
                     g_haveViewLights = true;
@@ -2163,7 +2560,7 @@ namespace sotc_native
             // being 0x20; the splash rings drawn after on the surface stay visible.
             if ((word(s + 0x18u) & 0x2200u) == 0x2200u)
                 state.noDepthWrite = true;
-            const bool twoTextures = word(s + 0x1Cu) == 2u && mesh == id && !state.debugColour;
+            const bool twoTextures = word(s + 0x1Cu) == 2u && !posed && !state.debugColour;
             if (twoTextures)
                 state.writeDepth = true;
             native_renderer::draw(mesh, transform, state);
@@ -2263,7 +2660,8 @@ namespace sotc_native
                     refr.order = 9;
                     refr.reflectionTint[0] = refr.reflectionTint[1] = refr.reflectionTint[2] = 1.0f;
                     refr.reflectionTint[3] = refractAlpha;
-                    if (std::getenv("SOTC_REFRACT_SHOW")) // debugging: where it lands, in red
+                    static const bool showRefraction = std::getenv("SOTC_REFRACT_SHOW") != nullptr; // debugging: where it lands, in red
+                    if (showRefraction)
                     {
                         refr.reflectionTint[0] = 4.0f;
                         refr.reflectionTint[1] = refr.reflectionTint[2] = 0.0f;

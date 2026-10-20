@@ -51,6 +51,13 @@ namespace native_renderer
         // itself is held back (in Vita3K's speed mode the logos took minutes).
         bool frameCap30 = false;
         bool frameLog = false;      // per-frame timing to the log (SOTC_FRAME_LOG; native_renderer::FrameCounters)
+        // The game hooks' faster paths (skinned meshes posed once per vertex
+        // and written in place, a texture's and a packet's id sampled once a
+        // frame); off: the earlier code, to compare (SOTC_NATIVE_SLOWHOOKS).
+        bool fastHooks = true;
+        // OpenGL / Vita: skinned meshes posed by the GPU (the bind pose kept,
+        // the bone palette sent per draw) instead of on the CPU (SOTC_GPU_SKIN=0/1).
+        bool gpuSkinning = true;
         // What the heat haze (layer 23) and the water (layer 9) read as "the
         // picture so far" on the OpenGL renderer: 0 the 256 x 256 copy made at
         // their layer (the PS2's way), 1 a full-size copy made there, 2 the
