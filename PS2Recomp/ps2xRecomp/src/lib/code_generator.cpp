@@ -228,6 +228,25 @@ namespace ps2recomp
 
     CodeGenerator::~CodeGenerator() = default;
 
+    bool CodeGenerator::codeReadsPc(const std::string &code)
+    {
+        if (code.find("throw") != std::string::npos)
+        {
+            return true;
+        }
+        // Memory accesses reach the runtime only for special addresses, and
+        // read ctx->pc only to report an address error (approximate there).
+        for (size_t at = code.find("runtime->"); at != std::string::npos; at = code.find("runtime->", at + 9u))
+        {
+            const std::string_view rest(code.data() + at + 9u, code.size() - at - 9u);
+            if (rest.rfind("Load", 0) != 0 && rest.rfind("Store", 0) != 0 && rest.rfind("memory()", 0) != 0)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     std::string CodeGenerator::translateInstruction(const Instruction &inst)
     {
         return InstructionTranslator(*this).translate(inst, {});

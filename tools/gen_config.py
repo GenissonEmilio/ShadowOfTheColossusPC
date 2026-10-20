@@ -41,7 +41,13 @@ import funcmap_elf
 elf = Elf(str(out_dir / "SOTC.elf"))
 words = {a: elf.read32(a) for lo, hi in elf.exec_ranges() for a in range(lo, hi, 4)}
 starts = {int(l.split(",")[1], 16) for l in (out_dir / "functions.csv").read_text().splitlines()[1:]}
-entries = [t for t in funcmap_elf.hidden_entries(words, starts) if t not in stubs]
+entries = set(funcmap_elf.hidden_entries(words, starts))
+# Starts tools/build_elf.py merged into the function around them (false
+# splits): still entered from outside (pointers, jump tables, calls).
+merged = out_dir / "merged_entries.txt"
+if merged.exists():
+    entries |= {int(l, 16) for l in merged.read_text().splitlines() if l.strip() and not l.startswith("#")}
+entries = sorted(t for t in entries if t not in stubs and t not in starts)
 entry_lines = "".join(f'  "entry_{t:08X}@0x{t:08X}",\n' for t in entries)
 
 stub_lines = "".join(f'  "{stubs[a]}",\n' for a in sorted(stubs))

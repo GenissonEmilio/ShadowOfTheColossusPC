@@ -98,14 +98,21 @@ it against Metal every second.
    from RAM the moment the game jumps into it, then cut out at its final
    addresses (`tools/modimage.py`).
 3. **Link.** `tools/build_elf.py` merges everything into one `SOTC.elf` plus
-   a function map (~16 000 functions) and the list of instructions the
-   guest linker rewrites.
+   a function map (~9 000 functions) and the list of instructions the
+   guest linker rewrites. Since 2026-10-19 the heuristics' false starts
+   are merged back (`merge_split_starts`): a start inside a module
+   symbol's size, or one a branch crosses, is a switch case, an aligned
+   label or a prologue-like store in the middle of a body (7 251 of the
+   16 274; GetLayoutClass was cut in 7, iosDlPushLayer in 2). Split, the
+   jumps between the pieces left the function at run time (3M nested host
+   calls a second on the Mac); whole, they are gotos.
 4. **Config.** `tools/gen_config.py` writes the recompiler config:
    - stubs for the SDK calls the runtime implements;
    - since 2026-10-17, **hidden entry points**: 841 pieces of code packed
      right after another function's jump, which the game calls through
      pointers. One of them, a three-instruction leaf at 0x1357888, froze the
-     game about 14 minutes in.
+     game about 14 minutes in. The merged starts are entry points too,
+     so whatever reached them before still does.
 5. **Recompile** to C++ and build. The VU1 microcode was compiled the same
    way.
 

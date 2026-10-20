@@ -662,15 +662,16 @@ endif()
 
 # Vita: Work around for GCC 10's LTO plugin
 if(PS2X_IS_VITA)
-    # Cortex-A9: Thumb-2 and NEON. The recompiled game is size-optimized
-    # (tens of MB of code); the runtime itself is speed-optimized.
+    # Cortex-A9: Thumb-2 and NEON. The runtime is speed-optimized; the
+    # recompiled game (tens of MB of code) by PS2X_VITA_GAME_OPT.
+    set(PS2X_VITA_GAME_OPT "-O2" CACHE STRING "Optimization level of the recompiled game code on the Vita (-O2 or -Os)")
     foreach(PS2X_VITA_TARGET IN ITEMS ps2_runtime ps2EntryRunner ps2_iop)
         if(TARGET ${PS2X_VITA_TARGET})
             target_compile_options(${PS2X_VITA_TARGET} PRIVATE -mcpu=cortex-a9 -mfpu=neon -mfloat-abi=hard -mthumb)
         endif()
     endforeach()
     target_compile_options(ps2_runtime PRIVATE -O2)
-    target_compile_options(ps2EntryRunner PRIVATE -Os)
+    target_compile_options(ps2EntryRunner PRIVATE ${PS2X_VITA_GAME_OPT})
     # Except the hot few: recompiled VU1 microcode and native replacements
     # (game overrides) run every vertex.
     get_target_property(PS2X_RUNNER_SOURCES ps2EntryRunner SOURCES)

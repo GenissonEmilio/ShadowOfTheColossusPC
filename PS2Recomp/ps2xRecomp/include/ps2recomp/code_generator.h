@@ -2,7 +2,9 @@
 #define PS2RECOMP_CODE_GENERATOR_H
 
 #include <cstdint>
+#include <cstdlib>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <map>
 #include <unordered_map>
@@ -73,6 +75,15 @@ namespace ps2recomp
         const std::vector<Section>& m_sections;
         BootstrapInfo m_bootstrapInfo;
         bool m_emitInstructionComments = true;
+        // ctx->pc is stored only where something can read it: before code
+        // that calls into the runtime (exceptions, traps, syscalls, VU0
+        // microprograms), branches, calls, checkpoints and returns.
+        // PS2X_RECOMP_ALL_PC=1 (at recompile time) stores it before every
+        // instruction, as before.
+        bool m_allPcStores = std::getenv("PS2X_RECOMP_ALL_PC") != nullptr;
+        // Whether translated code can read ctx->pc (it calls into the
+        // runtime other than for a memory access, or throws).
+        static bool codeReadsPc(const std::string &code);
         RecompilerReporter *m_reporter = nullptr;
         std::string m_currentFunctionName;
 

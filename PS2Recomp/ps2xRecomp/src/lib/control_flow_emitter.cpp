@@ -131,11 +131,17 @@ namespace ps2recomp
             return;
         }
 
-        m_ss << fmt::format("{}ctx->pc = 0x{:X}u;\n", indent, delayPc());
-        m_ss << fmt::format("{}ctx->in_delay_slot = true;\n", indent);
-        m_ss << fmt::format("{}ctx->branch_pc = 0x{:X}u;\n", indent, branchPc());
-
         const std::string code = delaySlotCode();
+        // The delay slot state is for an exception the slot raises: kept
+        // only when it can raise one (see CodeGenerator::codeReadsPc).
+        const bool slotState = m_gen.m_allPcStores || CodeGenerator::codeReadsPc(code);
+        if (slotState)
+        {
+            m_ss << fmt::format("{}ctx->pc = 0x{:X}u;\n", indent, delayPc());
+            m_ss << fmt::format("{}ctx->in_delay_slot = true;\n", indent);
+            m_ss << fmt::format("{}ctx->branch_pc = 0x{:X}u;\n", indent, branchPc());
+        }
+
         std::istringstream lines(code);
         std::string line;
         while (std::getline(lines, line))
@@ -146,7 +152,10 @@ namespace ps2recomp
             }
         }
 
-        m_ss << fmt::format("{}ctx->in_delay_slot = false;\n", indent);
+        if (slotState)
+        {
+            m_ss << fmt::format("{}ctx->in_delay_slot = false;\n", indent);
+        }
     }
 
     void ControlFlowEmitter::emitResumeFromDelaySlotEntry()
@@ -174,7 +183,10 @@ namespace ps2recomp
 
     void ControlFlowEmitter::emitInternalTarget(uint32_t target, uint32_t sourcePc, std::string_view indent)
     {
-        m_ss << fmt::format("{}ctx->pc = 0x{:X}u;\n", indent, target);
+        if (m_gen.m_allPcStores || (target <= sourcePc && !isCallLikeEdge()))
+        {
+            m_ss << fmt::format("{}ctx->pc = 0x{:X}u;\n", indent, target);
+        }
         if (target <= sourcePc && !isCallLikeEdge())
         {
             m_ss << fmt::format("{}if (runtime->eeCheckpointDue()) {{\n", indent);
@@ -204,7 +216,7 @@ namespace ps2recomp
             m_ss << fmt::format("{}}}\n", indent);
             return;
         }
-        if (runtimeKind == "IndirectJump")
+        if (runtimeKind == "IndirectJump" || runtimeKind == "DirectJump")
         {
             m_ss << fmt::format("{}runtime->jumpGuest(rdram, ctx, {});\n", indent, targetExpression);
             m_ss << fmt::format("{}return;\n", indent);
@@ -373,7 +385,10 @@ namespace ps2recomp
         emitDelaySlot("    ");
 
         const uint32_t target = buildAbsoluteJumpTarget(m_branchInst.address, m_branchInst.target);
-        if (isInternalTarget(target))
+        // A JAL into this function (recursion, a call to one of its entries)
+        // is a call: a goto would come back through the callee's JR $ra as a
+        // return from this whole function, out to the scheduler.
+        if (kind != StaticBranchKind::Call && isInternalTarget(target))
         {
             emitInternalTarget(target, branchPc(), "    ");
             return;
@@ -590,14 +605,23 @@ namespace ps2recomp
 
     void ControlFlowEmitter::emitFinalFallthrough()
     {
-        m_ss << fmt::format("    ctx->pc = 0x{:X}u;\n", fallthroughPc());
+        // Past a call ctx->pc is the return address already (callGuest and
+        // the stub calls return only then); a jump does not fall through. A
+        // branch not taken needs it only at the function's end, where the
+        // function hands ctx->pc to the next one.
+        if (m_gen.m_allPcStores || fallthroughPc() >= m_function.end)
+        {
+            m_ss << fmt::format("    ctx->pc = 0x{:X}u;\n", fallthroughPc());
+        }
     }
 
     std::string ControlFlowEmitter::emit()
     {
-        (void)m_function;
         emitResumeFromDelaySlotEntry();
-        m_ss << fmt::format("    ctx->pc = 0x{:X}u;\n", branchPc());
+        if (m_gen.m_allPcStores)
+        {
+            m_ss << fmt::format("    ctx->pc = 0x{:X}u;\n", branchPc());
+        }
 
         if (m_branchInst.opcode == OPCODE_J || m_branchInst.opcode == OPCODE_JAL)
         {

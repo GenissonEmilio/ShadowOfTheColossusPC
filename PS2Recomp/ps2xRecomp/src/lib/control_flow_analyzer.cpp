@@ -9,6 +9,34 @@
 
 namespace ps2recomp
 {
+    namespace
+    {
+        // Whether an instruction may write GPR reg (conservative: true when
+        // unsure; a jump table pattern is then not taken).
+        bool mayWriteGpr(const Instruction &inst, uint32_t reg)
+        {
+            if (reg == 0u)
+            {
+                return false;
+            }
+            switch (inst.opcode)
+            {
+            case OPCODE_SB: case OPCODE_SH: case OPCODE_SW: case OPCODE_SWL: case OPCODE_SWR:
+            case OPCODE_SD: case OPCODE_SDL: case OPCODE_SDR: case OPCODE_SQ: case OPCODE_CACHE:
+            case OPCODE_SWC1: case OPCODE_SQC2:
+            case OPCODE_BEQ: case OPCODE_BNE: case OPCODE_BLEZ: case OPCODE_BGTZ:
+            case OPCODE_BEQL: case OPCODE_BNEL: case OPCODE_BLEZL: case OPCODE_BGTZL:
+            case OPCODE_J: case OPCODE_LWC1: case OPCODE_LQC2:
+                return false;
+            case OPCODE_SPECIAL:
+            case OPCODE_MMI:
+                return inst.rd == reg;
+            default:
+                return inst.rt == reg;
+            }
+        }
+    }
+
     ControlFlowAnalyzer::ControlFlowAnalyzer(
         const std::vector<Section> &sections,
         const std::unordered_map<uint32_t, std::vector<uint32_t>> &configuredJumpTableTargetsByAddress,
@@ -173,6 +201,12 @@ namespace ps2recomp
                     if (inst.opcode == OPCODE_JAL)
                     {
                         queueResumeEntryTarget(inst.address + 8u);
+                        // Called through the function table (see
+                        // ControlFlowEmitter::emitStaticJump).
+                        if (target != function.start)
+                        {
+                            queueResumeEntryTarget(target);
+                        }
                     }
                 }
                 else
@@ -247,6 +281,33 @@ namespace ps2recomp
                             for (int i = adduIndex - 1; i >= 0 && i >= adduIndex - 20; --i)
                             {
                                 const auto &inst = instructions[i];
+                                // lui rX, hi; addiu rBase, rX, lo (GCC puts the
+                                // table base in another register than the lui's):
+                                // the nearest definition of rBase is that addiu,
+                                // and rX's nearest before it is the lui.
+                                if ((inst.opcode == OPCODE_ADDIU || inst.opcode == OPCODE_ORI) &&
+                                    inst.rs != inst.rt && (inst.rt == tableBaseReg || inst.rt == indexReg))
+                                {
+                                    for (int j = i - 1; j >= 0 && j >= i - 20; --j)
+                                    {
+                                        const auto &hiInst = instructions[j];
+                                        if (hiInst.opcode == OPCODE_LUI && hiInst.rt == inst.rs)
+                                        {
+                                            tableAddress = (hiInst.immediate << 16) +
+                                                           (inst.opcode == OPCODE_ADDIU ? inst.simmediate : inst.immediate);
+                                            foundTableAddress = true;
+                                            break;
+                                        }
+                                        if (hiInst.hasDelaySlot || mayWriteGpr(hiInst, inst.rs))
+                                        {
+                                            break;
+                                        }
+                                    }
+                                    if (foundTableAddress)
+                                    {
+                                        break;
+                                    }
+                                }
                                 if (inst.opcode == OPCODE_LUI)
                                 {
                                     if (inst.rt == tableBaseReg || inst.rt == indexReg)
@@ -393,7 +454,11 @@ namespace ps2recomp
                         }
                     }
                 }
-                if (!foundTable)
+                // An unresolved JALR is a call through a pointer: it goes to
+                // another function and comes back at +8 (a resume entry
+                // already). Only an unresolved JR can land anywhere in this
+                // function, which makes every instruction an entry.
+                if (!foundTable && jrInst->function == SPECIAL_JR)
                 {
                     needsIndirectFallback = true;
                 }

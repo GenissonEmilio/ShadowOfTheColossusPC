@@ -7,7 +7,7 @@ hdr is the module header address, or "auto" to locate it in the dump.
 
 Each module is captured from a RAM dump taken when the game jumps to its entry.
 """
-import sys, struct
+import bisect, pathlib, re, sys, struct
 from elfmini import Elf
 from modimage import LoadedModule, find_header
 import funcmap_elf
@@ -60,9 +60,16 @@ def main(out_dir, boot_path, boot_syms, mods):
             data = None if s["type"] == 8 else boot.data[s["offset"]:s["offset"] + s["size"]]
             sections.append((s["name"], s["addr"], s["size"], data, s["flags"]))
 
+    # Addresses the hand-written overrides hook or replace stay function
+    # starts: a goto inside a merged function would go past the hook.
+    pinned = set()
+    for src in sorted((pathlib.Path(__file__).resolve().parent.parent / "game/overrides").glob("*.cpp")):
+        pinned |= {int(h, 16) for h in re.findall(r"\b0x([0-9A-Fa-f]{6,8})u?\b", src.read_text(errors="ignore"))}
+    merged = []
+
     # boot ELF function map from heuristics
     boot_csv = f"{out_dir}/boot_functions.csv"
-    funcmap_elf.main(boot_path, boot_syms, boot_csv)
+    merged += funcmap_elf.main(boot_path, boot_syms, boot_csv, merge=True, pinned=pinned)
     rows = [l.strip().split(",") for l in open(boot_csv).readlines()[1:]]
     funcs = [(int(r[1], 16), int(r[2], 16), r[0]) for r in rows]
     syms = [l.split() for l in open(boot_syms)]
@@ -82,9 +89,29 @@ def main(out_dir, boot_path, boot_syms, mods):
         words = {t.addr + o: struct.unpack_from("<I", t.data, o)[0] for o in range(0, t.size, 4)}
         in_text = lambda a, t=t: t.addr <= a < t.addr + t.size
         blobs = [s.data for s in m.sections if s.data is not None and not s.exec]
+        # The section's first word starts a function even when nothing names
+        # or calls it (MANAGER's first, a debug routine, was left out).
+        if t.addr not in fmap:
+            fmap[t.addr] = (0, f"{tag.lower()}_sub_{t.addr:08X}")
+        named = set(fmap)
         for tgt in funcmap_elf.find_starts(words, in_text, blobs):
             if tgt not in fmap:
                 fmap[tgt] = (0, f"{tag.lower()}_sub_{tgt:08X}")
+        # Pieces of one function the heuristics split (switch cases, aligned
+        # labels): merged back, still callable through entry points.
+        # (A sized symbol's extent is authoritative: an override address
+        # inside one, such as the SOTC_CENSUS counters in modelDisp's body or
+        # a range bound, does not split it.)
+        sizes = {a: sz for a, (sz, n) in fmap.items() if a in named}
+        extents = sorted((a, a + sz) for a, sz in sizes.items() if sz)
+        def inside_named(p):
+            i = bisect.bisect_right(extents, (p, 0xFFFFFFFF)) - 1
+            return i >= 0 and extents[i][0] < p < extents[i][1]
+        keep = {p for p in pinned & set(fmap) if not inside_named(p)}
+        kept, dropped = funcmap_elf.merge_split_starts(words, fmap, named | keep, sizes)
+        for a in dropped:
+            del fmap[a]
+        merged += dropped
         starts = sorted(fmap)
         for i, a in enumerate(starts):
             nxt = starts[i + 1] if i + 1 < len(starts) else t.addr + t.size
@@ -93,7 +120,7 @@ def main(out_dir, boot_path, boot_syms, mods):
             syms.append([f"{a:08x}", n])
         for a, n in m.data_symbols().items():
             syms.append([f"{a:08x}", n])
-        print(f"{m.name}: header {m.base:#x}, {len(fmap)} functions, sections:",
+        print(f"{m.name}: header {m.base:#x}, {len(fmap)} functions ({len(dropped)} false splits merged), sections:",
               ", ".join(f"{s.name}@{s.addr:#x}+{s.size:#x}" for s in m.sections))
 
         # import relocation sites in .text: the guest linker rewrites these at run time
@@ -119,6 +146,12 @@ def main(out_dir, boot_path, boot_syms, mods):
                 continue
             seen.add(a)
             f.write(f"{n},0x{a:08X},0x{e:08X},{e - a}\n")
+    # Starts merged into a function: entry points (tools/gen_config.py).
+    with open(f"{out_dir}/merged_entries.txt", "w") as f:
+        f.write("# function starts merged into the function around them\n")
+        for a in sorted(set(merged)):
+            f.write(f"{a:08x}\n")
+    print(f"{len(set(merged))} false splits merged")
     with open(f"{out_dir}/symbols.txt", "w") as f:
         for a, n in sorted(syms):
             f.write(f"{a} {n}\n")

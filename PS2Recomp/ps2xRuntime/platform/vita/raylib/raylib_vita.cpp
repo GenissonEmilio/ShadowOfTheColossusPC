@@ -6,6 +6,7 @@
 #include <SDL2/SDL.h>
 #include <vitaGL.h>
 #include <psp2/ctrl.h>
+#include <psp2/kernel/sysmem.h>
 #include <psp2/power.h>
 #include <psp2/touch.h>
 
@@ -226,9 +227,15 @@ void EndDrawing(void)
     {
         nextMemLog = now + 5.0;
         const struct mallinfo mi = mallinfo();
-        std::fprintf(stderr, "[vita:mem] t=%.0f heap used=%.1f MB arena=%.1f MB | vgl vram=%.1f/%.1f ram=%.1f/%.1f MB\n", now,
+        // What the system has left for this app (code size and the heap
+        // reservation come out of it): the headroom on a real Vita.
+        SceKernelFreeMemorySizeInfo freeInfo{};
+        freeInfo.size = sizeof(freeInfo);
+        sceKernelGetFreeMemorySize(&freeInfo);
+        std::fprintf(stderr, "[vita:mem] t=%.0f heap used=%.1f MB arena=%.1f MB | vgl vram=%.1f/%.1f ram=%.1f/%.1f MB | system free user=%.1f cdram=%.1f phycont=%.1f MB\n", now,
                      mi.uordblks / 1048576.0, mi.arena / 1048576.0, vglMemFree(VGL_MEM_VRAM) / 1048576.0, vglMemTotal(VGL_MEM_VRAM) / 1048576.0,
-                     vglMemFree(VGL_MEM_RAM) / 1048576.0, vglMemTotal(VGL_MEM_RAM) / 1048576.0);
+                     vglMemFree(VGL_MEM_RAM) / 1048576.0, vglMemTotal(VGL_MEM_RAM) / 1048576.0,
+                     freeInfo.size_user / 1048576.0, freeInfo.size_cdram / 1048576.0, freeInfo.size_phycont / 1048576.0);
     }
     if (now - g_fpsWindowStart >= 1.0)
     {

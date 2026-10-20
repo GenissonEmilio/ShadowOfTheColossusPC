@@ -4,7 +4,7 @@ Function starts come from: known symbols, JAL targets, lui/addiu code pointers,
 data words pointing at prologues/post-return code, and stack-frame prologues
 following a return.
 """
-import sys, struct
+import bisect, sys, struct
 from elfmini import Elf
 
 JR_RA = 0x03E00008
@@ -106,6 +106,64 @@ def branch_targets(words):
     return out
 
 
+def branch_edges(words):
+    """(source, target) of every PC-relative branch: beq/bne/blez/bgtz and
+    their likely forms, REGIMM (bltz, bgez, the -al forms), COP0/1/2 bc."""
+    out = []
+    for a, w in words.items():
+        op = w >> 26
+        if (op in (4, 5, 6, 7, 0x14, 0x15, 0x16, 0x17)
+                or (op == 1 and ((w >> 16) & 31) in (0, 1, 2, 3, 16, 17, 18, 19))
+                or (op in (0x10, 0x11, 0x12) and ((w >> 21) & 31) == 8)):
+            out.append((a, (a + 4 + (struct.unpack("<h", struct.pack("<H", w & 0xFFFF))[0] << 2)) & 0xFFFFFFFF))
+    return out
+
+
+def merge_split_starts(words, starts, strong, sizes):
+    """Drops the starts that fall inside another function's body: the
+    heuristics above cut functions at switch cases (a jump table's targets
+    follow a jump), at labels GCC aligned with a nop after a jump, at a
+    prologue-like store in the middle of a body. A split makes the jumps
+    between the pieces leave the function at run time (a nested host call
+    each) instead of staying a goto.
+
+    starts: candidate starts; strong: starts kept whatever happens (named
+    symbols, the ELF entry, addresses the overrides hook); sizes: {start:
+    size} for symbols that give one (the XFF modules' functions). A start is
+    dropped when it lies inside a sized symbol's extent, or when a branch
+    crosses it (from before it to it or past it, or back over it) without
+    crossing a strong start (a branch to another function's body). Returns
+    (kept starts, dropped starts); the dropped ones stay callable as entry
+    points into the merged function."""
+    starts = sorted(set(starts))
+    dropped = set()
+    for a, size in sizes.items():
+        if size > 4:
+            i = bisect.bisect_right(starts, a)
+            while i < len(starts) and starts[i] < a + size:
+                if starts[i] not in strong:
+                    dropped.add(starts[i])
+                i += 1
+    strong_sorted = sorted(strong)
+    for src, tgt in branch_edges(words):
+        lo, hi = (src, tgt) if src < tgt else (tgt, src)
+        if hi - lo > 0x20000 or tgt not in words:
+            continue
+        # starts s with lo < s <= hi: a forward branch reaches s or runs past
+        # it; a backward one goes back over it (or to it from inside it: s ==
+        # src's own start is not crossed, s <= src is; lo < s keeps tgt's own
+        # function start out).
+        j = bisect.bisect_right(strong_sorted, lo)
+        if j < len(strong_sorted) and strong_sorted[j] <= hi:
+            continue
+        i = bisect.bisect_right(starts, lo)
+        while i < len(starts) and starts[i] <= hi:
+            dropped.add(starts[i])
+            i += 1
+    dropped -= set(strong)
+    return [s for s in starts if s not in dropped], sorted(dropped)
+
+
 def hidden_entries(words, starts):
     """Code right after a jump and its delay slot, with no nop padding, that
     no branch reaches and that starts no known function: a leaf GCC packed
@@ -120,7 +178,9 @@ def hidden_entries(words, starts):
     return sorted(out)
 
 
-def main(elf_path, sym_path, out_csv):
+def main(elf_path, sym_path, out_csv, merge=False, pinned=()):
+    """Writes the function map; with merge, false splits are merged
+    (merge_split_starts) and the dropped starts are returned."""
     elf = Elf(elf_path)
     ranges = elf.exec_ranges()
     in_text = lambda a: any(lo <= a < hi for lo, hi in ranges)
@@ -135,6 +195,10 @@ def main(elf_path, sym_path, out_csv):
     blobs = [elf.data[s["offset"]:s["offset"] + s["size"]] for s in elf.sections
              if s["type"] == 1 and not s["flags"] & 4 and s["size"]]
     starts = sorted(set(names) | {elf.entry} | find_starts(words, in_text, blobs))
+    dropped = []
+    if merge:
+        strong = set(names) | {elf.entry} | {p for p in pinned if p in set(starts)}
+        starts, dropped = merge_split_starts(words, starts, strong, {})
     with open(out_csv, "w") as f:
         f.write("Name,Start,End,Size\n")
         for i, st in enumerate(starts):
@@ -142,7 +206,8 @@ def main(elf_path, sym_path, out_csv):
             end = min(starts[i + 1], hi) if i + 1 < len(starts) else hi
             n = names.get(st, f"sub_{st:08X}")
             f.write(f"{n},0x{st:08X},0x{end:08X},{end - st}\n")
-    print(f"{len(starts)} functions ({len(names)} named) -> {out_csv}")
+    print(f"{len(starts)} functions ({len(names)} named, {len(dropped)} false splits merged) -> {out_csv}")
+    return dropped
 
 
 if __name__ == "__main__":
