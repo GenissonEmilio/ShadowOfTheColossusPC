@@ -20,6 +20,7 @@
 #include "ps2_runtime_macros.h"
 
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 namespace sotc_decomp
@@ -44,6 +45,65 @@ namespace sotc_decomp
 
     // Puts the registered functions in place (and the checks SOTC_DIFFTEST asks for).
     void install(PS2Runtime &runtime);
+
+    // The recompiled function a decompiled one replaced (for a native
+    // function's rare cases left to the original code), nullptr if none.
+    PS2Runtime::RecompiledFunction recompiled(uint32_t address);
+
+    // Calls guest code from a decompiled function as a jal would: ra and sp
+    // set (sp: the original's frame at that call), run until it returns there.
+    void callGuest(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t target, uint32_t ra, uint32_t sp);
+
+    // Relocation sites: the XFF modules' references to the boot ELF and to
+    // each other are patched into the code when the game links them, so the
+    // values are read from the live instruction words, as the recompiled code
+    // does (_dynInsn), not taken from the disassembly.
+    inline uint32_t codeWord(const uint8_t *rdram, uint32_t at)
+    {
+        uint32_t v;
+        std::memcpy(&v, rdram + (at & 0x01FFFFFFu), 4);
+        return v;
+    }
+    // lui at hi + the signed immediate at lo (addiu / lw / sw ...).
+    inline uint32_t relocated(const uint8_t *rdram, uint32_t hi, uint32_t lo)
+    {
+        return (codeWord(rdram, hi) << 16) + static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(codeWord(rdram, lo) & 0xFFFFu)));
+    }
+    // The target of the jal at a site.
+    inline uint32_t jalTarget(const uint8_t *rdram, uint32_t at) { return (codeWord(rdram, at) & 0x03FFFFFFu) << 2; }
+
+    // VU0 arithmetic with fewer clamps. PS2_VMUL / PS2_VADD / PS2_VSUB clamp
+    // both operands and the result (ps2VuNormalize: denormals to signed
+    // zero, Inf / NaN to signed FLT_MAX), and the clamp is idempotent, so a
+    // value that is already a clamped result (or clamped once, like a matrix
+    // row used for four columns) need not be clamped again: vmulN(a, b) ==
+    // PS2_VMUL(a, b) when a and b are clamped, bit for bit.
+    namespace vu
+    {
+        inline __m128 clamp(__m128 v) { return ps2VuNormalize(v); }
+        inline __m128 mulN(__m128 a, __m128 b) { return ps2VuNormalize(_mm_mul_ps(a, b)); }
+        inline __m128 addN(__m128 a, __m128 b) { return ps2VuNormalize(_mm_add_ps(a, b)); }
+        inline __m128 subN(__m128 a, __m128 b) { return ps2VuNormalize(_mm_sub_ps(a, b)); }
+        template <int L>
+        inline __m128 lane(__m128 v) { return _mm_shuffle_ps(v, v, _MM_SHUFFLE(L, L, L, L)); }
+        struct Rows
+        {
+            __m128 r[4];
+        };
+        // Four rows clamped once.
+        inline Rows clampRows(const __m128 *rows) { return {{clamp(rows[0]), clamp(rows[1]), clamp(rows[2]), clamp(rows[3])}}; }
+        // vmulax / vmadday / vmaddaz / vmaddw: rows weighted by v's x, y, z, w (rows clamped, v raw).
+        inline __m128 apply(const Rows &a, __m128 v, __m128 *acc = nullptr)
+        {
+            const __m128 c = clamp(v);
+            __m128 t = mulN(a.r[0], lane<0>(c));
+            t = addN(t, mulN(a.r[1], lane<1>(c)));
+            t = addN(t, mulN(a.r[2], lane<2>(c)));
+            if (acc)
+                *acc = t;
+            return addN(t, mulN(a.r[3], lane<3>(c)));
+        }
+    }
 
     // Returning from a decompiled function: the jr ra the recompiled code ends with.
     inline void returnTo(R5900Context *ctx) { ctx->pc = GPR_U32(ctx, 31); }

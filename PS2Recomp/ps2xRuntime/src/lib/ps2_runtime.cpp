@@ -48,6 +48,9 @@
 #include <cstdio>
 #include <cstdlib>
 
+// See ps2FpuDivideNearest (ps2_runtime_macros.h).
+bool g_ps2FpuSetcsrNearest = false;
+
 namespace ps2_stubs
 {
     void resetSifState();
@@ -2919,6 +2922,7 @@ void PS2Runtime::run()
         ps2_load::setThreadSlot(ps2_load::kGame);
         // Guest float code runs like the EE: round toward zero, no denormals.
         ps2SetEeFloatingPointMode();
+        g_ps2FpuSetcsrNearest = std::getenv("PS2X_FPU_SETCSR") != nullptr && std::atoi(std::getenv("PS2X_FPU_SETCSR")) != 0;
         try
         {
             m_eeScheduler->reset(m_memory.getRDRAM(), m_cpuContext);

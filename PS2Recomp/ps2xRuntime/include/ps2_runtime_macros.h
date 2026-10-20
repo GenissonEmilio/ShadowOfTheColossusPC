@@ -744,7 +744,11 @@ static constexpr uint32_t PS2_FCR31_D = 0x00010000u;
 static constexpr uint32_t PS2_FCR31_SI = 0x00000040u;
 static constexpr uint32_t PS2_FCR31_SD = 0x00000020u;
 
-static PS2_FORCE_INLINE float ps2FpuDivideNearest(float dividend, float divisor)
+// PS2X_FPU_SETCSR=1: switch the rounding mode around every FPU divide /
+// square root, as before (ps2_runtime.cpp reads it at start).
+extern bool g_ps2FpuSetcsrNearest;
+
+static PS2_FORCE_INLINE float ps2FpuDivideNearestCsr(float dividend, float divisor)
 {
     const uint32_t csr = _mm_getcsr();
     _mm_setcsr(csr & ~0x6000u);
@@ -753,13 +757,68 @@ static PS2_FORCE_INLINE float ps2FpuDivideNearest(float dividend, float divisor)
     return result;
 }
 
-static PS2_FORCE_INLINE float ps2FpuSqrtNearest(float value)
+static PS2_FORCE_INLINE float ps2FpuSqrtNearestCsr(float value)
 {
     const uint32_t csr = _mm_getcsr();
     _mm_setcsr(csr & ~0x6000u);
     const float result = _mm_cvtss_f32(_mm_sqrt_ss(_mm_set_ss(value)));
     _mm_setcsr(csr);
     return result;
+}
+
+// The game thread runs round-toward-zero (ps2SetEeFloatingPointMode); DIV
+// and SQRT round to nearest. Without touching the rounding mode (an FPSCR
+// read and two writes, or fesetround calls, each time): the quotient /
+// root of two normal floats in double, truncated, then rounded to the
+// nearest float by its bits. Exact: a float quotient or root is either a
+// tie exactly (then the truncated double is that tie) or at least ~2^-49
+// away from it, far more than the double's truncation (2^-53), so the
+// round bit and the sticky bits are the true ones. Checked against the
+// rounding-mode switch: 400 M random quotients and roots on the Mac (RTZ +
+// flush to zero), every positive float's root. Zero, denormal, infinite or
+// NaN operands and results outside float exponents 2..253 take the old
+// path (the platform's own flush / overflow rules).
+static PS2_FORCE_INLINE bool ps2NearestFloatFromTruncated(double value, float &out)
+{
+    uint64_t b;
+    std::memcpy(&b, &value, sizeof(b));
+    const uint32_t e = static_cast<uint32_t>((b >> 52) & 0x7FFu);
+    if (e < 1023u - 127u + 2u || e > 1023u - 127u + 253u)
+        return false;
+    const uint64_t m = b & 0xFFFFFFFFFFFFFull;
+    uint32_t f = ((e - 1023u + 127u) << 23) | static_cast<uint32_t>(m >> 29);
+    const uint64_t rest = m & 0x1FFFFFFFull;
+    if (rest > 0x10000000ull || (rest == 0x10000000ull && (f & 1u)))
+        ++f;
+    f |= static_cast<uint32_t>(b >> 63) << 31;
+    std::memcpy(&out, &f, sizeof(out));
+    return true;
+}
+
+static PS2_FORCE_INLINE bool ps2FloatIsPlainNormal(float value)
+{
+    uint32_t bits;
+    std::memcpy(&bits, &value, sizeof(bits));
+    const uint32_t e = (bits >> 23) & 0xFFu;
+    return e != 0u && e != 0xFFu;
+}
+
+static PS2_FORCE_INLINE float ps2FpuDivideNearest(float dividend, float divisor)
+{
+    float result;
+    if (!g_ps2FpuSetcsrNearest && ps2FloatIsPlainNormal(dividend) && ps2FloatIsPlainNormal(divisor) &&
+        ps2NearestFloatFromTruncated(static_cast<double>(dividend) / static_cast<double>(divisor), result))
+        return result;
+    return ps2FpuDivideNearestCsr(dividend, divisor);
+}
+
+static PS2_FORCE_INLINE float ps2FpuSqrtNearest(float value)
+{
+    float result;
+    if (!g_ps2FpuSetcsrNearest && ps2FloatIsPlainNormal(value) && !std::signbit(value) &&
+        ps2NearestFloatFromTruncated(std::sqrt(static_cast<double>(value)), result))
+        return result;
+    return ps2FpuSqrtNearestCsr(value);
 }
 
 static PS2_FORCE_INLINE float ps2FpuDivide(uint32_t &fcr31, float dividend, float divisor)

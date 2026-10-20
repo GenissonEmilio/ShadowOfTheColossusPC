@@ -378,12 +378,10 @@ namespace
             return 0xC1E0000000000000ull;
         p.cls = kNormal;
         p.fraction = static_cast<uint64_t>(v < 0 ? -static_cast<int64_t>(v) : static_cast<int64_t>(v));
-        p.exp = 60;
-        while (p.fraction < kImplicit1)
-        {
-            p.fraction <<= 1;
-            --p.exp;
-        }
+        // Normalised to bit 60 in one shift (was a loop of one bit a step).
+        const int shift = __builtin_clzll(p.fraction) - 3;
+        p.fraction <<= shift;
+        p.exp = 60 - shift;
         return packD(p);
     }
 
@@ -463,6 +461,15 @@ namespace
     void floatdisf(uint8_t *, R5900Context *ctx, PS2Runtime *) // __floatdisf (0x124b90): int64 -> float, through doubles
     {
         uint64_t x = GPR_U64(ctx, 4);
+        // Within +-2^24 the value is a float exactly and every step on the
+        // way is exact (no cut): the result is the plain conversion.
+        if (x + 0x1000000ull <= 0x2000000ull)
+        {
+            const float f = static_cast<float>(static_cast<int64_t>(x));
+            std::memcpy(&ctx->f[0], &f, 4);
+            returnTo(ctx);
+            return;
+        }
         if (x + 0x1FFFFFFFFFFFFFull > 0x3FFFFFFFFFFFFEull && (x & 0x7FFu) != 0u)
             x |= 0x800u; // a sticky bit where the double will cut
         uint64_t d = litodpBits(static_cast<int32_t>(static_cast<int64_t>(x) >> 32));

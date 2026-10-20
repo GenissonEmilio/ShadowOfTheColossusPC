@@ -12,6 +12,7 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <unordered_map>
 
 namespace sotc_decomp
 {
@@ -42,6 +43,7 @@ namespace sotc_decomp
             std::atomic<uint64_t> calls{0}, checks{0}, mismatches{0};
         };
         std::array<Checked, kMaxChecked> g_checked;
+        std::unordered_map<uint32_t, PS2Runtime::RecompiledFunction> g_recompiled;
 
         // The registers a caller may rely on after the call.
         // (v1 too would be for 128-bit returns, which none of these has.)
@@ -71,7 +73,7 @@ namespace sotc_decomp
             fn(rdram, ctx, runtime);
             while (!(ctx->pc == ra && GPR_U32(ctx, 29) == sp))
             {
-                PS2Runtime::RecompiledFunction next = runtime->hasFunction(ctx->pc) ? runtime->lookupFunction(ctx->pc) : nullptr;
+                PS2Runtime::RecompiledFunction next = runtime->guestFunctionAt(ctx->pc);
                 if (!next)
                     break;
                 next(rdram, ctx, runtime);
@@ -85,7 +87,11 @@ namespace sotc_decomp
             static const uint64_t first = std::getenv("SOTC_DIFFTEST_FIRST") ? std::strtoull(std::getenv("SOTC_DIFFTEST_FIRST"), nullptr, 0) : 200u;
             static const uint64_t every = std::max<uint64_t>(1u, std::getenv("SOTC_DIFFTEST_EVERY") ? std::strtoull(std::getenv("SOTC_DIFFTEST_EVERY"), nullptr, 0) : 1000u);
             const uint64_t n = c.calls.fetch_add(1, std::memory_order_relaxed);
-            if (n >= first && n % every != 0u)
+            // A checked function reached again while a check runs (recursion,
+            // or one checked function calling another): the recompiled code,
+            // unchecked; the snapshots below belong to the outer check.
+            static int depth = 0;
+            if (depth > 0 || (n >= first && n % every != 0u))
             {
                 c.recompiled(rdram, ctx, runtime);
                 return;
@@ -96,6 +102,7 @@ namespace sotc_decomp
             before.scratch.assign(scratch, scratch + PS2_SCRATCHPAD_SIZE);
             const R5900Context input = *ctx;
 
+            ++depth;
             runToReturn(rdram, ctx, runtime, c.function->native);
             const R5900Context nativeOut = *ctx;
             const R5900Context *native = &nativeOut;
@@ -106,6 +113,7 @@ namespace sotc_decomp
             std::memcpy(scratch, before.scratch.data(), PS2_SCRATCHPAD_SIZE);
             *ctx = input;
             runToReturn(rdram, ctx, runtime, c.recompiled);
+            --depth;
             c.checks.fetch_add(1, std::memory_order_relaxed);
 
             bool bad = false;
@@ -169,6 +177,21 @@ namespace sotc_decomp
         }
     }
 
+    void callGuest(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t target, uint32_t ra, uint32_t sp)
+    {
+        SET_GPR_U32(ctx, 31, ra);
+        SET_GPR_U32(ctx, 29, sp);
+        ctx->pc = target;
+        PS2Runtime::RecompiledFunction fn = runtime->guestFunctionAt(target);
+        runToReturn(rdram, ctx, runtime, fn ? fn : runtime->lookupFunction(target));
+    }
+
+    PS2Runtime::RecompiledFunction recompiled(uint32_t address)
+    {
+        const auto it = g_recompiled.find(address);
+        return it == g_recompiled.end() ? nullptr : it->second;
+    }
+
     void install(PS2Runtime &runtime)
     {
         if (const char *on = std::getenv("SOTC_DECOMP"); on && std::atoi(on) == 0)
@@ -181,6 +204,7 @@ namespace sotc_decomp
         {
             if (!runtime.hasFunction(f.address) || listed(skip, f.name))
                 continue;
+            g_recompiled.emplace(f.address, runtime.lookupFunction(f.address));
             if (listed(test, f.name) && checked < kMaxChecked)
             {
                 g_checked[checked].function = &f;
