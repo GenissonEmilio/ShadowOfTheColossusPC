@@ -116,7 +116,8 @@ class Pipeline:
         self.run([*flags, *result, "-Wl,--whole-archive", libs[0], "-Wl,--no-whole-archive",
                   "-Wl,--start-group", *libs[1:], "-Wl,--end-group",
                   "-static-libstdc++", "-static-libgcc", "-Wl,-rpath-link,"+str(self.bundle / "lib"),
-                  "-Wl,-rpath-link,"+str(tc / "sysroot/usr/lib/x86_64-linux-gnu"), "-pthread", "-ldl", "-lm", "-o",executable],
+                  "-Wl,-rpath-link,"+str(tc / "sysroot/usr/lib/x86_64-linux-gnu"),
+                  "-Wl,-rpath-link,"+str(tc / "lib"), "-pthread", "-ldl", "-lm", "-o",executable],
                  env=self.compiler_env())
         return executable
 

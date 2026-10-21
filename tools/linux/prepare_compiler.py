@@ -85,6 +85,9 @@ deps('/usr/lib/x86_64-linux-gnu/libGL.so.1',OUT / 'toolchain/sysroot/usr/lib/x86
 link_inputs.append('toolchain/sysroot/usr/lib/x86_64-linux-gnu/libGL.so')
 
 tc=OUT / 'toolchain'
+# Link-time inputs for FFmpeg's C++ dependencies; never in the game's runtime path.
+for name in ('libstdc++.so.6','libgcc_s.so.1'):
+    copy('/usr/lib/x86_64-linux-gnu/'+name,tc / 'lib' / name)
 for original,name in [('/usr/bin/x86_64-linux-gnu-g++-13','g++'),('/usr/bin/x86_64-linux-gnu-as','as'),('/usr/bin/x86_64-linux-gnu-ld.bfd','ld')]:
     copy(original,tc / 'bin' / name);deps(tc / 'bin' / name,tc / 'lib',skip_system=False)
 copy('/usr/lib/gcc/x86_64-linux-gnu/13',tc / 'lib/gcc/x86_64-linux-gnu/13')
