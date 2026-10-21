@@ -13,6 +13,8 @@ continua em andamento na base Celosia.
 
 **Nenhuma ROM, BIOS ou código gerado do jogo é distribuído.**
 
+![Launcher Linux](docs/launcher-linux.png)
+
 ## Jogar
 
 1. Baixe o pacote Linux em [Releases](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases).

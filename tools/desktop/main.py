@@ -21,6 +21,16 @@ if len(sys.argv) > 1 and sys.argv[1] == "--pipeline-helper":
 if getattr(sys,"frozen",False):
     os.environ.pop("GTK_MODULES",None)
     os.environ["FONTCONFIG_FILE"]=str(assets_directory() / "fonts.conf")
+    # Register the shipped fonts by absolute path. Older fontconfig resolves
+    # relative font directories differently on newer Linux desktops.
+    import ctypes
+    fontconfig = ctypes.CDLL("libfontconfig.so.1")
+    fontconfig.FcConfigGetCurrent.restype = ctypes.c_void_p
+    fontconfig.FcConfigAppFontAddFile.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    fontconfig.FcConfigAppFontAddFile.restype = ctypes.c_int
+    for font_file in sorted((assets_directory() / "fonts").glob("*.ttf")):
+        if not fontconfig.FcConfigAppFontAddFile(fontconfig.FcConfigGetCurrent(), os.fsencode(font_file)):
+            print("Could not register bundled font", file=sys.stderr)
 
 import gi
 gi.require_version("Gtk", "3.0")

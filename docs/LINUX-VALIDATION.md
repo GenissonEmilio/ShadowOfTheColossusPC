@@ -1,21 +1,25 @@
 # Validação Linux 0.1.0
 
 Build nativo original fixado em Celosia `e0bc43d6d4eb8cc1a022c4b277f396be3ee4fbbe`.
-A implementação Linux do runtime e do launcher corresponde ao commit
+A implementação Linux do runtime corresponde ao commit
 `8e9f3a8d72dcf41b605c291b0e0627c47080ab81`; os commits seguintes acrescentam
-metadados, documentação e roteiros de validação.
+metadados, documentação, roteiros de validação e a correção de fontes do launcher.
 
 ## Pacote e primeira preparação
 
 - Linux x86_64, compilador GCC 13 incluído, runtime C++20 e OpenGL 3.3.
 - Kit de compilação: `1b65ad890494855b3f681e27`.
-- Arquivo: `ShadowOfTheColossusPC-0.1.0-linux-x86_64.tar.gz`, 158096132 bytes.
-- SHA-256: `d60a23f5abf6821ba73566724fdd19213f9f81f357702c53d155d30313e8eb49`.
+- Arquivo: `ShadowOfTheColossusPC-0.1.0-linux-x86_64.tar.gz`, 158096280 bytes.
+- SHA-256: `9c00f9b5ce952c4c91916d809b813d909726ecb45d58ee0214aa912f808557a2`.
 
 A primeira preparação foi executada **pelo launcher empacotado**, partindo do
 arquivo 7z fornecido pelo usuário, em Ubuntu 24.04 isolado, sem rede, com a
 instalação somente para leitura. O ambiente não tinha Python, GCC, G++, CMake
-nem .NET instalados. Esses componentes foram usados a partir do próprio pacote.
+nem .NET instalados. Python, o compilador e as bibliotecas necessários vieram do próprio pacote;
+CMake e .NET não foram usados nessa etapa.
+
+Após o ajuste exclusivamente visual de fontes, o launcher foi reempacotado
+com o mesmo kit nativo e seu boot foi novamente testado no ambiente isolado.
 
 O processo importou o disco USA SCUS-97472, recompilou o boot, capturou os módulos
 KERNEL → MANAGER → GAMECORE e compilou o executável Linux com duas tarefas.
