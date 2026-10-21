@@ -1,0 +1,42 @@
+* { font-family: 'DejaVu Sans', sans-serif; font-size: 13px; }
+window { background: #121916; color: #f6f2e9; }
+headerbar { background: #121916; color: #d9d1bf; border: none; box-shadow: none; min-height: 36px; }
+headerbar button { background: transparent; color: #b9b4aa; border: none; box-shadow: none; }
+.sidebar { background: #19231f; border-right: 1px solid #25242a; }
+.brand { font-family: 'DejaVu Serif'; font-size: 18px; font-weight: bold; color: #b8d8c1; }
+.small { font-size: 11px; color: #8f919f; }
+.eyebrow { font-size: 10px; letter-spacing: 2px; font-weight: bold; color: #9fbca5; }
+.nav { background: transparent; border: 1px solid transparent; box-shadow: none; color: #9696a5; padding: 13px 17px; border-radius: 8px; }
+.nav:hover { background: #191b25; color: #f2e6d0; }
+.nav.active { background: #26352a; border: 1px solid #536742; color: #d9dec5; }
+.nav label { font-size: 13px; }
+.main-content { background: #121916; }
+.breadcrumb { color: #777d8b; font-size: 11px; }
+.hero { background: linear-gradient(115deg, #27342c, #1d2723 55%, #182522); border: 1px solid #465348; border-radius: 14px; }
+.hero-title { font-family: 'DejaVu Serif'; font-size: 32px; font-weight: bold; color: #f6e3b5; }
+.hero-subtitle { color: #c0b7b5; font-size: 13px; }
+.pill { background: #282327; border: 1px solid #4b3f3e; border-radius: 20px; color: #cdbfa7; font-size: 10px; padding: 5px 11px; }
+.panel { background: #141720; border: 1px solid #2b2d39; border-radius: 12px; }
+.panel-title { font-size: 19px; font-weight: bold; color: #efeee9; }
+.muted { color: #8f95a5; font-size: 12px; }
+.drop-zone { background: #11141c; border: 1px dashed #48434a; border-radius: 10px; }
+.file-title { font-weight: bold; color: #ece5d8; font-size: 14px; }
+.secondary { background: #242631; color: #dedbd4; border: 1px solid #41414c; box-shadow: none; border-radius: 7px; padding: 11px 16px; font-weight: bold; }
+.secondary:hover { background: #323440; border-color: #88734b; }
+.secondary:disabled { color: #666b79; border-color: #30323b; }
+.play { background: linear-gradient(to right, #d9b56c, #efcf89); border: 1px solid #f1d699; color: #211a10; border-radius: 8px; padding: 14px 36px; font-size: 14px; font-weight: bold; box-shadow: 0 3px 18px alpha(#d9b56c, 0.14); }
+.play:hover { background: #f9dfa0; }
+.play:disabled { background: #292a31; color: #707582; border-color: #3b3d47; box-shadow: none; }
+.status { font-size: 12px; color: #b6a37d; }
+.ready { color: #8bd0a6; }
+.error { color: #f19892; }
+.footer { border-top: 1px solid #262833; color: #797d8a; font-size: 10px; }
+.link { background: transparent; border: none; box-shadow: none; color: #b6a37d; padding: 5px 0; }
+.link:hover { color: #f4d78c; }
+.section-title { font-family: 'DejaVu Serif'; font-size: 30px; font-weight: bold; color: #f2deb2; }
+.key { background: #282b37; border: 1px solid #444753; border-bottom-width: 3px; border-radius: 5px; padding: 8px 12px; color: #eee3cb; font-weight: bold; }
+progressbar trough { min-height: 4px; background: #282b36; border: none; border-radius: 2px; }
+progressbar progress { background: #d9b56c; border: none; border-radius: 2px; }
+tooltip { background: #232632; color: #f0e5cf; border: 1px solid #5e5036; }
+button:focus { outline: 2px solid #e2c484; outline-offset: 3px; }
+dialog { background: #141720; }

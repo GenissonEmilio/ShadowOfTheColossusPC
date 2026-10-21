@@ -32,3 +32,11 @@ imgui.ini
 __pycache__/
 .DS_Store
 celosia_settings.cfg
+
+# Linux distribution and local imports
+/artifacts/
+/dist/
+*.7z
+*.rar
+*.elf
+*.ps2

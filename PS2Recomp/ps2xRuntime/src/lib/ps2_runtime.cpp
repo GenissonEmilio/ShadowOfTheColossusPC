@@ -1,4 +1,4 @@
-#if defined(__APPLE__)
+#if defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__))
 #include "GLFW/glfw3.h"
 #endif
 #include "runtime/gs/gs_hw_backend.h"
@@ -405,7 +405,7 @@ static Texture2D g_directFrame{};
 
 static void waitDirectFrame(uint64_t fence)
 {
-#if defined(__APPLE__)
+#if defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__))
     // glWaitSync without pulling GL headers in here (GLFW owns them).
     using WaitSync = void (*)(void *, unsigned int, uint64_t);
     static WaitSync waitSync = reinterpret_cast<WaitSync>(glfwGetProcAddress("glWaitSync"));
@@ -970,9 +970,9 @@ bool PS2Runtime::initialize(const char *title)
 #if defined(PLATFORM_VITA) && !defined(PS2X_VITA_SDL2_SHIM)
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
 #else
-        SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+        SetConfigFlags(FLAG_WINDOW_RESIZABLE | (std::getenv("PS2X_HIDDEN_WINDOW") ? FLAG_WINDOW_HIDDEN : 0));
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
-#if defined(__APPLE__)
+#if defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__))
         if (std::getenv("PS2X_GS_HW"))
         {
             // The hardware GS renderer draws on the GS worker thread: give it a
@@ -997,7 +997,13 @@ bool PS2Runtime::initialize(const char *title)
             else
                 std::cerr << "[gs:hw] could not create the GS GL context" << std::endl;
         }
-        if (std::getenv("SOTC_NATIVE_GL"))
+        if (
+#if defined(__linux__)
+            true
+#else
+            std::getenv("SOTC_NATIVE_GL")
+#endif
+        )
         {
             // The native renderer on OpenGL (to check it against Metal): its own
             // hidden context, current on the game thread that drives it.
@@ -3406,6 +3412,10 @@ void PS2Runtime::run()
         }
 #else
         drawHostFrame(shownTex, presentWidth, presentHeight);
+#endif
+#if defined(__linux__) && !defined(__ANDROID__)
+        if (IsKeyPressed(KEY_F11))
+            ToggleBorderlessWindowed();
 #endif
         hostmenu::update();
 

@@ -27,7 +27,7 @@
 extern "C" unsigned int _pthread_stack_default_user; // ps2_vita_runtime.cpp
 #endif
 
-#if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
+#if defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__)) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
 #define PS2X_NATIVE_GL 1
 #endif
 
@@ -668,7 +668,7 @@ namespace
 
     bool wantGl()
     {
-#if defined(__vita__)
+#if defined(__vita__) || (defined(__linux__) && !defined(__ANDROID__))
         return true;
 #else
         const char *gl = std::getenv("SOTC_NATIVE_GL");

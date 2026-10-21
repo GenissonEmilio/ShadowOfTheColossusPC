@@ -14,12 +14,17 @@
 #include "native_backend.h"
 #include "runtime/native_tuning.h"
 
-#if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
+#if defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__)) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
 
 #if defined(__APPLE__)
 #define GL_SILENCE_DEPRECATION
 #include <OpenGL/gl3.h>
 #include <malloc/malloc.h>
+#elif defined(__linux__) && !defined(__ANDROID__)
+#define GL_GLEXT_PROTOTYPES 1
+#include <GL/gl.h>
+#include <GL/glext.h>
+#include <malloc.h>
 #else
 #include <mutex>
 #include <malloc.h>
@@ -61,6 +66,8 @@ namespace
     {
 #if defined(PS2X_NATIVE_VITA)
         return mallinfo().uordblks;
+#elif defined(__linux__) && !defined(__ANDROID__)
+        return mallinfo2().uordblks;
 #else
         malloc_statistics_t stats{};
         malloc_zone_statistics(nullptr, &stats);

@@ -1,3 +1,4 @@
+option(PS2X_ENABLE_LTO "Link-time optimization (uses more memory)" OFF)
 include(CheckIPOSupported)
 
 check_ipo_supported(RESULT IPO_SUPPORTED OUTPUT IPO_ERROR)
@@ -35,7 +36,7 @@ function(EnableFastReleaseMode TargetName)
     endif()
 
     # Vita: LTO over the whole recompiled game is too slow and memory hungry.
-    if(IPO_SUPPORTED AND NOT PS2X_IS_VITA)
+    if(PS2X_ENABLE_LTO AND IPO_SUPPORTED AND NOT PS2X_IS_VITA)
         set_property(TARGET ${TargetName} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     else()
         message(WARNING "Interprocedural optimization not supported: ${ipo_error}")

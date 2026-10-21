@@ -167,8 +167,17 @@ namespace
 
 int main(int argc, char *argv[])
 {
+    if (argc == 2 && std::string(argv[1]) == "--version")
+    {
+        std::cout << "ShadowOfTheColossusPC Linux runtime 0.1.0\n";
+        return 0;
+    }
 #if defined(__ANDROID__)
     redirectStdioToLogcat();
+#endif
+#if defined(__linux__) && !defined(__ANDROID__)
+    setenv("SOTC_NATIVE", "1", 0);
+    setenv("PS2X_GS_THREADS", "2", 0);
 #endif
     setupTerminateLogger();
 
@@ -183,7 +192,7 @@ int main(int argc, char *argv[])
         // Which renderer draws: the native one (game overrides, SOTC_NATIVE=1)
         // or the emulated PS2 GS (software, or the GPU with PS2X_GS_HW=1).
         const char *native = std::getenv("SOTC_NATIVE");
-        std::string windowTitle = (native && std::atoi(native) == 1) ? "Celosia Native (Metal) | "
+        std::string windowTitle = (native && std::atoi(native) == 1) ? "Shadow of the Colossus PC (native) | "
                                   : std::getenv("PS2X_GS_HW")             ? "Celosia (emulated GS, GPU) | "
                                                                           : "Celosia (emulated GS) | ";
         const char *gameName = getGameName(normalizedId);

@@ -58,6 +58,7 @@ ghidra_output = "functions.csv"
 dynamic_immediates = "dynamic_imm.txt"
 output = "./output/"
 single_file_output = false
+output_worker_threads = 2
 patch_syscalls = false
 patch_cop0 = true
 patch_cache = true

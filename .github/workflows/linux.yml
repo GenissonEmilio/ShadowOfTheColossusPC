@@ -1,0 +1,36 @@
+name: Linux native port
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: linux-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Import and cache checks (synthetic data only)
+        run: python3 -m unittest discover -s tests/linux -v
+      - name: Build ROM-free compiler and desktop package
+        run: tools/linux/build.sh
+      - name: Check compiler relocation
+        run: |
+          LD_LIBRARY_PATH="$PWD/artifacts/compiler/lib" artifacts/compiler/bin/ps2_recomp --help
+          test -f artifacts/compiler/manifest.json
+      - name: Package content check
+        run: |
+          test -f dist/ShadowOfTheColossusPC-0.1.0-linux-x86_64.tar.gz
+          cd dist
+          sha256sum -c ShadowOfTheColossusPC-0.1.0-linux-x86_64.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ShadowOfTheColossusPC-linux-x86_64
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error

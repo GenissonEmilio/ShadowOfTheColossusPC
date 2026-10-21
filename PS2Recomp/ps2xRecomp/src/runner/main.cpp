@@ -13,6 +13,12 @@ void printUsage()
 
 int main(int argc, char *argv[])
 {
+    if (argc == 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h"))
+    {
+        printUsage();
+        return 0;
+    }
+
     if (argc < 2)
     {
         printUsage();

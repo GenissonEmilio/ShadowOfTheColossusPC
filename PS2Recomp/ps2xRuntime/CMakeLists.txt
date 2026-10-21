@@ -95,6 +95,8 @@ else()
     FetchContent_Declare(
         raylib
         GIT_REPOSITORY "https://github.com/raysan5/raylib.git"
+        GIT_SUBMODULES ""
+        GIT_SHALLOW TRUE
         GIT_TAG "5.5" # we will migrate to 4.2.0 later, trust me it will be better
         GIT_PROGRESS TRUE
     )
@@ -104,6 +106,7 @@ else()
         FetchContent_Declare(
             imgui
             GIT_REPOSITORY https://github.com/ocornut/imgui.git
+        GIT_SUBMODULES ""
             GIT_TAG "v1.92.7-docking"
             GIT_SHALLOW TRUE
         )
@@ -127,6 +130,7 @@ else()
         FetchContent_Declare(
             rlImGui
             GIT_REPOSITORY https://github.com/raylib-extras/rlImGui.git
+        GIT_SUBMODULES ""
             GIT_TAG "Raylib_5_5"
             GIT_SHALLOW TRUE
         )
@@ -453,6 +457,11 @@ add_library(ps2_runtime STATIC
 # Native renderer: the front picks Metal (macOS) or OpenGL (macOS with
 # SOTC_NATIVE_GL=1, the Vita through vitaGL).
 target_sources(ps2_runtime PRIVATE src/lib/native/native_renderer.cpp src/lib/native/native_renderer_gl.cpp)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(ps2_runtime PUBLIC OpenGL::GL glfw)
+    target_include_directories(ps2_runtime PRIVATE "${raylib_SOURCE_DIR}/src/external/glfw/include")
+endif()
 
 # GPU GS rasterizer (Metal) on macOS, the default there (PS2X_GS_GPU=0 = CPU).
 if(NOT APPLE)

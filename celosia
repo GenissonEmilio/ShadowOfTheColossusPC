@@ -16,7 +16,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 DISC=${CELOSIA_DISC:-$ROOT/disc}
 BUILD=${CELOSIA_BUILD:-$ROOT/build}
-JOBS=${CELOSIA_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 8)}
+JOBS=${CELOSIA_JOBS:-2}
 CMAKE_DIR=$BUILD/cmake
 RUNNER_DIR=$BUILD/runner       # recompiled EE code (generated)
 VU1REC_DIR=$BUILD/vu1rec       # recompiled VU1 microcode (generated)
