@@ -12,6 +12,113 @@
 
 namespace native_renderer
 {
+    // A set of 64-bit ids (meshes, textures, packets) in one flat table, a
+    // power of two long, probed in a line: looked up a few thousand times a
+    // frame, where std::unordered_set's prime bucket count costs an integer
+    // division (a library call on the Vita's Cortex-A9) per lookup and per
+    // node walked. Ids 0 and ~0 are kept apart (the table's empty and erased
+    // slots).
+    class IdSet
+    {
+    public:
+        bool count(uint64_t id) const
+        {
+            if (id == kEmpty || id == kErased)
+                return id == kEmpty ? m_hasEmpty : m_hasErased;
+            if (m_slots.empty())
+                return false;
+            for (size_t i = slot(id);; i = (i + 1u) & m_mask)
+            {
+                const uint64_t v = m_slots[i];
+                if (v == id)
+                    return true;
+                if (v == kEmpty)
+                    return false;
+            }
+        }
+        void insert(uint64_t id)
+        {
+            if (id == kEmpty || id == kErased)
+            {
+                (id == kEmpty ? m_hasEmpty : m_hasErased) = true;
+                return;
+            }
+            if ((m_used + 1u) * 4u > m_slots.size() * 3u)
+                grow();
+            size_t erased = ~size_t(0);
+            for (size_t i = slot(id);; i = (i + 1u) & m_mask)
+            {
+                const uint64_t v = m_slots[i];
+                if (v == id)
+                    return;
+                if (v == kErased && erased == ~size_t(0))
+                    erased = i;
+                if (v == kEmpty)
+                {
+                    if (erased != ~size_t(0))
+                        m_slots[erased] = id; // an erased slot taken back (m_used counts it already)
+                    else
+                    {
+                        m_slots[i] = id;
+                        ++m_used;
+                    }
+                    ++m_size;
+                    return;
+                }
+            }
+        }
+        void erase(uint64_t id)
+        {
+            if (id == kEmpty || id == kErased)
+            {
+                (id == kEmpty ? m_hasEmpty : m_hasErased) = false;
+                return;
+            }
+            if (m_slots.empty())
+                return;
+            for (size_t i = slot(id);; i = (i + 1u) & m_mask)
+            {
+                const uint64_t v = m_slots[i];
+                if (v == id)
+                {
+                    m_slots[i] = kErased;
+                    --m_size;
+                    return;
+                }
+                if (v == kEmpty)
+                    return;
+            }
+        }
+        size_t size() const { return m_size + (m_hasEmpty ? 1u : 0u) + (m_hasErased ? 1u : 0u); }
+
+    private:
+        static constexpr uint64_t kEmpty = 0, kErased = ~0ull;
+        size_t slot(uint64_t id) const
+        {
+            id ^= id >> 33;
+            id *= 0xff51afd7ed558ccdull;
+            id ^= id >> 33;
+            return static_cast<size_t>(id) & m_mask;
+        }
+        void grow()
+        {
+            std::vector<uint64_t> old;
+            old.swap(m_slots);
+            size_t capacity = 64u;
+            while (capacity * 3u < (m_size + 1u) * 8u) // live ids up to 3/8 after the growth
+                capacity *= 2u;
+            m_slots.assign(capacity, kEmpty);
+            m_mask = capacity - 1u;
+            m_used = m_size = 0;
+            for (uint64_t v : old)
+                if (v != kEmpty && v != kErased)
+                    insert(v);
+        }
+        std::vector<uint64_t> m_slots;
+        size_t m_mask = 0, m_used = 0, m_size = 0;
+        bool m_hasEmpty = false, m_hasErased = false;
+    };
+
     struct Vertex
     {
         float x, y, z;    // model space
@@ -21,6 +128,10 @@ namespace native_renderer
     };
 
     bool available();
+    // Running in an emulator (Vita3K), as the backend found out at its start
+    // (the OpenGL backend on the Vita: a render target read back); false
+    // elsewhere.
+    bool inEmulator();
     // OpenGL backends: makes the renderer's context current on the calling
     // thread (the backend's render thread; every call below comes from the
     // game thread).
@@ -72,6 +183,16 @@ namespace native_renderer
     // RGBA8 (alpha 0x80 = opaque, as the PS2's), kept on the GPU under `id`.
     // `levels` mip levels, each half the last, one after the other in `rgba`.
     void uploadTexture(uint64_t id, uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t levels = 1);
+
+    // Work off the game thread (tuning().asyncBuilds, Debug "Builds on a
+    // worker"): `work` runs on a worker thread (it holds copies of what it
+    // reads: no game memory, no renderer calls), `finish` on the game thread
+    // at the first beginFrame after `work` is done (it uploads what work
+    // made). Until then hasMesh / hasTexture say yes for `ids` (no second
+    // build) and a draw naming one of them, as its mesh or its texture, is
+    // left out. False (nothing run) when the tuning is off: the caller
+    // builds it itself.
+    bool buildAsync(std::vector<uint64_t> ids, std::function<void()> work, std::function<void()> finish);
 
     // Draws of one frame: `clip` (column-major) takes model space to clip
     // space with x, y and w as the game's projection gives them (x/w, y/w in
@@ -255,6 +376,9 @@ namespace native_renderer
         // frame before when renderThread, for its own frame when not).
         uint64_t waitUs = 0;
         bool renderThread = false;
+        // buildAsync: draws left out (their mesh or texture still on the
+        // worker), jobs handed to it, and finished jobs taken up.
+        uint32_t heldDraws = 0, asyncJobs = 0, asyncDone = 0;
     };
     FrameCounters &frameCounters();
     uint64_t nowUs();

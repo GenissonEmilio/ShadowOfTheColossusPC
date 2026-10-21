@@ -3,6 +3,7 @@
 // the GL path against Metal); the Vita: OpenGL (vitaGL); elsewhere none.
 #include "native_backend.h"
 #include "runtime/native_tuning.h"
+#include "ThreadNaming.h"
 
 #include <algorithm>
 #include <atomic>
@@ -16,6 +17,15 @@
 #include <functional>
 #include <iostream>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
+#include <unordered_set>
+#if defined(__vita__)
+#include <psp2/kernel/threadmgr.h>
+extern "C" unsigned int _pthread_stack_default_user; // ps2_vita_runtime.cpp
+#endif
 
 #if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
 #define PS2X_NATIVE_GL 1
@@ -46,10 +56,15 @@ namespace native_renderer
         // Copies of the picture made mid-frame came out white in Vita3K when
         // the picture was taken up again after them: drawn again instead, so
         // the heat haze and the water read the PS2's 256 x 256 copy as on the Mac.
-        d.midFrameRedraw = true;
+        d.midFrameRedraw = 2.0f; // only in Vita3K (inEmulator)
         // Render and present on a core of their own while the game makes the
         // next frame.
         d.renderThread = true;
+        // Textures decoded and meshes built on a worker (the game thread
+        // stalled ~80 ms on them at a camera cut, throttled).
+        d.asyncBuilds = true;
+        d.holdIncomplete = true;
+        d.warmShaders = true;
 #endif
         return d;
     }
@@ -112,8 +127,14 @@ namespace native_renderer
                 d.frameCap30 = std::atoi(std::getenv("SOTC_CAP30")) != 0;
             if (on("SOTC_RENDER_THREAD"))
                 d.renderThread = std::atoi(std::getenv("SOTC_RENDER_THREAD")) != 0;
+            if (on("SOTC_GL_WARM"))
+                d.warmShaders = std::atoi(std::getenv("SOTC_GL_WARM")) != 0;
+            if (on("SOTC_HOLD_INCOMPLETE"))
+                d.holdIncomplete = std::atoi(std::getenv("SOTC_HOLD_INCOMPLETE")) != 0;
+            if (on("SOTC_ASYNC_BUILDS"))
+                d.asyncBuilds = std::atoi(std::getenv("SOTC_ASYNC_BUILDS")) != 0;
             if (on("SOTC_GL_REDRAW"))
-                d.midFrameRedraw = std::atoi(std::getenv("SOTC_GL_REDRAW")) != 0;
+                d.midFrameRedraw = static_cast<float>(std::clamp(std::atoi(std::getenv("SOTC_GL_REDRAW")), 0, 2));
             if (const char *h = std::getenv("SOTC_HIDE_LAYERS")) // n,n,n
                 for (const char *c = h; *c;)
                 {
@@ -168,9 +189,15 @@ namespace native_renderer
         if (t.frameCap30 != d.frameCap30)
             add(std::string("SOTC_CAP30=") + (t.frameCap30 ? "1" : "0"));
         if (t.midFrameRedraw != d.midFrameRedraw)
-            add(std::string("SOTC_GL_REDRAW=") + (t.midFrameRedraw ? "1" : "0"));
+            add("SOTC_GL_REDRAW=" + number(t.midFrameRedraw));
         if (t.renderThread != d.renderThread)
             add(std::string("SOTC_RENDER_THREAD=") + (t.renderThread ? "1" : "0"));
+        if (t.warmShaders != d.warmShaders)
+            add(std::string("SOTC_GL_WARM=") + (t.warmShaders ? "1" : "0"));
+        if (t.holdIncomplete != d.holdIncomplete)
+            add(std::string("SOTC_HOLD_INCOMPLETE=") + (t.holdIncomplete ? "1" : "0"));
+        if (t.asyncBuilds != d.asyncBuilds)
+            add(std::string("SOTC_ASYNC_BUILDS=") + (t.asyncBuilds ? "1" : "0"));
         if (t.frameLog)
             add("SOTC_FRAME_LOG=1");
         if (!t.fastHooks)
@@ -307,10 +334,16 @@ namespace native_renderer
             item.debug = true;
             v.push_back(item);
         }
-        debugToggle("dbg_redraw", "Redraw for copies", "Redesenhar para cópias",
-                    "OpenGL / Vita: water, heat haze and screen blur get the picture so far drawn again apart, instead of leaving the picture and taking it up again (white screens in Vita3K). Costs those draws twice in such frames.",
-                    "OpenGL / Vita: água, calor e borrão de tela recebem a imagem até ali desenhada de novo à parte, em vez de largar a imagem e retomá-la (telas brancas no Vita3K). Custa esses desenhos duas vezes nesses quadros.",
-                    &Tuning::midFrameRedraw, "SOTC_GL_REDRAW");
+        {
+            // A new key: the earlier on / off one ("dbg_redraw") was saved on
+            // by default and would keep it on on the console.
+            TuningItem item{"dbg_redraw_mode", "Redraw for copies", "Redesenhar para cópias",
+                            "OpenGL / Vita: water, heat haze and screen blur get the picture so far drawn again apart, instead of leaving the picture and taking it up again (white screens in Vita3K). Costs those draws twice in such frames. 0 off, 1 on, 2 only in Vita3K (the console copies at the layer).",
+                            "OpenGL / Vita: água, calor e borrão de tela recebem a imagem até ali desenhada de novo à parte, em vez de largar a imagem e retomá-la (telas brancas no Vita3K). Custa esses desenhos duas vezes nesses quadros. 0 desligado, 1 ligado, 2 só no Vita3K (o console copia na camada).",
+                            nullptr, &Tuning::midFrameRedraw, 0.0f, 2.0f, 1.0f, "SOTC_GL_REDRAW"};
+            item.debug = true;
+            v.push_back(item);
+        }
         debugToggle("dbg_mips", "Mipmaps", "Mipmaps", "Smaller textures far away.", "Texturas menores ao longe.", &Tuning::mipmaps, "SOTC_NATIVE_NOMIPS");
         debugToggle("dbg_scroll", "Texture scrolling", "Rolagem de textura", "Water and cloth textures that move.", "Texturas que se movem (água, tecido).",
                     &Tuning::textureScroll, "SOTC_NATIVE_NOROW");
@@ -334,6 +367,18 @@ namespace native_renderer
                     "OpenGL / Vita: each frame drawn and shown on a thread of its own while the game makes the next (off: the game waits for each frame to be drawn).",
                     "OpenGL / Vita: cada quadro desenhado e mostrado numa thread própria enquanto o jogo faz o próximo (desligado: o jogo espera cada quadro ser desenhado).",
                     &Tuning::renderThread, "SOTC_RENDER_THREAD");
+        debugToggle("dbg_async_builds", "Builds on a worker", "Montagem em outra thread",
+                    "Textures decoded and model meshes built on a worker thread instead of in the game's own time (a camera cut or a new area no longer freezes the game for them); what is not ready yet is left out of a frame or two.",
+                    "Texturas decodificadas e malhas de modelos montadas numa thread à parte em vez de no tempo do próprio jogo (um corte de câmera ou área nova não trava mais o jogo por elas); o que ainda não ficou pronto fica de fora por um ou dois quadros.",
+                    &Tuning::asyncBuilds, "SOTC_ASYNC_BUILDS");
+        debugToggle("dbg_hold_incomplete", "Hold incomplete frames", "Segurar quadros incompletos",
+                    "With builds on a worker: a frame missing more than an eighth of its draws (still being built, at a camera cut) is not shown; the last one stays up (at most 3 frames).",
+                    "Com montagem em outra thread: um quadro sem mais de um oitavo dos desenhos (ainda montando, num corte de câmera) não é mostrado; o anterior fica na tela (no máximo 3 quadros).",
+                    &Tuning::holdIncomplete, "SOTC_HOLD_INCOMPLETE");
+        debugToggle("dbg_warm_shaders", "Warm shaders at start", "Preparar shaders no início",
+                    "OpenGL / Vita: each shader drawn once with every blend state when the renderer starts, so their first use in the game does not stall (takes effect at the next start).",
+                    "OpenGL / Vita: cada shader desenhado uma vez com cada modo de mistura quando o renderizador começa, pra que o primeiro uso no jogo não trave (vale a partir do próximo início).",
+                    &Tuning::warmShaders, "SOTC_GL_WARM");
         static char labels[32][2][24];
         for (int i = 0; i < 32; ++i)
         {
@@ -650,11 +695,14 @@ namespace
 namespace native_renderer::detail
 {
     const std::function<void(uint32_t, uint32_t, uint32_t)> &presentHook() { return g_presentHook; }
+    std::atomic<bool> g_inEmulator{false};
+    void setInEmulator(bool emulator) { g_inEmulator.store(emulator, std::memory_order_relaxed); }
 }
 
 namespace native_renderer
 {
     const char *backendName() { return wantGl() ? "OpenGL" : "Metal"; }
+    bool inEmulator() { return detail::g_inEmulator.load(std::memory_order_relaxed); }
     bool tuningApplies(const TuningItem &item) { return (item.backends & (wantGl() ? 2u : 1u)) != 0u; }
 
     void setGlContext(std::function<void()> makeCurrent)
@@ -685,7 +733,111 @@ namespace native_renderer
     std::atomic<uint64_t> g_frontSkinned{0};
     void noteFrontendMemory(uint64_t skinnedPackets) { g_frontSkinned.store(skinnedPackets, std::memory_order_relaxed); }
     uint64_t frontendMemory() { return g_frontSkinned.load(std::memory_order_relaxed); }
-    bool hasMesh(uint64_t id) { return backend() && g_backend->hasMesh(id); }
+    // buildAsync's worker: one thread, jobs in the order given. The waits
+    // look again every 2 ms (Vita3K lost newlib condition wake-ups now and
+    // then, see the GL backend's hand-over).
+    struct AsyncBuilds
+    {
+        struct Job
+        {
+            std::vector<uint64_t> ids;
+            std::function<void()> work, finish;
+        };
+        std::mutex mutex;
+        std::condition_variable wake;
+        std::deque<Job> todo;
+        std::vector<Job> done;
+        bool started = false;
+        std::unordered_set<uint64_t> pending; // the game thread's: ids of jobs not taken up yet
+        std::vector<Job> finished;            // the game thread's (kept for its capacity)
+
+        void loop()
+        {
+            ThreadNaming::SetCurrentThreadName("BuildWorker");
+#if defined(__vita__)
+            // Off core 0; the game thread keeps to cores 0-1, the render thread to 2.
+            sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), SCE_KERNEL_CPU_MASK_USER_1 | SCE_KERNEL_CPU_MASK_USER_2);
+#endif
+            for (;;)
+            {
+                Job job;
+                {
+                    std::unique_lock<std::mutex> lock(mutex);
+                    while (todo.empty())
+                        wake.wait_for(lock, std::chrono::milliseconds(2));
+                    job = std::move(todo.front());
+                    todo.pop_front();
+                }
+                if (job.work)
+                    job.work();
+                std::lock_guard<std::mutex> lock(mutex);
+                done.push_back(std::move(job));
+            }
+        }
+        void start()
+        {
+            if (started)
+                return;
+            started = true;
+#if defined(__vita__)
+            const unsigned int stackDefault = _pthread_stack_default_user;
+            _pthread_stack_default_user = 256u * 1024u;
+#endif
+            std::thread([this] { loop(); }).detach();
+#if defined(__vita__)
+            _pthread_stack_default_user = stackDefault;
+#endif
+        }
+        // At a frame's start (game thread): what the worker made goes to the backend.
+        void takeUp()
+        {
+            if (pending.empty())
+                return;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                finished.swap(done);
+            }
+            for (Job &job : finished)
+            {
+                for (uint64_t id : job.ids)
+                    pending.erase(id);
+                if (job.finish)
+                    job.finish();
+            }
+            if (tuning().frameLog)
+                frameCounters().asyncDone += static_cast<uint32_t>(finished.size());
+            finished.clear();
+        }
+    };
+    AsyncBuilds &asyncBuilds()
+    {
+        static AsyncBuilds *a = new AsyncBuilds(); // never destroyed: its thread runs to the end
+        return *a;
+    }
+    bool buildAsync(std::vector<uint64_t> ids, std::function<void()> work, std::function<void()> finish)
+    {
+        if (!tuning().asyncBuilds || !backend())
+            return false;
+        AsyncBuilds &a = asyncBuilds();
+        a.start();
+        for (uint64_t id : ids)
+            a.pending.insert(id);
+        {
+            std::lock_guard<std::mutex> lock(a.mutex);
+            a.todo.push_back({std::move(ids), std::move(work), std::move(finish)});
+        }
+        a.wake.notify_one();
+        if (tuning().frameLog)
+            ++frameCounters().asyncJobs;
+        return true;
+    }
+    bool asyncPending(uint64_t id)
+    {
+        const AsyncBuilds &a = asyncBuilds();
+        return !a.pending.empty() && a.pending.count(id) != 0;
+    }
+
+    bool hasMesh(uint64_t id) { return backend() && (g_backend->hasMesh(id) || asyncPending(id)); }
     // SOTC_NATIVE_LOG_UPLOADS=1: uploads per frame (meshes: static / per-frame
     // ones, the ids with a top bit set; textures), every 60 frames.
     struct UploadStats
@@ -759,7 +911,7 @@ namespace native_renderer
         if (backend())
             g_backend->cancelFrameMesh();
     }
-    bool hasTexture(uint64_t id) { return backend() && g_backend->hasTexture(id); }
+    bool hasTexture(uint64_t id) { return backend() && (g_backend->hasTexture(id) || asyncPending(id)); }
     void uploadTexture(uint64_t id, uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t levels)
     {
         if (g_uploads.on)
@@ -798,6 +950,7 @@ namespace native_renderer
             g_dumpFile = std::fopen(g_dumpPath.c_str(), "w");
             g_dumpState = 2;
         }
+        asyncBuilds().takeUp();
         if (backend())
             g_backend->beginFrame();
     }
@@ -814,6 +967,12 @@ namespace native_renderer
                          s.overlay, s.writeDepth, s.lit, s.clamp, s.shadowVolume, s.reflectionSource, s.reflectionSample, s.refractionSample,
                          s.screenCopy, s.previousFrame, s.reflectionTint[0], s.reflectionTint[1], s.reflectionTint[2], s.reflectionTint[3],
                          s.uvOffset[0], s.uvOffset[1], s.lodK, s.lodScale, s.maxLod);
+        }
+        // Its mesh or texture still on the worker (buildAsync): left out.
+        if (!asyncBuilds().pending.empty() && (asyncPending(mesh) || (state.texture && asyncPending(state.texture))))
+        {
+            ++frameCounters().heldDraws;
+            return;
         }
         // The menus' Debug group: what is drawn at all.
         const Tuning &t = tuning();
@@ -896,6 +1055,16 @@ namespace native_renderer
             std::fclose(g_dumpFile);
             g_dumpFile = nullptr;
             g_dumpState = 0;
+        }
+        // A cut whose meshes / textures are still on the worker: the last
+        // picture stays up rather than one with holes (holdIncomplete).
+        {
+            static uint32_t heldRun = 0;
+            const FrameCounters &c = frameCounters();
+            const bool hold = tuning().asyncBuilds && tuning().holdIncomplete && c.heldDraws * 8u > c.draws + c.heldDraws && heldRun < 3u;
+            heldRun = hold ? heldRun + 1u : 0u;
+            if (hold && backend())
+                g_backend->holdFrame();
         }
         if (backend())
         {

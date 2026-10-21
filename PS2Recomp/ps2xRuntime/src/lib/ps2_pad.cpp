@@ -202,6 +202,9 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
     // PS2X_SNAPSHOT_DIR). "+<n>v@<k>" starts n VBlanks after entry k's start.
     // A start of "@3d" waits for 3D after a loading
     // screen: the first VBlank with VU1 programs after 60 without any.
+    // A fourth field "r<n>" presses again every n VBlanks until 3D comes
+    // after a loading screen (a menu that shows up after a varying wait,
+    // e.g. the memory card's file list: "+150v:CROSS:8:r250").
     struct ScriptEntry
     {
         double at = 0.0;        // start (seconds or frames), or VBlanks after the previous entry's start
@@ -216,7 +219,8 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
         bool vblankDuration = false;
         uint64_t startVblank = 0; // set when the entry starts
         double startNow = 0.0;
-        int state = 0;            // 0 waiting, 1 pressed, 2 done
+        int state = 0;            // 0 waiting, 1 pressed, 2 done, 3 waiting to press again ("r<n>")
+        uint64_t repeatEvery = 0, firstVblank = 0, nextVblank = 0;
     };
     static constexpr uint16_t kStickUp = 0xF001u, kStickDown = 0xF002u, kStickLeft = 0xF003u, kStickRight = 0xF004u, kSnap = 0xF005u;
     static std::vector<ScriptEntry> script = []
@@ -240,6 +244,8 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
             if (std::getline(fields, at, ':') && std::getline(fields, name, ':'))
             {
                 std::getline(fields, dur, ':');
+                std::string extra;
+                std::getline(fields, extra, ':');
                 const auto it = names.find(name);
                 if (it == names.end())
                     continue;
@@ -264,6 +270,8 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
                 e.mask = it->second;
                 e.vblankDuration = !dur.empty() && dur.back() == 'v';
                 e.duration = dur.empty() ? 0.2 : std::atof(dur.c_str());
+                if (!extra.empty() && extra[0] == 'r')
+                    e.repeatEvery = std::strtoull(extra.c_str() + 1, nullptr, 10);
                 out.push_back(e);
             }
         }
@@ -279,9 +287,33 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
         const uint64_t frame = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
         const uint64_t vblank = ps2_stats::vblanks.load(std::memory_order_relaxed);
         const double now = frameClock ? static_cast<double>(frame) : GetTime();
+        // The last VBlank with 3D after a loading screen ("r<n>" entries stop there).
+        static uint64_t loadedAt = 0, seenPrograms = 0, seenVblank = 0, quiet = 0;
+        if (vblank != seenVblank)
+        {
+            const uint64_t programs = ps2_stats::vu1Programs.load(std::memory_order_relaxed);
+            const bool drew = programs != seenPrograms;
+            if (drew && quiet >= 60u)
+                loadedAt = vblank;
+            quiet = drew ? 0u : quiet + (vblank - seenVblank);
+            seenPrograms = programs;
+            seenVblank = vblank;
+        }
         for (size_t i = 0; i < script.size(); ++i)
         {
             ScriptEntry &e = script[i];
+            if (e.state == 3)
+            {
+                if (loadedAt > e.firstVblank)
+                    e.state = 2;
+                else if (vblank >= e.nextVblank)
+                {
+                    e.state = 1;
+                    e.startVblank = vblank;
+                    e.startNow = now;
+                    std::fprintf(stderr, "[input] entry %zu pressed again at frame %llu vblank %llu\n", i, (unsigned long long)frame, (unsigned long long)vblank);
+                }
+            }
             if (e.state == 0)
             {
                 const ScriptEntry *previous = i > 0 ? &script[i - 1] : nullptr;
@@ -321,6 +353,7 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
                     continue;
                 e.state = 1;
                 e.startVblank = vblank;
+                e.firstVblank = vblank;
                 e.startNow = now;
                 if (e.mask == kSnap)
                     ps2_stats::snapshotRequest.store(static_cast<int>(i), std::memory_order_relaxed);
@@ -333,6 +366,11 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
             if (over)
             {
                 e.state = 2;
+                if (e.repeatEvery && loadedAt <= e.firstVblank)
+                {
+                    e.state = 3;
+                    e.nextVblank = e.startVblank + e.repeatEvery;
+                }
                 std::fprintf(stderr, "[input] entry %zu released at frame %llu vblank %llu\n", i, (unsigned long long)frame, (unsigned long long)vblank);
                 continue;
             }

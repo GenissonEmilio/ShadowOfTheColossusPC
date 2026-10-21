@@ -88,8 +88,27 @@ namespace native_renderer
         // OpenGL: an effect that reads the picture so far (water refraction,
         // heat haze, screen blur) gets that picture drawn again into a target
         // of its own instead of the picture being left and taken up again
-        // (which lost it in Vita3K: white screens). On by default on the Vita.
-        bool midFrameRedraw = false; // SOTC_GL_REDRAW=0/1
+        // (which lost it in Vita3K: white screens). 0 off, 1 on, 2 only when
+        // running in an emulator (native_renderer::inEmulator: Vita3K; the
+        // Vita's default: on the console the copies are made at the layer,
+        // without drawing the world again). SOTC_GL_REDRAW=0/1/2.
+        float midFrameRedraw = 0.0f;
+        // OpenGL / Vita: every shader program drawn once with every blend
+        // state the renderer uses when it starts (vitaGL patches a fragment
+        // program per blend state; the first use mid-game made the patch then).
+        // Read at the renderer's start (SOTC_GL_WARM=0/1; on by default on the Vita).
+        bool warmShaders = false;
+        // Texture decoding and model mesh building on a worker thread
+        // (native_renderer::buildAsync) instead of inline in the game's
+        // hooks: a scene cut no longer stalls the game thread for them; what
+        // is not ready is left out of a frame or two. On by default on the
+        // Vita (SOTC_ASYNC_BUILDS=0/1).
+        bool asyncBuilds = false;
+        // With asyncBuilds: a frame that had to leave out more than an eighth
+        // of its draws (their meshes or textures still on the worker, at a
+        // camera cut) is not shown; the last one stays up instead, at most 3
+        // frames in a row (SOTC_HOLD_INCOMPLETE=0/1; on by default on the Vita).
+        bool holdIncomplete = false;
     };
 
     Tuning &tuning();

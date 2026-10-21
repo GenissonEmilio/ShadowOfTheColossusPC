@@ -9,6 +9,8 @@
 
 namespace native_renderer::detail
 {
+    void setInEmulator(bool emulator); // the backend's probe (native_renderer::inEmulator)
+
     class Backend
     {
     public:
@@ -57,6 +59,9 @@ namespace native_renderer::detail
         virtual void setGlowComposite(const GlowComposite &glow) = 0;
         virtual void setDepthOfField(const DepthOfField &dof) = 0;
         virtual void endFrame(uint32_t width, uint32_t height) = 0;
+        // The frame ending next is not shown (its uploads still made): the
+        // last one stays on screen (holdIncomplete). Backends that cannot: no-op.
+        virtual void holdFrame() {}
         virtual bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height) = 0;
         // A backend that draws on a thread of its own: returns once every
         // frame handed over is drawn.

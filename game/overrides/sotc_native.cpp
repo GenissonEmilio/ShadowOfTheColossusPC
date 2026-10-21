@@ -33,6 +33,7 @@
 
 #include <algorithm>
 #include <map>
+#include <memory>
 #include <cmath>
 #if defined(__arm__) && defined(__ARM_NEON)
 #include <arm_neon.h>
@@ -108,14 +109,15 @@ namespace sotc_native
     //   V4-16 normal, V2-16 ST, V4-8 colour, V4-32 skin (skinned)
     // Skin: w = bone count, x/y/z = bone index + weight (the fraction; one
     // bone: full weight); the bone is palette matrix n (VU1 qwords 4n..4n+3).
-    void readBatches(uint32_t addr, uint32_t size, std::vector<Strip> &out)
+    template <typename Mem>
+    void readBatchesFrom(const Mem &m, uint32_t addr, uint32_t size, std::vector<Strip> &out)
     {
         const uint32_t end = addr + size;
         uint32_t p = addr;
         uint32_t positions = 0, normals = 0, colours = 0, uvs = 0, pairs = 0, skin = 0, count = 0;
         while (p < end)
         {
-            const uint32_t code = word(p);
+            const uint32_t code = m.word(p);
             p += 4;
             const uint32_t cmd = (code >> 24) & 0x7Fu, num = (code >> 16) & 0xFFu, field = code & 0x3FFu;
             uint32_t words = 0;
@@ -165,24 +167,24 @@ namespace sotc_native
                     for (uint32_t i = 0; i < count; ++i)
                     {
                         BatchVertex &v = strip[i];
-                        v = {real(positions + i * 12u), real(positions + i * 12u + 4u), real(positions + i * 12u + 8u), 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 128, 128, 128, 128, 0, {0, 0, 0}, {0.0f, 0.0f, 0.0f}};
+                        v = {m.real(positions + i * 12u), m.real(positions + i * 12u + 4u), m.real(positions + i * 12u + 8u), 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 128, 128, 128, 128, 0, {0, 0, 0}, {0.0f, 0.0f, 0.0f}};
                         // V4-16 is the normal when the ST comes apart (V2-16), else two ST pairs.
-                        const uint32_t st = uvs ? word(uvs + i * 4u) : (pairs ? word(pairs + i * 8u) : 0u);
+                        const uint32_t st = uvs ? m.word(uvs + i * 4u) : (pairs ? m.word(pairs + i * 8u) : 0u);
                         if (pairs && !uvs) // the second texture's pair
                         {
-                            const uint32_t st2 = word(pairs + i * 8u + 4u);
+                            const uint32_t st2 = m.word(pairs + i * 8u + 4u);
                             v.u2 = static_cast<int16_t>(st2 & 0xFFFFu) / 4096.0f;
                             v.v2 = static_cast<int16_t>(st2 >> 16) / 4096.0f;
                         }
                         if (normals)
                         {
-                            v.nx = real(normals + i * 12u);
-                            v.ny = real(normals + i * 12u + 4u);
-                            v.nz = real(normals + i * 12u + 8u);
+                            v.nx = m.real(normals + i * 12u);
+                            v.ny = m.real(normals + i * 12u + 4u);
+                            v.nz = m.real(normals + i * 12u + 8u);
                         }
                         else if (pairs && uvs)
                         {
-                            const uint32_t xy = word(pairs + i * 8u), z = word(pairs + i * 8u + 4u);
+                            const uint32_t xy = m.word(pairs + i * 8u), z = m.word(pairs + i * 8u + 4u);
                             v.nx = static_cast<int16_t>(xy & 0xFFFFu) / 4096.0f;
                             v.ny = static_cast<int16_t>(xy >> 16) / 4096.0f;
                             v.nz = static_cast<int16_t>(z & 0xFFFFu) / 4096.0f;
@@ -191,7 +193,7 @@ namespace sotc_native
                         v.v = static_cast<int16_t>(st >> 16) / 4096.0f;
                         if (colours)
                         {
-                            const uint32_t c = word(colours + i * 4u);
+                            const uint32_t c = m.word(colours + i * 4u);
                             v.r = static_cast<uint8_t>(c);
                             v.g = static_cast<uint8_t>(c >> 8);
                             v.b = static_cast<uint8_t>(c >> 16);
@@ -201,11 +203,11 @@ namespace sotc_native
                         {
                             const uint32_t q = skin + i * 16u;
                             for (uint32_t k = 0; k < 4u; ++k)
-                                v.skin[k] = word(q + k * 4u);
-                            v.bones = static_cast<uint8_t>(std::min(word(q + 12u), 3u));
+                                v.skin[k] = m.word(q + k * 4u);
+                            v.bones = static_cast<uint8_t>(std::min(m.word(q + 12u), 3u));
                             for (uint32_t k = 0; k < v.bones; ++k)
                             {
-                                const float packed = real(q + k * 4u);
+                                const float packed = m.real(q + k * 4u);
                                 const float bone = std::floor(packed);
                                 v.bone[k] = static_cast<uint8_t>(std::clamp(bone, 0.0f, 255.0f));
                                 v.weight[k] = v.bones == 1 ? 1.0f : packed - bone;
@@ -219,6 +221,35 @@ namespace sotc_native
             p += words * 4u;
         }
     }
+
+    // Guest memory as readBatches reads it: the game's, or a copy of a
+    // packet's bytes (the async worker; past the copy reads 0).
+    struct GuestMem
+    {
+        uint32_t word(uint32_t a) const { return sotc_native::word(a); }
+        float real(uint32_t a) const { return sotc_native::real(a); }
+    };
+    struct CopyMem
+    {
+        uint32_t base;
+        const std::vector<uint8_t> *bytes;
+        uint32_t word(uint32_t a) const
+        {
+            const uint32_t off = (a & ~3u) - base;
+            uint32_t v = 0;
+            if (off <= bytes->size() && bytes->size() - off >= 4u)
+                std::memcpy(&v, bytes->data() + off, 4);
+            return v;
+        }
+        float real(uint32_t a) const
+        {
+            const uint32_t v = word(a);
+            float f;
+            std::memcpy(&f, &v, 4);
+            return f;
+        }
+    };
+    void readBatches(uint32_t addr, uint32_t size, std::vector<Strip> &out) { readBatchesFrom(GuestMem{}, addr, size, out); }
 
     bool lit(const std::vector<Strip> &strips)
     {
@@ -292,6 +323,60 @@ namespace sotc_native
         return h;
     }
 
+    // A hash of every byte of guest memory from addr (word aligned) on, 8 at a
+    // time (content ids: packetId, decodedTexture).
+    uint64_t contentHash(uint32_t addr, uint32_t bytes, uint64_t h)
+    {
+        addr &= 0x1FFFFFCu;
+        const auto mix = [&h](uint64_t v)
+        {
+            h = (h ^ v) * 0x100000001b3ull;
+            h ^= h >> 29;
+        };
+        if (addr + bytes <= 0x2000000u)
+        {
+            const uint8_t *p = g_ram + addr;
+            uint32_t i = 0;
+            for (; i + 8u <= bytes; i += 8u)
+            {
+                uint64_t v;
+                std::memcpy(&v, p + i, 8);
+                mix(v);
+            }
+            for (; i < bytes; ++i)
+                mix(p[i]);
+        }
+        else
+            for (uint32_t i = 0; i < bytes; ++i)
+                mix(g_ram[(addr + i) & 0x1FFFFFFu]);
+        return h;
+    }
+
+    // Memos by address, four ways a set (a scene draws a few thousand
+    // packets: one way a slot made neighbours evict each other every frame,
+    // and each time the full hash ran again); the way used longest ago goes.
+    template <typename Entry, uint32_t Sets>
+    struct WayMemo
+    {
+        Entry ways[Sets][4];
+        Entry &find(uint32_t address, uint32_t hash, bool &found)
+        {
+            Entry *set = ways[hash & (Sets - 1u)];
+            Entry *oldest = &set[0];
+            for (int i = 0; i < 4; ++i)
+            {
+                if (set[i].address == address)
+                {
+                    found = true;
+                    return set[i];
+                }
+                if (set[i].frame + 1u < oldest->frame + 1u) // ~0 (never used) first
+                    oldest = &set[i];
+            }
+            found = false;
+            return *oldest;
+        }
+    };
     uint64_t decodedTexture(uint32_t header);
     // texture() asked again for a header in the same frame: the key it gave
     // (the contents sampled once a frame; was every draw).
@@ -313,6 +398,202 @@ namespace sotc_native
         return key;
     }
 
+    // A texture as it is in guest memory, copied out (decodable on another
+    // thread): its format, the palette (CSM1 order undone), and the bytes of
+    // every level from the pixels' address on (and what a level's swizzled
+    // read reaches past them).
+    struct TexSource
+    {
+        uint32_t header = 0, psm = 0, width = 0, height = 0, levels = 1;
+        uint8_t swizzleBits = 0;
+        uint32_t palette[256] = {};
+        std::vector<uint8_t> pixels;
+    };
+
+    // GS memory as an 8-bit / 4-bit texture reads it after a PSMCT32 upload
+    // (the NTO2 swizzled levels), by page: a page is 8 KB in every format;
+    // within one, an 8-bit pixel's byte (128 x 64), a 4-bit pixel's nibble
+    // (128 x 128), and which 32-bit pixel (64 x 32) holds a byte. Made once
+    // from the GS's own address functions.
+    struct SwizzleTables
+    {
+        uint16_t t8[64 * 128], t4[128 * 128], inv32[2048];
+    };
+    const SwizzleTables &swizzleTables()
+    {
+        static const SwizzleTables *tables = []
+        {
+            auto *t = new SwizzleTables();
+            for (uint32_t y = 0; y < 64u; ++y)
+                for (uint32_t x = 0; x < 128u; ++x)
+                    t->t8[y * 128u + x] = static_cast<uint16_t>(GSPSMT8::addrPSMT8(0, 2, x, y));
+            for (uint32_t y = 0; y < 128u; ++y)
+                for (uint32_t x = 0; x < 128u; ++x)
+                    t->t4[y * 128u + x] = static_cast<uint16_t>(GSPSMT4::addrPSMT4(0, 2, x, y));
+            for (uint32_t y = 0; y < 32u; ++y)
+                for (uint32_t x = 0; x < 64u; ++x)
+                    t->inv32[GSPSMCT32::addrPSMCT32(0, 1, x, y) >> 2] = static_cast<uint16_t>(x | (y << 6));
+            return t;
+        }();
+        return *tables;
+    }
+
+    uint32_t log2u(uint32_t v)
+    {
+        uint32_t n = 0;
+        while ((1u << (n + 1u)) <= v)
+            ++n;
+        return n;
+    }
+
+    // The source of a texture (formats checked by the caller); false: no room.
+    bool texSource(uint32_t header, TexSource &src)
+    {
+        const uint32_t format = word(header + 0x1Cu);
+        src.header = header;
+        src.psm = format & 0x3Fu;
+        src.width = 1u << ((format >> 16) & 0xFu);
+        src.height = 1u << ((format >> 20) & 0xFu);
+        // Mip levels (format bits 12-15, texTransResolve): each half the last,
+        // stored one after the other; byte +0x1f has a swizzle bit per level.
+        static const bool noMips = std::getenv("SOTC_NATIVE_NOMIPS") != nullptr;
+        src.levels = noMips ? 1u : std::clamp((format >> 12) & 0xFu, 1u, 7u);
+        src.swizzleBits = g_ram[(header + 0x1Fu) & 0x1FFFFFFu];
+        if (src.psm != 0x00u)
+        {
+            const uint32_t clut = header + word(header + 0x18u);
+            const uint32_t entries = src.psm == 0x14u ? 16u : 256u;
+            for (uint32_t i = 0; i < entries; ++i)
+            {
+                // CSM1: of every 32 entries, 8-15 and 16-23 are swapped.
+                const uint32_t from = entries == 256u ? ((i & ~0x18u) | ((i & 8u) << 1) | ((i & 16u) >> 1)) : i;
+                src.palette[i] = word(clut + from * 4u);
+            }
+        }
+        size_t at = 0, reach = 0;
+        for (uint32_t level = 0, w = src.width, h = src.height; level < src.levels && w >= 1u && h >= 1u; ++level, w /= 2u, h /= 2u)
+        {
+            const size_t bytes = src.psm == 0x00u ? static_cast<size_t>(w) * h * 4u : (src.psm == 0x13u ? static_cast<size_t>(w) * h : static_cast<size_t>(w) * h / 2u);
+            size_t read = bytes;
+            if (src.psm != 0x00u && ((src.swizzleBits >> level) & 1u))
+                read = static_cast<size_t>(std::max(w / 2u, 1u)) * std::max(src.psm == 0x13u ? h / 2u : h / 4u, 1u) * 4u;
+            reach = std::max(reach, at + read);
+            at += bytes;
+        }
+        try
+        {
+            src.pixels.resize(reach);
+        }
+        catch (const std::bad_alloc &)
+        {
+            return false;
+        }
+        const uint32_t pixels = (header + word(header + 0x14u)) & 0x1FFFFFFu;
+        if (pixels + reach <= 0x2000000u)
+            std::memcpy(src.pixels.data(), g_ram + pixels, reach);
+        else
+            for (size_t i = 0; i < reach; ++i)
+                src.pixels[i] = g_ram[(pixels + i) & 0x1FFFFFFu];
+        return true;
+    }
+
+    // RGBA8 of every level, one after the other; `decoded` the levels made.
+    // Pure: runs on the async worker too.
+    bool decodeTexture(const TexSource &src, std::vector<uint8_t> &rgba, uint32_t &decoded)
+    {
+        const uint32_t psm = src.psm, entries = psm == 0x14u ? 16u : 256u;
+        const uint32_t *palette = src.palette;
+        size_t total = 0;
+        for (uint32_t level = 0, lw = src.width, lh = src.height; level < src.levels && lw >= 1u && lh >= 1u; ++level, lw /= 2u, lh /= 2u)
+            total += static_cast<size_t>(lw) * lh * 4u;
+        try
+        {
+            rgba.resize(total);
+        }
+        catch (const std::bad_alloc &)
+        {
+            return false;
+        }
+        const SwizzleTables &tables = swizzleTables();
+        const uint8_t *raw = src.pixels.data();
+        const size_t rawSize = src.pixels.size();
+        size_t at = 0, base = 0;
+        decoded = 0;
+        for (uint32_t level = 0, w = src.width, h = src.height; level < src.levels && w >= 1u && h >= 1u; ++level, w /= 2u, h /= 2u)
+        {
+            uint8_t *out = &rgba[base];
+            base += static_cast<size_t>(w) * h * 4u;
+            const uint8_t *in = raw + at;
+            const size_t avail = rawSize - at;
+            const bool swizzled = ((src.swizzleBits >> level) & 1u) != 0u;
+            if (psm == 0x00u)
+                std::memcpy(out, in, std::min(avail, static_cast<size_t>(w) * h * 4u)); // PSMCT32: the pixels themselves (alpha 0x80 = opaque)
+            else if (!swizzled)
+            {
+                uint32_t *o = reinterpret_cast<uint32_t *>(out);
+                if (psm == 0x14u)
+                    for (uint32_t y = 0; y < h; ++y)
+                        for (uint32_t x = 0; x < w; ++x)
+                        {
+                            const uint8_t b = in[(y * w + x) / 2u];
+                            *o++ = palette[(x & 1u) ? (b >> 4) : (b & 15u)];
+                        }
+                else
+                    for (uint32_t i = 0; i < w * h; ++i)
+                        o[i] = palette[in[i]];
+            }
+            else
+            {
+                // Uploaded as PSMCT32 (cw x ch, bw32 pages a row) and read back
+                // as 8 / 4-bit (tbw / 2 pages a row): each pixel's GS byte, then
+                // the 32-bit pixel that wrote it. The PS2's scratch area of
+                // max(w, 64) x max(h, 64) + 16 KB: bytes past it read 0, as do
+                // the bytes no 32-bit pixel wrote.
+                const uint32_t cw = std::max(w / 2u, 1u), ch = std::max(psm == 0x13u ? h / 2u : h / 4u, 1u);
+                const uint32_t bw32 = std::max<uint32_t>(cw / 64u, 1u), bwShift = log2u(bw32);
+                const uint32_t tbw = std::max<uint32_t>(w / 64u, 2u), ppr = tbw >> 1;
+                const uint32_t scratch = std::max(w, 64u) * std::max(h, 64u) + 0x4000u;
+                const auto byteAt = [&](uint32_t a) -> uint32_t
+                {
+                    if (a >= scratch)
+                        return 0u;
+                    const uint32_t page = a >> 13, q = tables.inv32[(a & 8191u) >> 2];
+                    const uint32_t cx = ((page & (bw32 - 1u)) << 6) + (q & 63u), cy = ((page >> bwShift) << 5) + (q >> 6);
+                    if (cx >= cw || cy >= ch)
+                        return 0u;
+                    const size_t from = (static_cast<size_t>(cy) * cw + cx) * 4u + (a & 3u);
+                    return from < avail ? in[from] : 0u;
+                };
+                uint32_t *o = reinterpret_cast<uint32_t *>(out);
+                if (psm == 0x14u)
+                    for (uint32_t y = 0; y < h; ++y)
+                    {
+                        const uint32_t rowPage = (y >> 7) * ppr;
+                        const uint16_t *row = &tables.t4[(y & 127u) * 128u];
+                        for (uint32_t x = 0; x < w; ++x)
+                        {
+                            const uint32_t n = ((rowPage + (x >> 7)) << 14) + row[x & 127u];
+                            const uint32_t b = byteAt(n >> 1);
+                            *o++ = palette[(n & 1u) ? (b >> 4) : (b & 15u)];
+                        }
+                    }
+                else
+                    for (uint32_t y = 0; y < h; ++y)
+                    {
+                        const uint32_t rowPage = (y >> 6) * ppr;
+                        const uint16_t *row = &tables.t8[(y & 63u) * 128u];
+                        for (uint32_t x = 0; x < w; ++x)
+                            *o++ = palette[byteAt(((rowPage + (x >> 7)) << 13) + row[x & 127u]) & (entries - 1u)];
+                    }
+            }
+            ++decoded;
+            at += psm == 0x00u ? static_cast<size_t>(w) * h * 4u : (psm == 0x13u ? static_cast<size_t>(w) * h : static_cast<size_t>(w) * h / 2u);
+        }
+        return true;
+    }
+
+    bool decodeTextureReference(uint32_t header, std::vector<uint8_t> &rgba, uint32_t &decodedOut);
+
     uint64_t decodedTexture(uint32_t header)
     {
         if (!header || word(header) != 0x324F544Eu) // "NTO2"
@@ -320,8 +601,44 @@ namespace sotc_native
         const uint32_t format = word(header + 0x1Cu), psm = format & 0x3Fu;
         const uint32_t width = 1u << ((format >> 16) & 0xFu), height = 1u << ((format >> 20) & 0xFu);
         const uint32_t pixelBytes = psm == 0x14u ? width * height / 2u : width * height;
-        const uint64_t key = sample(header + word(header + 0x14u), pixelBytes, 64u) ^
-                             sample(header + word(header + 0x18u), psm == 0x14u ? 64u : 1024u, 16u) * 31u ^ format;
+        const uint64_t sampled = sample(header + word(header + 0x14u), pixelBytes, 64u) ^
+                                 sample(header + word(header + 0x18u), psm == 0x14u ? 64u : 1024u, 16u) * 31u ^ format;
+        uint64_t key = sampled;
+        bool changedInPlace = false;
+        if (native_renderer::tuning().fastHooks)
+        {
+            // Fast hooks: a hash of the texture's bytes (every level, the
+            // palette, the format and swizzle bits), kept by header while the
+            // sample above stays the same (see packetId: the game moves
+            // textures in memory after an area loads).
+            struct ContentMemo
+            {
+                uint32_t address = 0;
+                uint64_t frame = ~0ull, sampled = 0, key = 0;
+            };
+            static WayMemo<ContentMemo, 512> memos;
+            bool found = false;
+            ContentMemo &memo = memos.find(header, (header >> 4) ^ (header >> 13), found);
+            if (found && memo.sampled == sampled)
+            {
+                key = memo.key;
+                memo.frame = g_frame;
+            }
+            else
+            {
+                // Drawn in the last two frames and changed: rewritten where it is
+                // (animated), decoded at once, not on the worker.
+                changedInPlace = found && memo.frame != ~0ull && memo.frame + 2u >= g_frame;
+                uint32_t bytes = 0;
+                for (uint32_t level = 0, w = width, h = height, levels = std::clamp((format >> 12) & 0xFu, 1u, 7u); level < levels && w >= 1u && h >= 1u;
+                     ++level, w /= 2u, h /= 2u)
+                    bytes += psm == 0x00u ? w * h * 4u : (psm == 0x13u ? w * h : w * h / 2u);
+                uint64_t h = contentHash(header + word(header + 0x14u), bytes, 0x84222325cbf29ce4ull ^ format);
+                h = contentHash(header + word(header + 0x18u), psm == 0x00u ? 0u : (psm == 0x14u ? 64u : 1024u), h ^ g_ram[(header + 0x1Fu) & 0x1FFFFFFu]);
+                key = (h & 0x03FFFFFFFFFFFFFFull) | (1ull << 58);
+                memo = {header, g_frame, sampled, key};
+            }
+        }
         if (native_renderer::hasTexture(key))
             return key;
         if ((psm != 0x00u && psm != 0x13u && psm != 0x14u) || width > 1024u || height > 1024u)
@@ -334,6 +651,74 @@ namespace sotc_native
             return 0;
         }
         const uint64_t decodeStart = native_renderer::tuning().frameLog ? native_renderer::nowUs() : 0u;
+        auto src = std::make_shared<TexSource>();
+        if (!texSource(header, *src))
+            return 0; // no room: asked for again at the next draw
+        // SOTC_TEX_DECODE_CHECK=1 (debugging): every texture also decoded by
+        // the earlier per-pixel code, and the two compared.
+        static const bool decodeCheck = std::getenv("SOTC_TEX_DECODE_CHECK") != nullptr;
+        if (decodeCheck)
+        {
+            std::vector<uint8_t> fast, slow;
+            uint32_t fastLevels = 0, slowLevels = 0;
+            const bool a = decodeTexture(*src, fast, fastLevels), b = decodeTextureReference(header, slow, slowLevels);
+            static uint64_t checked = 0, mismatched = 0;
+            ++checked;
+            if (a != b || fastLevels != slowLevels || fast != slow)
+            {
+                ++mismatched;
+                std::fprintf(stderr, "[tex-check] MISMATCH header %08x psm %02x %ux%u levels %u/%u swizzle %02x\n", header, psm, width, height, fastLevels, slowLevels,
+                             src->swizzleBits);
+            }
+            if (checked % 200u == 0u)
+                std::fprintf(stderr, "[tex-check] %llu textures, %llu mismatches\n", (unsigned long long)checked, (unsigned long long)mismatched);
+        }
+        // SOTC_TEXDUMP_DIR=<dir> (debugging): level 0 of every decoded texture, raw RGBA.
+        static const char *dumpDir = std::getenv("SOTC_TEXDUMP_DIR");
+        const auto finish = [key, width, height, header, psm](const std::vector<uint8_t> &rgba, uint32_t decoded)
+        {
+            if (dumpDir)
+            {
+                char path[512];
+                std::snprintf(path, sizeof(path), "%s/nat_%08x_psm%02x_%ux%u.rgba", dumpDir, header, psm, width, height);
+                if (FILE *f = std::fopen(path, "wb"))
+                {
+                    std::fwrite(rgba.data(), 1, static_cast<size_t>(width) * height * 4u, f);
+                    std::fclose(f);
+                }
+            }
+            native_renderer::uploadTexture(key, width, height, rgba.data(), decoded);
+        };
+        // On the worker: decoded there, uploaded at the next frame's start.
+        auto out = std::make_shared<std::pair<std::vector<uint8_t>, uint32_t>>();
+        auto ok = std::make_shared<bool>(false);
+        if (!changedInPlace && native_renderer::buildAsync({key}, [src, out, ok] { *ok = decodeTexture(*src, out->first, out->second); },
+                                        [out, ok, finish]
+                                        {
+                                            if (*ok)
+                                                finish(out->first, out->second);
+                                        }))
+        {
+            if (decodeStart)
+                native_renderer::frameCounters().decodeUs += native_renderer::nowUs() - decodeStart;
+            return key;
+        }
+        static std::vector<uint8_t> rgba;
+        uint32_t decoded = 0;
+        if (!decodeTexture(*src, rgba, decoded))
+            return 0;
+        if (decodeStart)
+            native_renderer::frameCounters().decodeUs += native_renderer::nowUs() - decodeStart;
+        finish(rgba, decoded);
+        return key;
+    }
+
+    // The earlier decoder (per pixel through the GS address functions,
+    // straight from guest memory): SOTC_TEX_DECODE_CHECK's reference.
+    bool decodeTextureReference(uint32_t header, std::vector<uint8_t> &rgba, uint32_t &decodedOut)
+    {
+        const uint32_t format = word(header + 0x1Cu), psm = format & 0x3Fu;
+        const uint32_t width = 1u << ((format >> 16) & 0xFu), height = 1u << ((format >> 20) & 0xFu);
         const uint32_t clut = header + word(header + 0x18u);
         const uint32_t entries = psm == 0x14u ? 16u : 256u;
         uint32_t palette[256];
@@ -349,7 +734,7 @@ namespace sotc_native
         static const bool noMips = std::getenv("SOTC_NATIVE_NOMIPS") != nullptr;
         const uint32_t levels = noMips ? 1u : std::clamp((format >> 12) & 0xFu, 1u, 7u);
         const uint8_t swizzleBits = g_ram[(header + 0x1Fu) & 0x1FFFFFFu];
-        std::vector<uint8_t> rgba;
+        rgba.clear();
         std::vector<uint8_t> scratch;
         // Room for every level at once (growing level by level copied the
         // levels before each time); no room in the heap: no texture this time
@@ -366,7 +751,7 @@ namespace sotc_native
             }
             catch (const std::bad_alloc &)
             {
-                return 0;
+                return false;
             }
         }
         uint32_t pixels = header + word(header + 0x14u), w = width, h = height, decoded = 0;
@@ -428,44 +813,55 @@ namespace sotc_native
             w /= 2u;
             h /= 2u;
         }
-        // Metal wants the whole chain down to the smallest it was given; stop
-        // where a level would be under 1 pixel (kept as decoded).
-        // SOTC_TEXDUMP_DIR=<dir> (debugging): level 0 of every decoded texture, raw RGBA.
-        if (const char *dir = std::getenv("SOTC_TEXDUMP_DIR"))
-        {
-            char path[512];
-            std::snprintf(path, sizeof(path), "%s/nat_%08x_psm%02x_%ux%u.rgba", dir, header, psm, width, height);
-            if (FILE *f = std::fopen(path, "wb"))
-            {
-                std::fwrite(rgba.data(), 1, static_cast<size_t>(width) * height * 4u, f);
-                std::fclose(f);
-            }
-        }
-        if (decodeStart)
-            native_renderer::frameCounters().decodeUs += native_renderer::nowUs() - decodeStart;
-        native_renderer::uploadTexture(key, width, height, rgba.data(), decoded);
-        return key;
+        decodedOut = decoded;
+        return true;
     }
 
-    // A model packet's id: its address and size, and a sample of its
-    // contents (another area loaded in its place makes new ids). The same
-    // packet drawn again in a frame (instances) takes the id it had.
+    // A model packet's id. Fast hooks: a hash of all its bytes, not of where
+    // they are. After an area loads the game moves its model data and
+    // textures around in memory (its heap compaction), several times in the
+    // first second: ids by address rebuilt the whole scene each time (~2 400
+    // packets and ~100 textures, five times in ~20 frames, every one of them
+    // the same bytes as before). A memo by address keeps a packet's id while a
+    // sample of its contents (32 words) stays the same, so the full hash runs
+    // only when the packet is new there; the same packet drawn again in a
+    // frame (instances) takes the id it had. Without fast hooks: the address
+    // and size, and the sample (another area loaded in its place makes new ids).
     struct PacketMemo
     {
-        uint32_t data = 0, size = 0;
-        uint64_t frame = ~0ull, id = 0;
+        uint32_t address = 0, size = 0;
+        uint64_t frame = ~0ull, sample = 0, id = 0;
     };
-    PacketMemo g_packetMemo[512];
+    WayMemo<PacketMemo, 2048> g_packetMemo;
+    // The last packetId whose bytes changed where they are (same address and
+    // size, another sample): packets the game rewrites in place (every frame,
+    // some of them) are built at once, not on the async worker, which would
+    // leave them out of every frame.
+    bool g_packetChangedInPlace = false;
     uint64_t packetId(uint32_t data, uint32_t size, bool fast)
     {
-        const auto id = [&] { return ((static_cast<uint64_t>(size) << 32) | data) ^ (sample(data, size, 32u) & 0x7FFF000000000000ull); };
+        g_packetChangedInPlace = false;
         if (!fast)
-            return id();
-        PacketMemo &memo = g_packetMemo[((data >> 4) ^ (data >> 13)) & 511u];
-        if (memo.data == data && memo.size == size && memo.frame == g_frame)
+            return ((static_cast<uint64_t>(size) << 32) | data) ^ (sample(data, size, 32u) & 0x7FFF000000000000ull);
+        bool found = false;
+        PacketMemo &memo = g_packetMemo.find(data, (data >> 4) ^ (data >> 15), found);
+        found = found && memo.size == size;
+        if (found && memo.frame == g_frame)
             return memo.id;
-        memo = {data, size, g_frame, id()};
-        return memo.id;
+        const uint64_t sampled = sample(data, size, 32u);
+        if (found && memo.sample == sampled)
+        {
+            memo.frame = g_frame;
+            return memo.id;
+        }
+        // Drawn in the last two frames and changed: rewritten in place
+        // (animated). Long unused: another packet loaded there (async is fine).
+        g_packetChangedInPlace = found && memo.frame != ~0ull && memo.frame + 2u >= g_frame;
+        // Bit 59 set, 60-63 clear: apart from the per-frame meshes' ids
+        // (bits 60, 62, 63 and a count) and the second pass's (bit 61 flipped).
+        const uint64_t id = (contentHash(data, size, 0x9E3779B97F4A7C15ull ^ size) & 0x07FFFFFFFFFFFFFFull) | (1ull << 59);
+        memo = {data, size, g_frame, sampled, id};
+        return id;
     }
 
     // The surface's texture: +0x2c, or +0x3c for the second (texture mode 2).
@@ -932,7 +1328,8 @@ namespace sotc_native
     }
     std::unordered_map<uint64_t, SkinnedPacket> g_skinnedPackets; // by packet
     uint64_t g_skinnedPacketBytes = 0;                               // what they hold
-    std::unordered_set<uint64_t> g_litPackets;                        // packets with normals
+    native_renderer::IdSet g_litPackets;                              // packets with normals
+    native_renderer::IdSet g_skinnedIds;                              // g_skinnedPackets' keys (most packets are not: no map lookup for them)
     uint64_t g_skinnedDraws = 0;                                       // this frame's skinned meshes
 
     void flush2D();
@@ -1155,9 +1552,16 @@ namespace sotc_native
         {
             const uint64_t period = now - last;
             if (period > 50000u)
-                std::fprintf(stderr, "[frame] slow %llu: %.1f ms: hooks %.1f (decode %.1f, %u textures %.0f KB, up %.1f; %u meshes %.0f KB, up %.1f) render %.1f present %.1f wait %.1f draws %u targets %u\n",
+                std::fprintf(stderr, "[frame] slow %llu: %.1f ms: hooks %.1f (decode %.1f, %u textures %.0f KB, up %.1f; %u meshes %.0f KB, up %.1f) render %.1f present %.1f wait %.1f draws %u targets %u async %u/%u held %u\n",
                              (unsigned long long)g_frame, period / 1000.0, c.hookUs / 1000.0, c.decodeUs / 1000.0, c.texUploads, c.texBytes / 1024.0, c.texUs / 1000.0,
-                             c.meshUploads, c.meshBytes / 1024.0, c.meshUs / 1000.0, c.renderUs / 1000.0, c.presentUs / 1000.0, c.waitUs / 1000.0, c.draws, c.targets);
+                             c.meshUploads, c.meshBytes / 1024.0, c.meshUs / 1000.0, c.renderUs / 1000.0, c.presentUs / 1000.0, c.waitUs / 1000.0, c.draws, c.targets,
+                             c.asyncJobs, c.asyncDone, c.heldDraws);
+            // SOTC_FRAME_LOG_ALL=1: every frame on a line of its own (cuts, loads).
+            static const bool all = std::getenv("SOTC_FRAME_LOG_ALL") != nullptr;
+            if (all && period <= 50000u)
+                std::fprintf(stderr, "[frame] each %llu: %.1f ms: hooks %.1f (decode %.1f, %u textures, %u meshes, up %.1f) render %.1f wait %.1f draws %u async %u/%u held %u\n",
+                             (unsigned long long)g_frame, period / 1000.0, c.hookUs / 1000.0, c.decodeUs / 1000.0, c.texUploads, c.meshUploads,
+                             (c.texUs + c.meshUs) / 1000.0, c.renderUs / 1000.0, c.waitUs / 1000.0, c.draws, c.asyncJobs, c.asyncDone, c.heldDraws);
             ++sum.frames;
             sum.period += period;
             sum.worst = std::max(sum.worst, period);
@@ -1226,6 +1630,7 @@ namespace sotc_native
                     if (it->second.used + 1800u < frame)
                     {
                         g_litPackets.erase(it->first);
+                        g_skinnedIds.erase(it->first);
                         g_skinnedPacketBytes -= it->second.bytes;
                         it = g_skinnedPackets.erase(it);
                     }
@@ -2528,6 +2933,100 @@ namespace sotc_native
         ctx->pc = GPR_U32(ctx, 31); // jr ra
     }
 
+    // A model packet's mesh made on the async worker (native_renderer::buildAsync)
+    // from a copy of its bytes: read and triangulated there (a skinned one
+    // made into its bind pose), taken up at a later frame's start. False:
+    // no worker, build it here.
+    bool buildPacketAsync(uint64_t id, uint32_t data, uint32_t size, bool twoPasses)
+    {
+        struct Job
+        {
+            std::vector<uint8_t> bytes;
+            uint32_t base = 0;
+            bool ok = false, skinned = false, lit = false;
+            std::vector<native_renderer::Vertex> vertices, second;
+            SkinnedPacket packet;
+        };
+        if (!native_renderer::tuning().asyncBuilds)
+            return false;
+        auto job = std::make_shared<Job>();
+        job->base = data & ~3u;
+        const uint32_t bytes = (data - job->base) + size + 64u; // and a little after (read as the game's would be)
+        try
+        {
+            job->bytes.resize(bytes);
+        }
+        catch (const std::bad_alloc &)
+        {
+            return false;
+        }
+        if ((job->base & 0x1FFFFFFu) + bytes <= 0x2000000u)
+            std::memcpy(job->bytes.data(), g_ram + (job->base & 0x1FFFFFFu), bytes);
+        else
+            for (uint32_t i = 0; i + 4u <= bytes; i += 4u)
+            {
+                const uint32_t v = word(job->base + i);
+                std::memcpy(&job->bytes[i], &v, 4);
+            }
+        std::vector<uint64_t> ids{id};
+        if (twoPasses)
+            ids.push_back(id ^ (1ull << 61));
+        const auto work = [job, data, size, twoPasses]
+        {
+            try
+            {
+                std::vector<Strip> strips;
+                readBatchesFrom(CopyMem{job->base, &job->bytes}, data, size, strips);
+                job->skinned = skinned(strips);
+                job->lit = lit(strips);
+                if (job->skinned)
+                    job->packet = makeSkinnedPacket(std::move(strips));
+                else
+                {
+                    const auto place = [](const BatchVertex &v, native_renderer::Vertex &o)
+                    {
+                        o.x = v.x;
+                        o.y = v.y;
+                        o.z = v.z;
+                        o.nx = v.nx;
+                        o.ny = v.ny;
+                        o.nz = v.nz;
+                    };
+                    triangulate(strips, place, job->vertices);
+                    if (twoPasses) // two textures: the second pass's mesh, with the second coordinates
+                        triangulate(strips, place, job->second, true);
+                }
+                job->ok = true;
+            }
+            catch (const std::bad_alloc &)
+            {
+                job->ok = false; // asked for again at its next draw
+            }
+            std::vector<uint8_t>().swap(job->bytes);
+        };
+        const auto finish = [job, id, twoPasses]
+        {
+            if (!job->ok)
+                return;
+            if (job->lit)
+                g_litPackets.insert(id);
+            if (job->skinned)
+            {
+                if (g_skinnedPackets.find(id) == g_skinnedPackets.end())
+                {
+                    g_skinnedPacketBytes += job->packet.bytes;
+                    g_skinnedPackets.emplace(id, std::move(job->packet));
+                    g_skinnedIds.insert(id);
+                }
+                return;
+            }
+            native_renderer::uploadMesh(id, job->vertices.data(), static_cast<uint32_t>(job->vertices.size()));
+            if (twoPasses)
+                native_renderer::uploadMesh(id ^ (1ull << 61), job->second.data(), static_cast<uint32_t>(job->second.size()));
+        };
+        return native_renderer::buildAsync(std::move(ids), work, finish);
+    }
+
     void modelDispHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         syncFrame(rdram);
@@ -2694,10 +3193,14 @@ namespace sotc_native
                 continue;
             const uint32_t size = word(pk), data = word(pk + 16u);
             const uint64_t id = packetId(data, size, fast);
-            auto skinnedPacket = g_skinnedPackets.find(id);
+            const bool changedInPlace = g_packetChangedInPlace;
+            auto skinnedPacket = g_skinnedIds.count(id) ? g_skinnedPackets.find(id) : g_skinnedPackets.end();
             const bool twoPasses = word(s + 0x1Cu) == 2u;
-            if (skinnedPacket == g_skinnedPackets.end() &&
-                (!native_renderer::hasMesh(id) || (twoPasses && !native_renderer::hasMesh(id ^ (1ull << 61)))))
+            const bool needsBuild = skinnedPacket == g_skinnedPackets.end() &&
+                                    (!native_renderer::hasMesh(id) || (twoPasses && !native_renderer::hasMesh(id ^ (1ull << 61))));
+            if (needsBuild && !changedInPlace && buildPacketAsync(id, data, size, twoPasses))
+                ; // on the worker: this packet is left out until it is taken up
+            else if (needsBuild)
             {
                 strips.clear();
                 readBatches(data, size, strips);
@@ -2708,6 +3211,7 @@ namespace sotc_native
                     try
                     {
                         skinnedPacket = g_skinnedPackets.emplace(id, makeSkinnedPacket(std::move(strips))).first;
+                        g_skinnedIds.insert(id);
                     }
                     catch (const std::bad_alloc &)
                     {

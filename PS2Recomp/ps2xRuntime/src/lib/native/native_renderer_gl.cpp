@@ -781,6 +781,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         std::vector<FrameMesh> frameMeshes;
         std::vector<GLuint> deadBuffers, deadTextures; // evicted (GlBackend::evictKept): deleted before the next frame
         void applyUploads();
+        void applyUploadList(std::vector<Upload> &list); // and empties it
         void uploadMesh(uint64_t id, const native_renderer::Vertex *vertices, uint32_t count);
         void uploadSkinned(uint64_t id, const native_renderer::SkinVertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount);
         void uploadTexture(uint64_t id, uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t levels);
@@ -795,6 +796,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         native_renderer::Bloom bloom;
         native_renderer::GlowComposite glow;
         native_renderer::DepthOfField dof;
+        bool hold = false; // holdFrame: uploads only, not drawn or shown
 
         std::mutex outputMutex;
         std::vector<uint8_t> output;
@@ -985,8 +987,155 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             glUniform1i(uniform(false, "uSrc"), 0);
             glUniform1i(uniform(false, "uSrc2"), 1);
             glUniform1i(uniform(false, "uDepth"), 2);
+#if defined(PS2X_NATIVE_VITA)
+            probeEmulator();
+            if (native_renderer::tuning().warmShaders)
+                warmShaders();
+#endif
             return true;
         }
+
+#if defined(PS2X_NATIVE_VITA)
+        // A GXM fragment program carries its blend state: vitaGL patches a
+        // program again when it is drawn with other blending, and the shader
+        // patcher keeps each patched copy. The first draw of a program with a
+        // blend state not seen before made that patch mid-game (a cut, a new
+        // effect). Done here for every program and blend state the renderer
+        // uses, into a 1 x 1 target (Tuning warmShaders, SOTC_GL_WARM).
+        void warmShaders()
+        {
+            const uint64_t start = native_renderer::nowUs();
+            Target t;
+            makeTarget(t, 1, 1, true);
+            glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+            glViewport(0, 0, 1, 1);
+            glDisable(GL_DEPTH_TEST);
+            glDisable(GL_STENCIL_TEST);
+            GLuint vbo = 0;
+            glGenBuffers(1, &vbo);
+            glBindBuffer(GL_ARRAY_BUFFER, vbo);
+            const std::vector<uint8_t> zeros(3u * sizeof(native_renderer::SkinVertex), 0);
+            glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(zeros.size()), zeros.data(), GL_STATIC_DRAW);
+            struct BlendState
+            {
+                bool on, mask;
+                GLenum rgbEq, rgbSrc, rgbDst, aSrc, aDst;
+            };
+            // setBlend (with and without keepAlpha), quad()'s blends, the shadow volumes'.
+            const BlendState blends[] = {
+                {false, true, GL_FUNC_ADD, GL_ONE, GL_ZERO, GL_ONE, GL_ZERO},
+                {true, true, GL_FUNC_ADD, GL_ONE, GL_ZERO, GL_ZERO, GL_ONE},
+                {true, true, GL_FUNC_ADD, GL_SRC_ALPHA, GL_ONE, GL_ONE, GL_ZERO},
+                {true, true, GL_FUNC_ADD, GL_SRC_ALPHA, GL_ONE, GL_ZERO, GL_ONE},
+                {true, true, GL_FUNC_REVERSE_SUBTRACT, GL_SRC_ALPHA, GL_ONE, GL_ONE, GL_ZERO},
+                {true, true, GL_FUNC_REVERSE_SUBTRACT, GL_SRC_ALPHA, GL_ONE, GL_ZERO, GL_ONE},
+                {true, true, GL_FUNC_ADD, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ZERO},
+                {true, true, GL_FUNC_ADD, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE},
+                {true, true, GL_FUNC_ADD, GL_ONE, GL_ONE, GL_ZERO, GL_ONE},
+                {true, true, GL_FUNC_ADD, GL_ZERO, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE},
+                {true, false, GL_FUNC_ADD, GL_ZERO, GL_ONE, GL_ZERO, GL_ONE},
+            };
+            uint32_t draws = 0;
+            for (int which = 0; which < 14; ++which)
+            {
+                const GLuint p = which == 0 ? mainProgram : (which == 1 ? skinProgram : quadPrograms[which - 2]);
+                if (!p)
+                    continue;
+                glUseProgram(p);
+                const bool skinned = which == 1, quadMode = which >= 2;
+                const GLsizei stride = skinned ? sizeof(native_renderer::SkinVertex) : sizeof(native_renderer::Vertex);
+                for (GLuint i = 0; i < 6; ++i)
+                {
+                    const bool used = quadMode ? i == 0 : (i < 4 || skinned);
+                    if (!used)
+                    {
+                        glDisableVertexAttribArray(i);
+                        continue;
+                    }
+                    glEnableVertexAttribArray(i);
+                    if (quadMode)
+                        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+                    else if (i == 2)
+                        glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::Vertex, r)));
+                    else
+                        glVertexAttribPointer(i, i == 3 ? 2 : 3, GL_FLOAT, GL_FALSE, stride,
+                                              reinterpret_cast<const void *>(i == 0 ? offsetof(native_renderer::Vertex, x)
+                                                                             : i == 1 ? offsetof(native_renderer::Vertex, nx)
+                                                                             : i == 3 ? offsetof(native_renderer::Vertex, u)
+                                                                             : i == 4 ? offsetof(native_renderer::SkinVertex, bone)
+                                                                                      : offsetof(native_renderer::SkinVertex, weight)));
+                }
+                for (const BlendState &b : blends)
+                {
+                    if (b.on)
+                    {
+                        glEnable(GL_BLEND);
+                        glBlendEquationSeparate(b.rgbEq, GL_FUNC_ADD);
+                        glBlendFuncSeparate(b.rgbSrc, b.rgbDst, b.aSrc, b.aDst);
+                    }
+                    else
+                        glDisable(GL_BLEND);
+                    const GLboolean m = b.mask ? GL_TRUE : GL_FALSE;
+                    glColorMask(m, m, m, m);
+                    glDrawArrays(GL_TRIANGLES, 0, 3);
+                    ++draws;
+                }
+                glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            }
+            glFinish();
+            glDisable(GL_BLEND);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            boundFbo = boundProgram = ~0u;
+            glDeleteBuffers(1, &vbo);
+            glDeleteFramebuffers(1, &t.fbo);
+            glDeleteTextures(1, &t.texture);
+            if (t.depth)
+                glDeleteTextures(1, &t.depth);
+            std::fprintf(stderr, "[native:gl] shaders warmed: %u draws (14 programs x %u blend states) in %.1f ms\n", draws,
+                         static_cast<unsigned>(sizeof(blends) / sizeof(blends[0])), (native_renderer::nowUs() - start) / 1000.0);
+        }
+#endif
+
+#if defined(PS2X_NATIVE_VITA)
+        // Vita3K: what the GPU draws into a texture never reaches the memory
+        // the CPU reads (Vita3K keeps render targets on the host GPU); on the
+        // console it does once the GPU is done. A small target cleared to a
+        // colour, waited for and read back: not that colour, an emulator
+        // (native_renderer::inEmulator; the mid-frame redraw's "only in
+        // Vita3K"). SOTC_EMULATOR=0/1 says it instead.
+        void probeEmulator()
+        {
+            if (const char *e = std::getenv("SOTC_EMULATOR"))
+            {
+                native_renderer::detail::setInEmulator(std::atoi(e) != 0);
+                return;
+            }
+            Target t;
+            makeTarget(t, 16, 16, false);
+            glBindTexture(GL_TEXTURE_2D, t.texture);
+            auto *pixels = static_cast<uint8_t *>(vglGetTexDataPointer(GL_TEXTURE_2D));
+            if (!pixels)
+                return;
+            std::memset(pixels, 0, 16u * 16u * 4u);
+            glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+            glViewport(0, 0, 16, 16);
+            glDisable(GL_SCISSOR_TEST);
+            glClearColor(1.0f, 0.0f, 1.0f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glFinish();
+            uint32_t matching = 0;
+            for (uint32_t i = 0; i < 16u * 16u; ++i)
+                matching += pixels[i * 4u] > 200u && pixels[i * 4u + 1u] < 50u && pixels[i * 4u + 2u] > 200u ? 1u : 0u;
+            const bool emulator = matching < 16u * 16u / 2u;
+            native_renderer::detail::setInEmulator(emulator);
+            std::fprintf(stderr, "[native:gl] render target read back: %u of 256 pixels drawn: %s\n", matching,
+                         emulator ? "an emulator (Vita3K)" : "the console");
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            boundFbo = ~0u;
+            glDeleteFramebuffers(1, &t.fbo);
+            glDeleteTextures(1, &t.texture);
+        }
+#endif
 
         static GLuint newTexture(uint32_t w, uint32_t h, bool linear)
         {
@@ -1381,17 +1530,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         cache.texture = ~0u;
     }
 
-    // The frame's GL work before its draws, in the order the game thread
-    // asked for it: what eviction let go, the uploads, the per-frame meshes.
-    void Renderer::applyUploads()
+    void Renderer::applyUploadList(std::vector<Upload> &list)
     {
-        if (!deadBuffers.empty())
-            glDeleteBuffers(static_cast<GLsizei>(deadBuffers.size()), deadBuffers.data());
-        if (!deadTextures.empty())
-            glDeleteTextures(static_cast<GLsizei>(deadTextures.size()), deadTextures.data());
-        deadBuffers.clear();
-        deadTextures.clear();
-        for (const Upload &u : uploads)
+        for (const Upload &u : list)
         {
             switch (u.kind)
             {
@@ -1407,7 +1548,20 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 break;
             }
         }
-        uploads.clear();
+        list.clear();
+    }
+
+    // The frame's GL work before its draws, in the order the game thread
+    // asked for it: what eviction let go, the uploads, the per-frame meshes.
+    void Renderer::applyUploads()
+    {
+        if (!deadBuffers.empty())
+            glDeleteBuffers(static_cast<GLsizei>(deadBuffers.size()), deadBuffers.data());
+        if (!deadTextures.empty())
+            glDeleteTextures(static_cast<GLsizei>(deadTextures.size()), deadTextures.data());
+        deadBuffers.clear();
+        deadTextures.clear();
+        applyUploadList(uploads);
         for (const FrameMesh &f : frameMeshes)
         {
             Mesh &mesh = meshes[f.id];
@@ -2077,6 +2231,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         for (size_t i = 0; i < blurs.size(); ++i)
             events.push_back({blurs[i].order, static_cast<int>(i)});
         std::stable_sort(events.begin(), events.end(), [](const Event &x, const Event &y) { return x.order < y.order; });
+        static const bool eventLog = std::getenv("SOTC_GL_EVENT_LOG") != nullptr; // debugging: each frame's effects (layer:kind)
+        if (eventLog)
+        {
+            std::string line;
+            for (const Event &ev : events)
+                line += " " + std::to_string(ev.order) + ":" + std::to_string(ev.blur);
+            std::fprintf(stderr, "[gl:events] frame %llu draws %u%s\n", (unsigned long long)arenaFrame, static_cast<unsigned>(draws.size()), line.c_str());
+        }
         // Mid-frame redraw (Tuning midFrameRedraw; the Vita's default): an
         // effect that reads the picture so far (water refraction, heat haze,
         // screen blur) gets it drawn again into a target of its own, before
@@ -2085,23 +2247,38 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // drawn before came back as an older frame; with the effects that add
         // light, the screen went white). Costs the draws below that layer a
         // second time, only in frames with such an effect.
-        if (native_renderer::tuning().midFrameRedraw)
+        const float redrawMode = native_renderer::tuning().midFrameRedraw;
+        if (redrawMode >= 1.5f ? native_renderer::inEmulator() : redrawMode >= 0.5f)
         {
             const native_renderer::Tuning &t = native_renderer::tuning();
             const int hazeFrom = static_cast<int>(t.hazeSource + 0.5f), waterFrom = static_cast<int>(t.waterSource + 0.5f);
-            int k = 0;
+            int k = 0, last = -1;
+            uint32_t lastOrder = ~0u;
+            static const bool share = !std::getenv("SOTC_GL_REDRAW_NOSHARE");
             for (Event &ev : events)
             {
                 const bool water = ev.blur == -4 && haveRefraction && ev.order == 9u && waterFrom != 2;
                 const bool haze = ev.blur == -4 && screenCopyOrder && ev.order == screenCopyOrder && hazeFrom != 2;
-                if (!(ev.blur >= 0 || water || haze) || k >= 3)
+                if (!(ev.blur >= 0 || water || haze))
                     continue;
-                Target &pre = prefix[k];
-                if (!pre.texture)
-                    makeTarget(pre, w, h, true);
-                boundFbo = ~0u;
-                pass(pre, false, 0, ev.order, false);
-                ev.prefix = k++;
+                // Effects at the same layer read the same picture (the draws
+                // before that layer): drawn again once for all of them
+                // (SOTC_GL_REDRAW_NOSHARE=1: once each, as before).
+                if (share && last >= 0 && ev.order == lastOrder)
+                    ev.prefix = last;
+                else
+                {
+                    if (k >= 3)
+                        continue;
+                    Target &pre = prefix[k];
+                    if (!pre.texture)
+                        makeTarget(pre, w, h, true);
+                    boundFbo = ~0u;
+                    pass(pre, false, 0, ev.order, false);
+                    ev.prefix = last = k++;
+                    lastOrder = ev.order;
+                }
+                Target &pre = prefix[ev.prefix];
                 auto small = [&](Target &to) // the PS2's: 256 x 256, blurred once through 128 x 128
                 {
                     copy(pre, to);
@@ -2407,6 +2584,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             r->bloom = m_rec.bloom;
             r->glow = m_rec.glow;
             r->dof = m_rec.dof;
+            r->hold = m_rec.hold;
+            m_rec.hold = false;
             clearFrame();
             m_rec.uploads.clear();
             m_uploadPeak = std::max(m_uploadPeak, m_frameUploadBytes + m_recUploadBytes);
@@ -2438,6 +2617,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             waitIdle(lock);
         }
         bool timesItself() override { return true; }
+        void holdFrame() override { m_rec.hold = true; }
         bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height) override
         {
             std::lock_guard<std::mutex> lock(r->outputMutex);
@@ -2476,6 +2656,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             native_renderer::Bloom bloom;
             native_renderer::GlowComposite glow;
             native_renderer::DepthOfField dof;
+            bool hold = false;
             std::vector<Renderer::Upload> uploads; // kept until handed over (uploads come between frames too)
             std::vector<Renderer::FrameMesh> frameMeshes;
         };
@@ -2529,8 +2710,12 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // A scene load asks for hundreds of textures in one frame: each
         // copy waited in the queue until the hand-over (the frame being
         // recorded and the one drawn held up to ~2 x 30 MB). Past
-        // m_flushBytes the render thread applies what is queued now (the
-        // game thread waits for it) and the copies go.
+        // m_flushBytes what is queued goes to the render thread at once, on
+        // a list of its own (m_side) that it applies as soon as it is free
+        // (before the next frame's draws), and the copies go. The game thread
+        // goes on (it used to wait for the frame being drawn, then for the
+        // uploads); it waits only while 4 x m_flushBytes are still on that
+        // list. SOTC_GL_FLUSH_WAIT=1: the earlier way.
         void flushIfLarge()
         {
             if (m_recUploadBytes >= m_flushBytes)
@@ -2539,15 +2724,29 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         void flushUploads()
         {
             std::unique_lock<std::mutex> lock(m_mutex);
-            waitIdle(lock);
-            // The render thread is idle: the frame handed over is drawn, its
-            // upload list empty.
-            r->uploads.swap(m_rec.uploads);
-            m_rec.uploads.clear();
-            m_uploadsOnly = true;
-            m_queued = true;
-            m_work.notify_one();
-            waitIdle(lock);
+            static const bool waitOld = std::getenv("SOTC_GL_FLUSH_WAIT") != nullptr;
+            if (waitOld)
+            {
+                waitIdle(lock);
+                // The render thread is idle: the frame handed over is drawn, its
+                // upload list empty.
+                r->uploads.swap(m_rec.uploads);
+                m_rec.uploads.clear();
+                m_uploadsOnly = true;
+                m_queued = true;
+                m_work.notify_one();
+                waitIdle(lock);
+            }
+            else
+            {
+                while (m_sideBytes > 4u * m_flushBytes)
+                    m_idle.wait_for(lock, kRecheck);
+                for (Renderer::Upload &u : m_rec.uploads)
+                    m_side.push_back(std::move(u));
+                m_rec.uploads.clear();
+                m_sideBytes += m_recUploadBytes;
+                m_work.notify_one();
+            }
             m_frameUploadBytes += m_recUploadBytes;
             m_recUploadBytes = 0;
             ++m_flushes;
@@ -2663,6 +2862,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             }
             for (const Renderer::Upload &u : r->uploads)
                 (u.kind == Renderer::Upload::TextureKind ? m_keepTextures : m_keepMeshes).insert(u.id);
+            for (const Renderer::Upload &u : m_side) // flushed, not applied yet
+                (u.kind == Renderer::Upload::TextureKind ? m_keepTextures : m_keepMeshes).insert(u.id);
             const uint64_t agedBefore = aging ? frame - kUnused : 0u;
             const uint64_t pressureBefore = pressure && frame > kPressureAge ? frame - kPressureAge : 0u;
             const uint64_t budgetBefore = overBudget && frame > kBudgetAge ? frame - kBudgetAge : 0u;
@@ -2749,12 +2950,33 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             for (;;)
             {
                 std::unique_lock<std::mutex> lock(m_mutex);
-                while (!m_queued)
+                while (!m_queued && m_side.empty())
                     m_work.wait_for(lock, kRecheck);
+                // Flushed uploads first (they were asked for before this frame's).
+                if (!m_side.empty())
+                {
+                    m_sideApplying.swap(m_side);
+                    const uint64_t bytes = m_sideBytes;
+                    m_sideBytes = 0;
+                    m_busy = true;
+                    lock.unlock();
+                    {
+                        Lock gl;
+                        r->applyUploadList(m_sideApplying);
+                    }
+                    lock.lock();
+                    (void)bytes;
+                    if (!m_queued)
+                    {
+                        m_busy = false;
+                        m_idle.notify_all();
+                        continue;
+                    }
+                }
                 m_queued = false;
                 m_busy = true;
                 const uint32_t width = m_width, height = m_height;
-                const bool uploadsOnly = m_uploadsOnly; // flushUploads
+                const bool uploadsOnly = m_uploadsOnly; // flushUploads (SOTC_GL_FLUSH_WAIT)
                 m_uploadsOnly = false;
                 lock.unlock();
                 if (uploadsOnly)
@@ -2768,7 +2990,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     const uint64_t start = native_renderer::nowUs(), present = r->stats.presentUs;
                     ++r->arenaFrame;
                     r->applyUploads();
-                    r->render(width, height);
+                    if (!r->hold) // held: the last picture stays on screen
+                        r->render(width, height);
                     r->evictUnused();
                     r->stats.renderUs += (native_renderer::nowUs() - start) - (r->stats.presentUs - present);
                 }
@@ -2781,7 +3004,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         Renderer *r;
         // The game thread's.
         Recording m_rec;
-        std::unordered_set<uint64_t> m_knownMeshes, m_knownTextures; // what hasMesh / hasTexture answer
+        native_renderer::IdSet m_knownMeshes, m_knownTextures; // what hasMesh / hasTexture answer
         size_t m_pendingFirst = 0, m_pendingIndexFirst = 0;
         // Memory (see evictKept, flushUploads, trimRecording, logMemory).
         struct Candidate
@@ -2815,7 +3038,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         bool m_started = false, m_initOk = false;
         bool m_queued = false; // a frame handed over, not started yet
         bool m_busy = false;   // the render thread drawing
-        bool m_uploadsOnly = false; // what is handed over is uploads alone (flushUploads)
+        bool m_uploadsOnly = false; // what is handed over is uploads alone (flushUploads, SOTC_GL_FLUSH_WAIT)
+        std::vector<Renderer::Upload> m_side, m_sideApplying; // flushed uploads (flushUploads); the render thread's copy while it applies them
+        uint64_t m_sideBytes = 0;
         uint32_t m_width = 0, m_height = 0;
     };
 }
