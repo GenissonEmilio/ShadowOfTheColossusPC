@@ -9,8 +9,8 @@ metadados, documentação, roteiros de validação e a correção de fontes do l
 
 - Linux x86_64, compilador GCC 13 incluído, runtime C++20 e OpenGL 3.3.
 - Kit de compilação: `1b65ad890494855b3f681e27`.
-- Arquivo: `ShadowOfTheColossusPC-0.1.0-linux-x86_64.tar.gz`, 158096280 bytes.
-- SHA-256: `9c00f9b5ce952c4c91916d809b813d909726ecb45d58ee0214aa912f808557a2`.
+- Arquivo: `ShadowOfTheColossusPC-0.1.0-linux-x86_64.tar.gz`, 174252476 bytes.
+- SHA-256: `96fe98bbe3308c12a1ec1c1aec77b6cc6d1d6aeeb28c5928143103fb0b00d077`.
 
 A primeira preparação foi executada **pelo launcher empacotado**, partindo do
 arquivo 7z fornecido pelo usuário, em Ubuntu 24.04 isolado, sem rede, com a
@@ -63,3 +63,8 @@ do executável. `tools/linux/test_memory_card.py` testa o cartão sem dados do j
 O CI compila o pacote sem ROM, testa o compilador e a persistência do cartão com
 dados sintéticos. ROM, código gerado do jogo, cartões e capturas de áudio ficam
 fora dos artefatos publicados.
+
+O pacote também inclui os avisos de copyright de ambos os ambientes de build,
+versões dos pacotes de origem e um snapshot das fontes das dependências estáticas
+do recompilador em `third-party-sources.tar.gz`. Isso não altera o kit nativo
+identificado acima nem o cache do executável do jogo.

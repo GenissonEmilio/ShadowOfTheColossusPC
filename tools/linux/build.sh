@@ -6,12 +6,14 @@ docker build --cpuset-cpus=0,1 -t sotc-linux-builder -f tools/linux/Dockerfile .
 docker run --rm --init --cpus=2 -u "$(id -u):$(id -g)" -e HOME=/tmp \
   -e CELOSIA_CMAKE_ARGS='-DPS2X_ENABLE_DEBUG_UI=OFF -DPS2X_ENABLE_IOP_RPC_TRACE=OFF -DCMAKE_CXX_FLAGS=-msse4.1' \
   -v "$root:/src:z" sotc-linux-builder bash -c \
-  './celosia configure && nice -n 10 cmake --build build/cmake --target ps2_runtime ps2_recomp -j2 && nice -n 10 python3 tools/linux/prepare_compiler.py'
+  './celosia configure && nice -n 10 cmake --build build/cmake --target ps2_runtime ps2_recomp -j2 && nice -n 10 python3 tools/linux/prepare_compiler.py && python3 tools/linux/collect_licenses.py --kind native'
 # The GTK packager is intentionally separate from the C++ compilation kit.
 docker build --cpuset-cpus=0,1 -t sotc-desktop-builder -f tools/desktop/release/Dockerfile .
 docker run --rm --init --cpus=2 -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$root:/src:z" \
   sotc-desktop-builder python3 -m PyInstaller --noconfirm --clean \
   --distpath artifacts/frozen --workpath artifacts/pyinstaller tools/desktop/release/launcher.spec
+docker run --rm --init --cpus=2 -u "$(id -u):$(id -g)" -v "$root:/src:z" \
+  sotc-desktop-builder python3 tools/linux/collect_licenses.py --kind launcher
 mkdir -p artifacts/compiler-check
 ln -sfn ../compiler artifacts/compiler-check/compiler
 docker run --rm --init --cpus=2 --network=none -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$root:/src:z" \

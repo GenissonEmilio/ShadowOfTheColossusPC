@@ -12,6 +12,8 @@ if OUT.exists():shutil.rmtree(OUT)
 shutil.copytree(ROOT / 'artifacts/frozen' / NAME,OUT)
 shutil.copytree(ROOT / 'artifacts/compiler',OUT / 'compiler')
 shutil.copy2(ROOT / 'LICENSE',OUT / 'LICENSE')
+shutil.copytree(ROOT / 'artifacts/distribution-licenses',OUT / 'licenses')
+shutil.copy2(ROOT / 'artifacts/third-party-sources.tar.gz',OUT / 'third-party-sources.tar.gz')
 (OUT / 'LEIA-ME.txt').write_text('''Shadow of the Colossus PC — Linux x86_64
 
 Abra ShadowOfTheColossusPC e escolha seu disco ISO/7Z/ZIP/RAR USA SCUS-97472.
@@ -32,7 +34,9 @@ No painel Sobre é possível adicionar o jogo ao menu de aplicativos.
 Base nativa: HenryKun55/celosia e ran-j/PS2Recomp (GPL-3.0).
 Launcher Linux: GenissonEmilio; baseado nos projetos ForbiddenMemoriesPC e
 CrashBandicootPC. O código correspondente do port está em compiler/source.
-Licenças das dependências e versões: compiler/licenses e compiler/packages.txt.
+Licenças: licenses/; versões/fontes: licenses/*/source-packages.tsv.
+Dependências estáticas do recompilador: third-party-sources.tar.gz.
+O runtime e os scripts de build estão em compiler/source.
 GCC 13 e bibliotecas Ubuntu: fontes em https://archive.ubuntu.com/ubuntu/pool/
 (identificadas pelos pacotes em packages.txt); GCC em https://gcc.gnu.org/gcc-13/.
 
