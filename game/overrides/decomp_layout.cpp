@@ -12,8 +12,9 @@
 // happens without bit 0x02; bits 0x40 / 0x80 only with 0x04.
 //
 // Every product is the recompiled code's (PS2_VMUL / PS2_VADD with VU
-// clamping, ACC chains in the same order). The boot ELF's matrix helpers
-// stay guest calls (their jal sites are relocated: targets read from the
+// clamping, ACC chains in the same order). iosScaleMatrixV (once a bone) is
+// native too; the boot ELF's other matrix helpers (once a call) stay guest
+// calls (their jal sites are relocated: targets read from the
 // code). A negative bone count goes to the recompiled code.
 #include "sotc_decomp.h"
 
@@ -133,10 +134,30 @@ namespace decomp_layout
         if (!(byteAt(o + 0x1BCu) & 0x04u))
             return finish(0u);
         const uint32_t scaled = word(o + 0x15Cu);
+        // iosScaleMatrixV(out, in, scale) natively when the site names it:
+        // rows x, y, z times the scale's x, y, z (vmulx / vmuly / vmulz),
+        // vf14..17 and vf8 left as it leaves them.
+        const bool scaleNative = sotc_decomp::jalTarget(rdram, 0x010F2800u) == 0x001B92D0u;
         for (int32_t i = 0; i < count; ++i)
         {
             SET_GPR_U32(ctx, 6, o + 0x90u);
-            call(0x010F2800u, scaled + i * 0x40u, bones + i * 0x40u); // iosScaleMatrixV(out, in, scale)
+            if (!scaleNative)
+            {
+                call(0x010F2800u, scaled + i * 0x40u, bones + i * 0x40u); // iosScaleMatrixV(out, in, scale)
+                continue;
+            }
+            const uint32_t out = scaled + i * 0x40u, in = bones + i * 0x40u;
+            SET_GPR_U32(ctx, 4, out);
+            SET_GPR_U32(ctx, 5, in);
+            __m128 *vf = ctx->vu0_vf;
+            for (int r = 0; r < 4; ++r)
+                vf[14 + r] = ram.q((in & ~0xFu) + 0x10u * r);
+            vf[8] = ram.q((o + 0x90u) & ~0xFu);
+            vf[14] = PS2_VMUL(vf[14], lane<0>(vf[8]));
+            vf[15] = PS2_VMUL(vf[15], lane<1>(vf[8]));
+            vf[16] = PS2_VMUL(vf[16], lane<2>(vf[8]));
+            for (int r = 0; r < 4; ++r)
+                ram.putq((out & ~0xFu) + 0x10u * r, vf[14 + r]);
         }
         if (byteAt(o + 0x1BCu) & 0x40u)
         {
@@ -163,3 +184,41 @@ namespace decomp_layout
 }
 
 SOTC_DECOMP_FUNCTION(0x010F26D0u, UpdateLayoutClassGeometry, decomp_layout::updateLayoutClassGeometry);
+
+// GetLayoutClass (0x10f1a20): an object's layout class by its type (byte
+// +8, 9..22, through the table at 0x1194070): +0x20, +0x90 or none
+// natively (~1 700 calls a frame, 1% of the Vita's game thread
+// recompiled); the cases that call out (0x10f1a60 / a70 / a88) go to the
+// recompiled code from its start (nothing written before).
+namespace decomp_layoutclass
+{
+    using sotc_decomp::returnTo;
+
+    void getLayoutClass(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t a0 = GPR_U32(ctx, 4);
+        const uint32_t index = static_cast<uint32_t>(rdram[(a0 + 8u) & PS2_RAM_MASK]) - 9u;
+        if (index >= 0xEu)
+        {
+            SET_GPR_U64(ctx, 3, 0u);
+            SET_GPR_U64(ctx, 2, 0u);
+            return returnTo(ctx);
+        }
+        uint32_t target;
+        std::memcpy(&target, rdram + ((0x01194070u + index * 4u) & PS2_RAM_MASK), 4);
+        uint32_t v0;
+        if (target == 0x010F1A58u)
+            v0 = a0 + 0x20u;
+        else if (target == 0x010F1A98u)
+            v0 = a0 + 0x90u;
+        else if (target == 0x010F1AA0u)
+            v0 = 0u;
+        else
+            return sotc_decomp::recompiled(0x010F1A20u)(rdram, ctx, runtime);
+        SET_GPR_S32(ctx, 3, static_cast<int32_t>(target));
+        SET_GPR_S32(ctx, 2, static_cast<int32_t>(v0));
+        returnTo(ctx);
+    }
+}
+
+SOTC_DECOMP_FUNCTION(0x010F1A20u, GetLayoutClass, decomp_layoutclass::getLayoutClass);

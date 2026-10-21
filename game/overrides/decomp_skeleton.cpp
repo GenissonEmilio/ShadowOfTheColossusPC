@@ -9,10 +9,16 @@
 // matrix and stores it (a1 + 0x40 i) with the current quaternion,
 // normalised (a2 + 0x10 i), then does the children and pops.
 //
-// The matrix / quaternion stack helpers stay guest calls (boot ELF, their
-// jal sites relocated: targets read from the code); the VU0 arithmetic is
-// the recompiled code's own, on locals, written back to the context before
-// the next guest call. Recursion is native.
+// The matrix / quaternion stack helpers (boot ELF: PushQuaternion,
+// iosPushCurrentMatrix, MultiCurrentQuaternion, iosTransCurrentMatrix,
+// iosMulCurrentMatrixR, iosGetCurrentMatrix, GetCurrentQuaternion,
+// iosPopCurrentMatrix, PopQuaternion) are native too, on the context's VU0
+// registers and VU0 memory (vi15, the matrix stack) as their recompiled
+// code: 9 guest calls a bone were ~2.4% of the Vita's game thread in call
+// overhead alone. Their jal sites are relocated: the targets are read from
+// the code, and a site naming another function is called through the guest.
+// The VU0 arithmetic of the pose itself is the recompiled code's own, on
+// locals, written back to the context. Recursion is native.
 #include "sotc_decomp.h"
 
 #include "ps2_runtime_macros.h"
@@ -44,6 +50,160 @@ namespace decomp_skeleton
         }
         void putq(uint32_t a, __m128 v) const { std::memcpy(rdram + (a & PS2_RAM_MASK & ~0xFu), &v, 16); }
         void call(uint32_t site, uint32_t sp) const { sotc_decomp::callGuest(rdram, ctx, runtime, sotc_decomp::jalTarget(rdram, site), site + 8u, sp); }
+        uint8_t *vu0(uint32_t vi) const { return runtime->memory().getVU0Data() + ((vi & 0xFFu) << 4); }
+
+        // The boot ELF's matrix / quaternion stack helpers, natively (each
+        // as its recompiled code: the same VU0 operations, the registers it
+        // leaves). Called through the guest when the jal site does not name
+        // the expected function, or for PushQuaternion's reset case.
+        bool is(uint32_t site, uint32_t target) const { return sotc_decomp::jalTarget(rdram, site) == target; }
+        static constexpr uint32_t kQuatTop = 0x001E0F60u, kQuatStack = 0x00202AC0u;
+        void pushQuaternion(uint32_t site, uint32_t sp) const
+        {
+            const int32_t n0 = static_cast<int32_t>(u32(kQuatTop));
+            if (!is(site, 0x001BBB48u) || n0 < 0)
+                return call(site, sp);
+            int32_t n = n0 + 1;
+            put32(kQuatTop, static_cast<uint32_t>(n));
+            if (!(n < 0x40))
+            {
+                n = 0x3F;
+                put32(kQuatTop, 0x3Fu);
+            }
+            const uint32_t a0 = (static_cast<uint32_t>(n) << 4) + kQuatStack;
+            const __m128i v = _mm_castps_si128(q(a0 - 0x10u));
+            putq(a0, _mm_castsi128_ps(v));
+            SET_GPR_VEC(ctx, 2, v);
+            SET_GPR_S32(ctx, 3, static_cast<int32_t>(kQuatStack));
+            SET_GPR_S32(ctx, 4, static_cast<int32_t>(a0));
+            SET_GPR_S32(ctx, 5, static_cast<int32_t>(a0));
+        }
+        void pushMatrix(uint32_t site, uint32_t sp) const
+        {
+            if (!is(site, 0x001B8638u))
+                return call(site, sp);
+            for (int r = 1; r <= 4; ++r)
+            {
+                std::memcpy(vu0(ctx->vi[15]), &ctx->vu0_vf[r], 16);
+                ctx->vi[15] = static_cast<uint16_t>(ctx->vi[15] + 1u);
+            }
+        }
+        void popMatrix(uint32_t site, uint32_t sp) const
+        {
+            if (!is(site, 0x001B8650u))
+                return call(site, sp);
+            for (int r = 4; r >= 1; --r)
+            {
+                ctx->vi[15] = static_cast<uint16_t>(ctx->vi[15] - 1u);
+                std::memcpy(&ctx->vu0_vf[r], vu0(ctx->vi[15]), 16);
+            }
+        }
+        void popQuaternion(uint32_t site, uint32_t sp) const
+        {
+            if (!is(site, 0x001BBC08u))
+                return call(site, sp);
+            int32_t n = static_cast<int32_t>(u32(kQuatTop)) - 1;
+            const bool negative = n < 0;
+            if (negative)
+                n = 0;
+            SET_GPR_S32(ctx, 2, static_cast<int32_t>(kQuatTop));
+            SET_GPR_S32(ctx, 3, n);
+            SET_GPR_U64(ctx, 4, negative ? 1u : 0u);
+            put32(kQuatTop, static_cast<uint32_t>(n));
+        }
+        uint32_t currentQuaternion() const
+        {
+            const uint32_t v0 = kQuatStack + (u32(kQuatTop) << 4);
+            SET_GPR_S32(ctx, 1, static_cast<int32_t>(kQuatStack));
+            SET_GPR_S32(ctx, 2, static_cast<int32_t>(v0));
+            SET_GPR_S32(ctx, 3, 0x001E0000);
+            return v0;
+        }
+        void getCurrentQuaternion(uint32_t site, uint32_t sp) const
+        {
+            if (!is(site, 0x001BB868u))
+                return call(site, sp);
+            currentQuaternion();
+        }
+        void multiCurrentQuaternion(uint32_t site, uint32_t sp, uint32_t a0) const
+        {
+            if (!is(site, 0x001BB8A8u))
+            {
+                SET_GPR_U32(ctx, 4, a0);
+                return call(site, sp);
+            }
+            const uint32_t v0 = currentQuaternion();
+            __m128 *vf = ctx->vu0_vf;
+            const __m128 xyz = _mm_castsi128_ps(_mm_set_epi32(0, -1, -1, -1)), x = _mm_castsi128_ps(_mm_set_epi32(0, 0, 0, -1)),
+                         w = _mm_castsi128_ps(_mm_set_epi32(-1, 0, 0, 0));
+            auto ln = [](__m128 v, int l)
+            {
+                switch (l)
+                {
+                case 0: return _mm_shuffle_ps(v, v, _MM_SHUFFLE(0, 0, 0, 0));
+                case 1: return _mm_shuffle_ps(v, v, _MM_SHUFFLE(1, 1, 1, 1));
+                case 2: return _mm_shuffle_ps(v, v, _MM_SHUFFLE(2, 2, 2, 2));
+                default: return _mm_shuffle_ps(v, v, _MM_SHUFFLE(3, 3, 3, 3));
+                }
+            };
+            auto yzx_ = [](__m128 v) { return _mm_shuffle_ps(v, v, _MM_SHUFFLE(3, 0, 2, 1)); };
+            auto zxy_ = [](__m128 v) { return _mm_shuffle_ps(v, v, _MM_SHUFFLE(3, 1, 0, 2)); };
+            vf[11] = q(v0);
+            vf[12] = q(a0);
+            vf[13] = PS2_VMUL(vf[11], vf[12]);
+            vf[13] = _mm_blendv_ps(vf[13], PS2_VADD(vf[13], ln(vf[13], 1)), x);
+            vf[13] = _mm_blendv_ps(vf[13], PS2_VADD(vf[13], ln(vf[13], 2)), x);
+            vf[13] = _mm_blendv_ps(vf[13], PS2_VSUB(vf[13], ln(vf[13], 0)), w);
+            vf[14] = _mm_blendv_ps(vf[14], PS2_VMUL(vf[12], ln(vf[11], 3)), xyz);
+            vf[15] = _mm_blendv_ps(vf[15], PS2_VMUL(vf[11], ln(vf[12], 3)), xyz);
+            ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, PS2_VMUL(yzx_(vf[12]), zxy_(vf[11])), xyz);
+            vf[16] = _mm_blendv_ps(vf[16], PS2_VSUB(ctx->vu0_acc, PS2_VMUL(yzx_(vf[11]), zxy_(vf[12]))), xyz);
+            vf[13] = _mm_blendv_ps(vf[13], PS2_VADD(vf[14], vf[15]), xyz);
+            vf[13] = _mm_blendv_ps(vf[13], PS2_VADD(vf[13], vf[16]), xyz);
+            putq(v0, vf[13]);
+            SET_GPR_U32(ctx, 4, a0);
+        }
+        // ACC = m1 x v.x + m2 x v.y + m3 x v.z; returns ACC + m4 x v.w (vmulax / vmadday / vmaddaz / vmaddw).
+        __m128 column(__m128 v, __m128 w4) const
+        {
+            const __m128 *vf = ctx->vu0_vf;
+            __m128 acc = PS2_VMUL(vf[1], _mm_shuffle_ps(v, v, _MM_SHUFFLE(0, 0, 0, 0)));
+            acc = PS2_VADD(acc, PS2_VMUL(vf[2], _mm_shuffle_ps(v, v, _MM_SHUFFLE(1, 1, 1, 1))));
+            acc = PS2_VADD(acc, PS2_VMUL(vf[3], _mm_shuffle_ps(v, v, _MM_SHUFFLE(2, 2, 2, 2))));
+            ctx->vu0_acc = acc;
+            return PS2_VADD(acc, PS2_VMUL(vf[4], w4));
+        }
+        void transCurrentMatrix(uint32_t site, uint32_t sp, uint32_t a0) const
+        {
+            SET_GPR_U32(ctx, 4, a0);
+            if (!is(site, 0x001B8878u))
+                return call(site, sp);
+            __m128 *vf = ctx->vu0_vf;
+            vf[8] = q(a0);
+            vf[4] = column(vf[8], _mm_shuffle_ps(vf[0], vf[0], _MM_SHUFFLE(3, 3, 3, 3)));
+        }
+        void mulCurrentMatrixR(uint32_t site, uint32_t sp, uint32_t a0) const
+        {
+            SET_GPR_U32(ctx, 4, a0);
+            if (!is(site, 0x001B8CD0u))
+                return call(site, sp);
+            __m128 *vf = ctx->vu0_vf;
+            for (int c = 0; c < 4; ++c)
+                vf[14 + c] = q(a0 + 0x10u * c);
+            for (int c = 0; c < 4; ++c)
+                vf[14 + c] = column(vf[14 + c], _mm_shuffle_ps(vf[14 + c], vf[14 + c], _MM_SHUFFLE(3, 3, 3, 3)));
+            for (int c = 0; c < 4; ++c)
+                vf[1 + c] = vf[14 + c];
+        }
+        void getCurrentMatrix(uint32_t site, uint32_t sp, uint32_t a0) const
+        {
+            SET_GPR_U32(ctx, 4, a0);
+            if (!is(site, 0x001B8C90u))
+                return call(site, sp);
+            for (int c = 0; c < 4; ++c)
+                putq(a0 + 0x10u * c, ctx->vu0_vf[1 + c]);
+        }
+        void put32(uint32_t a, uint32_t v) const { std::memcpy(rdram + (a & PS2_RAM_MASK), &v, 4); }
     };
 
     const __m128 kX = _mm_castsi128_ps(_mm_set_epi32(0, 0, 0, -1)), kY = _mm_castsi128_ps(_mm_set_epi32(0, 0, -1, 0)),
@@ -75,11 +235,10 @@ namespace decomp_skeleton
         const uint32_t b = g.u32(skeleton + 8u) + i * 0x40u;
         const uint32_t local = locals + i * 16u;
         const uint32_t sibling = g.u32(b + 0x34u);
-        g.call(0x010B85F0u, sp); // PushQuaternion
-        g.call(0x010B85F8u, sp); // iosPushCurrentMatrix
+        g.pushQuaternion(0x010B85F0u, sp);
+        g.pushMatrix(0x010B85F8u, sp);
         const uint32_t child = g.u32(b + 0x30u);
-        SET_GPR_U32(ctx, 4, local);
-        g.call(0x010B8604u, sp); // MultiCurrentQuaternion(local)
+        g.multiCurrentQuaternion(0x010B8604u, sp, local);
 
         __m128 vf15;
         const __m128 vf0 = ctx->vu0_vf[0];
@@ -133,13 +292,10 @@ namespace decomp_skeleton
         ctx->vu0_vf[17] = vf17;
         ctx->vu0_acc = acc;
 
-        SET_GPR_U32(ctx, 4, sp + 0x40u);
-        g.call(0x010B86C0u, sp); // iosTransCurrentMatrix(offset x scale)
-        SET_GPR_U32(ctx, 4, sp);
-        g.call(0x010B86C8u, sp); // iosMulCurrentMatrixR(rotation)
-        SET_GPR_U32(ctx, 4, matrices + i * 0x40u);
-        g.call(0x010B86D8u, sp); // iosGetCurrentMatrix(out)
-        g.call(0x010B86E0u, sp); // GetCurrentQuaternion
+        g.transCurrentMatrix(0x010B86C0u, sp, sp + 0x40u); // offset x scale
+        g.mulCurrentMatrixR(0x010B86C8u, sp, sp);           // rotation
+        g.getCurrentMatrix(0x010B86D8u, sp, matrices + i * 0x40u);
+        g.getCurrentQuaternion(0x010B86E0u, sp);
         __m128 n15;
         g.putq(quats + i * 16u, normalised(ctx, g.q(GPR_U32(ctx, 2)), n15));
         ctx->vu0_vf[14] = g.q(GPR_U32(ctx, 2));
@@ -159,8 +315,8 @@ namespace decomp_skeleton
         };
         if (child != 0xFFFFFFFFu)
             recurse(child, 0x010B8734u);
-        g.call(0x010B8734u, sp); // iosPopCurrentMatrix
-        g.call(0x010B873Cu, sp); // PopQuaternion
+        g.popMatrix(0x010B8734u, sp);
+        g.popQuaternion(0x010B873Cu, sp);
         if (sibling != 0xFFFFFFFFu)
             recurse(sibling, 0x010B8768u);
     }

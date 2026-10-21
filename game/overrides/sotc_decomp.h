@@ -31,15 +31,22 @@ namespace sotc_decomp
         const char *name;
         PS2Runtime::RecompiledFunction native;
         bool returnsFloat = false; // the result in f0 (v0 is scratch then)
+        // A context switch (a coroutine's wake / sleep): it saves one
+        // register set below sp and loads another. Checked with every
+        // register and the stack below sp compared; `once`: the recompiled
+        // code is run once and not to its return (a sleep returns to the
+        // other context, which goes on for a frame or more).
+        bool switches = false, once = false;
     };
 
     std::vector<Function> &registry();
 
     struct Registrar
     {
-        Registrar(uint32_t address, const char *name, PS2Runtime::RecompiledFunction native, bool returnsFloat = false)
+        Registrar(uint32_t address, const char *name, PS2Runtime::RecompiledFunction native, bool returnsFloat = false, bool switches = false,
+                  bool once = false)
         {
-            registry().push_back({address, name, native, returnsFloat});
+            registry().push_back({address, name, native, returnsFloat, switches, once});
         }
     };
 
@@ -113,3 +120,9 @@ namespace sotc_decomp
     static const ::sotc_decomp::Registrar sotc_decomp_registrar_##name{address, #name, fn}
 #define SOTC_DECOMP_FLOAT_FUNCTION(address, name, fn) \
     static const ::sotc_decomp::Registrar sotc_decomp_registrar_##name{address, #name, fn, true}
+// A context switch that returns to its caller after a round trip (wake).
+#define SOTC_DECOMP_SWITCH_FUNCTION(address, name, fn) \
+    static const ::sotc_decomp::Registrar sotc_decomp_registrar_##name{address, #name, fn, false, true, false}
+// A context switch that returns into the other context (sleep).
+#define SOTC_DECOMP_SWITCH_ONCE_FUNCTION(address, name, fn) \
+    static const ::sotc_decomp::Registrar sotc_decomp_registrar_##name{address, #name, fn, false, true, true}

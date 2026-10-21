@@ -30,6 +30,69 @@ namespace ps2_stubs
             return kMaxTransfer;
         }
 
+        // Small copies and fills inline: on the Vita, ::memcpy / ::memset are
+        // sceClibMemcpy / sceClibMemset, a call into another module (in
+        // Vita3K an HLE trap that costs more than the copy). The game's own
+        // memcpy / memset (stubbed here) are mostly a few dozen bytes.
+        // Forward, 16 bytes at a time, as ::memcpy for the sizes it is used
+        // with (no overlap).
+        // PS2X_LIBC_INLINE=0: always through ::memcpy / ::memset, as before.
+        const uint32_t kInlineBytes = []
+        {
+            const char *on = std::getenv("PS2X_LIBC_INLINE");
+            return (on && std::atoi(on) == 0) ? 0u : 512u;
+        }();
+#if defined(__GNUC__) && !defined(__clang__)
+#define PS2X_NO_LIBCALL __attribute__((optimize("no-tree-loop-distribute-patterns")))
+#else
+#define PS2X_NO_LIBCALL
+#endif
+        PS2X_NO_LIBCALL inline void smallCopy(uint8_t *d, const uint8_t *s, uint32_t n)
+        {
+            for (; n >= 16u; n -= 16u, d += 16u, s += 16u)
+            {
+                uint8_t t[16];
+                ::memcpy(t, s, 16);
+                ::memcpy(d, t, 16);
+            }
+            if (n >= 8u)
+            {
+                uint8_t t[8];
+                ::memcpy(t, s, 8);
+                ::memcpy(d, t, 8);
+                n -= 8u, d += 8u, s += 8u;
+            }
+            if (n >= 4u)
+            {
+                uint8_t t[4];
+                ::memcpy(t, s, 4);
+                ::memcpy(d, t, 4);
+                n -= 4u, d += 4u, s += 4u;
+            }
+            for (; n; --n)
+                *d++ = *s++;
+        }
+        PS2X_NO_LIBCALL inline void smallFill(uint8_t *d, uint8_t v, uint32_t n)
+        {
+            uint8_t t[16];
+            for (int i = 0; i < 16; ++i)
+                t[i] = v;
+            for (; n >= 16u; n -= 16u, d += 16u)
+                ::memcpy(d, t, 16);
+            if (n >= 8u)
+            {
+                ::memcpy(d, t, 8);
+                n -= 8u, d += 8u;
+            }
+            if (n >= 4u)
+            {
+                ::memcpy(d, t, 4);
+                n -= 4u, d += 4u;
+            }
+            for (; n; --n)
+                *d++ = v;
+        }
+
         uint32_t guestContiguousBytes(uint32_t guestAddr)
         {
             uint32_t offset = 0u;
@@ -94,6 +157,19 @@ namespace ps2_stubs
         uint32_t size = getRegU32(ctx, 6);     // $a2
         size = sanitizeMemTransferSize(size, "memcpy");
 
+        if (size <= kInlineBytes && size != 0u)
+        {
+            uint8_t *hostDest = getMemPtr(rdram, destAddr);
+            const uint8_t *hostSrc = getConstMemPtr(rdram, srcAddr);
+            if (hostDest && hostSrc && size <= guestContiguousBytes(destAddr) && size <= guestContiguousBytes(srcAddr))
+            {
+                smallCopy(hostDest, hostSrc, size);
+                ps2TraceGuestRangeWrite(rdram, destAddr, size, "memcpy", ctx);
+                ctx->r[2] = ctx->r[4];
+                return;
+            }
+        }
+
         uint32_t copied = 0u;
         uint32_t curDst = destAddr;
         uint32_t curSrc = srcAddr;
@@ -135,6 +211,18 @@ namespace ps2_stubs
         int value = (int)(getRegU32(ctx, 5) & 0xFF); // $a1 (char value)
         uint32_t size = getRegU32(ctx, 6);           // $a2
         size = sanitizeMemTransferSize(size, "memset");
+
+        if (size <= kInlineBytes && size != 0u)
+        {
+            uint8_t *hostDest = getMemPtr(rdram, destAddr);
+            if (hostDest && size <= guestContiguousBytes(destAddr))
+            {
+                smallFill(hostDest, static_cast<uint8_t>(value), size);
+                ps2TraceGuestRangeWrite(rdram, destAddr, size, "memset", ctx);
+                ctx->r[2] = ctx->r[4];
+                return;
+            }
+        }
 
         uint32_t written = 0u;
         uint32_t curDst = destAddr;

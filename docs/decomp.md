@@ -91,19 +91,68 @@ What a native function has to keep, learned the hard way:
 | decomp_skeleton.cpp | manager_sub_010B8590 (skeleton pose, recursive) | 37 000, 0 mismatches | the quaternion -> matrix VU0 block natively (2.8%), the matrix / quaternion stack helpers as guest calls |
 | decomp_math.cpp | iosGetSinCosf | 30 000, 0 mismatches | VU0 polynomial (1.2%) |
 
+| decomp_texanim.cpp | manager_sub_010A9EA8 (texAnim: texture scroll + palette animation) | 40 000 attract + 35 000 route, 0 mismatches | ~300 calls a frame (3.4%); the waves' iosGetCosf / iosGetSinf stay guest calls, iosDlGetWorkBufId read directly. Not seen on the routes: the wobble terms and the CSM1-swizzled formats 0x13 / 0x1b (written from the disassembly, unchecked) |
+| decomp_skeleton.cpp | the pose's stack helpers (PushQuaternion, iosPush/PopCurrentMatrix, MultiCurrentQuaternion, iosTransCurrentMatrix, iosMulCurrentMatrixR, iosGetCurrentMatrix, Get/PopQuaternion) inline | 19 000 + 10 000 (skeletonPose), 0 mismatches | 9 guest calls a bone were ~2.4% in call overhead alone (runToReturn + callGuest); on the context's VU0 registers and VU0 memory (vi15) as their recompiled code |
+| decomp_layout.cpp | iosScaleMatrixV inline (UpdateLayoutClassGeometry), GetLayoutClass | 700 + 400; 90 000 + 145 000, 0 mismatches | GetLayoutClass: ~1 700 calls a frame (1%); the cases that call out go to the recompiled code |
+| decomp_subthread.cpp | isysWakeupSubThread, isysSleepSubThread | sleep 6 900 + 3 600, 0 mismatches; wake: see below | the sub-threads' coroutine switch (1.85%): 0x2c0 bytes of registers saved / loaded as blocks. The game's own load gives f5..f8 f4's word (no lw for them): kept |
+| decomp_gctick.cpp | iosMallocGarbageTickProc with its time check kernel_sub_001C81B0 | 300 + 200, 0 mismatches | the heap's garbage walk, ~385 blocks a frame, the time check before each (1.7%) |
+| decomp_modelclip.cpp | manager_sub_01099C50 (modelClipPoint) | 5 500 + 2 600, 0 mismatches | a model point through the camera, CLIP test, distance (0.9%) |
+| decomp_ptcldraw.cpp | manager_sub_0113E940 (particleDraw), its particle loop | 600 + 700, 0 mismatches | then the recompiled code from its label 0x113eafc (the matrix, the ptclman packets) |
+
+The wake is a round trip: the check runs the sub-thread until it sleeps,
+and that code writes values that differ between two runs of the same code
+(object state at 0x14656xx, 0x15b68c4, 0x15b8bd0 ...). A control run
+(SOTC_DIFFTEST_CONTROL=1, the recompiled code in both legs) gives the same
+mismatches at the same addresses at the same rate (17 000 checks, ~700
+each); every register (all 128 bits, FPU, hi / lo / sa) matched in all.
+
+Two bugs the checks caught, worth remembering:
+
+- **The time check read the hardware T0.** iosGetTCountExtension is an
+  override (sotc_overrides.cpp: the EE clock / 2, T0 is stopped): reading
+  T0 natively gave 0, the check said "out of time" at once and the garbage
+  walk did nothing, with 1 mismatch in 1 100 checks (only frames where the
+  recompiled walk merged a block). Call what the function table has.
+- **A leftover of removed debug code** (`if (csm)` left in front of the
+  palette copy) skipped the copy of the entries outside the rotated range:
+  0 mismatches on the attract demo (its textures rotate the whole palette),
+  830 on the route. Run the route too after any edit.
+
+Framework additions: SOTC_DECOMP_SWITCH_FUNCTION /
+SOTC_DECOMP_SWITCH_ONCE_FUNCTION (context switches: every register and the
+stack below sp compared; `once` runs the recompiled code once instead of
+to its return, for a sleep that returns into the other context);
+SOTC_DIFFTEST_CONTROL=1 (both legs recompiled: the noise floor of a check);
+SOTC_DIFFTEST_IGNORE=lo-hi,... (RAM ranges left out); SOTC_DIFFTEST_DUMP=1
+(the next 16 differing bytes too).
+
+Native loops charge no EE cycles: where the game measures its own time
+(the garbage walk's budget) the native loop does more within one budget.
+On the attract demo the recompiled walk never ran out of budget either
+(~385 blocks a frame, 0 stopped by the clock), so the work is the same.
+
+With these (throttled Vita3K attract demo, frames 1100-1460, alternating
+the HEAD VPK and the new one, the host shared with another Vita3K):
+37.6 -> 34.7 ms a frame (game 34.0 -> 31.6, hooks 3.54 -> 3.0); unthrottled
+17.4 -> 16.9 ms.
+
 Together (throttled Vita3K attract demo, frames 1100-1460, the same VPK
 with SOTC_DECOMP_SKIP / PS2X_FPU_SETCSR=1 for the old code): 45.7 -> 38.0
 ms a frame, game thread 42.1 -> 34.5 ms.
 
-## Next candidates (profile 2026-10-20, throttled attract demo, after the above)
+## Next candidates (profile 2026-10-20 evening, throttled attract demo, after the above)
 
-- manager_sub_010A9EA8, texture scroll + CLUT animation (3.3%; the native
-  renderer reads its output: rewrite, don't skip).
-- ExecCharaGeometry (1.6%), manager_sub_0113E940 (1.5%), 010AC6C8 (1.5%,
-  a 15-way curve evaluation), ClipCollisionDirectCallBack (1.4%),
-  0108D730 (1.3%).
-- isysWakeupSubThread (1.8%): the sub-thread switch saves and restores
-  every 128-bit register.
+The profile is flat: nothing above 2.5%.
+
+- decomp_skeleton::bone 2.45% (ours: the VU0 block; PS2_V* clamps every
+  operand), decomp_layout::mul 1.5% (ours), particleUpdate 1.6% (ours).
+- ExecCharaGeometry 1.8%, manager_sub_010AC6C8 1.7% (a 15-way jump table
+  of curve evaluations), ClipCollisionDirectCallBack 1.5% (the particles'
+  damage test), manager_sub_0108D730 1.45%.
+- texTransResolve 1.0%, manager_sub_010F3CF0 1.0%, iosDlChainTailCurrent
+  0.95%, manager_sub_010AB618 0.9%, 010F3FB0 0.9%.
+- Host: ptclVtxHook 1.9%, Vif1Walker::feed 1.4%, sceClibMemcpy 0.8%
+  (copies over 512 bytes: the scheduler's context copies).
 
 ## Older candidates (profile 2026-10-17, native route)
 

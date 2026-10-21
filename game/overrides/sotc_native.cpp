@@ -34,6 +34,9 @@
 #include <algorithm>
 #include <map>
 #include <cmath>
+#if defined(__arm__) && defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 #include <cstdio>
 #include <cstddef>
 #include <cstdlib>
@@ -2046,12 +2049,26 @@ namespace sotc_native
             mul3(B, -cs * sz, e.k[1] * sn * sz, B);
             native_renderer::Vertex v{};
             v.nz = 1.0f;
+            // (uint8_t)clamp(x, 0, 255) without float compares (each a VFP
+            // compare + flags transfer on the Vita): truncated to an int (NaN
+            // gives 0 either way), then clamped as an int; the same bytes.
+            const float cr = real(q + 16u) * 255.0f, cg = real(q + 20u) * 255.0f, cb = real(q + 24u) * 255.0f;
+            auto byteOf = [](float x)
+            {
+#if defined(__arm__) && defined(__ARM_NEON)
+                const int32_t i = vget_lane_s32(vcvt_s32_f32(vdup_n_f32(x)), 0); // saturating, NaN -> 0
+#else
+                const int32_t i = std::isnan(x) ? 0 : (x >= 2147483520.0f ? 255 : (x <= -2147483520.0f ? 0 : static_cast<int32_t>(x)));
+#endif
+                return static_cast<uint8_t>(i < 0 ? 0 : (i > 255 ? 255 : i));
+            };
+            const uint8_t ca = byteOf(real(q + 28u) * 128.0f);
             auto col = [&](native_renderer::Vertex &o, float scale)
             {
-                o.r = static_cast<uint8_t>(std::clamp(real(q + 16u) * 255.0f * scale, 0.0f, 255.0f));
-                o.g = static_cast<uint8_t>(std::clamp(real(q + 20u) * 255.0f * scale, 0.0f, 255.0f));
-                o.b = static_cast<uint8_t>(std::clamp(real(q + 24u) * 255.0f * scale, 0.0f, 255.0f));
-                o.a = static_cast<uint8_t>(std::clamp(real(q + 28u) * 128.0f, 0.0f, 255.0f));
+                o.r = byteOf(cr * scale);
+                o.g = byteOf(cg * scale);
+                o.b = byteOf(cb * scale);
+                o.a = ca;
             };
             col(v, 1.0f); // every corner's colour (the lit ones set their own)
             auto at = [&](const float *o, float sign, float u, float vv)

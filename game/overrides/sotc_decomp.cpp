@@ -103,7 +103,15 @@ namespace sotc_decomp
             const R5900Context input = *ctx;
 
             ++depth;
-            runToReturn(rdram, ctx, runtime, c.function->native);
+            // SOTC_DIFFTEST_CONTROL=1: the recompiled code in both runs, for
+            // the mismatches that come from the state, not the rewrite (a
+            // function whose result depends on the clock, interrupts).
+            static const bool control = std::getenv("SOTC_DIFFTEST_CONTROL") != nullptr;
+            const PS2Runtime::RecompiledFunction leg = control ? c.recompiled : c.function->native;
+            if (c.function->once)
+                leg(rdram, ctx, runtime);
+            else
+                runToReturn(rdram, ctx, runtime, leg);
             const R5900Context nativeOut = *ctx;
             const R5900Context *native = &nativeOut;
             nativeAfter.ram.assign(rdram, rdram + PS2_RAM_SIZE);
@@ -112,7 +120,10 @@ namespace sotc_decomp
             std::memcpy(rdram, before.ram.data(), PS2_RAM_SIZE);
             std::memcpy(scratch, before.scratch.data(), PS2_SCRATCHPAD_SIZE);
             *ctx = input;
-            runToReturn(rdram, ctx, runtime, c.recompiled);
+            if (c.function->once)
+                c.recompiled(rdram, ctx, runtime);
+            else
+                runToReturn(rdram, ctx, runtime, c.recompiled);
             --depth;
             c.checks.fetch_add(1, std::memory_order_relaxed);
 
@@ -127,6 +138,34 @@ namespace sotc_decomp
                     bad = true;
                     break;
                 }
+            if (!bad && c.function->switches)
+            {
+                // Every register: the other context's set was loaded.
+                for (int r = 0; r < 32 && !bad; ++r)
+                    if (std::memcmp(&ctx->r[r], &native->r[r], 16) != 0)
+                    {
+                        char what[64];
+                        std::snprintf(what, sizeof(what), "r%d (128 bits)", r);
+                        report(c, input, what);
+                        bad = true;
+                    }
+                for (int i = 0; i < 32 && !bad; ++i)
+                    if (std::memcmp(&ctx->f[i], &native->f[i], 4) != 0)
+                    {
+                        char what[96];
+                        uint32_t x, y;
+                        std::memcpy(&x, &ctx->f[i], 4);
+                        std::memcpy(&y, &native->f[i], 4);
+                        std::snprintf(what, sizeof(what), "f%d recompiled %08x native %08x", i, x, y);
+                        report(c, input, what);
+                        bad = true;
+                    }
+                if (!bad && (ctx->hi != native->hi || ctx->lo != native->lo || ctx->hi1 != native->hi1 || ctx->lo1 != native->lo1 || ctx->sa != native->sa))
+                {
+                    report(c, input, "hi / lo / sa");
+                    bad = true;
+                }
+            }
             if (!bad && std::memcmp(&ctx->f[0], &nativeOut.f[0], 4) != 0)
             {
                 char what[96];
@@ -152,14 +191,47 @@ namespace sotc_decomp
                 char what[128];
                 std::snprintf(what, sizeof(what), "%s %08x recompiled %02x native %02x", where, base + static_cast<uint32_t>(i), live[i], native[i]);
                 report(c, input, what);
+                // SOTC_DIFFTEST_DUMP=1: the next differing bytes too.
+                static const bool dump = std::getenv("SOTC_DIFFTEST_DUMP") != nullptr;
+                for (size_t j = i + 1, shown = 0; dump && j < size && shown < 16; ++j)
+                    if (live[j] != native[j])
+                    {
+                        std::fprintf(stderr, "[difftest]   also %08x recompiled %02x native %02x\n", base + static_cast<uint32_t>(j), live[j], native[j]);
+                        ++shown;
+                    }
                 bad = true;
             };
+            if (!c.function->switches)
             {
                 const R5900Context *in = &input;
                 const uint32_t sp = GPR_U32(in, 29) & (PS2_RAM_SIZE - 1u);
                 const uint32_t low = sp > kDeadStack ? sp - kDeadStack : 0u;
                 std::memcpy(nativeAfter.ram.data() + low, rdram + low, sp - low); // not compared
             }
+            // SOTC_DIFFTEST_IGNORE=start-end,...: RAM ranges left out (bytes
+            // that differ between two runs of the same code, e.g. what a
+            // sub-thread run by a wake round trip writes from a timer).
+            static const std::vector<std::pair<uint32_t, uint32_t>> ignored = []
+            {
+                std::vector<std::pair<uint32_t, uint32_t>> out;
+                if (const char *list = std::getenv("SOTC_DIFFTEST_IGNORE"))
+                    for (const char *p = list; *p;)
+                    {
+                        char *end = nullptr;
+                        const uint32_t lo = static_cast<uint32_t>(std::strtoul(p, &end, 16));
+                        if (*end != '-')
+                            break;
+                        const uint32_t hi = static_cast<uint32_t>(std::strtoul(end + 1, &end, 16));
+                        if (lo < hi && hi <= PS2_RAM_SIZE)
+                            out.emplace_back(lo, hi);
+                        p = *end == ',' ? end + 1 : end;
+                        if (!*end)
+                            break;
+                    }
+                return out;
+            }();
+            for (const auto &range : ignored)
+                std::memcpy(nativeAfter.ram.data() + range.first, rdram + range.first, range.second - range.first);
             compareMemory(rdram, nativeAfter.ram.data(), PS2_RAM_SIZE, 0u, "ram");
             compareMemory(scratch, nativeAfter.scratch.data(), PS2_SCRATCHPAD_SIZE, 0x70000000u, "scratchpad");
             if (bad)

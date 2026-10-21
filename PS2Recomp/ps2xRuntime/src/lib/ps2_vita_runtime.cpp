@@ -19,6 +19,67 @@ extern "C" unsigned int sceUserMainThreadStackSize = 8u * 1024u * 1024u;
 // when left undefined). Raised around the game thread's creation only.
 extern "C" unsigned int _pthread_stack_default_user = 32u * 1024u;
 
+// memcpy / memset: newlib's on the Vita are a branch to sceClibMemcpy /
+// sceClibMemset, a call into another module for every copy (in Vita3K an HLE
+// trap: ~3% of the game thread, mostly copies of a few dozen bytes: struct
+// copies, the game's own memcpy). Small ones here with NEON, large ones still
+// go to the system's. The loops must not become memcpy / memset calls again.
+extern "C" void *sceClibMemcpy(void *dst, const void *src, size_t len);
+extern "C" void *sceClibMemset(void *dst, int ch, size_t len);
+#include <arm_neon.h>
+#define PS2X_NO_LIBCALL __attribute__((optimize("no-tree-loop-distribute-patterns")))
+extern "C" PS2X_NO_LIBCALL void *memcpy(void *__restrict dst, const void *__restrict src, size_t n)
+{
+    if (n > 512u)
+        return sceClibMemcpy(dst, src, n);
+    uint8_t *d = static_cast<uint8_t *>(dst);
+    const uint8_t *s = static_cast<const uint8_t *>(src);
+    for (; n >= 32u; n -= 32u, d += 32u, s += 32u)
+    {
+        const uint8x16_t a = vld1q_u8(s), b = vld1q_u8(s + 16);
+        vst1q_u8(d, a);
+        vst1q_u8(d + 16, b);
+    }
+    if (n >= 16u)
+    {
+        vst1q_u8(d, vld1q_u8(s));
+        n -= 16u, d += 16u, s += 16u;
+    }
+    if (n >= 8u)
+    {
+        vst1_u8(d, vld1_u8(s));
+        n -= 8u, d += 8u, s += 8u;
+    }
+    for (; n; --n)
+        *d++ = *s++;
+    return dst;
+}
+extern "C" PS2X_NO_LIBCALL void *memset(void *dst, int ch, size_t n)
+{
+    if (n > 512u)
+        return sceClibMemset(dst, ch, n);
+    uint8_t *d = static_cast<uint8_t *>(dst);
+    const uint8x16_t v = vdupq_n_u8(static_cast<uint8_t>(ch));
+    for (; n >= 32u; n -= 32u, d += 32u)
+    {
+        vst1q_u8(d, v);
+        vst1q_u8(d + 16, v);
+    }
+    if (n >= 16u)
+    {
+        vst1q_u8(d, v);
+        n -= 16u, d += 16u;
+    }
+    if (n >= 8u)
+    {
+        vst1_u8(d, vget_low_u8(v));
+        n -= 8u, d += 8u;
+    }
+    for (; n; --n)
+        *d++ = static_cast<uint8_t>(ch);
+    return dst;
+}
+
 namespace
 {
     // Out of heap: written with sceIo and closed at once, so it survives the
