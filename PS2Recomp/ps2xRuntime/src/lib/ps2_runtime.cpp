@@ -69,6 +69,9 @@ static constexpr uint32_t DEFAULT_FB_ADDR = (PS2_RAM_SIZE - DEFAULT_FB_SIZE - 0x
 #if defined(PLATFORM_VITA)
 static constexpr int HOST_WINDOW_WIDTH = 960;
 static constexpr int HOST_WINDOW_HEIGHT = 544;
+#elif defined(__linux__) && !defined(__ANDROID__)
+static constexpr int HOST_WINDOW_WIDTH = 1024;
+static constexpr int HOST_WINDOW_HEIGHT = 720;
 #else
 static constexpr int HOST_WINDOW_WIDTH = FB_WIDTH;
 static constexpr int HOST_WINDOW_HEIGHT = DEFAULT_DISPLAY_HEIGHT;

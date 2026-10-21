@@ -60,7 +60,11 @@ class Library:
     @property
     def disc(self):
         path = self.state.get("disc")
-        return Path(path) if isinstance(path, str) and Path(path).is_file() else None
+        if not isinstance(path, str):
+            return None
+        value = Path(path)
+        value = value if value.is_absolute() else self.directory / value
+        return value if value.is_file() else None
 
     @property
     def player_directory(self):
@@ -103,7 +107,7 @@ class Library:
             executable = Pipeline(self.program, self.directory, self.game_environment(), progress).prepare(destination)
         except subprocess.CalledProcessError as exc:
             raise ValueError(f"A compilação não terminou. Consulte os detalhes em:\n{self.directory / 'last-prepare.log'}") from exc
-        state = {"disc": str(boot), "name": source.name, "serial": "SCUS-97472", "executable": str(executable)}
+        state = {"disc": str(boot.relative_to(self.directory)), "name": source.name, "serial": "SCUS-97472", "executable": str(executable)}
         atomic_json(self.config, state)
         self.state = state
         return boot
