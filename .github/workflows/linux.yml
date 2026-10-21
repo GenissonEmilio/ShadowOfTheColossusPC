@@ -26,6 +26,11 @@ jobs:
         run: |
           LD_LIBRARY_PATH="$PWD/artifacts/compiler/lib" artifacts/compiler/bin/ps2_recomp --help
           test -f artifacts/compiler/manifest.json
+      - name: Native memory-card persistence (synthetic data)
+        run: |
+          docker run --rm --init --cpus=2 --network=none -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder python3 tools/linux/test_memory_card.py \
+            --program /src/artifacts/compiler-check --out /src/artifacts/card-persistence
       - name: Package content check
         run: |
           test -f dist/ShadowOfTheColossusPC-0.1.0-linux-x86_64.tar.gz
