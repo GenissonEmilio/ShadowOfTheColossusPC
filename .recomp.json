@@ -2,13 +2,32 @@
   "game": "Shadow of the Colossus",
   "system": "PS2",
   "type": "recomp",
-  "project": "celosia",
+  "project": "ShadowOfTheColossusPC",
   "status": "in-progress",
-  "targets": ["macOS"],
+  "targets": [
+    "Linux"
+  ],
   "toolchain": "PS2Recomp",
-  "original": { "region": "USA", "serial": "SCUS-97472" },
-  "approach": "Static recompilation of the EE code with PS2Recomp, and a native Metal renderer fed at the game's own draw calls (models, skinning, lighting, fog, bloom, 2D)",
-  "notes": "Runs on macOS through static recompilation. The PS2 hardware is being replaced step by step: the native renderer (SOTC_NATIVE=1) draws the game from its own model, texture and sprite data with Metal, without the VIF/VU1/GS path. PS Vita is the long-term target.",
-  "tags": ["native-renderer", "metal", "vita"],
-  "maintainers": [{ "name": "HenryKun55", "link": "https://github.com/HenryKun55" }]
+  "original": {
+    "region": "USA",
+    "serial": "SCUS-97472"
+  },
+  "approach": "Local static recompilation of the USA EE code to C++/x86_64 with PS2Recomp, native OpenGL graphics and a Linux desktop launcher",
+  "notes": "Linux fork of HenryKun55/celosia. The owned ISO and XFF modules are compiled locally; generated game code and disc data are never distributed. Manual decompilation continues in the upstream project.",
+  "tags": [
+    "native-renderer",
+    "opengl",
+    "linux",
+    "desktop-launcher"
+  ],
+  "maintainers": [
+    {
+      "name": "GenissonEmilio",
+      "link": "https://github.com/GenissonEmilio"
+    },
+    {
+      "name": "HenryKun55 (upstream)",
+      "link": "https://github.com/HenryKun55/celosia"
+    }
+  ]
 }

@@ -1,7 +1,9 @@
 name: Linux native port
 on:
   push:
+    paths-ignore: ['docs/**', 'README.md', '.recomp.json']
   pull_request:
+    paths-ignore: ['docs/**', 'README.md', '.recomp.json']
   workflow_dispatch:
 permissions:
   contents: read
@@ -15,7 +17,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Import and cache checks (synthetic data only)
-        run: python3 -m unittest discover -s tests/linux -v
+        run: |
+          python3 -m unittest discover -s tests/linux -v
+          python3 -m compileall -q tools/desktop tools/linux
       - name: Build ROM-free compiler and desktop package
         run: tools/linux/build.sh
       - name: Check compiler relocation
