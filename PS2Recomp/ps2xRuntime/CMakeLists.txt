@@ -670,13 +670,18 @@ if(PS2X_IS_VITA)
             target_compile_options(${PS2X_VITA_TARGET} PRIVATE -mcpu=cortex-a9 -mfpu=neon -mfloat-abi=hard -mthumb)
         endif()
     endforeach()
-    target_compile_options(ps2_runtime PRIVATE -O2)
+    # The runtime and the game overrides at -O3 (throttled Vita3K, 2026-10-21:
+    # the render thread 57.5 -> 52.8 ms at the shrine altar, the attract demo
+    # 30.1 -> 29.5 ms; LTO on the two gave nothing).
+    target_compile_options(ps2_runtime PRIVATE -O3)
     target_compile_options(ps2EntryRunner PRIVATE ${PS2X_VITA_GAME_OPT})
     # Except the hot few: recompiled VU1 microcode and native replacements
     # (game overrides) run every vertex.
     get_target_property(PS2X_RUNNER_SOURCES ps2EntryRunner SOURCES)
     foreach(PS2X_SOURCE IN LISTS PS2X_RUNNER_SOURCES)
-        if(PS2X_SOURCE MATCHES "vu1rec_[^/]*\\.cpp$" OR PS2X_SOURCE MATCHES "/overrides/[^/]*\\.cpp$")
+        if(PS2X_SOURCE MATCHES "/overrides/[^/]*\\.cpp$")
+            set_source_files_properties(${PS2X_SOURCE} PROPERTIES COMPILE_OPTIONS "-O3")
+        elseif(PS2X_SOURCE MATCHES "vu1rec_[^/]*\\.cpp$")
             set_source_files_properties(${PS2X_SOURCE} PROPERTIES COMPILE_OPTIONS "-O2")
         endif()
     endforeach()

@@ -29,6 +29,7 @@
 namespace decomp_skeleton
 {
     using sotc_decomp::returnTo;
+    namespace vu = sotc_decomp::vu;
 
     struct Ctx
     {
@@ -148,30 +149,34 @@ namespace decomp_skeleton
             };
             auto yzx_ = [](__m128 v) { return _mm_shuffle_ps(v, v, _MM_SHUFFLE(3, 0, 2, 1)); };
             auto zxy_ = [](__m128 v) { return _mm_shuffle_ps(v, v, _MM_SHUFFLE(3, 1, 0, 2)); };
+            // Clamped once (sotc_decomp::vu): every PS2_V* operand below is
+            // a clamped input or a clamped result in the lanes kept.
             vf[11] = q(v0);
             vf[12] = q(a0);
-            vf[13] = PS2_VMUL(vf[11], vf[12]);
-            vf[13] = _mm_blendv_ps(vf[13], PS2_VADD(vf[13], ln(vf[13], 1)), x);
-            vf[13] = _mm_blendv_ps(vf[13], PS2_VADD(vf[13], ln(vf[13], 2)), x);
-            vf[13] = _mm_blendv_ps(vf[13], PS2_VSUB(vf[13], ln(vf[13], 0)), w);
-            vf[14] = _mm_blendv_ps(vf[14], PS2_VMUL(vf[12], ln(vf[11], 3)), xyz);
-            vf[15] = _mm_blendv_ps(vf[15], PS2_VMUL(vf[11], ln(vf[12], 3)), xyz);
-            ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, PS2_VMUL(yzx_(vf[12]), zxy_(vf[11])), xyz);
-            vf[16] = _mm_blendv_ps(vf[16], PS2_VSUB(ctx->vu0_acc, PS2_VMUL(yzx_(vf[11]), zxy_(vf[12]))), xyz);
-            vf[13] = _mm_blendv_ps(vf[13], PS2_VADD(vf[14], vf[15]), xyz);
-            vf[13] = _mm_blendv_ps(vf[13], PS2_VADD(vf[13], vf[16]), xyz);
+            const __m128 c11 = vu::clamp(vf[11]), c12 = vu::clamp(vf[12]);
+            vf[13] = vu::mulN(c11, c12);
+            vf[13] = _mm_blendv_ps(vf[13], vu::addN(vf[13], ln(vf[13], 1)), x);
+            vf[13] = _mm_blendv_ps(vf[13], vu::addN(vf[13], ln(vf[13], 2)), x);
+            vf[13] = _mm_blendv_ps(vf[13], vu::subN(vf[13], ln(vf[13], 0)), w);
+            vf[14] = _mm_blendv_ps(vf[14], vu::mulN(c12, ln(c11, 3)), xyz);
+            vf[15] = _mm_blendv_ps(vf[15], vu::mulN(c11, ln(c12, 3)), xyz);
+            ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, vu::mulN(yzx_(c12), zxy_(c11)), xyz);
+            vf[16] = _mm_blendv_ps(vf[16], vu::subN(ctx->vu0_acc, vu::mulN(yzx_(c11), zxy_(c12))), xyz);
+            vf[13] = _mm_blendv_ps(vf[13], vu::addN(vf[14], vf[15]), xyz);
+            vf[13] = _mm_blendv_ps(vf[13], vu::addN(vf[13], vf[16]), xyz);
             putq(v0, vf[13]);
             SET_GPR_U32(ctx, 4, a0);
         }
-        // ACC = m1 x v.x + m2 x v.y + m3 x v.z; returns ACC + m4 x v.w (vmulax / vmadday / vmaddaz / vmaddw).
-        __m128 column(__m128 v, __m128 w4) const
+        // ACC = m1 x v.x + m2 x v.y + m3 x v.z; returns ACC + m4 x v.w (vmulax / vmadday / vmaddaz / vmaddw),
+        // the rows m1..m4 clamped (vu::clampRows), v and w4 raw.
+        __m128 column(const vu::Rows &m, __m128 v, __m128 w4) const
         {
-            const __m128 *vf = ctx->vu0_vf;
-            __m128 acc = PS2_VMUL(vf[1], _mm_shuffle_ps(v, v, _MM_SHUFFLE(0, 0, 0, 0)));
-            acc = PS2_VADD(acc, PS2_VMUL(vf[2], _mm_shuffle_ps(v, v, _MM_SHUFFLE(1, 1, 1, 1))));
-            acc = PS2_VADD(acc, PS2_VMUL(vf[3], _mm_shuffle_ps(v, v, _MM_SHUFFLE(2, 2, 2, 2))));
+            const __m128 c = vu::clamp(v);
+            __m128 acc = vu::mulN(m.r[0], vu::lane<0>(c));
+            acc = vu::addN(acc, vu::mulN(m.r[1], vu::lane<1>(c)));
+            acc = vu::addN(acc, vu::mulN(m.r[2], vu::lane<2>(c)));
             ctx->vu0_acc = acc;
-            return PS2_VADD(acc, PS2_VMUL(vf[4], w4));
+            return vu::addN(acc, vu::mulN(m.r[3], vu::clamp(w4)));
         }
         void transCurrentMatrix(uint32_t site, uint32_t sp, uint32_t a0) const
         {
@@ -180,7 +185,7 @@ namespace decomp_skeleton
                 return call(site, sp);
             __m128 *vf = ctx->vu0_vf;
             vf[8] = q(a0);
-            vf[4] = column(vf[8], _mm_shuffle_ps(vf[0], vf[0], _MM_SHUFFLE(3, 3, 3, 3)));
+            vf[4] = column(vu::clampRows(vf + 1), vf[8], _mm_shuffle_ps(vf[0], vf[0], _MM_SHUFFLE(3, 3, 3, 3)));
         }
         void mulCurrentMatrixR(uint32_t site, uint32_t sp, uint32_t a0) const
         {
@@ -190,8 +195,9 @@ namespace decomp_skeleton
             __m128 *vf = ctx->vu0_vf;
             for (int c = 0; c < 4; ++c)
                 vf[14 + c] = q(a0 + 0x10u * c);
+            const vu::Rows rows = vu::clampRows(vf + 1); // vf1..vf4 stay as they are until the copy below
             for (int c = 0; c < 4; ++c)
-                vf[14 + c] = column(vf[14 + c], _mm_shuffle_ps(vf[14 + c], vf[14 + c], _MM_SHUFFLE(3, 3, 3, 3)));
+                vf[14 + c] = column(rows, vf[14 + c], _mm_shuffle_ps(vf[14 + c], vf[14 + c], _MM_SHUFFLE(3, 3, 3, 3)));
             for (int c = 0; c < 4; ++c)
                 vf[1 + c] = vf[14 + c];
         }
@@ -216,15 +222,17 @@ namespace decomp_skeleton
     __m128 zxy(__m128 v) { return _mm_shuffle_ps(v, v, _MM_SHUFFLE(3, 1, 0, 2)); }
 
     // vmul vf15, vf14, vf14; vaddy / vaddz / vaddw .x; vrsqrt Q, vf0w, vf15x; vmulq vf15, vf14, Q.
+    // v clamped once (sotc_decomp::vu); the sums are of clamped results.
     __m128 normalised(R5900Context *ctx, __m128 v, __m128 &vf15)
     {
         const __m128 vf0 = ctx->vu0_vf[0];
-        vf15 = PS2_VMUL(v, v);
-        vf15 = _mm_blendv_ps(vf15, PS2_VADD(vf15, lane<1>(vf15)), kX);
-        vf15 = _mm_blendv_ps(vf15, PS2_VADD(vf15, lane<2>(vf15)), kX);
-        vf15 = _mm_blendv_ps(vf15, PS2_VADD(vf15, lane<3>(vf15)), kX);
+        const __m128 c = vu::clamp(v);
+        vf15 = vu::mulN(c, c);
+        vf15 = _mm_blendv_ps(vf15, vu::addN(vf15, lane<1>(vf15)), kX);
+        vf15 = _mm_blendv_ps(vf15, vu::addN(vf15, lane<2>(vf15)), kX);
+        vf15 = _mm_blendv_ps(vf15, vu::addN(vf15, lane<3>(vf15)), kX);
         ctx->vu0_q = ps2VuRsqrt(ctx->vu0_status, _mm_cvtss_f32(lane<3>(vf0)), _mm_cvtss_f32(vf15));
-        vf15 = PS2_VMUL(v, _mm_set1_ps(ctx->vu0_q));
+        vf15 = vu::mulN(c, vu::clamp(_mm_set1_ps(ctx->vu0_q)));
         return vf15;
     }
 
@@ -242,26 +250,34 @@ namespace decomp_skeleton
 
         __m128 vf15;
         const __m128 vf0 = ctx->vu0_vf[0];
-        g.putq(local, normalised(ctx, g.q(local), vf15));
+        const __m128 vf0c = vu::clamp(vf0);
+        // normalised's result: clamped in every lane, read back below as vf11.
+        const __m128 quat = normalised(ctx, g.q(local), vf15);
+        g.putq(local, quat);
         // The rotation matrix of the quaternion (rows vf14..vf16, w 0).
-        __m128 vf12 = _mm_blendv_ps(ctx->vu0_vf[12], PS2_VADD(vf0, lane<3>(vf0)), kXyz);
-        __m128 vf11 = g.q(local);
+        // Clamped once (sotc_decomp::vu): each operand of the products and
+        // sums is a clamped value in the lanes the blend keeps (x, y, z;
+        // vf11's w is the quaternion's), so the results are PS2_V*'s bit for bit.
+        __m128 vf12 = _mm_blendv_ps(ctx->vu0_vf[12], vu::addN(vf0c, lane<3>(vf0c)), kXyz);
+        __m128 vf11 = quat;
         const __m128 mr32w = _mm_shuffle_ps(vf0, vf0, _MM_SHUFFLE(0, 3, 2, 1));
         __m128 vf14 = _mm_blendv_ps(ctx->vu0_vf[14], mr32w, kW);
         vf15 = _mm_blendv_ps(vf15, mr32w, kW);
         __m128 vf16 = _mm_blendv_ps(ctx->vu0_vf[16], mr32w, kW);
-        __m128 acc = _mm_blendv_ps(ctx->vu0_acc, PS2_VMUL(yzx(vf11), zxy(vf12)), kXyz);
-        vf11 = _mm_blendv_ps(vf11, PS2_VADD(acc, PS2_VMUL(vf0, vf0)), kXyz);
-        const __m128 vf10 = _mm_blendv_ps(ctx->vu0_vf[10], PS2_VADD(acc, PS2_VMUL(vf11, vf12)), kXyz);
-        const __m128 vf13 = PS2_VBLEND(ctx->vu0_vf[13], PS2_VMUL(vf11, vf10), kXyz);
-        acc = _mm_blendv_ps(acc, PS2_VMUL(yzx(vf11), zxy(vf10)), kXyz);
-        vf15 = _mm_blendv_ps(vf15, PS2_VADD(acc, PS2_VMUL(vf10, lane<3>(vf11))), kXyz);
-        vf16 = _mm_blendv_ps(vf16, PS2_VSUB(acc, PS2_VMUL(vf10, lane<3>(vf11))), kXyz);
-        acc = _mm_blendv_ps(acc, PS2_VMUL(yzx(vf13), zxy(vf12)), kXyz);
-        __m128 vf17 = _mm_blendv_ps(ctx->vu0_vf[17], PS2_VADD(acc, PS2_VMUL(vf13, vf12)), kXyz);
-        acc = _mm_blendv_ps(acc, PS2_VMUL(yzx(vf15), zxy(vf12)), kXyz);
-        vf15 = _mm_blendv_ps(vf15, PS2_VADD(acc, PS2_VMUL(vf0, vf0)), kXyz);
-        vf14 = PS2_VBLEND(vf14, PS2_VSUB(vf12, vf17), kXyz);
+        const __m128 vf0sq = vu::mulN(vf0c, vf0c);
+        __m128 acc = _mm_blendv_ps(ctx->vu0_acc, vu::mulN(yzx(vf11), zxy(vf12)), kXyz);
+        vf11 = _mm_blendv_ps(vf11, vu::addN(acc, vf0sq), kXyz);
+        const __m128 vf10 = _mm_blendv_ps(ctx->vu0_vf[10], vu::addN(acc, vu::mulN(vf11, vf12)), kXyz);
+        const __m128 vf13 = PS2_VBLEND(ctx->vu0_vf[13], vu::mulN(vf11, vf10), kXyz);
+        acc = _mm_blendv_ps(acc, vu::mulN(yzx(vf11), zxy(vf10)), kXyz);
+        const __m128 byW = vu::mulN(vf10, lane<3>(vf11));
+        vf15 = _mm_blendv_ps(vf15, vu::addN(acc, byW), kXyz);
+        vf16 = _mm_blendv_ps(vf16, vu::subN(acc, byW), kXyz);
+        acc = _mm_blendv_ps(acc, vu::mulN(yzx(vf13), zxy(vf12)), kXyz);
+        __m128 vf17 = _mm_blendv_ps(ctx->vu0_vf[17], vu::addN(acc, vu::mulN(vf13, vf12)), kXyz);
+        acc = _mm_blendv_ps(acc, vu::mulN(yzx(vf15), zxy(vf12)), kXyz);
+        vf15 = _mm_blendv_ps(vf15, vu::addN(acc, vf0sq), kXyz);
+        vf14 = PS2_VBLEND(vf14, vu::subN(vf12, vf17), kXyz);
         vf17 = _mm_blendv_ps(vf17, vf14, kYz);
         vf14 = _mm_blendv_ps(vf14, vf16, kY);
         vf16 = _mm_blendv_ps(vf16, vf15, kY);

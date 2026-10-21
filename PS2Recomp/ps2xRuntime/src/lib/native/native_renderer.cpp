@@ -819,11 +819,16 @@ namespace native_renderer
             finished.clear();
         }
     };
-    AsyncBuilds &asyncBuilds()
+    AsyncBuilds *g_asyncBuilds = nullptr;
+    AsyncBuilds &asyncBuildsFirst()
     {
         static AsyncBuilds *a = new AsyncBuilds(); // never destroyed: its thread runs to the end
+        g_asyncBuilds = a;
         return *a;
     }
+    // Asked for every draw: a plain pointer once made (a function-local static
+    // costs a guard check with a memory barrier at each call on the Vita).
+    inline AsyncBuilds &asyncBuilds() { return g_asyncBuilds ? *g_asyncBuilds : asyncBuildsFirst(); }
     bool buildAsync(std::vector<uint64_t> ids, std::function<void()> work, std::function<void()> finish)
     {
         if (!tuning().asyncBuilds || !backend())

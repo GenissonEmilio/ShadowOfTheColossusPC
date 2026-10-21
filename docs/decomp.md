@@ -100,6 +100,7 @@ What a native function has to keep, learned the hard way:
 | decomp_ptcldraw.cpp | manager_sub_0113E940 (particleDraw), its particle loop | 600 + 700, 0 mismatches | then the recompiled code from its label 0x113eafc (the matrix, the ptclman packets) |
 | decomp_collision.cpp | the segment test: ClipCollisionDirectCallBack (0x112d590), the tree's node visitor and sides (01131C80, 0112C610, 0112C498), the leaf (0112BE58), ClipCollisionDB (the plane, the crossing, the triangle), GetCollisionDBSurfBoundary, getLayoutClassCollisionIndepSurfBoundary, GetCollisionDBAttributeAdr; ClipCollisionDB's keep variant (0111C078, its first test); the sphere finder's leaf (01115798 / 01115A50) and CheckCollisionFinderExistData; the id filters (CameraVisibility, CameraLeave, 010D41E0, 011292B0, pathJudgeFunc, 01434C00) | route (EVERY=100-200, parents left recompiled for the children): ClipCollisionDB 21 700, leaf 2 400, node / sides 10 500, DirectCallBack 600, keep 5 900, finder leaf 1 300, filters 300-3 500 each; attract demo: see below; 0 mismatches | the shrine altar's collision family, ~29 ms of the throttled Vita3K frame: see "Collision" below |
 | decomp_pointsort.cpp | execPointListSort (0x142da48) | 300 (route), 0 mismatches | the path points within a radius, selection-sorted (1.3% at the altar); getPointDataByAreaIdx stays a guest call |
+| decomp_skeleton.cpp | skeletonPose: the bone's VU0 block, the quaternion normalisation, MultiCurrentQuaternion, iosTransCurrentMatrix / iosMulCurrentMatrixR with each operand clamped once (vu::*N, the rows once for the four columns) | 87 300 (route, EVERY=20) + 17 900 (attract demo), 0 mismatches | ~210 -> ~90 clamps (ps2VuNormalize) a bone |
 
 The wake is a round trip: the check runs the sub-thread until it sleeps,
 and that code writes values that differ between two runs of the same code
@@ -189,6 +190,84 @@ the HEAD VPK and the new one, the host shared with another Vita3K):
 Together (throttled Vita3K attract demo, frames 1100-1460, the same VPK
 with SOTC_DECOMP_SKIP / PS2X_FPU_SETCSR=1 for the old code): 45.7 -> 38.0
 ms a frame, game thread 42.1 -> 34.5 ms.
+
+## Compiler level and the hooks (2026-10-21, afternoon)
+
+The altar profile after the collision work (throttled Vita3K, HEAD
+5464e5a: 68.6 ms a frame, game thread 57.6 + hooks 10.9) is flat: the
+recompiled game code is 57% of the game thread (33 ms) over ~1 750
+functions, nothing above 1.1%; ours (hooks and decomp_*) ~29%. Grouped by
+caller (macOS `sample` of the same scene, inclusive, waits left out): the
+display walk DispDispObjGroupModel ~28% (modelDispHook half of it, the
+particle emitters 4%), the character control / AI (st_controltarget,
+010CABA0) 8%, the animation (ExecCharaGeometry through the script VM, IK,
+GetMotion*) ~10%, the camera (doit_cameraman) 5%, the display list DMA
+(iosDlTrans) 5%, the script data / life bar 6%.
+
+**The recompiled code's GPR access** (ps2_runtime_macros.h). GPR_U32 /
+SET_GPR_* went through the context's __m128i registers: every read moved
+the value from a NEON register to an ARM one (a stall on the Cortex-A9)
+and every 32-bit write loaded the whole 128-bit register, merged its low
+half and stored it back. They are now plain 32 / 64-bit loads and stores
+of the register's low half (memcpy: no aliasing question). With them the
+guest RAM test leads each READ / WRITE macro with a hint (PS2_EXPECT:
+main RAM on the straight path; GCC had laid the RAM path out of line).
+isysGroupForNext: 1 001 -> 864 instructions, 80 NEON loads / stores -> 2,
+11 NEON -> ARM moves -> 0. Measured on the 40 unity batches holding 69% of
+the recompiled time (rebuilt by hand, the rest left as it was): altar
+67.2 -> 61.2 ms, attract demo 33.7 -> 31.8. Every recompiled file includes
+the header: the change needs the full game rebuild (Mac 11 min, Vita ~70
+min, ccache has nothing for it).
+
+**The hooks:** modelDispHook read seven function-local statics per packet
+(debug switches; each a guard check with a barrier on ARM): read once per
+call now (ModelDispEnv); asyncBuilds() likewise, per draw. The part test
+in modelDispState makes the eight corners' CLIP flags four at a time in
+vectors (no move to ARM registers per corner); SOTC_MODELDISP_CHECK=1:
+160 000 checks on the route, 30 000 on the attract demo, 0 mismatches.
+IdSet (the renderer's id sets, mostly asked for ids they do not hold)
+stays at most half full: a miss walked ~8 slots at 3/4. With the skeleton
+change above: altar 68.4 -> 67.2 ms.
+
+**PGO** works with the VitaSDK, with care: its libgcov is built without
+libc (no file I/O: __gcov_init / __gcov_dump are empty, the value
+profilers missing). Instrument with `-fprofile-generate=ux0:data/celosia/pgo
+-fprofile-update=single -fno-profile-values -fno-profile-reorder-functions
+-fprofile-info-section=gcov_info`, link with `-fprofile-generate
+-Wl,--undefined=__gcov_info_to_gcda`; SOTC_GCOV_DUMP_FRAME=<n> writes the
+.gcda files through __gcov_info_to_gcda (sotc_native.cpp gcovDump). The
+dump leaves runs / sum_max at 0: set them (runs 1, sum_max the largest
+arc count of all files) before `-fprofile-use=<dir> -fprofile-partial-training
+-fprofile-correction -fno-profile-values -fno-profile-reorder-functions
+-fno-vpt -Wno-missing-profile -Wno-coverage-mismatch`. Compile gen and use
+from the same directory with the same relative -o (the .gcda name is the
+object's mangled path). The instrumented build runs at 87 ms at the altar
+(throttled), so training in Vita3K is fine. Trained on the altar route and
+the attract demo, applied to the same 40 batches and the overrides: altar
+60.3 / 60.6 -> 59.4 / 59.0 ms, attract demo 31.7 / 31.7 -> 31.1 / 31.2
+(~2%). Not worth two full rebuilds and a stale-profile risk at every game
+code change now; the render thread is the next limit anyway (below).
+
+**-O3 / LTO on the runtime and the overrides** (no game rebuild): -O3
+(CMakeLists: ps2_runtime and game/overrides; vu1rec stays -O2) took the
+render thread 57.5 -> 52.8 ms at the altar and the attract demo 30.1 ->
+29.5 ms; LTO of the two (-flto, gcc-ar archive) gave nothing (58.8 / 30.0).
+
+**All together** (full rebuild, throttled Vita3K, alternating with the HEAD
+5464e5a VPK): shrine altar 67.8 / 70.2 -> 57.0 / 57.1 ms a frame (game
+thread 57-59 -> 47, hooks 10.8 -> 9.7), attract demo 33.9 / 34.0 -> 29.5 /
+29.5 ms. Mac: the route reaches the plain, game clock 1.000x;
+SOTC_DIFFTEST=all over the route and the attract demo: 0 mismatches but
+isysWakeupSubThread's known noise (above). ELF 124 -> 113 MB on the Vita.
+
+**What limits the altar now: the render thread** (~52-57 ms, the game
+thread ~57). Its profile (thread 246): sceGxmDraw 26%, sceGxmSetVertexStream
+9.5%, sceGxmSetFragmentTexture 9.5%, vitaGL's _glDrawArrays 7.8%, our
+Renderer::render loop 10% and uniform4 7.7%, memcmp in vglCreateVertexProgram
+4.7% (per draw), the unordered_map modulo 4.3%. The sceGxm* part is Vita3K's
+HLE and may cost less on the hardware; fewer draws (~2 000 at the altar) and
+fewer uniform uploads per draw are the levers there.
+
 
 ## Next candidates (profile 2026-10-20 evening, throttled attract demo, after the above)
 

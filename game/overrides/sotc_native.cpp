@@ -44,6 +44,8 @@
 #include <cstring>
 #include <iostream>
 #include <set>
+#include <string>
+#include <sys/stat.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -1010,11 +1012,18 @@ namespace sotc_native
         return 0;
     }
 
+    // SOTC_LOG_SURFACE_REGS, read once into a plain flag (no guard / barrier per call).
+    bool g_logSurfaceRegs()
+    {
+        static int8_t state = -1; // game thread only
+        if (state < 0)
+            state = std::getenv("SOTC_LOG_SURFACE_REGS") != nullptr;
+        return state != 0;
+    }
     native_renderer::Blend surfaceBlend(uint32_t s, uint32_t reg = 0x42u)
     {
         // SOTC_LOG_SURFACE_REGS=1: the distinct GS registers of the surfaces' A+D packets.
-        static const bool logRegs = std::getenv("SOTC_LOG_SURFACE_REGS") != nullptr;
-        if (logRegs && reg == 0x42u)
+        if (reg == 0x42u && g_logSurfaceRegs())
         {
             static std::set<std::pair<uint32_t, uint64_t>> seen;
             for (uint32_t q = s + 0x60u; q < s + 0xC0u; q += 16u)
@@ -1626,6 +1635,60 @@ namespace sotc_native
         c = {};
     }
 
+    // PGO on the Vita: the VitaSDK's libgcov has no file I/O (built without
+    // libc), so a build made with -fprofile-generate -fprofile-info-section=
+    // gcov_info (-fno-profile-values -fno-profile-reorder-functions: its
+    // value profilers are empty) writes its .gcda files here, through
+    // __gcov_info_to_gcda, each to the name compiled in (ux0:...).
+    // SOTC_GCOV_DUMP_FRAME=<n>: written at frame n and every n frames after
+    // (the counts so far; the last write wins). No-op in other builds.
+#ifdef PLATFORM_VITA
+    extern "C"
+    {
+        struct gcov_info;
+        extern const gcov_info *const __start_gcov_info[] __attribute__((weak));
+        extern const gcov_info *const __stop_gcov_info[] __attribute__((weak));
+        void __gcov_info_to_gcda(const gcov_info *, void (*)(const char *, void *), void (*)(const void *, unsigned, void *),
+                                 void *(*)(unsigned, void *), void *) __attribute__((weak));
+    }
+    void gcovDump(uint64_t frame)
+    {
+        static const uint64_t every = std::getenv("SOTC_GCOV_DUMP_FRAME") ? std::strtoull(std::getenv("SOTC_GCOV_DUMP_FRAME"), nullptr, 10) : 0u;
+        if (!every || frame % every != 0u || !__gcov_info_to_gcda || !__start_gcov_info)
+            return;
+        size_t files = 0;
+        for (const gcov_info *const *info = __start_gcov_info; info != __stop_gcov_info; ++info)
+        {
+            std::FILE *file = nullptr;
+            __gcov_info_to_gcda(
+                *info,
+                [](const char *name, void *arg)
+                {
+                    std::FILE *&f = *static_cast<std::FILE **>(arg);
+                    std::string dir(name);
+                    dir.resize(dir.find_last_of('/') == std::string::npos ? 0u : dir.find_last_of('/'));
+                    if (!dir.empty())
+                        mkdir(dir.c_str(), 0777);
+                    f = std::fopen(name, "wb");
+                },
+                [](const void *data, unsigned size, void *arg)
+                {
+                    if (std::FILE *f = *static_cast<std::FILE **>(arg))
+                        std::fwrite(data, 1, size, f);
+                },
+                [](unsigned size, void *) -> void * { return std::malloc(size); }, &file);
+            if (file)
+            {
+                std::fclose(file);
+                ++files;
+            }
+        }
+        std::fprintf(stderr, "[gcov] frame %llu: %u .gcda files written\n", static_cast<unsigned long long>(frame), static_cast<unsigned>(files));
+    }
+#else
+    void gcovDump(uint64_t) {}
+#endif
+
     // A frame of the game ends when the display list goes to the VIF1.
     void syncFrame(uint8_t *rdram)
     {
@@ -1638,6 +1701,7 @@ namespace sotc_native
             frameLog();
             native_renderer::beginFrame();
             g_frame = frame;
+            gcovDump(frame);
             g_frameDraws = 0;
             g_skinnedDraws = 0;
             // A packet's id hashes its content: another area loaded in its
@@ -2743,17 +2807,23 @@ namespace sotc_native
         return flags;
     }
 
-    // vuClipFlags on a vector (bits as ordered integers against |w|).
-    inline uint32_t vuClipFlags4(__m128 v)
+    // vuClipFlags (bits as ordered integers against |w|) for four vectors at
+    // once, one per lane of the result: no move to the ARM registers per vector.
+    inline __m128i vuClipFlags4x(__m128 a, __m128 b, __m128 c, __m128 d)
     {
-        static constexpr uint8_t kSpread[8] = {0, 1, 4, 5, 16, 17, 20, 21}; // lane bits 0-2 -> flag bits 0, 2, 4
-        const __m128i bits = _mm_castps_si128(v);
-        const uint32_t wBits = static_cast<uint32_t>(_mm_cvtsi128_si32(_mm_shuffle_epi32(bits, 0xFF)));
-        const int32_t limit = (wBits & 0x7F800000u) != 0u ? static_cast<int32_t>(wBits & 0x7FFFFFFFu) : 0x007FFFFF;
-        const __m128i lim = _mm_set1_epi32(limit);
-        const uint32_t plus = static_cast<uint32_t>(_mm_movemask_ps(_mm_castsi128_ps(_mm_cmpgt_epi32(bits, lim)))) & 7u;
-        const uint32_t minus = static_cast<uint32_t>(_mm_movemask_ps(_mm_castsi128_ps(_mm_cmpgt_epi32(_mm_xor_si128(bits, _mm_set1_epi32(static_cast<int>(0x80000000u))), lim)))) & 7u;
-        return kSpread[plus] | (kSpread[minus] << 1);
+        _MM_TRANSPOSE4_PS(a, b, c, d); // a: the x of each, b: y, c: z, d: w
+        const __m128i w = _mm_castps_si128(d);
+        const __m128i expZero = _mm_cmpeq_epi32(_mm_and_si128(w, _mm_set1_epi32(0x7F800000)), _mm_setzero_si128());
+        const __m128i lim = _mm_or_si128(_mm_andnot_si128(expZero, _mm_and_si128(w, _mm_set1_epi32(0x7FFFFFFF))),
+                                         _mm_and_si128(expZero, _mm_set1_epi32(0x007FFFFF)));
+        const __m128i sign = _mm_set1_epi32(static_cast<int>(0x80000000u));
+        const auto lanes = [&](__m128 v, int plusBit)
+        {
+            const __m128i bits = _mm_castps_si128(v);
+            return _mm_or_si128(_mm_and_si128(_mm_cmpgt_epi32(bits, lim), _mm_set1_epi32(1 << plusBit)),
+                                _mm_and_si128(_mm_cmpgt_epi32(_mm_xor_si128(bits, sign), lim), _mm_set1_epi32(2 << plusBit)));
+        };
+        return _mm_or_si128(_mm_or_si128(lanes(a, 0), lanes(b, 2)), lanes(c, 4));
     }
 
     void modelDispState(R5900Context *ctx, uint32_t instance, const float model[16])
@@ -2798,16 +2868,28 @@ namespace sotc_native
                 const __m128 byX[2] = {ps2VuNormalize(_mm_mul_ps(col0, _mm_shuffle_ps(lo, lo, 0x00))), ps2VuNormalize(_mm_mul_ps(col0, _mm_shuffle_ps(hi, hi, 0x00)))};
                 const __m128 byY[2] = {ps2VuNormalize(_mm_mul_ps(col1, _mm_shuffle_ps(lo, lo, 0x55))), ps2VuNormalize(_mm_mul_ps(col1, _mm_shuffle_ps(hi, hi, 0x55)))};
                 const __m128 byZ[2] = {ps2VuNormalize(_mm_mul_ps(col2, _mm_shuffle_ps(lo, lo, 0xAA))), ps2VuNormalize(_mm_mul_ps(col2, _mm_shuffle_ps(hi, hi, 0xAA)))};
-                uint32_t all = 0x3Fu, any = 0u;
-                for (uint8_t corner : kCorners)
+                __m128 v[8];
+                for (int k = 0; k < 8; ++k)
                 {
-                    __m128 v = ps2VuNormalize(_mm_add_ps(byX[corner & 1], byY[(corner >> 1) & 1]));
-                    v = ps2VuNormalize(_mm_add_ps(v, byZ[(corner >> 2) & 1]));
-                    v = ps2VuNormalize(_mm_add_ps(v, byW));
-                    clipRegister = ((clipRegister << 6) | vuClipFlags4(v)) & 0xFFFFFFu;
-                    all &= clipRegister;
-                    any |= clipRegister;
+                    const uint8_t corner = kCorners[k];
+                    v[k] = ps2VuNormalize(_mm_add_ps(byX[corner & 1], byY[(corner >> 1) & 1]));
+                    v[k] = ps2VuNormalize(_mm_add_ps(v[k], byZ[(corner >> 2) & 1]));
+                    v[k] = ps2VuNormalize(_mm_add_ps(v[k], byW));
                 }
+                // The corners' judgements f[3..10], after the register's last
+                // three (f[0..2]); the register after corner k holds f[k..k+3]
+                // (6 bits each, f[k+3] lowest). all = 0x3f AND the eight
+                // registers (their low 6 bits: the corners' own), any = the OR
+                // of the registers (every f).
+                alignas(16) uint32_t f[11];
+                f[0] = (clipRegister >> 12) & 0x3Fu;
+                f[1] = (clipRegister >> 6) & 0x3Fu;
+                f[2] = clipRegister & 0x3Fu;
+                _mm_storeu_si128(reinterpret_cast<__m128i *>(f + 3), vuClipFlags4x(v[0], v[1], v[2], v[3]));
+                _mm_storeu_si128(reinterpret_cast<__m128i *>(f + 7), vuClipFlags4x(v[4], v[5], v[6], v[7]));
+                const uint32_t all = f[3] & f[4] & f[5] & f[6] & f[7] & f[8] & f[9] & f[10];
+                const uint32_t any = f[0] | f[1] | f[2] | f[3] | f[4] | f[5] | f[6] | f[7] | f[8] | f[9] | f[10];
+                clipRegister = f[10] | (f[9] << 6) | (f[8] << 12) | (f[7] << 18);
                 return all ? 1u : (any ? 0u : 2u);
             };
             struct ClipBack // the register as modelDisp leaves it
@@ -3077,9 +3159,38 @@ namespace sotc_native
         return native_renderer::buildAsync(std::move(ids), work, finish);
     }
 
+    // modelDispHook's debugging switches, read once: a function-local static
+    // costs a guard check with a memory barrier (dmb) at every use on the
+    // Vita, and the packet loop used seven of them per packet.
+    struct ModelDispEnv
+    {
+        bool logPasses = std::getenv("SOTC_NATIVE_LOG") != nullptr;
+        bool logMat = std::getenv("SOTC_NATIVE_LOGMAT") != nullptr;
+        uint32_t skipLayers = [] // debugging: SOTC_NATIVE_SKIPLAYERS=12,18
+        {
+            uint32_t mask = 0;
+            if (const char *env = std::getenv("SOTC_NATIVE_SKIPLAYERS"))
+                for (const char *p = env; *p;)
+                {
+                    mask |= 1u << (std::strtoul(p, const_cast<char **>(&p), 10) & 31u);
+                    if (*p)
+                        ++p;
+                }
+            return mask;
+        }();
+        int logLayer = std::getenv("SOTC_LOG_LAYER") ? std::atoi(std::getenv("SOTC_LOG_LAYER")) : -1;
+        // Debugging: who drew what. SOTC_NATIVE_IDCOLOR=1 every model, =<n> > 1
+        // only surfaces in layers >= n (the rest drawn as usual).
+        int idFrom = std::getenv("SOTC_NATIVE_IDCOLOR") ? std::max(1, std::atoi(std::getenv("SOTC_NATIVE_IDCOLOR"))) : 0;
+        float tintAlpha = std::getenv("SOTC_REFLECT_ALPHA") ? static_cast<float>(std::atof(std::getenv("SOTC_REFLECT_ALPHA"))) : 1.0f;
+        float refractAlpha = std::getenv("SOTC_REFRACT_ALPHA") ? static_cast<float>(std::atof(std::getenv("SOTC_REFRACT_ALPHA"))) : 1.0f;
+        bool showRefraction = std::getenv("SOTC_REFRACT_SHOW") != nullptr; // debugging: where it lands, in red
+    };
+
     void modelDispHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         syncFrame(rdram);
+        static const ModelDispEnv env;
         const uint32_t instance = GPR_U32(ctx, 4), matrix = GPR_U32(ctx, 5);
         float model[16];
         for (int i = 0; i < 16; ++i)
@@ -3357,7 +3468,7 @@ namespace sotc_native
                     transform = projection;
                 }
             }
-            static const bool logPasses = std::getenv("SOTC_NATIVE_LOG") != nullptr;
+            const bool logPasses = env.logPasses;
             if (logPasses)
             {
                 uint64_t f;
@@ -3373,24 +3484,13 @@ namespace sotc_native
                                  (unsigned long long)f, alphaReg & 0xFFu, surfaceLayer(header, s, fading), word(s + 0x1Cu), opacity);
                 }
             }
-            static const uint32_t skipLayers = [] // debugging: SOTC_NATIVE_SKIPLAYERS=12,18
-            {
-                uint32_t mask = 0;
-                if (const char *env = std::getenv("SOTC_NATIVE_SKIPLAYERS"))
-                    for (const char *p = env; *p;)
-                    {
-                        mask |= 1u << (std::strtoul(p, const_cast<char **>(&p), 10) & 31u);
-                        if (*p)
-                            ++p;
-                    }
-                return mask;
-            }();
+            const uint32_t skipLayers = env.skipLayers;
             // Layers 12/13 are the reflection pass (reflectionBegin): the world
             // seen in a mirror, drawn by the game into a buffer of its own with
             // the camera context's +0x520 matrix and sampled by the reflecting
             // surfaces (layers 14/15). Never on the screen; not rendered yet.
             const uint32_t layer = surfaceLayer(header, s, fading);
-            static const int logLayer = std::getenv("SOTC_LOG_LAYER") ? std::atoi(std::getenv("SOTC_LOG_LAYER")) : -1;
+            const int logLayer = env.logLayer;
             if (static_cast<int>(layer) == logLayer)
             {
                 static std::set<uint64_t> told;
@@ -3436,9 +3536,7 @@ namespace sotc_native
                 if (told.insert((static_cast<uint64_t>(header) << 16) | surface).second)
                     std::fprintf(stderr, "[row] header %08x surface %u layer %u offset %g %g\n", header, surface, surfaceLayer(header, s, fading), state.uvOffset[0], state.uvOffset[1]);
             }
-            // Debugging: who drew what. SOTC_NATIVE_IDCOLOR=1 every model, =<n> > 1
-            // only surfaces in layers >= n (the rest drawn as usual).
-            static const int idFrom = std::getenv("SOTC_NATIVE_IDCOLOR") ? std::max(1, std::atoi(std::getenv("SOTC_NATIVE_IDCOLOR"))) : 0;
+            const int idFrom = env.idFrom; // SOTC_NATIVE_IDCOLOR
             if (idFrom && (idFrom == 1 || static_cast<int>(state.order) >= idFrom) && state.blend != native_renderer::Blend::Additive) // glows keep their look
             {
                 uint32_t h = (header ^ (surface * 0x9E37u)) * 2654435761u;
@@ -3451,7 +3549,7 @@ namespace sotc_native
                                  static_cast<int>(surfaceBlend(s)), static_cast<unsigned long long>(state.texture), surface, word(s + 0x18u));
             }
             state.background = state.order == 1u;            // the sky
-            static const bool logMat = std::getenv("SOTC_NATIVE_LOGMAT") != nullptr;
+            const bool logMat = env.logMat;
             if (logMat && k == 0u)
             {
                 static int n = 0;
@@ -3552,7 +3650,7 @@ namespace sotc_native
                 }
                 static const float identity4[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
                 std::memcpy(refl.light, mv ? mv : identity4, 16 * sizeof(float));
-                static const float tintAlpha = std::getenv("SOTC_REFLECT_ALPHA") ? static_cast<float>(std::atof(std::getenv("SOTC_REFLECT_ALPHA"))) : 1.0f;
+                const float tintAlpha = env.tintAlpha;
                 refl.reflectionTint[0] = refl.reflectionTint[1] = refl.reflectionTint[2] = 1.0f;
                 refl.reflectionTint[3] = std::clamp(real(data + 0x3Cu) / 128.0f, 0.0f, 2.0f) * tintAlpha;
                 // reflectionBegin's ripple: the mirror copied to fbp + 0x20 in 32
@@ -3571,7 +3669,7 @@ namespace sotc_native
                 // Microcode 2 in layer 9: the copy's colour as is (RGB 128), the
                 // vertex alpha under PABE (below 0x80 not blended): opaque.
                 const bool noRefract = !native_renderer::tuning().refraction;
-                static const float refractAlpha = std::getenv("SOTC_REFRACT_ALPHA") ? static_cast<float>(std::atof(std::getenv("SOTC_REFRACT_ALPHA"))) : 1.0f;
+                const float refractAlpha = env.refractAlpha;
                 if (!noRefract && !layer14)
                 {
                     native_renderer::DrawState refr = refl;
@@ -3582,7 +3680,7 @@ namespace sotc_native
                     refr.order = 9;
                     refr.reflectionTint[0] = refr.reflectionTint[1] = refr.reflectionTint[2] = 1.0f;
                     refr.reflectionTint[3] = refractAlpha;
-                    static const bool showRefraction = std::getenv("SOTC_REFRACT_SHOW") != nullptr; // debugging: where it lands, in red
+                    const bool showRefraction = env.showRefraction; // debugging: where it lands, in red
                     if (showRefraction)
                     {
                         refr.reflectionTint[0] = 4.0f;

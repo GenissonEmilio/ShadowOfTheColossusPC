@@ -43,7 +43,9 @@ namespace native_renderer
                 (id == kEmpty ? m_hasEmpty : m_hasErased) = true;
                 return;
             }
-            if ((m_used + 1u) * 4u > m_slots.size() * 3u)
+            // At most half full (erased slots count): a lookup that misses
+            // (most of them) walks to an empty slot, ~8 probes at 3/4.
+            if ((m_used + 1u) * 2u > m_slots.size())
                 grow();
             size_t erased = ~size_t(0);
             for (size_t i = slot(id);; i = (i + 1u) & m_mask)
@@ -105,7 +107,7 @@ namespace native_renderer
             std::vector<uint64_t> old;
             old.swap(m_slots);
             size_t capacity = 64u;
-            while (capacity * 3u < (m_size + 1u) * 8u) // live ids up to 3/8 after the growth
+            while (capacity < (m_size + 1u) * 4u) // live ids up to 1/4 after the growth
                 capacity *= 2u;
             m_slots.assign(capacity, kEmpty);
             m_mask = capacity - 1u;
