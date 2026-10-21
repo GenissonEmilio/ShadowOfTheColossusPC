@@ -258,6 +258,14 @@ namespace sotc_decomp
         runToReturn(rdram, ctx, runtime, fn ? fn : runtime->lookupFunction(target));
     }
 
+    void callRecompiled(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t address, uint32_t ra, uint32_t sp)
+    {
+        SET_GPR_U32(ctx, 31, ra);
+        SET_GPR_U32(ctx, 29, sp);
+        ctx->pc = address;
+        runToReturn(rdram, ctx, runtime, recompiled(address));
+    }
+
     PS2Runtime::RecompiledFunction recompiled(uint32_t address)
     {
         const auto it = g_recompiled.find(address);

@@ -84,7 +84,8 @@ namespace native_renderer
         d.effectDetail = std::clamp(std::round(number("SOTC_EFFECT_DETAIL", d.effectDetail)), 0.0f, 2.0f);
     }
 
-    Tuning &tuning()
+    Tuning *g_tuning = nullptr;
+    Tuning &tuningFirst()
     {
         static Tuning t = []
         {
@@ -119,6 +120,8 @@ namespace native_renderer
             d.waterSource = number("SOTC_WATER_SOURCE", d.waterSource);
             d.frameLog = on("SOTC_FRAME_LOG");
             d.fastHooks = !on("SOTC_NATIVE_SLOWHOOKS");
+            if (on("SOTC_PACKET_QUICK"))
+                d.packetQuickCheck = std::atoi(std::getenv("SOTC_PACKET_QUICK")) != 0;
             if (on("SOTC_PS2_LISTS"))
                 d.ps2Lists = std::atoi(std::getenv("SOTC_PS2_LISTS")) != 0;
             if (on("SOTC_GPU_SKIN"))
@@ -147,6 +150,7 @@ namespace native_renderer
             d.preset = static_cast<float>(matchingPreset(d));
             return d;
         }();
+        g_tuning = &t;
         return t;
     }
 
@@ -202,6 +206,8 @@ namespace native_renderer
             add("SOTC_FRAME_LOG=1");
         if (!t.fastHooks)
             add("SOTC_NATIVE_SLOWHOOKS=1");
+        if (t.packetQuickCheck != d.packetQuickCheck)
+            add(std::string("SOTC_PACKET_QUICK=") + (t.packetQuickCheck ? "1" : "0"));
         if (t.ps2Lists)
             add("SOTC_PS2_LISTS=1");
         if (t.gpuSkinning != d.gpuSkinning)
@@ -355,6 +361,10 @@ namespace native_renderer
                     "Characters posed by the faster path and textures looked up once a frame. Off: the earlier code, to compare (the picture should not change).",
                     "Personagens posados pelo caminho mais rápido e texturas buscadas uma vez por quadro. Desligado: o código anterior, pra comparar (a imagem não deve mudar).",
                     &Tuning::fastHooks, "SOTC_NATIVE_SLOWHOOKS");
+        debugToggle("dbg_packet_quick", "Quick packet check", "Checagem rápida de pacotes",
+                    "With fast hooks: a model packet the game never rewrote is taken as it was while drawn frame after frame (a few of its words checked after a gap, fully one frame in 16); off: the full sample every frame.",
+                    "Com ganchos rápidos: um pacote de modelo que o jogo nunca reescreveu é tomado como estava enquanto desenhado quadro após quadro (algumas palavras checadas depois de uma pausa, por inteiro um quadro em 16); desligado: a amostra inteira a cada quadro.",
+                    &Tuning::packetQuickCheck, "SOTC_PACKET_QUICK");
         debugToggle("dbg_ps2_lists", "PS2 display lists", "Listas de exibição do PS2",
                     "On: the game also builds its PS2 display lists (VIF packets of every model for the VU1, texture uploads, the screen effects' sprites), which nothing draws, as before. Off: only what the game reads back is kept (faster).",
                     "Ligado: o jogo também monta suas listas de exibição do PS2 (pacotes VIF de cada modelo para a VU1, envios de textura, os sprites dos efeitos de tela), que nada desenha, como antes. Desligado: só o que o jogo lê de volta é mantido (mais rápido).",

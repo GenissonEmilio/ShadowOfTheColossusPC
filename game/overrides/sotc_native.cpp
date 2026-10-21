@@ -831,7 +831,18 @@ namespace sotc_native
     {
         uint32_t address = 0, size = 0;
         uint64_t frame = ~0ull, sample = 0, id = 0;
+        uint64_t quick = 0, sampledAt = 0; // four words; the frame of the last full sample
+        bool rewritten = false;            // seen changed in place
     };
+    // Four words of a packet, spread over it (the quick check).
+    inline uint64_t quickSample(uint32_t data, uint32_t size)
+    {
+        const uint32_t step = (size / 5u) & ~3u;
+        uint64_t h = 0xcbf29ce484222325ull ^ data;
+        for (uint32_t i = 1; i <= 4; ++i)
+            h = (h ^ word(data + (size >= 8u ? std::min(step * i, size - 4u) : 0u))) * 0x100000001b3ull;
+        return h;
+    }
     WayMemo<PacketMemo, 2048> g_packetMemo;
     // The last packetId whose bytes changed where they are (same address and
     // size, another sample): packets the game rewrites in place (every frame,
@@ -848,10 +859,25 @@ namespace sotc_native
         found = found && memo.size == size;
         if (found && memo.frame == g_frame)
             return memo.id;
+        // Never rewritten in place: four words, the full sample one frame in
+        // 16 (by address, so not all on the same frame).
+        if (found && !memo.rewritten && native_renderer::tuning().packetQuickCheck && g_frame - memo.sampledAt < 16u &&
+            ((g_frame + (data >> 5)) & 15u) != 0u)
+        {
+            // Drawn the frame before too: taken as it was (the full sample
+            // comes round within 16 frames). Back after a while: four words.
+            if (memo.frame + 1u == g_frame || quickSample(data, size) == memo.quick)
+            {
+                memo.frame = g_frame;
+                return memo.id;
+            }
+        }
         const uint64_t sampled = sample(data, size, 32u);
         if (found && memo.sample == sampled)
         {
             memo.frame = g_frame;
+            memo.sampledAt = g_frame;
+            memo.quick = quickSample(data, size);
             return memo.id;
         }
         // Drawn in the last two frames and changed: rewritten in place
@@ -860,7 +886,8 @@ namespace sotc_native
         // Bit 59 set, 60-63 clear: apart from the per-frame meshes' ids
         // (bits 60, 62, 63 and a count) and the second pass's (bit 61 flipped).
         const uint64_t id = (contentHash(data, size, 0x9E3779B97F4A7C15ull ^ size) & 0x07FFFFFFFFFFFFFFull) | (1ull << 59);
-        memo = {data, size, g_frame, sampled, id};
+        const bool rewritten = found && (memo.rewritten || g_packetChangedInPlace);
+        memo = {data, size, g_frame, sampled, id, quickSample(data, size), g_frame, rewritten};
         return id;
     }
 
@@ -2716,6 +2743,19 @@ namespace sotc_native
         return flags;
     }
 
+    // vuClipFlags on a vector (bits as ordered integers against |w|).
+    inline uint32_t vuClipFlags4(__m128 v)
+    {
+        static constexpr uint8_t kSpread[8] = {0, 1, 4, 5, 16, 17, 20, 21}; // lane bits 0-2 -> flag bits 0, 2, 4
+        const __m128i bits = _mm_castps_si128(v);
+        const uint32_t wBits = static_cast<uint32_t>(_mm_cvtsi128_si32(_mm_shuffle_epi32(bits, 0xFF)));
+        const int32_t limit = (wBits & 0x7F800000u) != 0u ? static_cast<int32_t>(wBits & 0x7FFFFFFFu) : 0x007FFFFF;
+        const __m128i lim = _mm_set1_epi32(limit);
+        const uint32_t plus = static_cast<uint32_t>(_mm_movemask_ps(_mm_castsi128_ps(_mm_cmpgt_epi32(bits, lim)))) & 7u;
+        const uint32_t minus = static_cast<uint32_t>(_mm_movemask_ps(_mm_castsi128_ps(_mm_cmpgt_epi32(_mm_xor_si128(bits, _mm_set1_epi32(static_cast<int>(0x80000000u))), lim)))) & 7u;
+        return kSpread[plus] | (kSpread[minus] << 1);
+    }
+
     void modelDispState(R5900Context *ctx, uint32_t instance, const float model[16])
     {
         const uint32_t header = word(word(instance) + 0x20u);
@@ -2744,17 +2784,27 @@ namespace sotc_native
             // (out), the register 0 at every read (this box's corners and the
             // three judgements before them all inside) -> 2, else 0 (partly).
             uint32_t clipRegister = ctx->vu0_clip_flags & 0xFFFFFFu;
+            // vuTransform four rows at a time (the same products and sums,
+            // each through the same clamp: ps2VuNormalize is vuNorm by lane),
+            // the products by each corner's x, y and z made once for the box.
+            const __m128 col0 = _mm_loadu_ps(clip), col1 = _mm_loadu_ps(clip + 4), col2 = _mm_loadu_ps(clip + 8), col3 = _mm_loadu_ps(clip + 12);
+            const __m128 byW = ps2VuNormalize(_mm_mul_ps(col3, _mm_set1_ps(1.0f)));
             const auto test = [&](uint32_t node) -> uint32_t
             {
                 static constexpr uint8_t kCorners[8] = {0, 6, 5, 3, 4, 2, 1, 7}; // bit 0 x, 1 y, 2 z: max
+                // the node's min (x, y, z at +0) and max (+0x10), clamped
+                const __m128 lo = ps2VuNormalize(_mm_loadu_ps(reinterpret_cast<const float *>(g_ram + (node & 0x1FFFFFCu)))),
+                             hi = ps2VuNormalize(_mm_loadu_ps(reinterpret_cast<const float *>(g_ram + ((node + 0x10u) & 0x1FFFFFCu))));
+                const __m128 byX[2] = {ps2VuNormalize(_mm_mul_ps(col0, _mm_shuffle_ps(lo, lo, 0x00))), ps2VuNormalize(_mm_mul_ps(col0, _mm_shuffle_ps(hi, hi, 0x00)))};
+                const __m128 byY[2] = {ps2VuNormalize(_mm_mul_ps(col1, _mm_shuffle_ps(lo, lo, 0x55))), ps2VuNormalize(_mm_mul_ps(col1, _mm_shuffle_ps(hi, hi, 0x55)))};
+                const __m128 byZ[2] = {ps2VuNormalize(_mm_mul_ps(col2, _mm_shuffle_ps(lo, lo, 0xAA))), ps2VuNormalize(_mm_mul_ps(col2, _mm_shuffle_ps(hi, hi, 0xAA)))};
                 uint32_t all = 0x3Fu, any = 0u;
                 for (uint8_t corner : kCorners)
                 {
-                    const float x = vuNorm(real(node + ((corner & 1) ? 0x10u : 0u))), y = vuNorm(real(node + ((corner & 2) ? 0x14u : 4u))),
-                                z = vuNorm(real(node + ((corner & 4) ? 0x18u : 8u)));
-                    float v[4];
-                    vuTransform(clip, x, y, z, 1.0f, v);
-                    clipRegister = ((clipRegister << 6) | vuClipFlags(v)) & 0xFFFFFFu;
+                    __m128 v = ps2VuNormalize(_mm_add_ps(byX[corner & 1], byY[(corner >> 1) & 1]));
+                    v = ps2VuNormalize(_mm_add_ps(v, byZ[(corner >> 2) & 1]));
+                    v = ps2VuNormalize(_mm_add_ps(v, byW));
+                    clipRegister = ((clipRegister << 6) | vuClipFlags4(v)) & 0xFFFFFFu;
                     all &= clipRegister;
                     any |= clipRegister;
                 }
@@ -3368,7 +3418,7 @@ namespace sotc_native
             state.texture = surfaceTexture(header, surface);
             state.blend = surfaceBlend(s);
             state.clamp = surfaceClamp(s);
-            state.order = surfaceLayer(header, s, fading);
+            state.order = layer; // surfaceLayer above (pure)
             state.opacity = opacity;
             const bool noMips = !native_renderer::tuning().mipmaps;
             if (!noMips)

@@ -98,6 +98,8 @@ What a native function has to keep, learned the hard way:
 | decomp_gctick.cpp | iosMallocGarbageTickProc with its time check kernel_sub_001C81B0 | 300 + 200, 0 mismatches | the heap's garbage walk, ~385 blocks a frame, the time check before each (1.7%) |
 | decomp_modelclip.cpp | manager_sub_01099C50 (modelClipPoint) | 5 500 + 2 600, 0 mismatches | a model point through the camera, CLIP test, distance (0.9%) |
 | decomp_ptcldraw.cpp | manager_sub_0113E940 (particleDraw), its particle loop | 600 + 700, 0 mismatches | then the recompiled code from its label 0x113eafc (the matrix, the ptclman packets) |
+| decomp_collision.cpp | the segment test: ClipCollisionDirectCallBack (0x112d590), the tree's node visitor and sides (01131C80, 0112C610, 0112C498), the leaf (0112BE58), ClipCollisionDB (the plane, the crossing, the triangle), GetCollisionDBSurfBoundary, getLayoutClassCollisionIndepSurfBoundary, GetCollisionDBAttributeAdr; ClipCollisionDB's keep variant (0111C078, its first test); the sphere finder's leaf (01115798 / 01115A50) and CheckCollisionFinderExistData; the id filters (CameraVisibility, CameraLeave, 010D41E0, 011292B0, pathJudgeFunc, 01434C00) | route (EVERY=100-200, parents left recompiled for the children): ClipCollisionDB 21 700, leaf 2 400, node / sides 10 500, DirectCallBack 600, keep 5 900, finder leaf 1 300, filters 300-3 500 each; attract demo: see below; 0 mismatches | the shrine altar's collision family, ~29 ms of the throttled Vita3K frame: see "Collision" below |
+| decomp_pointsort.cpp | execPointListSort (0x142da48) | 300 (route), 0 mismatches | the path points within a radius, selection-sorted (1.3% at the altar); getPointDataByAreaIdx stays a guest call |
 
 The wake is a round trip: the check runs the sub-thread until it sleeps,
 and that code writes values that differ between two runs of the same code
@@ -105,6 +107,54 @@ and that code writes values that differ between two runs of the same code
 (SOTC_DIFFTEST_CONTROL=1, the recompiled code in both legs) gives the same
 mismatches at the same addresses at the same rate (17 000 checks, ~700
 each); every register (all 128 bits, FPU, hi / lo / sa) matched in all.
+
+## Collision (2026-10-21)
+
+The shrine altar spent ~29 ms of the throttled Vita3K frame (94 ms) in the
+collision database: the camera's and the character's segment and sphere
+probes against each object's collision tree. decomp_collision.cpp does the
+segment test from the object loop down (ClipCollisionDirectCallBack ->
+the node visitor and its two sides -> the leaf -> ClipCollisionDB) as
+native calls into each other, so a traversal is native from its top; the
+recompiled callers of any of them still reach the native one through the
+function table.
+
+- **Guest calls from native code** keep the original's ra and frame sp
+  (callGuest), with whatever the callee reads from that frame written
+  there first (the filters get pointers into it). The vertex fetchers
+  (01114C70 / 01116108), EntryModifiedManager, the isys group walk,
+  GetArbitraryDirectionInverseMatrix and the filters the file does not
+  know stay guest calls; 01114C70 is native when its three vertices are
+  cached (the common case).
+- **Recompiled fallbacks from native code**: sotc_decomp::callRecompiled
+  (address, ra, sp), run to its return. Handing ctx straight to a
+  recompiled function after guest calls needs ra, sp *and pc* put back
+  (the generated code switches on ctx->pc): clipCollisionKeep returned 0
+  for 2 until that was fixed (28 mismatches on the route).
+- **Lookups kept between calls**: a few pointer chains (a class's plane and
+  boundary tables, its part records) are kept in static caches tagged with
+  an epoch that every entry from guest code and every guest call from the
+  native code bumps (decomp_collision's G constructor, guestCall,
+  recompiledCall): within one native traversal they are read once, and
+  nothing but guest code could change them.
+- **Fewer clamps**: an operand clamped once and then summed / multiplied
+  with vu::mulN / addN / subN gives the PS2_V* result bit for bit (the
+  clamp is idempotent; x 1.0 of a clamped value is that value); used for
+  the plane distances and the barycentric test.
+- **Checking a child the native parent calls directly**: the parent is
+  left recompiled for that run (SOTC_DECOMP_SKIP=parent), so the child is
+  reached through the function table and checked.
+
+Throttled Vita3K (444 MHz, 3 cores), HEAD 461fd49 and the new build
+alternated, twice each: shrine altar 94.2 / 93.9 -> 68.6 / 68.6 ms a frame
+(game thread 76.7 -> 57.6, hooks 17.3 -> 10.9: the hooks' share is the
+vectorised part test and the packet check in sotc_native.cpp); attract demo
+34.4 / 34.5 -> 34.0 / 34.0. Left in the altar profile (v9): the native
+clipDB / leaf ~1.9% each, the finder's traversal (01128F38, 01116958),
+ClipCollisionDirectCallBackObjAry and 0111C078's crossing path ~0.5% each.
+
+SOTC_COLLISION_STATS=1 counts the paths (native / recompiled, crossings,
+planes made, the filters run as guest code by address).
 
 Two bugs the checks caught, worth remembering:
 

@@ -60,6 +60,9 @@ namespace sotc_decomp
     // Calls guest code from a decompiled function as a jal would: ra and sp
     // set (sp: the original's frame at that call), run until it returns there.
     void callGuest(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t target, uint32_t ra, uint32_t sp);
+    // The same for the recompiled code a decompiled function replaced (its
+    // rare cases, from a native caller): ra and sp set, run to its return.
+    void callRecompiled(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t address, uint32_t ra, uint32_t sp);
 
     // Relocation sites: the XFF modules' references to the boot ELF and to
     // each other are patched into the code when the game links them, so the
