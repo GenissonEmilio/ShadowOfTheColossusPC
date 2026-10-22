@@ -40,3 +40,6 @@ progressbar progress { background: #d9b56c; border: none; border-radius: 2px; }
 tooltip { background: #232632; color: #f0e5cf; border: 1px solid #5e5036; }
 button:focus { outline: 2px solid #e2c484; outline-offset: 3px; }
 dialog { background: #141720; }
+.graphics-panel { padding: 20px; }
+.graphics-select button { background: #242f29; color: #e3e6db; border: 1px solid #4b5c4b; border-radius: 7px; padding: 10px 14px; box-shadow: none; }
+.graphics-select button:hover { background: #304035; }

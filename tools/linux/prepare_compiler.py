@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+from compiler_key import compiler_key
 
 ROOT=Path(__file__).resolve().parents[2]
 BUILD=ROOT / 'build/cmake'
@@ -42,6 +43,13 @@ for name in ('LICENSE','README.md','celosia'):
 copy(BUILD / '_deps/raylib-src/LICENSE',OUT / 'licenses/raylib.LICENSE')
 copy(BUILD / 'ps2xRecomp/ps2_recomp',OUT / 'bin/ps2_recomp')
 deps(OUT / 'bin/ps2_recomp',OUT / 'lib')
+# The same presentation code validates user shaders on the local GPU, without
+# loading a ROM or recompiling the game.
+subprocess.run(['g++','-std=c++20','-O2','-static-libstdc++','-static-libgcc',
+    '-I'+str(ROOT / 'PS2Recomp/ps2xRuntime/include'),'-I'+str(BUILD / '_deps/raylib-src/src'),
+    str(ROOT / 'tools/linux/video_tool.cpp'), str(ROOT / 'PS2Recomp/ps2xRuntime/src/lib/desktop_video.cpp'),
+    str(next(BUILD.rglob('libraylib.a'))),'-lGL','-lX11','-ldl','-pthread','-lm',
+    '-o',str(OUT / 'bin/sotc-video-tool')],check=True)
 
 includes=ROOT / 'PS2Recomp/ps2xRuntime/include'
 base_dir=ROOT / 'artifacts/base'
@@ -107,9 +115,5 @@ copy('/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2',tc / 'sysroot/lib64/ld-lin
 for doc in Path('/usr/share/doc').iterdir():
     if (doc / 'copyright').is_file():copy(doc / 'copyright',OUT / 'licenses' / (doc.name+'.copyright'))
 (OUT / 'packages.txt').write_text(subprocess.check_output(['dpkg-query','-W'],text=True))
-digest=hashlib.sha256()
-for src in sorted(OUT.rglob('*')):
-    if src.is_file() and src.name!='manifest.json':
-        digest.update(src.relative_to(OUT).as_posix().encode());digest.update(hashlib.sha256(src.read_bytes()).digest())
-(OUT / 'manifest.json').write_text(json.dumps({'build_id':digest.hexdigest()[:24], 'link_inputs':link_inputs},indent=2)+'\n')
+(OUT / 'manifest.json').write_text(json.dumps({'build_id':compiler_key(OUT), 'link_inputs':link_inputs},indent=2)+'\n')
 print('Compiler staged:',OUT,flush=True)

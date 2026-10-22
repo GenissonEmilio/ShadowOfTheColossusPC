@@ -6,12 +6,13 @@ import shutil
 import tarfile
 ROOT=Path(__file__).resolve().parents[3]
 NAME='ShadowOfTheColossusPC'
-VERSION='0.1.0'
+VERSION='0.2.0'
 OUT=ROOT / 'dist' / NAME
 if OUT.exists():shutil.rmtree(OUT)
 shutil.copytree(ROOT / 'artifacts/frozen' / NAME,OUT)
 shutil.copytree(ROOT / 'artifacts/compiler',OUT / 'compiler')
 shutil.copy2(ROOT / 'LICENSE',OUT / 'LICENSE')
+shutil.copy2(ROOT / 'docs/SHADERS.md',OUT / 'SHADERS.md')
 shutil.copytree(ROOT / 'artifacts/distribution-licenses',OUT / 'licenses')
 shutil.copy2(ROOT / 'artifacts/third-party-sources.tar.gz',OUT / 'third-party-sources.tar.gz')
 (OUT / 'LEIA-ME.txt').write_text('''Shadow of the Colossus PC — Linux x86_64
@@ -26,6 +27,12 @@ Requisitos: Linux x86_64 com glibc 2.39+ (Ubuntu 24.04+, Fedora 40+), OpenGL 3.3
 
 WASD: analógico esquerdo. H/J/Y/U: ✕/○/□/△. I/O: L1/L2. K/L: R1/R2.
 Z/X: Start/Select. F1: configurações. Controle USB/Bluetooth também funciona.
+F11: alterna tela cheia na resolução do monitor e janela.
+
+Na aba Gráficos, escolha Original 4:3 (faixas laterais) ou Esticar (tela toda).
+Importe fragment shaders GLSL 330 (.frag/.fs/.glsl) ou use Nitidez HD.
+Shaders são validados no driver local; mudanças valem na próxima abertura.
+São filtros da imagem final, não pacotes de texturas HD. Desativar remove o filtro.
 
 Dados e saves: ~/.local/share/ShadowOfTheColossusPC (ou XDG_DATA_HOME).
 Os arquivos originais não são alterados. Nenhum dado é enviado para a internet.

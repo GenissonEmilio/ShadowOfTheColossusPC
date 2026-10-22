@@ -169,7 +169,7 @@ int main(int argc, char *argv[])
 {
     if (argc == 2 && std::string(argv[1]) == "--version")
     {
-        std::cout << "ShadowOfTheColossusPC Linux runtime 0.1.0\n";
+        std::cout << "ShadowOfTheColossusPC Linux runtime 0.2.0\n";
         return 0;
     }
 #if defined(__ANDROID__)

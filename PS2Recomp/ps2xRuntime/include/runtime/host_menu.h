@@ -21,6 +21,7 @@ namespace hostmenu
         std::atomic<bool> exactAlpha{true}; // GPU renderer: alpha-fail pass
         std::atomic<bool> showFps{true};
         std::atomic<int> screenMode{kScreenFit};
+        std::atomic<bool> fullscreen{false};
         std::atomic<int> volume{10};   // 0..10
         std::atomic<int> language{0};  // 0 auto, 1 Portuguese, 2 English
     };

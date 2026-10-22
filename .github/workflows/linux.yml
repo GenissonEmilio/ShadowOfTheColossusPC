@@ -31,11 +31,20 @@ jobs:
           docker run --rm --init --cpus=2 --network=none -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
             sotc-linux-builder python3 tools/linux/test_memory_card.py \
             --program /src/artifacts/compiler-check --out /src/artifacts/card-persistence
+      - name: Fullscreen and GPU shader checks (no ROM)
+        run: |
+          docker build -t sotc-linux-clean -f tools/linux/Test.Dockerfile .
+          for geometry in 1920x1080 2560x1080; do
+            docker run --rm --init --cpus=2 --network=none -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+              sotc-linux-clean xvfb-run -a -s "-screen 0 ${geometry}x24" \
+              /src/artifacts/compiler/bin/sotc-video-tool --self-test /src/artifacts/video-$geometry
+            python3 tools/linux/check_video.py artifacts/video-$geometry
+          done
       - name: Package content check
         run: |
-          test -f dist/ShadowOfTheColossusPC-0.1.0-linux-x86_64.tar.gz
+          test -f dist/ShadowOfTheColossusPC-0.2.0-linux-x86_64.tar.gz
           cd dist
-          sha256sum -c ShadowOfTheColossusPC-0.1.0-linux-x86_64.tar.gz.sha256
+          sha256sum -c ShadowOfTheColossusPC-0.2.0-linux-x86_64.tar.gz.sha256
       - uses: actions/upload-artifact@v4
         with:
           name: ShadowOfTheColossusPC-linux-x86_64

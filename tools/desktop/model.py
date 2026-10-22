@@ -11,7 +11,7 @@ import tempfile
 from import_disc import import_disc, EXPECTED
 from pipeline import Pipeline
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 APPLICATION_ID = "io.github.GenissonEmilio.ShadowOfTheColossusPC"
 
@@ -86,6 +86,10 @@ class Library:
         environment["LD_LIBRARY_PATH"] = str(self.program / "compiler/lib") + (
             os.pathsep + original_ld if original_ld else "")
         environment.setdefault("LP_NUM_THREADS", "2")
+        from graphics import Graphics
+        selected = Graphics(self).selected()
+        environment["SOTC_SHADER"] = str(selected) if selected else ""
+        environment["SOTC_SHADER_STATUS"] = str(self.directory / "shader-status.txt")
         return environment
 
     def prepare(self, source, progress=lambda text: None):
@@ -130,6 +134,9 @@ class Library:
 
     def launch(self, test=False):
         boot = self.verify()
+        from graphics import Graphics
+        graphics = Graphics(self)
+        graphics.save_display(*graphics.display())
         environment = self.game_environment(test)
         executable = Pipeline(self.program, self.directory, environment).prepare(boot.parent)
         self.player_directory.mkdir(parents=True, exist_ok=True)

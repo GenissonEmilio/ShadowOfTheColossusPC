@@ -11,6 +11,10 @@
 #include <filesystem>
 #include "runtime/native_tuning.h"
 #include "runtime/host_menu.h"
+#include "runtime/desktop_video.h"
+#if defined(__linux__) && !defined(__ANDROID__)
+#include "rlgl.h"
+#endif
 #include "runtime/gs/gs_direct_frame.h"
 #include "ps2_log.h"
 #include "ps2_stubs.h"
@@ -1033,6 +1037,18 @@ bool PS2Runtime::initialize(const char *title)
         native_renderer::setGlContext([] {});
 #endif
         hostmenu::load();
+#if defined(__linux__) && !defined(__ANDROID__)
+        if (!std::getenv("PS2X_HIDDEN_WINDOW"))
+            desktop_video::setFullscreen(hostmenu::settings().fullscreen);
+        std::string shaderError;
+        const bool shaderOk = desktop_video::loadShader(std::getenv("SOTC_SHADER"), shaderError);
+        if (!shaderOk) std::cerr << "[video] " << shaderError << std::endl;
+        if (const char *status = std::getenv("SOTC_SHADER_STATUS"))
+        {
+            std::ofstream report(status);
+            report << (shaderOk ? "ok" : shaderError) << '\n';
+        }
+#endif
         InitAudioDevice();
         m_audioBackend.setAudioReady(IsAudioDeviceReady());
         // PS2X_NO_SPU2_AUDIO=1 keeps the SPU2 silent on the host.
@@ -2790,6 +2806,10 @@ void PS2Runtime::run()
     {
             BeginDrawing();
             ClearBackground(BLACK);
+#if defined(__linux__) && !defined(__ANDROID__)
+            desktop_video::draw(shown, std::max(1u, presentWidth), std::max(1u, presentHeight), hostFrameFlipY,
+                                hostmenu::settings().screenMode);
+#else
             const float srcWidth = static_cast<float>(std::max<uint32_t>(1u, presentWidth));
             const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight));
             const float screenWidth = static_cast<float>(GetScreenWidth());
@@ -2817,6 +2837,7 @@ void PS2Runtime::run()
                 dstWidth,
                 dstHeight};
             DrawTexturePro(shown, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+#endif
             if (hostmenu::settings().showFps.load(std::memory_order_relaxed))
             {
                 // FPS overlay: game frames = display lists sent to VIF1 per second.
@@ -2840,6 +2861,18 @@ void PS2Runtime::run()
                 m_debugUiDrawCallback(*this, m_debugUiUserData);
             }
             hostmenu::draw(GetScreenWidth(), GetScreenHeight());
+#if defined(__linux__) && !defined(__ANDROID__)
+            static bool presentationCaptured = false;
+            if (!presentationCaptured && GetTime() >= 12.0)
+                if (const char *path = std::getenv("SOTC_PRESENT_SNAPSHOT"))
+                {
+                    rlDrawRenderBatchActive();
+                    Image snapshot = LoadImageFromScreen();
+                    ExportImage(snapshot, path);
+                    UnloadImage(snapshot);
+                    presentationCaptured = true;
+                }
+#endif
             EndDrawing();
     };
 #if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
@@ -3418,7 +3451,11 @@ void PS2Runtime::run()
 #endif
 #if defined(__linux__) && !defined(__ANDROID__)
         if (IsKeyPressed(KEY_F11))
-            ToggleBorderlessWindowed();
+        {
+            desktop_video::setFullscreen(!IsWindowFullscreen());
+            hostmenu::settings().fullscreen = IsWindowFullscreen();
+            hostmenu::saveSettings();
+        }
 #endif
         hostmenu::update();
 
@@ -3446,6 +3483,9 @@ void PS2Runtime::run()
         m_debugUiInitialized = false;
     }
     UnloadTexture(frameTex);
+#if defined(__linux__) && !defined(__ANDROID__)
+    desktop_video::shutdown();
+#endif
     CloseWindow();
 
     RUNTIME_LOG("[run] exiting loop");

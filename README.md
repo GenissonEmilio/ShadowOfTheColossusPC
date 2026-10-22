@@ -26,6 +26,7 @@ O compilador está incluído: o jogador não precisa instalar Docker, um SDK nem
 executar comandos. A primeira preparação pode demorar. Até duas tarefas compilam
 em paralelo, e a interface mostra o progresso. O cache é separado por versão do
 compilador/runtime e validado antes de ser reutilizado.
+Atualizações apenas da interface, shaders ou documentação preservam esse cache.
 
 Requisitos: Linux x86_64 com **glibc 2.39+** (Ubuntu 24.04+, Fedora 40+), GPU com
 OpenGL 3.3, 8 GB de RAM e pelo menos 15 GB livres. Uma CPU moderna e 16 GB de RAM
@@ -34,6 +35,28 @@ são recomendáveis para a compilação. Este pacote é exclusivamente para Linu
 A seção **Sobre** cria um atalho no menu de aplicativos. Os dados ficam em
 `~/.local/share/ShadowOfTheColossusPC` (ou `XDG_DATA_HOME`). Os saves são imagens
 de memory card em `player/memcards`. A ROM original permanece intacta.
+
+## Tela cheia e shaders
+
+![Gráficos e shaders](docs/graphics-linux.png)
+
+Na aba **Gráficos**, escolha **Tela cheia · resolução do monitor** para usar o
+monitor atual por inteiro. **Original 4:3** preserva a proporção e deixa faixas
+nas laterais de telas largas; **Esticar** preenche toda a tela. F11 alterna entre
+tela cheia e janela e salva a preferência. O menu F1 também ajusta a proporção.
+
+**Importar shader…** copia e compila no seu driver um fragment shader de
+pós-processamento **GLSL 330**, em `.frag`, `.fs` ou `.glsl`. A seleção anterior
+é preservada quando a validação falha. **Usar Nitidez HD** ativa o filtro incluído;
+**Desativar** restaura a imagem original. A mudança de shader vale na próxima
+abertura do jogo e não recompila o código do jogo.
+
+O modelo incluído usa `texture0`, `fragTexCoord`, `fragColor` e `colDiffuse`,
+além de `sourceSize`, `outputSize` (pixels físicos) e `time` (segundos).
+Filtros são aplicados à imagem do jogo antes do menu e do contador de FPS.
+Shaders modificam a imagem final; não criam texturas HD nem aumentam a resolução
+da geometria. Presets ReShade `.fx` e RetroArch `.slangp` não são compatíveis
+diretamente. Veja [o formato e exemplos](docs/SHADERS.md).
 
 ## Controles
 
@@ -65,6 +88,10 @@ kit de compilação. O pacote final é verificado para excluir imagens, executá
 PS2, módulos XFF, código gerado e saves. O workflow Linux executa esses testes e
 compila a cada push/PR. A execução do jogo é validada localmente com disco próprio;
 CI não recebe arquivos do jogo.
+
+O CI também testa a apresentação OpenGL em monitores virtuais 16:9 e ultrawide:
+resolução nativa, barras, esticamento, pixels filtrados, rejeição de GLSL inválido,
+desativação do filtro e retorno ao tamanho anterior da janela.
 
 O pipeline original de desenvolvimento segue disponível em `./celosia`;
 [a documentação da base](docs/UPSTREAM-CELOSIA.md) descreve seus estágios. Ele não

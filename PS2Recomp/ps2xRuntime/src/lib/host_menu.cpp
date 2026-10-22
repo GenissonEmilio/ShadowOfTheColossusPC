@@ -276,8 +276,9 @@ namespace
         FILE *f = std::fopen(kSettingsPath, "w");
         if (!f)
             return;
-        std::fprintf(f, "exact_alpha=%d\nshow_fps=%d\nscreen=%d\nvolume=%d\nlanguage=%d\n", g_settings.exactAlpha ? 1 : 0,
-                     g_settings.showFps ? 1 : 0, g_settings.screenMode.load(), g_settings.volume.load(), g_settings.language.load());
+        std::fprintf(f, "exact_alpha=%d\nshow_fps=%d\nscreen=%d\nfullscreen=%d\nvolume=%d\nlanguage=%d\n", g_settings.exactAlpha ? 1 : 0,
+                     g_settings.showFps ? 1 : 0, g_settings.screenMode.load(), g_settings.fullscreen ? 1 : 0,
+                     g_settings.volume.load(), g_settings.language.load());
         const native_renderer::Tuning &t = native_renderer::tuning();
         for (const native_renderer::TuningItem &item : native_renderer::tuningItems())
         {
@@ -437,6 +438,7 @@ void load()
         if (!std::strcmp(key, "exact_alpha")) g_settings.exactAlpha = value != 0;
         else if (!std::strcmp(key, "show_fps")) g_settings.showFps = value != 0;
         else if (!std::strcmp(key, "screen")) g_settings.screenMode = std::clamp(value, 0, 2);
+        else if (!std::strcmp(key, "fullscreen")) g_settings.fullscreen = value != 0;
         else if (!std::strcmp(key, "volume")) g_settings.volume = std::clamp(value, 0, 10);
         else if (!std::strcmp(key, "language")) g_settings.language = std::clamp(value, 0, 2);
     }

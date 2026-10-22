@@ -131,6 +131,8 @@ class Pipeline:
         output.unlink(missing_ok=True)
         env = dict(self.env, PS2X_DUMP_RAM_ON_MISSING=str(output), PS2X_HIDDEN_WINDOW="1",
                    PS2X_MEMCARD_DIR=str(self.work / "capture-memcards"))
+        env.pop("SOTC_SHADER", None)
+        env.pop("SOTC_SHADER_STATUS", None)
         with self.log.open("a") as stream:
             p = subprocess.Popen([str(executable),str(disc / BOOT)],cwd=self.work, env=env,
                                  stdout=stream, stderr=subprocess.STDOUT)

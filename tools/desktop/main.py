@@ -12,6 +12,7 @@ import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from model import Library, VERSION, assets_directory, program_directory
+from graphics import Graphics
 
 if len(sys.argv) > 1 and sys.argv[1] == "--pipeline-helper":
     from pipeline import helper
@@ -100,6 +101,7 @@ class Launcher:
     def __init__(self, args):
         self.args = args
         self.library = Library(args.data_dir)
+        self.graphics = Graphics(self.library)
         self.busy = False; self.process = None; self.closing = False; self.failed = False
         provider = Gtk.CssProvider(); provider.load_from_path(str(assets_directory() / "style.css"))
         Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
@@ -127,7 +129,7 @@ class Launcher:
         self.nav = {}
         self.stack = Gtk.Stack(); self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
         self.stack.set_hhomogeneous(False); self.stack.set_vhomogeneous(False)
-        for key, title in [("home","◈   Início"),("controls","⌘   Controles"),("about","◇   Sobre o port")]:
+        for key, title in [("home","◈   Início"),("graphics","▧   Gráficos"),("controls","⌘   Controles"),("about","◇   Sobre o port")]:
             button = style(Gtk.Button(label=title),"nav")
             button.get_child().set_xalign(0)
             button.connect("clicked", lambda _, name=key: self.navigate(name))
@@ -141,6 +143,7 @@ class Launcher:
         body.pack_start(label("BIBLIOTECA    /    SHADOW OF THE COLOSSUS", "breadcrumb"),False,False,0)
         body.pack_start(self.stack,True,True,0)
         self.stack.add_named(self.home(),"home")
+        self.stack.add_named(self.graphics_page(),"graphics")
         self.stack.add_named(self.controls(),"controls")
         self.stack.add_named(self.about(),"about")
         footer = box(Gtk.Orientation.HORIZONTAL,spacing=15,classes=("footer",)); footer.set_margin_top(2)
@@ -148,7 +151,7 @@ class Launcher:
         footer.pack_start(text,True,True,0)
         saves = style(Gtk.Button(label="Meus saves ↗"),"link"); saves.connect("clicked",self.open_saves)
         footer.pack_end(saves,False,False,0); body.pack_end(footer,False,False,0)
-        self.navigate("home"); self.window.show_all()
+        self.window.show_all(); self.navigate(args.page)
         self.progress.hide()
         if self.library.disc:
             self.set_ready()
@@ -231,6 +234,112 @@ class Launcher:
             grid.attach(a,0,i,1,1); grid.attach(b,1,i,1,1)
         page.pack_start(grid,False,False,0); page.pack_start(Gtk.Box(),True,True,0)
         return page
+
+    def graphics_page(self):
+        page = box(spacing=20)
+        page.pack_start(label("Seu monitor. Sua imagem.", "section-title"),False,False,0)
+        page.pack_start(label("Escolha como jogar. As mudanças serão usadas na próxima abertura do jogo.","muted",wrap=True),False,False,0)
+        panel = box(spacing=16,classes=("panel","graphics-panel"))
+        panel.pack_start(label("Tela e proporção", "panel-title"),False,False,0)
+        fullscreen, mode = self.graphics.display()
+        self.fullscreen = style(Gtk.ComboBoxText(),"graphics-select")
+        for text in ("Janela redimensionável", "Tela cheia · resolução do monitor"):
+            self.fullscreen.append_text(text)
+        self.fullscreen.set_active(int(fullscreen))
+        panel.pack_start(self.fullscreen,False,False,0)
+        self.aspect = style(Gtk.ComboBoxText(),"graphics-select")
+        for text in ("Original 4:3 · preservar proporção", "Esticar · preencher a tela", "Pixels · escala inteira"):
+            self.aspect.append_text(text)
+        self.aspect.set_active(mode)
+        panel.pack_start(self.aspect,False,False,0)
+        self.fullscreen.connect("changed", self.save_graphics)
+        self.aspect.connect("changed", self.save_graphics)
+        panel.pack_start(label("F11 alterna entre janela e tela cheia durante o jogo.\nOriginal mantém faixas laterais em monitores largos. Esticar ocupa toda a tela.","muted",wrap=True),False,False,0)
+        page.pack_start(panel,False,False,0)
+        panel = box(spacing=15,classes=("panel","graphics-panel"))
+        panel.pack_start(label("Shaders e filtros", "panel-title"),False,False,0)
+        panel.pack_start(label("Importe um fragment shader GLSL 330 (.frag, .fs ou .glsl).\nO filtro atua sobre a imagem final; não substitui as texturas do jogo por texturas HD.","muted",wrap=True),False,False,0)
+        self.shader_status = label("", "status",wrap=True)
+        panel.pack_start(self.shader_status,False,False,0)
+        actions = box(Gtk.Orientation.HORIZONTAL,10)
+        self.shader_import = style(Gtk.Button(label="Importar shader…"),"secondary")
+        self.shader_import.connect("clicked",self.choose_shader)
+        actions.pack_start(self.shader_import,False,False,0)
+        self.shader_hd = style(Gtk.Button(label="Usar Nitidez HD"),"secondary")
+        self.shader_hd.connect("clicked",lambda *_: self.import_shader(assets_directory()/"shaders/nitidez-hd.frag"))
+        actions.pack_start(self.shader_hd,False,False,0)
+        self.shader_clear = style(Gtk.Button(label="Desativar"),"secondary")
+        self.shader_clear.connect("clicked",self.clear_shader)
+        actions.pack_start(self.shader_clear,False,False,0)
+        panel.pack_start(actions,False,False,0)
+        template = style(Gtk.Button(label="Abrir modelo de shader ↗"),"link")
+        template.set_halign(Gtk.Align.START); template.connect("clicked",self.open_shader_template)
+        panel.pack_start(template,False,False,0)
+        self.video_panel = panel
+        self.refresh_shader()
+        page.pack_start(panel,False,False,0)
+        page.pack_start(label("Shaders são copiados para a biblioteca e validados no seu driver.\nDepois da importação, você pode mover o arquivo original.","muted",wrap=True),False,False,0)
+        return page
+
+    def save_graphics(self,*_):
+        try:
+            self.graphics.save_display(self.fullscreen.get_active()==1,self.aspect.get_active())
+        except OSError as exc:
+            self.error("Não foi possível salvar a imagem",str(exc))
+
+    def refresh_shader(self):
+        shader = self.graphics.selected()
+        self.shader_status.set_text("●  " + ("Ativo: " + shader.stem.rsplit("-",1)[0] if shader else "Imagem original · sem shader"))
+        self.shader_clear.set_sensitive(bool(shader))
+
+    def clear_shader(self,*_):
+        try:
+            self.graphics.clear(); self.refresh_shader()
+        except OSError as exc:
+            self.error("Não foi possível desativar o shader",str(exc))
+
+    def choose_shader(self,*_):
+        if self.busy or self.process: return
+        dialog=Gtk.FileChooserDialog(title="Importar shader GLSL 330",parent=self.window,action=Gtk.FileChooserAction.OPEN)
+        dialog.add_buttons("Cancelar",Gtk.ResponseType.CANCEL,"Validar e importar",Gtk.ResponseType.OK)
+        selected=Gtk.FileFilter(); selected.set_name("Fragment shaders GLSL 330")
+        for extension in ("frag","fs","glsl"):
+            selected.add_pattern("*."+extension); selected.add_pattern("*."+extension.upper())
+        dialog.add_filter(selected)
+        path = dialog.get_filename() if dialog.run()==Gtk.ResponseType.OK else None
+        dialog.destroy()
+        if path: self.import_shader(path)
+
+    def import_shader(self,path):
+        if self.busy or self.process: return
+        self.busy=True; self.video_panel.set_sensitive(False)
+        self.play_button.set_sensitive(False); self.choose_button.set_sensitive(False)
+        self.shader_status.set_text("Validando o shader no seu driver…")
+        def worker():
+            error=None
+            try: self.graphics.import_shader(path)
+            except Exception as exc: error=str(exc)
+            GLib.idle_add(self.shader_imported,error)
+        threading.Thread(target=worker,daemon=False).start()
+
+    def shader_imported(self,error):
+        self.busy=False; self.video_panel.set_sensitive(True)
+        self.play_button.set_sensitive(bool(self.library.disc)); self.choose_button.set_sensitive(True)
+        if self.closing: Gtk.main_quit(); return False
+        if error:
+            self.refresh_shader()
+            self.error("Esse shader não foi ativado",error)
+        else: self.refresh_shader()
+        return False
+
+    def open_shader_template(self,*_):
+        try:
+            import shutil
+            path=self.library.directory/"shaders/modelo.frag"; path.parent.mkdir(parents=True,exist_ok=True)
+            if not path.exists(): shutil.copy2(assets_directory()/"shaders/modelo.frag",path)
+            Gtk.show_uri_on_window(self.window,path.as_uri(),Gdk.CURRENT_TIME)
+        except (OSError,GLib.Error) as exc:
+            self.error("Não foi possível abrir o modelo",str(exc))
 
     def about(self):
         page=box(spacing=23)
@@ -332,6 +441,7 @@ class Launcher:
         if self.busy or self.process: return False
         self.busy=True; self.play_button.set_sensitive(False); self.choose_button.set_sensitive(False)
         self.update_status("Abrindo sua próxima aventura…")
+        self.fullscreen.set_sensitive(False); self.aspect.set_sensitive(False); self.video_panel.set_sensitive(False)
         def worker():
             try:
                 process=self.library.launch(self.args.test_game)
@@ -347,6 +457,7 @@ class Launcher:
             Gtk.main_quit(); return False
         if error:
             self.failed=True; self.choose_button.set_sensitive(True); self.play_button.set_sensitive(True)
+            self.fullscreen.set_sensitive(True); self.aspect.set_sensitive(True); self.video_panel.set_sensitive(True)
             self.update_status("Não foi possível abrir o jogo.",True); self.error("O jogo não abriu",error)
         else:
             self.process=process; self.play_button.set_label("Em jogo…")
@@ -358,7 +469,10 @@ class Launcher:
         code=self.process.poll()
         if code is None: return True
         self.process=None; self.choose_button.set_sensitive(True)
+        self.fullscreen.set_sensitive(True); self.aspect.set_sensitive(True); self.video_panel.set_sensitive(True)
         self.play_button.set_label("▶   Iniciar jogo"); self.set_ready()
+        fullscreen, mode = self.graphics.display()
+        self.fullscreen.set_active(int(fullscreen)); self.aspect.set_active(mode)
         if code:
             self.failed=True
             self.update_status("O jogo encerrou com um erro.",True)
@@ -424,6 +538,7 @@ def main():
     parser.add_argument("--screenshot",type=Path,help=argparse.SUPPRESS)
     parser.add_argument("--test-game",action="store_true",help=argparse.SUPPRESS)
     parser.add_argument("--install-shortcut",action="store_true",help=argparse.SUPPRESS)
+    parser.add_argument("--page",choices=("home","graphics","controls","about"),default="home",help=argparse.SUPPRESS)
     args=parser.parse_args()
     if args.install_shortcut:
         print(Library(args.data_dir).install_desktop_entry()); return 0
