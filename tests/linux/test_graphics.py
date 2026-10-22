@@ -76,6 +76,8 @@ class GraphicsTests(unittest.TestCase):
         runtime=root/"lib/libps2_runtime.a";runtime.parent.mkdir();runtime.write_bytes(b"runtime v1")
         previous=compiler_key(root)
         gui.write_text("interface v2")
+        docs=root/"source/docs/SHADERS.md";docs.parent.mkdir(parents=True)
+        docs.write_text("Shader documentation")
         self.assertEqual(compiler_key(root),previous)
         runtime.write_bytes(b"runtime v2")
         self.assertNotEqual(compiler_key(root),previous)

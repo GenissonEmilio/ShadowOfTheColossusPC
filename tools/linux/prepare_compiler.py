@@ -40,6 +40,7 @@ for name in ('raylib.h','raymath.h','rlgl.h'):
     copy(BUILD / '_deps/raylib-src/src' / name,OUT / 'source/raylib' / name)
 for name in ('LICENSE','README.md','celosia'):
     copy(ROOT / name,OUT / 'source' / name)
+copy(ROOT / 'docs/SHADERS.md',OUT / 'source/docs/SHADERS.md')
 copy(BUILD / '_deps/raylib-src/LICENSE',OUT / 'licenses/raylib.LICENSE')
 copy(BUILD / 'ps2xRecomp/ps2_recomp',OUT / 'bin/ps2_recomp')
 deps(OUT / 'bin/ps2_recomp',OUT / 'lib')
