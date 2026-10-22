@@ -132,13 +132,13 @@ class Library:
             raise ValueError("Escolha sua ROM para continuar. Os arquivos locais estão ausentes ou incompletos.")
         return boot
 
-    def launch(self, test=False):
+    def launch(self, test=False, progress=lambda text: None):
         boot = self.verify()
         from graphics import Graphics
         graphics = Graphics(self)
         graphics.save_display(*graphics.display())
         environment = self.game_environment(test)
-        executable = Pipeline(self.program, self.directory, environment).prepare(boot.parent)
+        executable = Pipeline(self.program, self.directory, environment, progress).prepare(boot.parent)
         self.player_directory.mkdir(parents=True, exist_ok=True)
         if test:
             shots = self.directory / "game-test"

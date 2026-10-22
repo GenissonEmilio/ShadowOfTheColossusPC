@@ -441,10 +441,11 @@ class Launcher:
         if self.busy or self.process: return False
         self.busy=True; self.play_button.set_sensitive(False); self.choose_button.set_sensitive(False)
         self.update_status("Abrindo sua próxima aventura…")
+        self.progress.show(); GLib.timeout_add(80,self.pulse)
         self.fullscreen.set_sensitive(False); self.aspect.set_sensitive(False); self.video_panel.set_sensitive(False)
         def worker():
             try:
-                process=self.library.launch(self.args.test_game)
+                process=self.library.launch(self.args.test_game,lambda text: GLib.idle_add(self.update_status,text))
                 GLib.idle_add(self.game_started,process,None)
             except Exception as exc:
                 GLib.idle_add(self.game_started,None,str(exc))
@@ -452,7 +453,7 @@ class Launcher:
         return False
 
     def game_started(self,process,error):
-        self.busy=False
+        self.busy=False; self.progress.hide()
         if self.closing:
             Gtk.main_quit(); return False
         if error:
