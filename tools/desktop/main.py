@@ -163,7 +163,9 @@ class Launcher:
         self.drop.connect("drag-data-received", self.dropped)
         if args.rom:
             GLib.timeout_add(300,lambda: self.prepare(args.rom) or False)
-        if args.screenshot and not args.rom:
+        elif args.test_game:
+            GLib.timeout_add(300,self.play)
+        elif args.screenshot:
             GLib.timeout_add(700,self.capture_and_exit)
 
     def home(self):
@@ -494,7 +496,7 @@ class Launcher:
     def error(self,title,text):
         if self.args.test_game or self.args.screenshot:
             print(title+": "+text,file=sys.stderr)
-            if self.args.rom:
+            if self.args.rom or self.args.test_game:
                 GLib.timeout_add(100,self.capture_and_exit)
             return
         dialog=Gtk.MessageDialog(transient_for=self.window,flags=0,message_type=Gtk.MessageType.ERROR,
@@ -543,8 +545,8 @@ def main():
     args=parser.parse_args()
     if args.install_shortcut:
         print(Library(args.data_dir).install_desktop_entry()); return 0
-    if args.test_game and not args.rom:
-        parser.error("--test-game requires --rom")
+    if args.test_game and not args.rom and not Library(args.data_dir).disc:
+        parser.error("--test-game requires an imported disc or --rom")
     launcher=Launcher(args); Gtk.main()
     return int(launcher.failed)
 
