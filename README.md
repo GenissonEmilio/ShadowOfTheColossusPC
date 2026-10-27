@@ -80,8 +80,15 @@ O runtime também inclui 743 registros Linux da base comunitária
 adaptados ao GLFW. O jogo e o menu F1 usam o controle reconhecido que estiver
 recebendo comandos, inclusive quando ele não está na primeira posição USB.
 Reconectar o controle não exige reiniciar o jogo. Um modelo ainda ausente pode
-usar um arquivo de mapeamento indicado por `PS2X_GAMEPAD_MAPPINGS` ou a variável
-`SDL_GAMECONTROLLERCONFIG`.
+ser configurado em **Controles → Configurar meu controle…**: selecione o
+dispositivo, solte os analógicos e siga as 20 etapas. O perfil fica salvo para
+as próximas aberturas do jogo e também funciona no menu F1. Xbox/XInput,
+PlayStation e genéricos são aceitos quando o Linux os disponibiliza como joystick;
+o nome comercial e o formato físico do controle não determinam o mapeamento.
+Enter pula comandos ausentes, Backspace refaz a etapa anterior e Esc cancela
+preservando o perfil anterior. Cada dispositivo mantém seu próprio perfil.
+No desenvolvimento, também são aceitos arquivos indicados por
+`PS2X_GAMEPAD_MAPPINGS` ou a variável `SDL_GAMECONTROLLERCONFIG`.
 
 ## Correções de fidelidade em validação
 

@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import os
+import subprocess
 from pathlib import Path
 import sys
 import threading
@@ -103,6 +104,7 @@ class Launcher:
         self.library = Library(args.data_dir)
         self.graphics = Graphics(self.library)
         self.busy = False; self.process = None; self.closing = False; self.failed = False
+        self.controller_process = None
         provider = Gtk.CssProvider(); provider.load_from_path(str(assets_directory() / "style.css"))
         Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         settings = Gtk.Settings.get_default()
@@ -224,6 +226,11 @@ class Launcher:
         page=box(spacing=24)
         page.pack_start(label("Pronto para jogar?", "section-title"),False,False,0)
         page.pack_start(label("Jogue com teclado ou controle USB/Bluetooth.\nH / J / Y / U são os botões ✕ / ○ / □ / △. F1 abre as configurações.\nOs controles originais do jogo estão disponíveis; use F1 para ajustar a imagem e o áudio.","muted",wrap=True),False,False,0)
+        self.controller_status = label("Perfis automáticos para controles Xbox, PlayStation e genéricos.\nSe os botões não responderem ou estiverem trocados, configure seu controle.", "muted", wrap=True)
+        page.pack_start(self.controller_status, False, False, 0)
+        self.controller_button = style(Gtk.Button(label="Configurar meu controle…"), "secondary")
+        self.controller_button.connect("clicked", self.configure_controller)
+        page.pack_start(self.controller_button, False, False, 0)
         grid=Gtk.Grid(column_spacing=28,row_spacing=15); style(grid,"panel")
         rows=[("W A S D","Mover · analógico esquerdo"),("↑ ↓ ← →","Direcional"),
               ("H / J / Y / U","✕ / ○ / □ / △"),("I / O","L1 / L2"),("K / L","R1 / R2"),
@@ -236,6 +243,37 @@ class Launcher:
             grid.attach(a,0,i,1,1); grid.attach(b,1,i,1,1)
         page.pack_start(grid,False,False,0); page.pack_start(Gtk.Box(),True,True,0)
         return page
+
+    def configure_controller(self, *_):
+        if self.busy or self.process or self.controller_process:
+            self.controller_status.set_text("Feche o jogo antes de configurar o controle.")
+            return
+        tool = self.library.program / "compiler/bin/sotc-input-tool"
+        if not tool.is_file():
+            self.error("Atualize o pacote", "A ferramenta de configuração não está neste pacote.")
+            return
+        profile = self.library.directory / "controllers/gamecontrollerdb.txt"
+        profile.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with (self.library.directory / "last-controller.log").open("w") as log:
+                self.controller_process = subprocess.Popen([str(tool), "--output", str(profile)],
+                    env=self.library.game_environment(), stdout=log, stderr=subprocess.STDOUT)
+        except OSError as exc:
+            self.error("Não foi possível configurar o controle", str(exc))
+            return
+        self.controller_button.set_sensitive(False)
+        self.controller_status.set_text("Siga as instruções na janela de configuração.")
+        GLib.timeout_add(250, self.watch_controller)
+
+    def watch_controller(self):
+        code = self.controller_process.poll()
+        if code is None:
+            return True
+        self.controller_process = None
+        self.controller_button.set_sensitive(True)
+        self.controller_status.set_text("Perfil salvo. Ele será usado na próxima abertura do jogo." if code == 0
+            else "Configuração não concluída. Os perfis anteriores foram preservados.")
+        return False
 
     def graphics_page(self):
         page = box(spacing=20)
@@ -440,7 +478,7 @@ class Launcher:
         return False
 
     def play(self,*_):
-        if self.busy or self.process: return False
+        if self.busy or self.process or self.controller_process: return False
         self.busy=True; self.play_button.set_sensitive(False); self.choose_button.set_sensitive(False)
         self.update_status("Abrindo sua próxima aventura…")
         self.progress.show(); GLib.timeout_add(80,self.pulse)

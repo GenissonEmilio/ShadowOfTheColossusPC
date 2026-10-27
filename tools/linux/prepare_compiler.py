@@ -41,6 +41,9 @@ for name in ('raylib.h','raymath.h','rlgl.h'):
 for name in ('LICENSE','README.md','celosia'):
     copy(ROOT / name,OUT / 'source' / name)
 copy(ROOT / 'docs/SHADERS.md',OUT / 'source/docs/SHADERS.md')
+copy(ROOT / 'docs/FIDELITY-2026-10.md', OUT / 'source/docs/FIDELITY-2026-10.md')
+copy(ROOT / 'PS2Recomp/ps2xRuntime/third_party/gamecontrollerdb/LICENSE',
+     OUT / 'licenses/SDL_GameControllerDB.LICENSE')
 copy(BUILD / '_deps/raylib-src/LICENSE',OUT / 'licenses/raylib.LICENSE')
 copy(BUILD / 'ps2xRecomp/ps2_recomp',OUT / 'bin/ps2_recomp')
 deps(OUT / 'bin/ps2_recomp',OUT / 'lib')
@@ -51,6 +54,12 @@ subprocess.run(['g++','-std=c++20','-O2','-static-libstdc++','-static-libgcc',
     str(ROOT / 'tools/linux/video_tool.cpp'), str(ROOT / 'PS2Recomp/ps2xRuntime/src/lib/desktop_video.cpp'),
     str(next(BUILD.rglob('libraylib.a'))),'-lGL','-lX11','-ldl','-pthread','-lm',
     '-o',str(OUT / 'bin/sotc-video-tool')],check=True)
+subprocess.run(['g++', '-std=c++20', '-O2', '-static-libstdc++', '-static-libgcc',
+    '-I'+str(BUILD / '_deps/raylib-src/src'),
+    '-I'+str(BUILD / '_deps/raylib-src/src/external/glfw/include'),
+    str(ROOT / 'tools/linux/input_tool.cpp'), str(next(BUILD.rglob('libraylib.a'))),
+    '-lGL', '-lX11', '-ldl', '-pthread', '-lm',
+    '-o', str(OUT / 'bin/sotc-input-tool')], check=True)
 
 includes=ROOT / 'PS2Recomp/ps2xRuntime/include'
 base_dir=ROOT / 'artifacts/base'

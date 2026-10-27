@@ -41,10 +41,16 @@ um save da cena relatada.
   por arquivo, até 1 MiB, ou pela variável padrão SDL.
   GLFW e a leitura do estado do controle ficam na thread da janela. A thread
   do jogo consome um snapshot protegido por mutex; não chama GLFW diretamente.
+- **Controles sem perfil:** o launcher 0.2.1 oferece um assistente de 20 etapas
+  em Controles. Ele captura botões, hats, eixos e gatilhos do joystick bruto,
+  cria um perfil pelo GUID real e grava atomicamente, preservando os perfis de
+  outros dispositivos. Não depende do nome comercial do controle. O jogo
+  carrega esse arquivo automaticamente. A configuração não altera o cache do
+  executável; atualizações apenas da ferramenta também preservam esse cache.
 
 ## Validação local
 
-- Testes Python de importação, cache e gráficos passaram.
+- Dezoito testes Python de importação, cache, gráficos e seleção de perfis passaram.
 - `tools/linux/test_fidelity.sh`: passou, sem ROM e sem contexto de GPU.
 - `tests/native/gamepad.cpp`, acionado pelo Linux `uinput`: passou com um
   dispositivo desconhecido na primeira posição e um USB genérico mapeado na
@@ -53,6 +59,18 @@ um save da cena relatada.
   injetado em teclado, mouse ou outro aplicativo.
   O teste também usa threads separadas para a janela e para a leitura do
   pacote pelo jogo.
+- Assistente completo, com um segundo USB virtual de VID/PID não incluídos na
+  base de mapeamentos: 20 comandos configurados, arquivo persistido e carregado
+  por outro processo. Botão X, direcional, analógico, soltura e seleção da
+  segunda posição passaram pelo backend real do jogo. Roteiro:
+  `tools/linux/test_gamepad_mapping.py`.
+- Nova execução nativa com as colisões originais ativas: 180 segundos sem
+  encerramento inesperado, terminada pelo limite do teste. É um teste de boot e
+  entrada; não comprova a luta contra Gaius. O teste anterior terminou em
+  SIGSEGV em `XPending` enquanto o kit também estava sendo refeito. A repetição
+  usou bibliotecas privadas imutáveis e o snapshot de entrada entre threads.
+- CI `40601484665` passou para `c0a23ab`: inclui o build Linux completo e os
+  testes de HUD, paleta e dispatch. O assistente foi acrescentado depois desse CI.
 
 O CI executa as regressões de HUD/paleta/dispatch após compilar o kit. O teste
 USB virtual requer permissão de acesso a `/dev/uinput` e fica como integração

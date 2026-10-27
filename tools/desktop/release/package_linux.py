@@ -6,7 +6,7 @@ import shutil
 import tarfile
 ROOT=Path(__file__).resolve().parents[3]
 NAME='ShadowOfTheColossusPC'
-VERSION='0.2.0'
+VERSION='0.2.1'
 OUT=ROOT / 'dist' / NAME
 if OUT.exists():shutil.rmtree(OUT)
 shutil.copytree(ROOT / 'artifacts/frozen' / NAME,OUT)
@@ -28,6 +28,8 @@ Requisitos: Linux x86_64 com glibc 2.39+ (Ubuntu 24.04+, Fedora 40+), OpenGL 3.3
 WASD: analógico esquerdo. H/J/Y/U: ✕/○/□/△. I/O: L1/L2. K/L: R1/R2.
 Z/X: Start/Select. F1: configurações. Controle USB/Bluetooth também funciona.
 F11: alterna tela cheia na resolução do monitor e janela.
+Na aba Controles, "Configurar meu controle" associa botoes e analogicos de
+controles sem perfil automatico. O perfil e salvo e usado tambem no menu F1.
 
 Na aba Gráficos, escolha Original 4:3 (faixas laterais) ou Esticar (tela toda).
 Importe fragment shaders GLSL 330 (.frag/.fs/.glsl) ou use Nitidez HD.
