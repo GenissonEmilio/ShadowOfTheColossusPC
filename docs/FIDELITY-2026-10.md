@@ -71,6 +71,14 @@ um save da cena relatada.
   usou bibliotecas privadas imutáveis e o snapshot de entrada entre threads.
 - CI `40601484665` passou para `c0a23ab`: inclui o build Linux completo e os
   testes de HUD, paleta e dispatch. O assistente foi acrescentado depois desse CI.
+- Pacote 0.2.1 criado e instalado localmente, com kit
+  `96b281f18bb8a07d4b4da997`. A instalação anterior foi preservada para rollback.
+  Os objetos do código traduzido foram relinkados com o novo runtime depois de
+  verificar que o ABI usado por eles não mudou. O launcher reconheceu o cache
+  preparado sem recompilar o jogo.
+- O launcher empacotado e instalado iniciou GAMECORE e o renderizador OpenGL,
+  gerou uma captura e terminou automaticamente no quadro 600. Os testes usaram
+  cópias privadas dos cartões; o hash do cartão original permaneceu inalterado.
 
 O CI executa as regressões de HUD/paleta/dispatch após compilar o kit. O teste
 USB virtual requer permissão de acesso a `/dev/uinput` e fica como integração
