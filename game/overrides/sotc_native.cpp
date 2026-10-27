@@ -602,9 +602,16 @@ namespace sotc_native
             return 0;
         const uint32_t format = word(header + 0x1Cu), psm = format & 0x3Fu;
         const uint32_t width = 1u << ((format >> 16) & 0xFu), height = 1u << ((format >> 20) & 0xFu);
-        const uint32_t pixelBytes = psm == 0x14u ? width * height / 2u : width * height;
+        const uint32_t pixelBytes = psm == 0x00u ? width * height * 4u :
+                                    (psm == 0x14u ? width * height / 2u : width * height);
+        // Palettes are small and animated in place (weak-point fades, death
+        // effects). Sampling 16 words of a 256-colour CLUT missed changes to
+        // the other entries and kept old GPU colours/alpha indefinitely.
+        const uint64_t paletteKey = contentHash(header + word(header + 0x18u),
+                                                psm == 0x00u ? 0u : (psm == 0x14u ? 64u : 1024u),
+                                                0xcbf29ce484222325ull);
         const uint64_t sampled = sample(header + word(header + 0x14u), pixelBytes, 64u) ^
-                                 sample(header + word(header + 0x18u), psm == 0x14u ? 64u : 1024u, 16u) * 31u ^ format;
+                                 paletteKey * 31u ^ format ^ g_ram[(header + 0x1Fu) & 0x1FFFFFFu];
         uint64_t key = sampled;
         bool changedInPlace = false;
         if (native_renderer::tuning().fastHooks)
@@ -1757,7 +1764,7 @@ namespace sotc_native
         {0x010A24C0u, 0x010A5270u}, // spriteDrawSpriteTexNoSet .. spriteDrawSpriteST2 (menus, title, map)
         {0x0108A288u, 0x0108A758u}, // drawFrontFog, fadeScreen, drawDemoBar (cinema bars)
         {0x0134B490u, 0x0134B6F8u}, // subtitles (pre-rendered lines, a textured sprite)
-        {0x013F6B20u, 0x013F78A8u}, // HUD gauges (fans and strips)
+        {0x013F6B20u, 0x013F8AA0u}, // all HUD gauge helpers, including the attack-charge ring
         {0x014033F0u, 0x01403558u}, // title menu backdrop
         {0x001C2DD0u, 0x001C30D0u}, // loading indicator (lines)
         {0x0114FD00u, 0x01150278u}, // spriteDraw*, windowPrintf (windows)
@@ -1909,6 +1916,18 @@ namespace sotc_native
         const size_t n = v.size();
         switch (a.prim & 7u)
         {
+        case 0: // GS point: one logical pixel, also used by dotted effects
+        {
+            native_renderer::Vertex q[4] = {o, o, o, o};
+            q[1].x += 2.0f / 512.0f;
+            q[2].y -= 2.0f / 448.0f;
+            q[3].x = q[1].x;
+            q[3].y = q[2].y;
+            emit2D(q[0], q[1], q[2]);
+            emit2D(q[1], q[3], q[2]);
+            v.clear();
+            break;
+        }
         case 1: case 2: // line, line strip: one pixel wide
             if (n >= 2)
             {

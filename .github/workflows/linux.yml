@@ -26,6 +26,11 @@ jobs:
         run: |
           LD_LIBRARY_PATH="$PWD/artifacts/compiler/lib" artifacts/compiler/bin/ps2_recomp --help
           test -f artifacts/compiler/manifest.json
+      - name: Native HUD, palette animation and collision dispatch (no ROM)
+        run: |
+          docker run --rm --init --cpus=2 --memory=1600m --memory-swap=1600m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_fidelity.sh
       - name: Native memory-card persistence (synthetic data)
         run: |
           docker run --rm --init --cpus=2 --network=none -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \

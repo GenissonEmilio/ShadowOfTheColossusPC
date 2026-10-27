@@ -73,6 +73,29 @@ diretamente. Veja [o formato e exemplos](docs/SHADERS.md).
 
 Controles USB/Bluetooth também são aceitos. O menu F1 ajusta vídeo, efeitos,
 som e idioma da interface do port. Os textos originais do disco são preservados.
+O mapeamento Linux inclui o Zikway HID gamepad / GameSir Nova Lite em modo HID
+(USB `3537:1041`), inclusive direcionais, analógicos e gatilhos.
+O runtime também inclui 743 registros Linux da base comunitária
+[SDL_GameControllerDB](https://github.com/mdqinc/SDL_GameControllerDB), com GUIDs
+adaptados ao GLFW. O jogo e o menu F1 usam o controle reconhecido que estiver
+recebendo comandos, inclusive quando ele não está na primeira posição USB.
+Reconectar o controle não exige reiniciar o jogo. Um modelo ainda ausente pode
+usar um arquivo de mapeamento indicado por `PS2X_GAMEPAD_MAPPINGS` ou a variável
+`SDL_GAMECONTROLLERCONFIG`.
+
+## Correções de fidelidade em validação
+
+As rotinas adicionais dos indicadores do HUD passam a ser capturadas, incluindo
+o anel de carga do ataque. O cache de texturas verifica toda a paleta animada,
+evitando reaproveitar cores e transparências antigas quando uma entrada muda.
+As colisões usam por padrão o código original traduzido; as reescritas manuais
+experimentais dessa parte ficam desativadas. Isso preserva também os registradores
+VU0 que as reescritas não reproduzem integralmente.
+
+Os testes sintéticos cobrem essas correções. A luta com o terceiro colosso,
+os pontos fracos e os efeitos após derrotá-lo ainda precisam de uma reprodução
+com save compatível; não foram declarados corrigidos apenas porque o build passou.
+Consulte [o acompanhamento](docs/FIDELITY-2026-10.md).
 
 ## Compilar e verificar
 
