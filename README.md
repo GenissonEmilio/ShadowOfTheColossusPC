@@ -104,6 +104,11 @@ os pontos fracos e os efeitos após derrotá-lo ainda precisam de uma reproduç�
 com save compatível; não foram declarados corrigidos apenas porque o build passou.
 Consulte [o acompanhamento](docs/FIDELITY-2026-10.md).
 
+O acompanhamento de [28/10](docs/FIDELITY-2026-10-28.md) registra os três
+trajetos no altar Cliff Path com o cartão recebido e a correção de conteúdo
+gráfico antigo no cache. As quedas não foram reproduzidas nesses trajetos;
+a colisão de Gaius e os raios de Hydrus continuam em validação.
+
 ## Compilar e verificar
 
 Para desenvolver, instale Docker e Python 3, então execute:
