@@ -11,7 +11,7 @@ import tempfile
 from import_disc import import_disc, EXPECTED
 from pipeline import Pipeline
 
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 APPLICATION_ID = "io.github.GenissonEmilio.ShadowOfTheColossusPC"
 
