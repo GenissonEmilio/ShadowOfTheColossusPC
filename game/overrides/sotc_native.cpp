@@ -613,6 +613,16 @@ namespace sotc_native
         const uint64_t sampled = sample(header + word(header + 0x14u), pixelBytes, 64u) ^
                                  paletteKey * 31u ^ format ^ g_ram[(header + 0x1Fu) & 0x1FFFFFFu];
         uint64_t key = sampled;
+        const auto fullKey = [&]
+        {
+            uint32_t bytes = 0;
+            for (uint32_t level = 0, w = width, h = height, levels = std::clamp((format >> 12) & 0xFu, 1u, 7u); level < levels && w >= 1u && h >= 1u;
+                 ++level, w /= 2u, h /= 2u)
+                bytes += psm == 0x00u ? w * h * 4u : (psm == 0x13u ? w * h : w * h / 2u);
+            uint64_t h = contentHash(header + word(header + 0x14u), bytes, 0x84222325cbf29ce4ull ^ format);
+            h = contentHash(header + word(header + 0x18u), psm == 0x00u ? 0u : (psm == 0x14u ? 64u : 1024u), h ^ g_ram[(header + 0x1Fu) & 0x1FFFFFFu]);
+            return (h & 0x03FFFFFFFFFFFFFFull) | (1ull << 58);
+        };
         bool changedInPlace = false;
         if (native_renderer::tuning().fastHooks)
         {
@@ -623,31 +633,32 @@ namespace sotc_native
             struct ContentMemo
             {
                 uint32_t address = 0;
-                uint64_t frame = ~0ull, sampled = 0, key = 0;
+                uint64_t frame = ~0ull, sampled = 0, key = 0, verifiedAt = 0;
+                bool rewritten = false;
             };
             static WayMemo<ContentMemo, 512> memos;
             bool found = false;
             ContentMemo &memo = memos.find(header, (header >> 4) ^ (header >> 13), found);
-            if (found && memo.sampled == sampled)
+            const bool reuse = found && memo.sampled == sampled && !memo.rewritten &&
+                               (memo.frame == g_frame || memo.frame + 1u == g_frame) && g_frame - memo.verifiedAt < 16u;
+            if (reuse)
             {
                 key = memo.key;
                 memo.frame = g_frame;
             }
             else
             {
-                // Drawn in the last two frames and changed: rewritten where it is
-                // (animated), decoded at once, not on the worker.
-                changedInPlace = found && memo.frame != ~0ull && memo.frame + 2u >= g_frame;
-                uint32_t bytes = 0;
-                for (uint32_t level = 0, w = width, h = height, levels = std::clamp((format >> 12) & 0xFu, 1u, 7u); level < levels && w >= 1u && h >= 1u;
-                     ++level, w /= 2u, h /= 2u)
-                    bytes += psm == 0x00u ? w * h * 4u : (psm == 0x13u ? w * h : w * h / 2u);
-                uint64_t h = contentHash(header + word(header + 0x14u), bytes, 0x84222325cbf29ce4ull ^ format);
-                h = contentHash(header + word(header + 0x18u), psm == 0x00u ? 0u : (psm == 0x14u ? 64u : 1024u), h ^ g_ram[(header + 0x1Fu) & 0x1FFFFFFu]);
-                key = (h & 0x03FFFFFFFFFFFFFFull) | (1ull << 58);
-                memo = {header, g_frame, sampled, key};
+                key = fullKey();
+                // Sparse samples cannot prove that streamed or animated bytes
+                // are unchanged. Check every byte periodically and on return
+                // after a gap; once animated, check fully on every frame.
+                changedInPlace = found && key != memo.key && memo.frame + 2u >= g_frame;
+                const bool rewritten = found && (memo.rewritten || changedInPlace);
+                memo = {header, g_frame, sampled, key, g_frame, rewritten};
             }
         }
+        else
+            key = fullKey(); // diagnostic slow path must not reuse sparse keys either
         if (native_renderer::hasTexture(key))
             return key;
         if ((psm != 0x00u && psm != 0x13u && psm != 0x14u) || width > 1024u || height > 1024u)
@@ -832,15 +843,15 @@ namespace sotc_native
     // first second: ids by address rebuilt the whole scene each time (~2 400
     // packets and ~100 textures, five times in ~20 frames, every one of them
     // the same bytes as before). A memo by address keeps a packet's id while a
-    // sample of its contents (32 words) stays the same, so the full hash runs
-    // only when the packet is new there; the same packet drawn again in a
+    // sample of its contents is unchanged between periodic full checks;
+    // the same packet drawn again in a
     // frame (instances) takes the id it had. Without fast hooks: the address
-    // and size, and the sample (another area loaded in its place makes new ids).
+    // fast hooks disabled: all contents checked on every call.
     struct PacketMemo
     {
         uint32_t address = 0, size = 0;
-        uint64_t frame = ~0ull, sample = 0, id = 0;
-        uint64_t quick = 0, sampledAt = 0; // four words; the frame of the last full sample
+        uint64_t frame = ~0ull, id = 0;
+        uint64_t quick = 0, verifiedAt = 0; // four words; last hash of ALL bytes
         bool rewritten = false;            // seen changed in place
     };
     // Four words of a packet, spread over it (the quick check).
@@ -861,42 +872,30 @@ namespace sotc_native
     uint64_t packetId(uint32_t data, uint32_t size, bool fast)
     {
         g_packetChangedInPlace = false;
-        if (!fast)
-            return ((static_cast<uint64_t>(size) << 32) | data) ^ (sample(data, size, 32u) & 0x7FFF000000000000ull);
         bool found = false;
         PacketMemo &memo = g_packetMemo.find(data, (data >> 4) ^ (data >> 15), found);
         found = found && memo.size == size;
-        if (found && memo.frame == g_frame)
+        if (fast && found && memo.frame == g_frame && !memo.rewritten)
             return memo.id;
-        // Never rewritten in place: four words, the full sample one frame in
-        // 16 (by address, so not all on the same frame).
-        if (found && !memo.rewritten && native_renderer::tuning().packetQuickCheck && g_frame - memo.sampledAt < 16u &&
+        // A sample is only a shortcut between bounded full-content checks.
+        // Returning after a gap may mean streaming reused the address: always
+        // check every byte then, even if all sampled words happen to match.
+        if (fast && found && !memo.rewritten && native_renderer::tuning().packetQuickCheck && g_frame - memo.verifiedAt < 16u &&
+            memo.frame + 1u == g_frame &&
             ((g_frame + (data >> 5)) & 15u) != 0u)
         {
-            // Drawn the frame before too: taken as it was (the full sample
-            // comes round within 16 frames). Back after a while: four words.
-            if (memo.frame + 1u == g_frame || quickSample(data, size) == memo.quick)
+            if (quickSample(data, size) == memo.quick)
             {
                 memo.frame = g_frame;
                 return memo.id;
             }
         }
-        const uint64_t sampled = sample(data, size, 32u);
-        if (found && memo.sample == sampled)
-        {
-            memo.frame = g_frame;
-            memo.sampledAt = g_frame;
-            memo.quick = quickSample(data, size);
-            return memo.id;
-        }
-        // Drawn in the last two frames and changed: rewritten in place
-        // (animated). Long unused: another packet loaded there (async is fine).
-        g_packetChangedInPlace = found && memo.frame != ~0ull && memo.frame + 2u >= g_frame;
         // Bit 59 set, 60-63 clear: apart from the per-frame meshes' ids
         // (bits 60, 62, 63 and a count) and the second pass's (bit 61 flipped).
         const uint64_t id = (contentHash(data, size, 0x9E3779B97F4A7C15ull ^ size) & 0x07FFFFFFFFFFFFFFull) | (1ull << 59);
+        g_packetChangedInPlace = found && id != memo.id && memo.frame + 2u >= g_frame;
         const bool rewritten = found && (memo.rewritten || g_packetChangedInPlace);
-        memo = {data, size, g_frame, sampled, id, quickSample(data, size), g_frame, rewritten};
+        memo = {data, size, g_frame, id, quickSample(data, size), g_frame, rewritten};
         return id;
     }
 

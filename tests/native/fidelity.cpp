@@ -78,6 +78,87 @@ int main()
     ++g_frame;
     assert(previous != texture(h));
 
+    // An in-place edit outside BOTH sparse samples used to stay stale
+    // forever. Bounded full checks must find it, then track animation on
+    // every frame (and every draw once the packet is known to be mutable).
+    constexpr uint32_t packet = 0x8000, packetSize = 4096;
+    native_renderer::tuning().packetQuickCheck = true;
+    ++g_frame;
+    uint64_t packetKey = packetId(packet, packetSize, true);
+    const auto sparse = sample(packet, packetSize, 32);
+    const auto quick = quickSample(packet, packetSize);
+    put(packet + 4, 0x3f801234);
+    assert(sample(packet, packetSize, 32) == sparse);
+    assert(quickSample(packet, packetSize) == quick);
+    bool detected = false;
+    for (unsigned i = 0; i < 16; ++i) {
+        ++g_frame;
+        const auto changed = packetId(packet, packetSize, true);
+        if (changed != packetKey) {
+            assert(g_packetChangedInPlace);
+            packetKey = changed;
+            detected = true;
+            break;
+        }
+    }
+    assert(detected);
+    ++g_frame;
+    put(packet + 8, 0x3f812345);
+    auto changedPacket = packetId(packet, packetSize, true);
+    assert(changedPacket != packetKey && g_packetChangedInPlace);
+    put(packet + 12, 0x3f823456); // same frame, same mutable buffer
+    packetKey = packetId(packet, packetSize, true);
+    assert(packetKey != changedPacket && g_packetChangedInPlace);
+
+    // Streaming reuse after an absent frame is checked immediately, even
+    // when the four shortcut words match. So is quick-check disabled.
+    constexpr uint32_t streamed = 0xa000;
+    const auto streamedKey = packetId(streamed, packetSize, true);
+    g_frame += 2;
+    put(streamed + 4, 0x40567890);
+    assert(packetId(streamed, packetSize, true) != streamedKey);
+    constexpr uint32_t strict = 0xc000;
+    packetKey = packetId(strict, packetSize, true);
+    native_renderer::tuning().packetQuickCheck = false;
+    ++g_frame;
+    put(strict + 4, 0x40678901);
+    assert(packetId(strict, packetSize, true) != packetKey);
+    native_renderer::tuning().packetQuickCheck = true;
+    packetKey = packetId(strict, packetSize, false);
+    put(strict + 8, 0x40789012);
+    assert(packetId(strict, packetSize, false) != packetKey);
+
+    constexpr uint32_t animated = 0x10000;
+    put(animated, 0x324f544e);
+    put(animated + 0x14, 0x1000); put(animated + 0x18, 0x800);
+    put(animated + 0x1c, 0x00771013); // 128x128 PSMT8
+    put(animated + 0x800, 0x80000000);
+    put(animated + 0x804, 0x80ffffff);
+    ++g_frame;
+    previous = texture(animated);
+    const auto pixelsSample = sample(animated + 0x1000, 16384, 64);
+    ram[animated + 0x1004] = 1;
+    assert(sample(animated + 0x1000, 16384, 64) == pixelsSample);
+    detected = false;
+    for (unsigned i = 0; i < 16; ++i) {
+        ++g_frame;
+        const auto changed = texture(animated);
+        if (changed != previous) {
+            previous = changed;
+            detected = true;
+            break;
+        }
+    }
+    assert(detected);
+    ++g_frame;
+    ram[animated + 0x1005] = 1;
+    assert(texture(animated) != previous);
+    native_renderer::tuning().fastHooks = false;
+    previous = texture(animated);
+    ram[animated + 0x1006] = 1;
+    assert(texture(animated) != previous);
+    native_renderer::tuning().fastHooks = true;
+
     // Default physics stays authored guest code; opt-in and difftest remain
     // possible. Registry fallbacks retain the original callable function.
     PS2Runtime runtime;
@@ -91,5 +172,5 @@ int main()
     setenv("SOTC_NATIVE_COLLISION", "1", 1);
     sotc_decomp::install(runtime);
     assert(runtime.lookupFunction(0x2000) == experimentalPhysics);
-    std::puts("PASS: HUD helpers, GS points, every CLUT entry, RGBA texture tail, original collision dispatch");
+    std::puts("PASS: HUD, CLUT/RGBA, unsampled geometry/texture edits, streaming reuse, original collision dispatch");
 }
