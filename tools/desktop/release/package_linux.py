@@ -6,7 +6,7 @@ import shutil
 import tarfile
 ROOT=Path(__file__).resolve().parents[3]
 NAME='ShadowOfTheColossusPC'
-VERSION='0.2.2'
+VERSION='0.2.3'
 OUT=ROOT / 'dist' / NAME
 if OUT.exists():shutil.rmtree(OUT)
 shutil.copytree(ROOT / 'artifacts/frozen' / NAME,OUT)
@@ -49,6 +49,7 @@ O runtime e os scripts de build estão em compiler/source.
 GCC 13 e bibliotecas Ubuntu: fontes em https://archive.ubuntu.com/ubuntu/pool/
 (identificadas pelos pacotes em packages.txt); GCC em https://gcc.gnu.org/gcc-13/.
 
+Artes do launcher: _internal/assets/ARTWORK.md (origem e prompts das adaptações).
 Shadow of the Colossus pertence a Sony / Team Ico. Projeto independente.
 ''',encoding='utf-8')
 for p in OUT.rglob('*'):

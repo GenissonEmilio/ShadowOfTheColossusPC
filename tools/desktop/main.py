@@ -38,7 +38,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 gi.require_foreign("cairo")
-from gi.repository import Gdk, GLib, Gtk, Pango
+from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, Pango
 import cairo
 
 
@@ -62,39 +62,59 @@ def box(orientation=Gtk.Orientation.VERTICAL, spacing=0, margin=0, classes=()):
     return widget
 
 
-def monument(cr, x, y, scale):
-    cr.save(); cr.translate(x,y); cr.scale(scale,scale)
-    # Original vector artwork: an ancient stone guardian and a sword of light.
-    cr.set_source_rgb(.23,.27,.25)
-    cr.move_to(-70,80); cr.line_to(-60,-14); cr.line_to(-38,-43); cr.line_to(-30,-76)
-    cr.line_to(28,-76); cr.line_to(42,-43); cr.line_to(64,-14); cr.line_to(76,80); cr.close_path(); cr.fill()
-    cr.set_source_rgb(.39,.42,.37)
-    for x1,y1,w,h in [(-28,-69,54,29),(-41,-32,82,30),(-48,6,96,25),(-52,39,107,30)]:
-        cr.rectangle(x1,y1,w,h); cr.fill()
-    cr.set_source_rgb(.43,.87,.78)
-    for dx in (-17,17): cr.rectangle(dx-5,-57,10,4); cr.fill()
-    cr.set_line_width(2); cr.move_to(0,-27);cr.line_to(-10,-12);cr.line_to(0,4);cr.line_to(10,-12);cr.close_path();cr.stroke()
-    cr.set_source_rgb(.76,.7,.53);cr.rectangle(-87,-88,4,155);cr.fill();cr.rectangle(-100,50,30,4);cr.fill()
-    cr.set_source_rgb(.65,.87,.8);cr.move_to(-85,-103);cr.line_to(-90,-86);cr.line_to(-80,-86);cr.close_path();cr.fill()
-    cr.restore()
-
-
 class Artwork(Gtk.DrawingArea):
+    """Responsive illustration, with actual transparent artwork for the brand."""
+    _images = {}
+
     def __init__(self, small=False):
-        super().__init__(); self.small=small
-        self.set_size_request(45 if small else 220,55 if small else 220)
-        self.connect("draw",self.draw)
-        self.get_accessible().set_name("Guardião de pedra e espada luminosa, ilustração decorativa")
+        super().__init__()
+        self.small = small
+        self.set_size_request(48 if small else 0, 64 if small else 260)
+        name = "icon.png" if small else "hero.png"
+        if name not in self._images:
+            self._images[name] = GdkPixbuf.Pixbuf.new_from_file(
+                str(assets_directory() / name))
+        self.picture = self._images[name]
+        self.connect("draw", self.draw)
+        self.get_accessible().set_name(
+            "Wander erguendo a espada sobre um colosso de olhos azuis")
 
     def draw(self, widget, cr):
-        w,h=self.get_allocated_width(),self.get_allocated_height()
-        if not self.small:
-            glow=cairo.RadialGradient(w/2,h/2,5,w/2,h/2,140)
-            glow.add_color_stop_rgba(0,.35,.7,.62,.18); glow.add_color_stop_rgba(1,.1,.1,.1,0)
-            cr.set_source(glow); cr.paint()
-            cr.set_source_rgba(.7,.7,.6,.15)
-            for dx in (20,170): cr.rectangle(dx,10,14,195);cr.fill()
-        monument(cr,w/2+8,h/2+12,.24 if self.small else .94)
+        w, h = self.get_allocated_width(), self.get_allocated_height()
+        iw, ih = self.picture.get_width(), self.picture.get_height()
+        cr.save()
+        if self.small:
+            scale = min(w / iw, h / ih)
+            cr.translate((w - iw * scale) / 2, (h - ih * scale) / 2)
+            cr.scale(scale, scale)
+            Gdk.cairo_set_source_pixbuf(cr, self.picture, 0, 0)
+            cr.paint()
+        else:
+            radius = 13
+            for cx, cy, start in ((w-radius, radius, -math.pi/2),
+                                  (w-radius, h-radius, 0),
+                                  (radius, h-radius, math.pi/2),
+                                  (radius, radius, math.pi)):
+                cr.arc(cx, cy, radius, start, start + math.pi/2)
+            cr.close_path()
+            cr.clip()
+            # Cover without distortion. Right alignment keeps Wander and the
+            # glowing eyes visible when the user makes the window narrower.
+            scale = max(w / iw, h / ih)
+            cr.save()
+            cr.translate(w - iw * scale, (h - ih * scale) / 2)
+            cr.scale(scale, scale)
+            Gdk.cairo_set_source_pixbuf(cr, self.picture, 0, 0)
+            cr.paint()
+            cr.restore()
+            # Keep copy readable even when a narrow window crops away the
+            # quiet left half of the wide illustration.
+            shade = cairo.LinearGradient(0, 0, min(w, 460), 0)
+            for at, alpha in ((0, .75), (.70, .80), (1, 0)):
+                shade.add_color_stop_rgba(at, .07, .11, .09, alpha)
+            cr.set_source(shade)
+            cr.paint()
+        cr.restore()
         return False
 
 
@@ -172,9 +192,13 @@ class Launcher:
 
     def home(self):
         page = box(spacing=22)
-        hero_outer = style(Gtk.Box(),"hero")
+        hero_outer = style(Gtk.Overlay(), "hero")
+        artwork = Artwork()
+        for edge in ("top", "bottom", "start", "end"):
+            getattr(artwork, "set_margin_" + edge)(1)
+        hero_outer.add(artwork)
         hero = box(Gtk.Orientation.HORIZONTAL, margin=24)
-        hero_outer.add(hero)
+        hero_outer.add_overlay(hero)
         copy = box(spacing=12)
         copy.pack_start(label("DAS TERRAS PROIBIDAS AO SEU PC", "eyebrow"),False,False,0)
         copy.pack_start(label("Shadow of the\nColossus", "hero-title",wrap=True),False,False,0)
@@ -183,7 +207,7 @@ class Launcher:
         for text in ("PORT NATIVO","JOGO ORIGINAL","OFFLINE"):
             pills.pack_start(label(text,"pill"),False,False,0)
         copy.pack_start(pills,False,False,4)
-        hero.pack_start(copy,True,True,0); hero.pack_end(Artwork(),False,False,0)
+        hero.pack_start(copy, True, True, 0)
         page.pack_start(hero_outer,False,False,0)
         panel_outer = style(Gtk.Box(orientation=Gtk.Orientation.VERTICAL),"panel")
         panel = box(spacing=17,margin=22); panel_outer.pack_start(panel,True,True,0)
