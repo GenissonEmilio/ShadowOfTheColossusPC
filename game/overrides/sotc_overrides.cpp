@@ -9,6 +9,7 @@
 #include "ps2_runtime_macros.h"
 #include "game_overrides.h"
 #include "runtime/ee_scheduler.h"
+#include "runtime/ps2_pad.h"
 #include "ps2x/iop/iop_subsystem.h"
 #include "runtime/ps2_stats.h"
 
@@ -844,8 +845,49 @@ namespace
         }
     }
 
+    // sceVibSetActParam(socket, profileSize, profile, dataSize, data) (libvib):
+    // the DualShock 2 motors, packed in bits in the profile's order (act 0 the
+    // small motor, 1 bit; act 1 the large one, 8 bits). Played on the host's
+    // controller, then the game's own (which talks to the PS2 pad) runs.
+    constexpr uint32_t kVibSetActParam = 0x00115940u, kVibSetActParamEnd = 0x00115A30u;
+    PS2Runtime::RecompiledFunction g_vibSetActParam = nullptr;
+
+    void vibSetActParamHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (ctx->pc <= kVibSetActParam || ctx->pc >= kVibSetActParamEnd) // a new call, not a resume inside it
+        {
+            const uint32_t profileSize = GPR_U32(ctx, 5), profile = GPR_U32(ctx, 6), dataSize = GPR_U32(ctx, 7), data = GPR_U32(ctx, 8);
+            if (profileSize >= 1u && profileSize <= 8u && dataSize >= 1u && dataSize <= 8u)
+            {
+                auto bitAt = [&](uint32_t base, uint32_t bit) { return (rdram[(base + bit / 8u) & 0x1FFFFFFu] >> (bit % 8u)) & 1u; };
+                const uint8_t actuators = rdram[profile & 0x1FFFFFFu];
+                uint32_t at = 0;
+                bool small = false;
+                uint32_t large = 0;
+                if (actuators & 1u)
+                    small = bitAt(data, at++) != 0;
+                if (actuators & 2u)
+                    for (uint32_t b = 0; b < 8u && at < dataSize * 8u; ++b)
+                        large |= bitAt(data, at++) << b;
+                static int logged = 0;
+                if (logged < 8 && (small || large))
+                {
+                    ++logged;
+                    std::fprintf(stderr, "[vib] small=%d large=%u\n", small ? 1 : 0, large);
+                }
+                PSPadBackend::setRumble(small, static_cast<float>(large) / 255.0f);
+            }
+        }
+        g_vibSetActParam(rdram, ctx, runtime);
+    }
+
     void applySotcOverrides(PS2Runtime &runtime)
     {
+        if (!std::getenv("PS2X_NO_RUMBLE") && runtime.hasFunction(kVibSetActParam))
+        {
+            g_vibSetActParam = runtime.lookupFunction(kVibSetActParam);
+            runtime.registerFunction(kVibSetActParam, vibSetActParamHook);
+        }
         if (runtime.hasFunction(0x001AFFD8u) && runtime.hasFunction(0x001B00F0u) && runtime.hasFunction(0x001B0328u))
         {
             g_mallocAlign = runtime.lookupFunction(0x001AFFD8u);
