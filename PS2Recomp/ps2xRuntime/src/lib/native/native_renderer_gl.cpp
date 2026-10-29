@@ -41,6 +41,7 @@ extern "C" unsigned int _newlib_heap_size_user;      // ps2_vita_runtime.cpp
 #include "ThreadNaming.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -582,6 +583,24 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         float clip[16];
     };
 
+#if !defined(PS2X_NATIVE_VITA)
+    // Shared present (desktop GL, setSharedPresent): the render thread's
+    // context shares objects with the window's, so a finished frame is handed
+    // over as a texture and a GPU fence instead of being read back to memory.
+    std::atomic<bool> g_sharedPresent{false};
+    std::mutex g_shareMutex;
+    struct SharedFrame
+    {
+        GLuint texture = 0;
+        uint32_t width = 0, height = 0;
+        GLsync ready = nullptr; // the render thread's copy into it is done
+    };
+    SharedFrame g_published;           // the newest finished frame
+    std::condition_variable g_publishedWake; // a new frame was published
+    GLuint g_shownTexture = 0;         // the one the window draws now
+    std::unordered_map<GLuint, GLsync> g_released; // the window's last draw of a texture it moved on from
+#endif
+
     // A colour target, with the framebuffer that draws into it (and its
     // depth/stencil when it has one).
     struct Target
@@ -619,7 +638,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // drawn again into a target of its own (one per effect), and the
         // heat haze's 256 x 256 copy apart from the water's.
         Target prefix[3], hazeSmall;
-        Target shownFrame[2]; // what the host shows, alternately (the GPU draws later: never the target being drawn)
+        Target shownFrame[3]; // what the host shows, in turn (the GPU draws later: never the target being drawn or shown)
         int shownIndex = 0;
         Target glowLayer, glowSmall[4]; // bossDeathEffect: layer 8 apart (on the picture's depth); 256, 128, 64, 64
         Target bloomTex[3];
@@ -2361,6 +2380,52 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         copy(colorPlain, previous);
 
 
+#if !defined(PS2X_NATIVE_VITA)
+        if (g_sharedPresent.load(std::memory_order_relaxed))
+        {
+            int slot = 0;
+            {
+                std::lock_guard<std::mutex> lock(g_shareMutex);
+                while (slot < 2 && (shownFrame[slot].texture == g_published.texture || shownFrame[slot].texture == g_shownTexture))
+                    ++slot;
+                const auto released = g_released.find(shownFrame[slot].texture);
+                if (released != g_released.end())
+                {
+                    glWaitSync(released->second, 0, GL_TIMEOUT_IGNORED); // the window's draw of it comes first on the GPU
+                    glDeleteSync(released->second);
+                    g_released.erase(released);
+                }
+            }
+            const Target &out = shownFrame[slot];
+            copy(colorPlain, out);
+            // The display shows colour only: alpha 1, or the window's blend darkens it.
+            glBindFramebuffer(GL_FRAMEBUFFER, out.fbo);
+            glDisable(GL_SCISSOR_TEST);
+            glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
+            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            boundFbo = boundProgram = ~0u;
+            // Mip levels: the window draws it smaller than it is (a render
+            // scale above the window) trilinear, without the shimmer of far detail.
+            static const bool shownMips = std::getenv("SOTC_SHOWN_MIPS") != nullptr;
+            if (shownMips)
+            {
+                bindTexture(0, out.texture);
+                glGenerateMipmap(GL_TEXTURE_2D);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+            }
+            GLsync ready = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+            glFlush(); // the fence must reach the GPU for the window's context to wait on it
+            std::lock_guard<std::mutex> lock(g_shareMutex);
+            if (g_published.ready)
+                glDeleteSync(g_published.ready);
+            g_published = SharedFrame{out.texture, w, h, ready};
+            g_publishedWake.notify_all();
+            return;
+        }
+#endif
         if (const auto &hook = native_renderer::detail::presentHook())
         {
             // The host shows a copy of its own: the next frame starts drawing
@@ -3073,6 +3138,70 @@ namespace native_renderer::detail
             return nullptr; // its thread has ended; the renderer is left as it is
         return backend;
     }
+}
+
+#if !defined(PS2X_NATIVE_VITA)
+namespace native_renderer
+{
+    void setSharedPresent(bool on) { g_sharedPresent.store(on, std::memory_order_relaxed); }
+
+    bool waitNewFrame(int timeoutMs)
+    {
+        if (!g_sharedPresent.load(std::memory_order_relaxed))
+            return false;
+        std::unique_lock<std::mutex> lock(g_shareMutex);
+        return g_publishedWake.wait_for(lock, std::chrono::milliseconds(timeoutMs),
+                                        [] { return g_published.texture && g_published.texture != g_shownTexture; });
+    }
+
+    bool sharedFrame(uint32_t &texture, uint32_t &width, uint32_t &height)
+    {
+        if (!g_sharedPresent.load(std::memory_order_relaxed))
+            return false;
+        std::lock_guard<std::mutex> lock(g_shareMutex);
+        if (!g_published.texture)
+            return false;
+        if (g_published.texture != g_shownTexture)
+        {
+            if (g_shownTexture)
+            {
+                // Everything the window drew so far (the old frame included) before the render thread draws into it again.
+                if (const auto old = g_released.find(g_shownTexture); old != g_released.end())
+                    glDeleteSync(old->second);
+                g_released[g_shownTexture] = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+                glFlush();
+            }
+            if (g_published.ready)
+            {
+                glWaitSync(g_published.ready, 0, GL_TIMEOUT_IGNORED); // on the GPU: the CPU goes on
+                glDeleteSync(g_published.ready);
+                g_published.ready = nullptr;
+            }
+            g_shownTexture = g_published.texture;
+        }
+        texture = g_published.texture;
+        width = g_published.width;
+        height = g_published.height;
+        return true;
+    }
+}
+
+#else
+namespace native_renderer
+{
+    void setSharedPresent(bool) {}
+    bool sharedFrame(uint32_t &, uint32_t &, uint32_t &) { return false; }
+    bool waitNewFrame(int) { return false; }
+}
+#endif
+
+#else
+
+namespace native_renderer
+{
+    void setSharedPresent(bool) {}
+    bool sharedFrame(uint32_t &, uint32_t &, uint32_t &) { return false; }
+    bool waitNewFrame(int) { return false; }
 }
 
 #endif
