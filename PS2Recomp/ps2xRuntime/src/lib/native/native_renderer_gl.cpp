@@ -243,6 +243,18 @@ void main()
 {
     if (uMode == 0) // copy
         oColor = vec4(texture(uSrc, vUV).rgb, 1.0);
+    else if (uMode == 21) // effect detail >= 1 (Metal's reduceBox): each destination pixel the average of its whole footprint; uA.xy its size, uA.z alpha kept
+    {
+        vec2 foot = vec2(textureSize(uSrc, 0)) / uA.xy;
+        ivec2 n = ivec2(clamp(ceil(foot / 2.0), 1.0, 8.0)); // bilinear taps, 2 x 2 texels each
+        vec2 corner = floor(vUV * uA.xy) / uA.xy;
+        vec4 sum = vec4(0.0);
+        for (int y = 0; y < n.y; ++y)
+            for (int x = 0; x < n.x; ++x)
+                sum += texture(uSrc, corner + (vec2(x, y) + 0.5) / vec2(n) / uA.xy);
+        sum /= float(n.x * n.y);
+        oColor = vec4(sum.rgb, uA.z > 0.5 ? sum.a : 1.0);
+    }
     else if (uMode == 1) // blur: uA.xy step
     {
         float w0 = 0.30, w1 = 0.235, w2 = 0.12, w3 = 0.05;
@@ -1357,9 +1369,34 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             glDrawArrays(GL_TRIANGLES, 0, corners ? 6 : 3);
         }
 
+        // This frame: Tuning::effectDetail >= 1 (desktop GL; the Vita keeps the PS2's copies).
+        bool smoothReduce = false;
+
+        // A reduction from -> to as the whole footprint averaged (effect
+        // detail >= 1, from more than twice as large): at 3x one bilinear tap
+        // read 2 x 2 of 6 x 6 texels and the DoF-blurred far cliffs came out
+        // blocky. False: not done, the caller draws its plain copy.
+        bool smoothCopy(const Target &from, const Target &to, bool keepAlpha)
+        {
+#if !defined(PS2X_NATIVE_VITA)
+            if (smoothReduce && (from.width > to.width * 2u || from.height > to.height * 2u))
+            {
+                const float a[4] = {static_cast<float>(to.width), static_cast<float>(to.height), keepAlpha ? 1.0f : 0.0f, 0};
+                bindTexture(0, from.texture);
+                quad(to, 21, QuadBlend::None, a);
+                return true;
+            }
+#else
+            (void)from, (void)to, (void)keepAlpha;
+#endif
+            return false;
+        }
+
         // The colour of `from` into `to` (bilinear: reducing blurs it).
         void copy(const Target &from, const Target &to)
         {
+            if (smoothCopy(from, to, false))
+                return;
             bindTexture(0, from.texture);
             quad(to, 0, QuadBlend::None);
         }
@@ -1947,6 +1984,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 glDisableVertexAttribArray(i);
         };
 
+        smoothReduce = native_renderer::tuning().effectDetail >= 0.5f;
         if (haveMirror)
             pass(reflection, false, 0, ~0u, false, true);
         if (fogOn)
@@ -2034,6 +2072,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             pass(glowLayer, false, glow.order, glow.order + 1u, true, false, true);
             auto reduce = [&](const Target &from, const Target &to, float shift)
             {
+                if (shift == 0.0f && smoothCopy(from, to, true))
+                    return;
                 const float offset[4] = {shift / static_cast<float>(from.width), shift / static_cast<float>(from.height), 0, 0};
                 bindTexture(0, from.texture);
                 quad(to, 13, QuadBlend::None, offset);
