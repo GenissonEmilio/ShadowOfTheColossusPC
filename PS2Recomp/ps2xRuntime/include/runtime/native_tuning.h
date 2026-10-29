@@ -60,6 +60,10 @@ namespace native_renderer
         // With the render thread the swap is that thread's, but the game
         // still waits for it when a whole frame ahead.
         bool frameCap30 = false;
+        // The picture's final look (OpenGL with the shared present): S-curve
+        // contrast 0..1, saturation (1 = the game's), brightness (1 = the
+        // game's) and sharpening 0..1. All at their neutral values: a plain copy.
+        float contrast = 0.0f, saturation = 1.0f, brightness = 1.0f, sharpen = 0.0f;
         // OpenGL / Vita: drawing and showing a frame on a thread of its own
         // while the game makes the next (at most one frame ahead); off: the
         // game waits for each frame to be drawn (SOTC_RENDER_THREAD=0/1; on
