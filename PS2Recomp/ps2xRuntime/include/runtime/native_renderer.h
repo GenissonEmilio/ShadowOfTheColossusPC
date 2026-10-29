@@ -359,6 +359,15 @@ namespace native_renderer
     bool shown();
     // The last finished frame (RGBA8); false before the first.
     bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height);
+    // Desktop OpenGL with the renderer's context sharing objects with the
+    // window's: finished frames are handed over as textures (no read back to
+    // memory; latestFrame then has nothing new). Window thread: the newest
+    // frame's texture (y-up), after a GPU-side wait for it; false before the first.
+    void setSharedPresent(bool on);
+    bool sharedFrame(uint32_t &texture, uint32_t &width, uint32_t &height);
+    // Window thread: waits up to timeoutMs for a frame it has not shown yet
+    // (each game frame shown once, at the next screen refresh); true if one came.
+    bool waitNewFrame(int timeoutMs);
 
     // The frame timing log (Debug 'Frame timing log', SOTC_FRAME_LOG): what
     // one game frame spent where, filled by the frontend, the backends and the
