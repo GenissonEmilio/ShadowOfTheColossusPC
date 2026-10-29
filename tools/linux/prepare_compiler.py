@@ -34,14 +34,15 @@ def deps(binary,directory,skip_system=True):
             continue
         copy(src,directory / src.name)
 
-for name in ('PS2Recomp','game','tools'):
+for name in ('PS2Recomp','game','tools','tests'):
     copy(ROOT / name,OUT / 'source' / name)
 for name in ('raylib.h','raymath.h','rlgl.h'):
     copy(BUILD / '_deps/raylib-src/src' / name,OUT / 'source/raylib' / name)
 for name in ('LICENSE','README.md','celosia'):
     copy(ROOT / name,OUT / 'source' / name)
 copy(ROOT / 'docs/SHADERS.md',OUT / 'source/docs/SHADERS.md')
-copy(ROOT / 'docs/FIDELITY-2026-10.md', OUT / 'source/docs/FIDELITY-2026-10.md')
+for report in (ROOT / 'docs').glob('FIDELITY-*.md'):
+    copy(report, OUT / 'source/docs' / report.name)
 copy(ROOT / 'PS2Recomp/ps2xRuntime/third_party/gamecontrollerdb/LICENSE',
      OUT / 'licenses/SDL_GameControllerDB.LICENSE')
 copy(BUILD / '_deps/raylib-src/LICENSE',OUT / 'licenses/raylib.LICENSE')

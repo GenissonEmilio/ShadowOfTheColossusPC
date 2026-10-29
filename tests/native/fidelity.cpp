@@ -1,6 +1,7 @@
 // Synthetic inputs only: exercise the real native HUD/texture parser and registry.
 #include "../../game/overrides/sotc_native.cpp"
 #include "../../game/overrides/sotc_decomp.cpp"
+#include "../../PS2Recomp/ps2xRuntime/src/lib/Kernel/GuestKernelMemory.h"
 #include <cassert>
 
 extern const uint32_t g_ps2RecompiledFunctionTableBase = 0;
@@ -172,5 +173,35 @@ int main()
     setenv("SOTC_NATIVE_COLLISION", "1", 1);
     sotc_decomp::install(runtime);
     assert(runtime.lookupFunction(0x2000) == experimentalPhysics);
-    std::puts("PASS: HUD, CLUT/RGBA, unsampled geometry/texture edits, streaming reuse, original collision dispatch");
+
+    // The twelfth 16 KiB callback stack used to overlap TLS; the next one
+    // overlapped RPC packets/descriptors. Simulate real stack writes through
+    // every allocation, keeping sentinel bytes in the service pools.
+    using namespace ps2x::kernel_memory;
+    constexpr uint32_t servicesEnd = kBootModePoolBase + kBootModePoolBytes;
+    std::fill(ram.begin() + kRpcPacketPoolBase, ram.begin() + servicesEnd, 0xa5);
+    assert(runtime.reserveAsyncCallbackStack(0, 16) == 0);
+    unsigned stacks = 0;
+    uint32_t previousBase = kCallbackStackTop;
+    while (const uint32_t sp = runtime.reserveAsyncCallbackStack(kCallbackStackSize, 16)) {
+        const uint32_t top = sp + 16, base = top - kCallbackStackSize;
+        assert(base >= kCallbackStackFloor && top <= previousBase);
+        assert(top <= kRpcPacketPoolBase || base >= servicesEnd);
+        std::fill(ram.begin() + base, ram.begin() + top, 0x5a);
+        previousBase = base;
+        ++stacks;
+        assert(stacks <= 25);
+    }
+    assert(stacks == 23);
+    assert(runtime.reserveAsyncCallbackStack(kCallbackStackSize, 16) == 0);
+    assert(std::all_of(ram.begin() + kRpcPacketPoolBase, ram.begin() + servicesEnd,
+                       [](uint8_t value) { return value == 0xa5; }));
+    PS2Runtime aligned;
+    // A rejected oversized request must not consume the pool. Alignment
+    // padding also belongs to the reserved stack interval.
+    assert(aligned.reserveAsyncCallbackStack(0x40000, 16) == 0);
+    assert(aligned.reserveAsyncCallbackStack(0x10000, 16) == kCallbackStackTop - 16);
+    assert(aligned.reserveAsyncCallbackStack(0x10000, 16) == kCallbackStackTop - 0x10000 - 16);
+    assert(aligned.reserveAsyncCallbackStack(0x10000, 0x10000) == kRpcPacketPoolBase - 16);
+    std::puts("PASS: HUD, CLUT/RGBA, geometry/texture edits, original collision dispatch, isolated callback stacks");
 }

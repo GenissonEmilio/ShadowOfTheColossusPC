@@ -2438,6 +2438,21 @@ uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment
 
     uint32_t base = top - allocSize;
     base &= ~(normalizedAlignment - 1u);
+    // Callback stacks descend through the kernel area. RPC, TLS and boot
+    // metadata occupy a hole inside that area, not below its floor. After
+    // eleven 16 KiB stacks, the old allocator handed this live metadata out
+    // as stack memory. Skip the complete service-pool interval, including
+    // when alignment padding or a larger stack would cross it.
+    constexpr uint32_t servicesBegin = ps2x::kernel_memory::kRpcPacketPoolBase;
+    constexpr uint32_t servicesEnd = ps2x::kernel_memory::kBootModePoolBase +
+                                     ps2x::kernel_memory::kBootModePoolBytes;
+    if (base < servicesEnd && top > servicesBegin)
+    {
+        top = servicesBegin;
+        if (top <= allocSize)
+            return 0u;
+        base = (top - allocSize) & ~(normalizedAlignment - 1u);
+    }
     if (base < m_asyncCallbackStackFloor || base >= top)
     {
         std::cerr << "[runtime] callback stack space exhausted (floor 0x" << std::hex << m_asyncCallbackStackFloor
