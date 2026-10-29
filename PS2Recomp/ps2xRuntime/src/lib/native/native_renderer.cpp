@@ -248,9 +248,9 @@ namespace native_renderer
              nullptr, &Tuning::msaa, 0.0f, 3.0f, 1.0f, "SOTC_MSAA"},
             {"texture_filter", "Texture filtering", "Filtro de texturas",
              "Nearest: hard square texels. Bilinear: smooth, one mip level. Trilinear: smooth between mip levels at the level the game picks by distance (the default). "
-             "Anisotropic 2x-16x (Metal only; OpenGL uses trilinear): the GPU picks the level from each pixel's footprint, so far ground and slopes stay sharp at a high resolution.",
+             "Anisotropic 2x-16x (Metal and OpenGL; Vita uses trilinear): the GPU picks the level from each pixel's footprint, so far ground and slopes stay sharp at a high resolution.",
              "Mais próximo: texels quadrados. Bilinear: suave, um nível de mip. Trilinear: suave entre níveis de mip, no nível que o jogo escolhe pela distância (o padrão). "
-             "Anisotrópico 2x-16x (só Metal; no OpenGL vale trilinear): a GPU escolhe o nível pela área de cada pixel, então chão distante e encostas ficam nítidos em resolução alta.",
+             "Anisotrópico 2x-16x (Metal e OpenGL; no Vita vale trilinear): a GPU escolhe o nível pela área de cada pixel, então chão distante e encostas ficam nítidos em resolução alta.",
              nullptr, &Tuning::textureFilter, 0.0f, 6.0f, 1.0f, "SOTC_TEXTURE_FILTER"},
             {"model_detail", "Model detail", "Detalhe dos modelos",
              "Which of a model's detail levels is drawn. Game's choice: the one the game picks by distance (the PS2's). Finer: one level more detailed. "
