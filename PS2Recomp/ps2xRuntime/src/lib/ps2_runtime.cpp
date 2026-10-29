@@ -978,6 +978,12 @@ bool PS2Runtime::initialize(const char *title)
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
 #else
         SetConfigFlags(FLAG_WINDOW_RESIZABLE | (std::getenv("PS2X_HIDDEN_WINDOW") ? FLAG_WINDOW_HIDDEN : 0));
+#if defined(__linux__) && !defined(__ANDROID__)
+        // GLFW names the X11 window's WM_CLASS instance after RESOURCE_NAME
+        // (otherwise after the title): docks match it to the desktop entry's
+        // StartupWMClass, the launcher's own window class.
+        setenv("RESOURCE_NAME", "shadow-of-the-colossus-pc", 0);
+#endif
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
 #if defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__))
         if (std::getenv("PS2X_GS_HW"))
