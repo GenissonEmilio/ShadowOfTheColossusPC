@@ -3,6 +3,7 @@
 #include "../../game/overrides/sotc_decomp.cpp"
 #include "../../PS2Recomp/ps2xRuntime/src/lib/Kernel/GuestKernelMemory.h"
 #include <cassert>
+#include "runtime/ee_scheduler.h"
 
 extern const uint32_t g_ps2RecompiledFunctionTableBase = 0;
 extern const uint32_t g_ps2RecompiledFunctionTableEnd = 0x10000;
@@ -13,8 +14,91 @@ static void noop(uint8_t *, R5900Context *, PS2Runtime *) {}
 static void originalPhysics(uint8_t *, R5900Context *c, PS2Runtime *) { SET_GPR_U32(c, 2, 1); }
 static void experimentalPhysics(uint8_t *, R5900Context *c, PS2Runtime *) { SET_GPR_U32(c, 2, 2); }
 
+namespace
+{
+    constexpr uint32_t kVectorEntry = 0x4000, kVectorResume = 0x4010, kVectorHandler = 0x4020;
+    constexpr uint32_t kVectorNested = 0x4030, kVectorHandlerResume = 0x4040;
+    bool vectorPreserved = false, nestedVectorPreserved = false;
+
+    void vectorNested(uint8_t *, R5900Context *c, PS2Runtime *)
+    {
+        c->vu0_vf[20] = _mm_set1_ps(-1000.0f);
+        c->vu0_q = 16.0f;
+        c->vu0_r = _mm_castsi128_ps(_mm_set1_epi32(0x3f923456));
+        c->pc = 0;
+    }
+
+    void vectorHandlerResume(uint8_t *, R5900Context *c, PS2Runtime *)
+    {
+        nestedVectorPreserved = _mm_cvtss_f32(c->vu0_vf[20]) == 500.0f && c->vu0_q == 4.0f;
+        c->pc = 0;
+    }
+
+    void vectorHandler(uint8_t *, R5900Context *c, PS2Runtime *runtime)
+    {
+        c->vu0_vf[20] = _mm_set_ps(1.0f, -100.0f, -900.0f, 500.0f);
+        c->vu0_acc = _mm_set1_ps(-1.0f);
+        c->vu0_q = 4.0f;
+        c->vi[7] = 99;
+        c->vu0_clip_flags = 0x123456;
+        c->pc = kVectorHandlerResume;
+        GuestInvocation nested{};
+        nested.kind = GuestInvocationKind::Interrupt;
+        nested.context = *c;
+        nested.context.pc = kVectorNested;
+        SET_GPR_U32(&nested.context, 29, 0);
+        SET_GPR_U32(&nested.context, 31, 0);
+        runtime->eeScheduler().invokeCurrent(std::move(nested));
+    }
+
+    void vectorResume(uint8_t *, R5900Context *c, PS2Runtime *runtime)
+    {
+        alignas(16) float p[4], a[4];
+        _mm_store_ps(p, c->vu0_vf[20]);
+        _mm_store_ps(a, c->vu0_acc);
+        vectorPreserved = p[0] == 1000.0f && p[1] == 5.0f && p[2] == -229.0f && p[3] == 1.0f &&
+                          a[0] == 0.0f && a[1] == 1.0f && a[2] == 0.0f && a[3] == 0.0f &&
+                          c->vu0_q == 0.5f && c->vi[7] == 7 && c->vu0_clip_flags == 0x42 &&
+                          _mm_cvtsi128_si32(_mm_castps_si128(c->vu0_r)) == 0x3f923456;
+        runtime->requestStop();
+        c->pc = 0;
+    }
+
+    void vectorEntry(uint8_t *, R5900Context *c, PS2Runtime *runtime)
+    {
+        c->vu0_vf[20] = _mm_set_ps(1.0f, -229.0f, 5.0f, 1000.0f);
+        c->vu0_acc = _mm_set_ps(0.0f, 0.0f, 1.0f, 0.0f);
+        c->vu0_q = 0.5f;
+        c->vi[7] = 7;
+        c->vu0_clip_flags = 0x42;
+        c->pc = kVectorResume;
+        GuestInvocation irq{};
+        irq.kind = GuestInvocationKind::Interrupt;
+        irq.context = *c;
+        irq.context.pc = kVectorHandler;
+        SET_GPR_U32(&irq.context, 29, 0);
+        SET_GPR_U32(&irq.context, 31, 0);
+        runtime->eeScheduler().invokeCurrent(std::move(irq));
+    }
+}
+
 int main()
 {
+    {
+        PS2Runtime vectors;
+        std::vector<uint8_t> memory(PS2_RAM_SIZE);
+        vectors.registerFunction(kVectorEntry, vectorEntry);
+        vectors.registerFunction(kVectorResume, vectorResume);
+        vectors.registerFunction(kVectorHandler, vectorHandler);
+        vectors.registerFunction(kVectorNested, vectorNested);
+        vectors.registerFunction(kVectorHandlerResume, vectorHandlerResume);
+        R5900Context initial{};
+        initial.pc = kVectorEntry;
+        vectors.eeScheduler().reset(memory.data(), initial);
+        vectors.eeScheduler().run();
+        assert(vectorPreserved && nestedVectorPreserved &&
+               "interrupts must preserve suspended vector calculations and advance the shared RNG");
+    }
     using namespace sotc_native;
     std::vector<uint8_t> ram(PS2_RAM_SIZE);
     R5900Context ctx{};
@@ -203,5 +287,5 @@ int main()
     assert(aligned.reserveAsyncCallbackStack(0x10000, 16) == kCallbackStackTop - 16);
     assert(aligned.reserveAsyncCallbackStack(0x10000, 16) == kCallbackStackTop - 0x10000 - 16);
     assert(aligned.reserveAsyncCallbackStack(0x10000, 0x10000) == kRpcPacketPoolBase - 16);
-    std::puts("PASS: HUD, CLUT/RGBA, geometry/texture edits, original collision dispatch, isolated callback stacks");
+    std::puts("PASS: HUD, CLUT/RGBA, geometry/texture edits, original collision dispatch, isolated vector contexts/RNG and callback stacks");
 }

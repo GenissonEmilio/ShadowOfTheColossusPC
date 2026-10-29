@@ -6,7 +6,7 @@ import shutil
 import tarfile
 ROOT=Path(__file__).resolve().parents[3]
 NAME='ShadowOfTheColossusPC'
-VERSION='0.2.3'
+VERSION='0.2.4'
 OUT=ROOT / 'dist' / NAME
 if OUT.exists():shutil.rmtree(OUT)
 shutil.copytree(ROOT / 'artifacts/frozen' / NAME,OUT)
@@ -37,6 +37,9 @@ Shaders são validados no driver local; mudanças valem na próxima abertura.
 São filtros da imagem final, não pacotes de texturas HD. Desativar remove o filtro.
 
 Dados e saves: ~/.local/share/ShadowOfTheColossusPC (ou XDG_DATA_HOME).
+Meus saves: importe/exporte cartões PS2/PCSX2 .ps2 de 8 MB entre computadores.
+Feche o jogo antes. O cartão anterior fica em player/memcards/backups ao importar.
+No jogo, escolha Carregar jogo para continuar a aventura importada.
 Os arquivos originais não são alterados. Nenhum dado é enviado para a internet.
 No painel Sobre é possível adicionar o jogo ao menu de aplicativos.
 

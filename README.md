@@ -34,7 +34,12 @@ são recomendáveis para a compilação. Este pacote é exclusivamente para Linu
 
 A seção **Sobre** cria um atalho no menu de aplicativos. Os dados ficam em
 `~/.local/share/ShadowOfTheColossusPC` (ou `XDG_DATA_HOME`). Os saves são imagens
-de memory card em `player/memcards`. A ROM original permanece intacta.
+de memory card em `player/memcards`. **Meus saves** permite importar e exportar
+um cartão PS2/PCSX2 de 8 MB (`.ps2`, 8.650.752 bytes) entre computadores. Feche o
+jogo antes de transferir; ao importar, o cartão anterior fica em
+`player/memcards/backups`. Depois, use **Carregar jogo** no menu do próprio jogo.
+O botão **Abrir pasta** usa o aplicativo padrão do sistema com o ambiente de
+bibliotecas restaurado, inclusive no pacote portátil. A ROM original permanece intacta.
 
 ## Tela cheia e shaders
 

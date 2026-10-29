@@ -401,7 +401,7 @@ class Launcher:
             import shutil
             path=self.library.directory/"shaders/modelo.frag"; path.parent.mkdir(parents=True,exist_ok=True)
             if not path.exists(): shutil.copy2(assets_directory()/"shaders/modelo.frag",path)
-            Gtk.show_uri_on_window(self.window,path.as_uri(),Gdk.CURRENT_TIME)
+            self.open_desktop_path(path)
         except (OSError,GLib.Error) as exc:
             self.error("Não foi possível abrir o modelo",str(exc))
 
@@ -566,8 +566,76 @@ class Launcher:
         dialog.format_secondary_text(text); dialog.run(); dialog.destroy()
 
     def open_saves(self,*_):
-        path=self.library.player_directory / "memcards"; path.mkdir(parents=True,exist_ok=True)
-        Gtk.show_uri_on_window(self.window,path.as_uri(),Gdk.CURRENT_TIME)
+        from saves import SaveCards
+        cards = SaveCards(self.library)
+        dialog = Gtk.Dialog(title="Meus saves", transient_for=self.window, modal=True)
+        dialog.set_default_size(620, 260)
+        dialog.add_button("Fechar", Gtk.ResponseType.CLOSE)
+        panel = box(spacing=16, margin=24)
+        panel.pack_start(label("Leve sua aventura para outro PC", "section-title"), False, False, 0)
+        panel.pack_start(label("Importe seu cartão ou exporte uma cópia para usar em outro computador.\n"
+                               "Depois, escolha Carregar jogo no menu do próprio jogo.", "muted", wrap=True), False, False, 0)
+        location = label(str(cards.directory), "muted", wrap=True)
+        location.set_selectable(True)
+        panel.pack_start(location, False, False, 0)
+        status = label("Cartão 1 disponível." if cards.card.is_file() else "Nenhum cartão salvo neste computador.", wrap=True)
+        panel.pack_start(status, False, False, 0)
+        row = box(Gtk.Orientation.HORIZONTAL, spacing=12)
+        folder = Gtk.Button(label="Abrir pasta ↗")
+        def open_folder(*_):
+            try:
+                cards.directory.mkdir(parents=True, exist_ok=True)
+                self.open_desktop_path(cards.directory)
+            except OSError as exc:
+                self.error("Não foi possível abrir a pasta", str(exc))
+        folder.connect("clicked", open_folder)
+        row.pack_start(folder, False, False, 0)
+        for importing, caption in ((True, "Importar cartão…"), (False, "Exportar cartão…")):
+            button = Gtk.Button(label=caption)
+            button.set_sensitive(not self.busy and self.process is None)
+            def transfer(_, importing=importing):
+                if self.busy or self.process is not None:
+                    status.set_text("Feche o jogo antes de importar ou exportar o cartão.")
+                    return
+                chooser = Gtk.FileChooserDialog(title="Importar cartão PS2" if importing else "Exportar cartão PS2",
+                    transient_for=dialog, action=Gtk.FileChooserAction.OPEN if importing else Gtk.FileChooserAction.SAVE)
+                chooser.add_buttons("Cancelar", Gtk.ResponseType.CANCEL, "Importar" if importing else "Exportar", Gtk.ResponseType.OK)
+                if importing:
+                    pattern = Gtk.FileFilter(); pattern.set_name("Cartão PS2 (.ps2)")
+                    pattern.add_pattern("*.ps2"); pattern.add_pattern("*.PS2"); chooser.add_filter(pattern)
+                else:
+                    chooser.set_current_name("Mcd001.ps2"); chooser.set_do_overwrite_confirmation(True)
+                response = chooser.run(); selected = chooser.get_filename(); chooser.destroy()
+                if response != Gtk.ResponseType.OK or not selected:
+                    return
+                try:
+                    if importing:
+                        backup = cards.import_card(selected)
+                        status.set_text("Cartão importado. Abra o jogo e escolha Carregar jogo." +
+                                        (f"\nCartão anterior preservado em {backup}" if backup else ""))
+                    else:
+                        cards.export_card(selected)
+                        status.set_text("Cópia exportada. No outro PC, use Meus saves → Importar cartão.")
+                except (OSError, ValueError) as exc:
+                    self.error("Não foi possível transferir o cartão", str(exc))
+            button.connect("clicked", transfer)
+            row.pack_start(button, False, False, 0)
+        panel.pack_start(row, False, False, 0)
+        if self.busy or self.process is not None:
+            panel.pack_start(label("Feche o jogo para importar ou exportar com segurança.", "muted", wrap=True), False, False, 0)
+        dialog.get_content_area().pack_start(panel, True, True, 0)
+        dialog.show_all(); dialog.run(); dialog.destroy()
+
+    def open_desktop_path(self, path):
+        # Running xdg-open/GIO with the frozen GTK libraries can break host
+        # file managers on other distributions. Keep this off the GTK thread.
+        from desktop_services import open_path
+        def worker():
+            try:
+                open_path(path)
+            except OSError as exc:
+                GLib.idle_add(self.error, "Não foi possível abrir o aplicativo padrão", str(exc))
+        threading.Thread(target=worker, daemon=True).start()
 
     def install_menu(self,*_):
         try:
