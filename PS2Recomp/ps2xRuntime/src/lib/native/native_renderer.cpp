@@ -102,6 +102,10 @@ namespace native_renderer
                 d.bloomStrength = strength;
             d.bloomRounds = number("SOTC_BLOOM_ROUNDS", d.bloomRounds);
             d.bloomSpread = number("SOTC_BLOOM_SPREAD", 1.0f);
+            d.contrast = std::clamp(number("SOTC_CONTRAST", d.contrast), 0.0f, 1.0f);
+            d.saturation = std::clamp(number("SOTC_SATURATION", d.saturation), 0.0f, 2.0f);
+            d.brightness = std::clamp(number("SOTC_BRIGHTNESS", d.brightness), 0.5f, 1.5f);
+            d.sharpen = std::clamp(number("SOTC_SHARPEN", d.sharpen), 0.0f, 1.0f);
             d.vertexFog = !on("SOTC_NATIVE_NOVFOG");
             d.vertexFogAmount = number("SOTC_FOG_AMOUNT", d.vertexFogAmount);
             d.zFog = !on("SOTC_NATIVE_ZFOG") || std::atoi(std::getenv("SOTC_NATIVE_ZFOG")) != 0;
@@ -297,6 +301,22 @@ namespace native_renderer
              "O quadro anterior por cima do novo (o voo da águia, a tela-título).", &Tuning::feedback, nullptr, 0, 1, 1, "SOTC_NATIVE_NOFEEDBACK"},
             {"reflections", "Reflections", "Reflexos", "Mirror reflections on water and floors.", "Reflexos na água e no chão.",
              &Tuning::reflections, nullptr, 0, 1, 1, "SOTC_NATIVE_NOREFLECT"},
+            {"color_contrast", "Contrast", "Contraste",
+             "OpenGL: deepens shadows and brightens highlights on an S curve (the sky does not burn out). 0: the game's.",
+             "OpenGL: escurece as sombras e clareia os brilhos numa curva S (o céu não estoura). 0: o do jogo.",
+             nullptr, &Tuning::contrast, 0.0f, 1.0f, 0.05f, "SOTC_CONTRAST"},
+            {"color_saturation", "Colour saturation", "Saturação",
+             "OpenGL: how vivid the colours are. 1: the game's; above 1 richer, below paler.",
+             "OpenGL: quão vivas são as cores. 1: a do jogo; acima de 1 mais fortes, abaixo mais pálidas.",
+             nullptr, &Tuning::saturation, 0.0f, 2.0f, 0.05f, "SOTC_SATURATION"},
+            {"color_brightness", "Brightness", "Brilho",
+             "OpenGL: the whole picture lighter or darker. 1: the game's (its bloom and haze are bright).",
+             "OpenGL: a imagem toda mais clara ou escura. 1: o do jogo (o bloom e a névoa dele são claros).",
+             nullptr, &Tuning::brightness, 0.5f, 1.5f, 0.05f, "SOTC_BRIGHTNESS"},
+            {"sharpen", "Sharpening", "Nitidez",
+             "OpenGL: sharpens edges and textures after scaling. 0: off.",
+             "OpenGL: realça bordas e texturas depois da escala. 0: desligado.",
+             nullptr, &Tuning::sharpen, 0.0f, 1.0f, 0.05f, "SOTC_SHARPEN"},
             {"refraction", "Water refraction", "Refração da água", "The scene seen through water.", "O cenário visto através da água.",
              &Tuning::refraction, nullptr, 0, 1, 1, "SOTC_NATIVE_NOREFRACT"},
             {"cap30", "Cap at 30 fps", "Limitar a 30 fps",
@@ -414,7 +434,8 @@ namespace native_renderer
             if (key == "msaa" || key == "effect_detail")
                 item.backends = 1;
             if (key == "bloom_rounds" || key == "bloom_spread" || key == "dbg_haze_source" || key == "dbg_water_source" || key == "dbg_redraw" ||
-                key == "dbg_gpu_skin" || key == "dbg_render_thread")
+                key == "dbg_gpu_skin" || key == "dbg_render_thread" || key == "color_contrast" || key == "color_saturation" ||
+                key == "color_brightness" || key == "sharpen")
                 item.backends = 2;
         }
         return v;

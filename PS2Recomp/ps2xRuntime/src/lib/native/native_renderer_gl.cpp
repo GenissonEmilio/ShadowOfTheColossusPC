@@ -244,6 +244,21 @@ void main()
 {
     if (uMode == 0) // copy
         oColor = vec4(texture(uSrc, vUV).rgb, 1.0);
+    else if (uMode == 20) // the picture's final look: sharpen uA.z, brightness uA.w, S-curve contrast uA.x, saturation uA.y
+    {
+        vec2 px = 1.0 / vec2(textureSize(uSrc, 0));
+        vec3 c = texture(uSrc, vUV).rgb;
+        if (uA.z > 0.0)
+        {
+            vec3 around = texture(uSrc, vUV + vec2(px.x, 0.0)).rgb + texture(uSrc, vUV - vec2(px.x, 0.0)).rgb +
+                          texture(uSrc, vUV + vec2(0.0, px.y)).rgb + texture(uSrc, vUV - vec2(0.0, px.y)).rgb;
+            c = clamp(c + (c - around * 0.25) * uA.z, 0.0, 1.0);
+        }
+        c = clamp(c * uA.w, 0.0, 1.0);
+        c = mix(c, c * c * (3.0 - 2.0 * c), uA.x);
+        float l = dot(c, vec3(0.299, 0.587, 0.114));
+        oColor = vec4(clamp(mix(vec3(l), c, uA.y), 0.0, 1.0), 1.0);
+    }
     else if (uMode == 1) // blur: uA.xy step
     {
         float w0 = 0.30, w1 = 0.235, w2 = 0.12, w3 = 0.05;
@@ -2397,7 +2412,15 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 }
             }
             const Target &out = shownFrame[slot];
-            copy(colorPlain, out);
+            const native_renderer::Tuning &look = native_renderer::tuning();
+            if (look.contrast != 0.0f || look.saturation != 1.0f || look.sharpen != 0.0f || look.brightness != 1.0f)
+            {
+                const float grade[4] = {look.contrast, look.saturation, look.sharpen, look.brightness};
+                bindTexture(0, colorPlain.texture);
+                quad(out, 20, QuadBlend::None, grade);
+            }
+            else
+                copy(colorPlain, out);
             // The display shows colour only: alpha 1, or the window's blend darkens it.
             glBindFramebuffer(GL_FRAMEBUFFER, out.fbo);
             glDisable(GL_SCISSOR_TEST);
