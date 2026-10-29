@@ -378,6 +378,11 @@ namespace native_renderer
         // frame before when renderThread, for its own frame when not).
         uint64_t waitUs = 0;
         bool renderThread = false;
+        // The game's "GS finished?" polls (checkDrawFinish) that found the
+        // host's VIF1/GIF paths still busy (each can cost the frame a VBlank),
+        // and the longest time from a display list kick to those paths idle.
+        uint32_t gsBusyPolls = 0;
+        uint64_t gsDrainUs = 0;
         // buildAsync: draws left out (their mesh or texture still on the
         // worker), jobs handed to it, and finished jobs taken up.
         uint32_t heldDraws = 0, asyncJobs = 0, asyncDone = 0;
