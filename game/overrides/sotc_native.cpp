@@ -41,6 +41,7 @@
 #include <cstdio>
 #include <cstddef>
 #include <cstdlib>
+#include "runtime/ps2_thread_load.h"
 #include <cstring>
 #include <iostream>
 #include <set>
@@ -1587,11 +1588,24 @@ namespace sotc_native
         if (last)
         {
             const uint64_t period = now - last;
-            if (period > 50000u)
-                std::fprintf(stderr, "[frame] slow %llu: %.1f ms: hooks %.1f (decode %.1f, %u textures %.0f KB, up %.1f; %u meshes %.0f KB, up %.1f) render %.1f present %.1f wait %.1f draws %u targets %u async %u/%u held %u\n",
+            // Each emulation thread's work in this frame: its wall time minus its waits (ps2_load).
+            static uint64_t lastWait[ps2_load::kSlots] = {};
+            uint64_t busy[ps2_load::kSlots] = {};
+            for (int i = 0; i < ps2_load::kSlots; ++i)
+            {
+                const uint64_t w = ps2_load::waitUs[i].load(std::memory_order_relaxed);
+                const uint64_t waited = w - lastWait[i];
+                lastWait[i] = w;
+                busy[i] = waited < period ? period - waited : 0u;
+            }
+            // SOTC_SLOW_MS: the length from which a frame is listed on its own (default 50 ms).
+            static const uint64_t slowUs = std::getenv("SOTC_SLOW_MS") ? std::strtoull(std::getenv("SOTC_SLOW_MS"), nullptr, 10) * 1000u : 50000u;
+            if (period > slowUs)
+                std::fprintf(stderr, "[frame] slow %llu: %.1f ms: hooks %.1f (decode %.1f, %u textures %.0f KB, up %.1f; %u meshes %.0f KB, up %.1f) render %.1f present %.1f wait %.1f draws %u targets %u async %u/%u held %u gsBusy %u drain %.1f | busy ee %.1f vu1 %.1f gif %.1f\n",
                              (unsigned long long)g_frame, period / 1000.0, c.hookUs / 1000.0, c.decodeUs / 1000.0, c.texUploads, c.texBytes / 1024.0, c.texUs / 1000.0,
                              c.meshUploads, c.meshBytes / 1024.0, c.meshUs / 1000.0, c.renderUs / 1000.0, c.presentUs / 1000.0, c.waitUs / 1000.0, c.draws, c.targets,
-                             c.asyncJobs, c.asyncDone, c.heldDraws);
+                             c.asyncJobs, c.asyncDone, c.heldDraws, c.gsBusyPolls, c.gsDrainUs / 1000.0,
+                             busy[ps2_load::kGame] / 1000.0, busy[ps2_load::kVu1] / 1000.0, busy[ps2_load::kGif] / 1000.0);
             // SOTC_FRAME_LOG_ALL=1: every frame on a line of its own (cuts, loads).
             static const bool all = std::getenv("SOTC_FRAME_LOG_ALL") != nullptr;
             if (all && period <= 50000u)

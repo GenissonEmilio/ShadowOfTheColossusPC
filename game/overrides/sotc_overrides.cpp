@@ -9,6 +9,7 @@
 #include "ps2_runtime_macros.h"
 #include "game_overrides.h"
 #include "runtime/ee_scheduler.h"
+#include "runtime/native_renderer.h"
 #include "ps2x/iop/iop_subsystem.h"
 #include "runtime/ps2_stats.h"
 
@@ -702,6 +703,7 @@ namespace
             }
             returnTo(ctx);
         }
+        uint64_t g_lastKickUs = 0; // the last display list kick (frame log)
         void dmaSendPath1(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             if (!runtime->memory().hostDrawPathsIdle())
@@ -713,13 +715,23 @@ namespace
             // game's stores before the kick would have delivered them.
             runtime->drainCompletedDmacHandlers(rdram);
             runtime->memory().hostDmaStart(0x10009000u, 0x145u, 0u, 0u, GPR_U32(ctx, 4) & 0x7FFFFFFFu);
+            g_lastKickUs = native_renderer::nowUs();
             runtime->drainCompletedDmacHandlers(rdram);
             returnTo(ctx);
         }
         void checkDrawFinish(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             put32(rdram, 0x001E10ECu, u32(rdram, 0x001E10ECu) + 1u);
-            SET_GPR_U64(ctx, 2, runtime->memory().hostDrawPathsIdle() ? 1u : 0u);
+            const bool idle = runtime->memory().hostDrawPathsIdle();
+            native_renderer::FrameCounters &c = native_renderer::frameCounters();
+            if (!idle)
+                ++c.gsBusyPolls;
+            else if (g_lastKickUs)
+            {
+                c.gsDrainUs = std::max(c.gsDrainUs, native_renderer::nowUs() - g_lastKickUs);
+                g_lastKickUs = 0;
+            }
+            SET_GPR_U64(ctx, 2, idle ? 1u : 0u);
             returnTo(ctx);
         }
         void copyFrameBuffer(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
