@@ -1685,6 +1685,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             glDepthFunc(GL_LEQUAL); // as the GS's GEQUAL (and far pixels round to the clear value 1.0 in the Vita's depth buffer)
             glDepthMask(GL_TRUE);
             glDisable(GL_STENCIL_TEST);
+#if !defined(PS2X_NATIVE_VITA)
+            // The GS does not cut at the near plane: ground right at the lens
+            // (the camera low, looking up) stays drawn instead of opening a
+            // hole that looks like the camera went into it. SOTC_NEAR_CLIP=1: cut.
+            static const bool nearClip = std::getenv("SOTC_NEAR_CLIP") != nullptr;
+            if (!nearClip)
+                glEnable(GL_DEPTH_CLAMP);
+#endif
             uint32_t shadowOrder = 0;
             float shadowAmount = 0.0f;
             auto resolveShadows = [&]
@@ -1830,7 +1838,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #endif
                     drawMesh(mesh->second, firstVertex);
 #if !defined(PS2X_NATIVE_VITA)
-                    glDisable(GL_DEPTH_CLAMP);
+                    if (std::getenv("SOTC_NEAR_CLIP")) // the rest of the pass keeps the clamp otherwise
+                        glDisable(GL_DEPTH_CLAMP);
 #endif
                     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
                     glDisable(GL_STENCIL_TEST);
