@@ -48,6 +48,7 @@ deps(OUT / 'bin/ps2_recomp',OUT / 'lib')
 # loading a ROM or recompiling the game.
 subprocess.run(['g++','-std=c++20','-O2','-static-libstdc++','-static-libgcc',
     '-I'+str(ROOT / 'PS2Recomp/ps2xRuntime/include'),'-I'+str(BUILD / '_deps/raylib-src/src'),
+    '-I'+str(BUILD / '_deps/raylib-src/src/external/glfw/include'), # desktop_video sets fullscreen through GLFW
     str(ROOT / 'tools/linux/video_tool.cpp'), str(ROOT / 'PS2Recomp/ps2xRuntime/src/lib/desktop_video.cpp'),
     str(next(BUILD.rglob('libraylib.a'))),'-lGL','-lX11','-ldl','-pthread','-lm',
     '-o',str(OUT / 'bin/sotc-video-tool')],check=True)
