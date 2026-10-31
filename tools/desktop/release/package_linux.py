@@ -26,7 +26,8 @@ Requisitos: Linux x86_64 com glibc 2.39+ (Ubuntu 24.04+, Fedora 40+), OpenGL 3.3
 8 GB de memória e pelo menos 15 GB livres para importação e compilação.
 
 WASD: movimentar. Espaço: pular. Q/E: trocar arma. F/R: L1/L2.
-Esc: Start (pausa). I: Select (mapa). C: Agro. Shift esquerdo: R2.
+Esc: Start (pausa). I: Select (mapa). C: chamar/acelerar Agro. Shift esquerdo: R2.
+Enter: confirmar nos menus. Backspace: voltar nos menus. Espaço também monta Agro.
 Mouse: câmera. Esquerdo: atacar. Direito: agarrar. Central: ação/luz da espada.
 F1: configurações, liberar cursor e Voltar ao launcher (Sistema).
 Personalize todas as atribuições, sensibilidade e inversão na aba Controles.

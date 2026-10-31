@@ -68,13 +68,14 @@ diretamente. Veja [o formato e exemplos](docs/SHADERS.md).
 | Teclado | Controle PS2 |
 | --- | --- |
 | WASD | movimentar |
-| Espaço | pular · ✕ |
+| Espaço | pular / montar · △ |
 | Mouse | mover a câmera |
 | Clique esquerdo / direito / central | atacar · □ / agarrar · R1 / ação · ○ |
 | Q / E | arma anterior / próxima arma |
 | F / R | L1 / L2 |
-| C / Shift esquerdo | Agro · △ / R2 |
+| C / Shift esquerdo | chamar / acelerar Agro · ✕ / R2 |
 | Esc / I | Start / Select |
+| Enter / Backspace | confirmar / voltar nos menus |
 | ↑ / ↓ | direcional para cima / baixo |
 | ← / → / Page Up / Page Down | câmera pelo teclado |
 | Ctrl esquerdo / V | L3 / R3 |

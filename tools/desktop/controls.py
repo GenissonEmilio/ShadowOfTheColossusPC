@@ -9,9 +9,9 @@ import tempfile
 ACTIONS = (
     ("move_up", "Mover para frente", 87), ("move_down", "Mover para trás", 83),
     ("move_left", "Mover para a esquerda", 65), ("move_right", "Mover para a direita", 68),
-    ("jump", "Pular · ✕", 32), ("attack", "Atacar · □", -1),
+    ("jump", "Pular / montar · △", 32), ("attack", "Atacar · □", -1),
     ("grab", "Agarrar · R1", -2), ("action", "Ação / luz da espada · ○", -3),
-    ("horse", "Chamar Agro / montar · △", 67),
+    ("horse", "Chamar / acelerar Agro · ✕", 67),
     ("weapon_left", "Arma anterior · ←", 81), ("weapon_right", "Próxima arma · →", 69),
     ("look", "L1", 70), ("camera_reset", "L2", 82), ("crouch", "R2", 340),
     ("start", "Pausar · Start", 256), ("select", "Mapa · Select", 73),
@@ -19,6 +19,7 @@ ACTIONS = (
     ("l3", "L3", 341), ("r3", "R3", 86),
     ("camera_left", "Câmera para a esquerda", 263), ("camera_right", "Câmera para a direita", 262),
     ("camera_up", "Câmera para cima", 266), ("camera_down", "Câmera para baixo", 267),
+    ("confirm", "Confirmar nos menus · ✕", 257), ("cancel", "Voltar nos menus · ○", 259),
 )
 DEFAULTS = {key: default for key, _, default in ACTIONS}
 DEFAULTS.update(mouse_camera=1, invert_x=0, invert_y=0, sensitivity=1.0)

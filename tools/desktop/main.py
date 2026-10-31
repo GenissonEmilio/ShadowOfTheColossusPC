@@ -278,6 +278,7 @@ class Launcher:
             f"{keys('weapon_left','weapon_right')}  ·  Trocar arma    |    {keys('horse')}  ·  Agro\n"
             f"{keys('look','camera_reset')}  ·  L1 / L2    |    {keys('crouch')}  ·  R2\n"
             f"{keys('start','select')}  ·  Start / Select\n"
+            f"{keys('confirm','cancel')}  ·  Confirmar / voltar nos menus\n"
             + ("Mouse  ·  Câmera" if values['mouse_camera'] else "Câmera pelo mouse desativada"))
 
     def configure_desktop_input(self, *_):

@@ -5,7 +5,8 @@ A câmera agora acompanha o movimento do mouse. O perfil inicial usa:
 - WASD para movimentar e Espaço para pular.
 - Clique esquerdo para atacar, direito para agarrar e central para ação/luz da espada.
 - Q/E para trocar armas; F/R para L1/L2.
-- Esc para Start, I para Select, C para Agro e Shift esquerdo para R2.
+- Esc para Start, I para Select, C para chamar/acelerar Agro e Shift esquerdo para R2.
+- Espaço aciona o Triângulo original (pular/montar); Enter/Backspace confirmam/voltam nos menus.
 - Setas esquerda/direita e Page Up/Down também movem a câmera pelo teclado.
 
 Em **Controles → Personalizar teclado e mouse**, cada ação pode receber outra
@@ -27,7 +28,7 @@ Controles USB/Bluetooth continuam funcionando ao mesmo tempo.
 - Editor GTK real: capturar tecla, atribuir Esc, salvar, recarregar e cancelar.
 - Jogo carregado numa cópia do cartão Cliff Path: movimento da câmera confirmado
   pela matriz do jogo, botões do mouse e WASD/espaço observados na entrada nativa;
-  Esc sem encerrar e saída pelo mouse no F1 com código 0.
+  salto verificado pela altura do Wander, Esc sem encerrar e saída pelo mouse no F1 com código 0.
 
 Esta atualização trata dos controles. A travessia da rampa de Gaius e os relatos
 anteriores de colisão e efeitos visuais continuam pendentes de confirmação; a

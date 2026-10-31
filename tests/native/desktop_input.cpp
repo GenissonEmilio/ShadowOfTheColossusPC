@@ -60,7 +60,7 @@ int main(int argc, char **argv)
     }
     neutral(); keys[KEY_W] = keys[KEY_D] = keys[KEY_SPACE] = true;
     mouse[0] = mouse[1] = true; poll();
-    assert(packet(data) == (0x4000|0x8000|0x0800));
+    assert(packet(data) == (0x1000|0x8000|0x0800));
     assert(data[6] == 255 && data[7] == 1);
     neutral(); delta = {5, -5}; poll(); packet(data);
     auto rx = data[4], ry = data[5];
@@ -77,12 +77,12 @@ int main(int argc, char **argv)
     focused = true; poll(); assert(packet(data) == 0);
     neutral();
     // Real user configuration replaces defaults for both keyboard and mouse.
-    std::ofstream(argv[1]) << "attack=66\ngrab=-4\nstart=257\nsensitivity=2\ninvert_x=1\ninvert_y=1\nmove_up=84\n";
+    std::ofstream(argv[1]) << "attack=66\ngrab=-4\nstart=89\nsensitivity=2\ninvert_x=1\ninvert_y=1\nmove_up=84\n";
     setenv("PS2X_DESKTOP_INPUT", argv[1], 1);
     desktop_input::initialize();
     neutral(); mouse[0] = true; keys[KEY_W] = keys[KEY_ESCAPE] = true; poll();
     assert(packet(data) == 0 && data[7] == 128);
-    neutral(); keys[KEY_B] = keys[KEY_T] = keys[KEY_ENTER] = true; mouse[3] = true; poll();
+    neutral(); keys[KEY_B] = keys[KEY_T] = keys[KEY_Y] = true; mouse[3] = true; poll();
     assert(packet(data) == (0x8000|0x0800|0x0008) && data[7] == 1);
     neutral(); delta = {3,-3}; poll(); packet(data);
     assert(data[4] < 60 && data[5] > 195);

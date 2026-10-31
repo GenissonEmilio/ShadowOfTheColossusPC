@@ -18,9 +18,9 @@ namespace {
     Binding bindings[] = {
         {"move_up", KEY_W, 0}, {"move_down", KEY_S, 0},
         {"move_left", KEY_A, 0}, {"move_right", KEY_D, 0},
-        {"jump", KEY_SPACE, 0x4000}, {"attack", -1, 0x8000},
+        {"jump", KEY_SPACE, 0x1000}, {"attack", -1, 0x8000},
         {"grab", -2, 0x0800}, {"action", -3, 0x2000},
-        {"horse", KEY_C, 0x1000}, {"weapon_left", KEY_Q, 0x0080},
+        {"horse", KEY_C, 0x4000}, {"weapon_left", KEY_Q, 0x0080},
         {"weapon_right", KEY_E, 0x0020}, {"look", KEY_F, 0x0400},
         {"camera_reset", KEY_R, 0x0100}, {"crouch", KEY_LEFT_SHIFT, 0x0200},
         {"start", KEY_ESCAPE, 0x0008}, {"select", KEY_I, 0x0001},
@@ -28,6 +28,7 @@ namespace {
         {"l3", KEY_LEFT_CONTROL, 0x0002}, {"r3", KEY_V, 0x0004},
         {"camera_left", KEY_LEFT, 0}, {"camera_right", KEY_RIGHT, 0},
         {"camera_up", KEY_PAGE_UP, 0}, {"camera_down", KEY_PAGE_DOWN, 0},
+        {"confirm", KEY_ENTER, 0x4000}, {"cancel", KEY_BACKSPACE, 0x2000},
     };
     bool mouseCamera = true, invertX = false, invertY = false;
     float sensitivity = 1.0f;
