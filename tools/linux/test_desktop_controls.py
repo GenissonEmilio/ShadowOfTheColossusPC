@@ -28,6 +28,7 @@ import cairo
 out=Path(sys.argv[1]);lib=Library(out/'synthetic-home')
 provider=Gtk.CssProvider();provider.load_from_path(str(assets_directory()/'style.css'))
 Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(),provider,Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+Gtk.Settings.get_default().set_property("gtk-application-prefer-dark-theme",True)
 parent=Gtk.Window()
 dialog=ControlsDialog(parent,lib);dialog.show_all()
 failures=[]
