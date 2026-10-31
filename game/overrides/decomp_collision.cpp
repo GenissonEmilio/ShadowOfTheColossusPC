@@ -1760,22 +1760,22 @@ namespace decomp_collision
     }
 }
 
-SOTC_DECOMP_FUNCTION(0x0112D590u, ClipCollisionDirectCallBack, decomp_collision::directCallBack);
-SOTC_DECOMP_FUNCTION(0x0111B9F0u, ClipCollisionDB, decomp_collision::clipCollisionDB);
-SOTC_DECOMP_FUNCTION(0x01119248u, getLayoutClassCollisionIndepSurfBoundary, decomp_collision::indepSurfBoundary);
-SOTC_DECOMP_FUNCTION(0x0112BE58u, collisionLeaf, decomp_collision::entry<decomp_collision::leaf>);
-SOTC_DECOMP_FUNCTION(0x0112C498u, collisionLow, decomp_collision::entry<decomp_collision::low>);
-SOTC_DECOMP_FUNCTION(0x0112C610u, collisionHigh, decomp_collision::entry<decomp_collision::high>);
-SOTC_DECOMP_FUNCTION(0x01131C80u, collisionNode, decomp_collision::entry<decomp_collision::node>);
-SOTC_DECOMP_FUNCTION(0x0112A478u, CheckCollisionFinderExistData, decomp_collision::checkFinderExistData);
-SOTC_DECOMP_FUNCTION(0x01115798u, collisionFinderLeaf, decomp_collision::finderLeaf<true>);
-SOTC_DECOMP_FUNCTION(0x01115A50u, collisionFinderLeaf16, decomp_collision::finderLeaf<false>);
-SOTC_DECOMP_FUNCTION(0x01123C60u, CollisionPlaneJudgeCallbackCameraLeave, decomp_collision::filterEntry<0>);
-SOTC_DECOMP_FUNCTION(0x010D41E0u, charaSurfaceFilter, decomp_collision::filterEntry<1>);
-SOTC_DECOMP_FUNCTION(0x01434C00u, gamecoreSurfaceFilter, decomp_collision::filterEntry<2>);
-SOTC_DECOMP_FUNCTION(0x011292B0u, collisionNotKind28Filter, decomp_collision::filterEntry<3>);
-SOTC_DECOMP_FUNCTION(0x014336A0u, pathJudgeFunc, decomp_collision::filterEntry<4>);
-SOTC_DECOMP_FUNCTION(0x0111C078u, clipCollisionKeep, decomp_collision::clipKeep);
-SOTC_DECOMP_FUNCTION(0x011193C8u, GetCollisionDBSurfBoundary, decomp_collision::surfBoundaryEntry);
-SOTC_DECOMP_FUNCTION(0x01123A58u, CollisionPlaneJudgeCallbackCameraVisibility, decomp_collision::cameraVisibilityEntry);
-SOTC_DECOMP_FUNCTION(0x01125B30u, GetCollisionDBAttributeAdr, decomp_collision::attributeAdr);
+SOTC_DECOMP_COLLISION_FUNCTION(0x0112D590u, ClipCollisionDirectCallBack, decomp_collision::directCallBack);
+SOTC_DECOMP_COLLISION_FUNCTION(0x0111B9F0u, ClipCollisionDB, decomp_collision::clipCollisionDB);
+SOTC_DECOMP_COLLISION_FUNCTION(0x01119248u, getLayoutClassCollisionIndepSurfBoundary, decomp_collision::indepSurfBoundary);
+SOTC_DECOMP_COLLISION_FUNCTION(0x0112BE58u, collisionLeaf, decomp_collision::entry<decomp_collision::leaf>);
+SOTC_DECOMP_COLLISION_FUNCTION(0x0112C498u, collisionLow, decomp_collision::entry<decomp_collision::low>);
+SOTC_DECOMP_COLLISION_FUNCTION(0x0112C610u, collisionHigh, decomp_collision::entry<decomp_collision::high>);
+SOTC_DECOMP_COLLISION_FUNCTION(0x01131C80u, collisionNode, decomp_collision::entry<decomp_collision::node>);
+SOTC_DECOMP_COLLISION_FUNCTION(0x0112A478u, CheckCollisionFinderExistData, decomp_collision::checkFinderExistData);
+SOTC_DECOMP_COLLISION_FUNCTION(0x01115798u, collisionFinderLeaf, decomp_collision::finderLeaf<true>);
+SOTC_DECOMP_COLLISION_FUNCTION(0x01115A50u, collisionFinderLeaf16, decomp_collision::finderLeaf<false>);
+SOTC_DECOMP_COLLISION_FUNCTION(0x01123C60u, CollisionPlaneJudgeCallbackCameraLeave, decomp_collision::filterEntry<0>);
+SOTC_DECOMP_COLLISION_FUNCTION(0x010D41E0u, charaSurfaceFilter, decomp_collision::filterEntry<1>);
+SOTC_DECOMP_COLLISION_FUNCTION(0x01434C00u, gamecoreSurfaceFilter, decomp_collision::filterEntry<2>);
+SOTC_DECOMP_COLLISION_FUNCTION(0x011292B0u, collisionNotKind28Filter, decomp_collision::filterEntry<3>);
+SOTC_DECOMP_COLLISION_FUNCTION(0x014336A0u, pathJudgeFunc, decomp_collision::filterEntry<4>);
+SOTC_DECOMP_COLLISION_FUNCTION(0x0111C078u, clipCollisionKeep, decomp_collision::clipKeep);
+SOTC_DECOMP_COLLISION_FUNCTION(0x011193C8u, GetCollisionDBSurfBoundary, decomp_collision::surfBoundaryEntry);
+SOTC_DECOMP_COLLISION_FUNCTION(0x01123A58u, CollisionPlaneJudgeCallbackCameraVisibility, decomp_collision::cameraVisibilityEntry);
+SOTC_DECOMP_COLLISION_FUNCTION(0x01125B30u, GetCollisionDBAttributeAdr, decomp_collision::attributeAdr);

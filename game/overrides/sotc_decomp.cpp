@@ -279,12 +279,21 @@ namespace sotc_decomp
         static const auto checkers = makeChecked(std::make_integer_sequence<int, kMaxChecked>{});
         const char *skip = std::getenv("SOTC_DECOMP_SKIP");
         const char *test = std::getenv("SOTC_DIFFTEST");
-        int replaced = 0, checked = 0;
+        const char *collisionMode = std::getenv("SOTC_NATIVE_COLLISION");
+        const bool nativeCollision = collisionMode && std::strcmp(collisionMode, "1") == 0;
+        int replaced = 0, checked = 0, originalCollision = 0;
         for (const Function &f : registry())
         {
             if (!runtime.hasFunction(f.address) || listed(skip, f.name))
                 continue;
             g_recompiled.emplace(f.address, runtime.lookupFunction(f.address));
+            // These rewrites were checked at the shrine, not on moving
+            // colossi. Preserve the complete original collision routine,
+            // including VU0 state, until those cases pass differential tests.
+            if (f.collision && !nativeCollision && !listed(test, f.name)) {
+                ++originalCollision;
+                continue;
+            }
             if (listed(test, f.name) && checked < kMaxChecked)
             {
                 g_checked[checked].function = &f;
@@ -298,5 +307,7 @@ namespace sotc_decomp
         }
         std::cerr << "[sotc:decomp] " << replaced << " decompiled functions in place" << (checked ? ", " : "")
                   << (checked ? std::to_string(checked) + " checked against the recompiled code" : std::string()) << std::endl;
+        if (originalCollision)
+            std::cerr << "[sotc:collision] " << originalCollision << " original collision routines retained" << std::endl;
     }
 }

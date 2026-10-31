@@ -70,11 +70,10 @@ namespace native_renderer
         // and written in place, a texture's and a packet's id sampled once a
         // frame); off: the earlier code, to compare (SOTC_NATIVE_SLOWHOOKS).
         bool fastHooks = true;
-        // With fastHooks: a model packet the game has never rewritten in
-        // place is taken as it was while it is drawn frame after frame (four
-        // of its words checked when it comes back after a gap), its full
-        // sample (33 words) taken one frame in 16; a packet seen rewritten
-        // keeps the full sample every frame (SOTC_PACKET_QUICK=0/1).
+        // With fastHooks: four words may skip an unchanged model packet
+        // between full-content checks (at most 16 frames). After a gap, or
+        // once seen rewritten, all bytes are checked. Off: full checks on
+        // every frame (SOTC_PACKET_QUICK=0/1).
         bool packetQuickCheck = true;
         // The game's own PS2 display lists for what the native renderer
         // draws: modelDisp's VIF packets and texture requests, the screen

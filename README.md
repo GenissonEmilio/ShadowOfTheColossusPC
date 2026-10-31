@@ -35,7 +35,12 @@ são recomendáveis para a compilação. Este pacote é exclusivamente para Linu
 
 A seção **Sobre** cria um atalho no menu de aplicativos. Os dados ficam em
 `~/.local/share/ShadowOfTheColossusPC` (ou `XDG_DATA_HOME`). Os saves são imagens
-de memory card em `player/memcards`. A ROM original permanece intacta.
+de memory card em `player/memcards`. **Meus saves** permite importar e exportar
+um cartão PS2/PCSX2 de 8 MB (`.ps2`, 8.650.752 bytes) entre computadores. Feche o
+jogo antes de transferir; ao importar, o cartão anterior fica em
+`player/memcards/backups`. Depois, use **Carregar jogo** no menu do próprio jogo.
+O botão **Abrir pasta** usa o aplicativo padrão do sistema com o ambiente de
+bibliotecas restaurado, inclusive no pacote portátil. A ROM original permanece intacta.
 
 ## Tela cheia e shaders
 
@@ -64,17 +69,65 @@ diretamente. Veja [o formato e exemplos](docs/SHADERS.md).
 
 | Teclado | Controle PS2 |
 | --- | --- |
-| WASD | analógico esquerdo |
-| setas | direcional |
-| H / J / Y / U | ✕ / ○ / □ / △ |
-| I / O | L1 / L2 |
-| K / L | R1 / R2 |
-| Z / X | Start / Select |
-| F1 | configurações do port |
-| F11 | tela cheia |
+| WASD | movimentar |
+| Espaço | pular / montar · △ |
+| Mouse | mover a câmera |
+| Clique esquerdo / direito / central | atacar · □ / agarrar · R1 / ação · ○ |
+| Q / E | arma anterior / próxima arma |
+| F / R | L1 / L2 |
+| C / Shift esquerdo | chamar / acelerar Agro · ✕ / R2 |
+| Esc / I | Start / Select |
+| Enter / Backspace | confirmar / voltar nos menus |
+| ↑ / ↓ | direcional para cima / baixo |
+| ← / → / Page Up / Page Down | câmera pelo teclado |
+| Ctrl esquerdo / V | L3 / R3 |
+| F1 | configurações, liberar cursor e **Sistema → Voltar ao launcher** |
+| F11 | alternar janela / tela cheia |
+
+Na aba **Controles → Personalizar teclado e mouse**, cada ação aceita outra tecla
+ou botão do mouse. Ajuste a sensibilidade e a inversão dos dois eixos ou desative
+a câmera pelo mouse. O perfil é salvo localmente e aplicado na próxima abertura.
+F1 e F11 são reservados; Delete remove uma atribuição no editor.
+O cursor é liberado ao abrir F1 ou trocar de janela; comandos mantidos durante
+a transição precisam ser soltos antes de voltar ao jogo. Esc pausa sem encerrar.
 
 Controles USB/Bluetooth também são aceitos. O menu F1 ajusta vídeo, efeitos,
 som e idioma da interface do port. Os textos originais do disco são preservados.
+O mapeamento Linux inclui o Zikway HID gamepad / GameSir Nova Lite em modo HID
+(USB `3537:1041`), inclusive direcionais, analógicos e gatilhos.
+O runtime também inclui 743 registros Linux da base comunitária
+[SDL_GameControllerDB](https://github.com/mdqinc/SDL_GameControllerDB), com GUIDs
+adaptados ao GLFW. O jogo e o menu F1 usam o controle reconhecido que estiver
+recebendo comandos, inclusive quando ele não está na primeira posição USB.
+Reconectar o controle não exige reiniciar o jogo. Um modelo ainda ausente pode
+ser configurado em **Controles → Configurar meu controle…**: selecione o
+dispositivo, solte os analógicos e siga as 20 etapas. O perfil fica salvo para
+as próximas aberturas do jogo e também funciona no menu F1. Xbox/XInput,
+PlayStation e genéricos são aceitos quando o Linux os disponibiliza como joystick;
+o nome comercial e o formato físico do controle não determinam o mapeamento.
+Enter pula comandos ausentes, Backspace refaz a etapa anterior e Esc cancela
+preservando o perfil anterior. Cada dispositivo mantém seu próprio perfil.
+No desenvolvimento, também são aceitos arquivos indicados por
+`PS2X_GAMEPAD_MAPPINGS` ou a variável `SDL_GAMECONTROLLERCONFIG`.
+
+## Correções de fidelidade em validação
+
+As rotinas adicionais dos indicadores do HUD passam a ser capturadas, incluindo
+o anel de carga do ataque. O cache de texturas verifica toda a paleta animada,
+evitando reaproveitar cores e transparências antigas quando uma entrada muda.
+As colisões usam por padrão o código original traduzido; as reescritas manuais
+experimentais dessa parte ficam desativadas. Isso preserva também os registradores
+VU0 que as reescritas não reproduzem integralmente.
+
+Os testes sintéticos cobrem essas correções. A luta com o terceiro colosso,
+os pontos fracos e os efeitos após derrotá-lo ainda precisam de uma reprodução
+com save compatível; não foram declarados corrigidos apenas porque o build passou.
+Consulte [o acompanhamento](docs/FIDELITY-2026-10.md).
+
+O acompanhamento de [28/10](docs/FIDELITY-2026-10-28.md) registra os três
+trajetos no altar Cliff Path com o cartão recebido e a correção de conteúdo
+gráfico antigo no cache. As quedas não foram reproduzidas nesses trajetos;
+a colisão de Gaius e os raios de Hydrus continuam em validação.
 
 ## Compilar e verificar
 

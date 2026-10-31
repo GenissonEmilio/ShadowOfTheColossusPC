@@ -18,7 +18,9 @@ namespace ps2x::kernel_memory
     constexpr uint32_t kBootModePoolBase = 0x00047000u;
     constexpr uint32_t kBootModePoolBytes = 0x00001000u;
 
-    constexpr uint32_t kCallbackStackFloor = 0x00010000u; // room for 25 stacks
+    // The allocator skips [kRpcPacketPoolBase, end of kBootModePool):
+    // 11 stacks above it and 12 below it, each 16 KiB.
+    constexpr uint32_t kCallbackStackFloor = 0x00010000u;
     constexpr uint32_t kCallbackStackTop = 0x00074000u;
     constexpr uint32_t kCallbackStackSize = 0x00004000u;
 }

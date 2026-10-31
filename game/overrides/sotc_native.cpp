@@ -602,10 +602,27 @@ namespace sotc_native
             return 0;
         const uint32_t format = word(header + 0x1Cu), psm = format & 0x3Fu;
         const uint32_t width = 1u << ((format >> 16) & 0xFu), height = 1u << ((format >> 20) & 0xFu);
-        const uint32_t pixelBytes = psm == 0x14u ? width * height / 2u : width * height;
+        const uint32_t pixelBytes = psm == 0x00u ? width * height * 4u :
+                                    (psm == 0x14u ? width * height / 2u : width * height);
+        // Palettes are small and animated in place (weak-point fades, death
+        // effects). Sampling 16 words of a 256-colour CLUT missed changes to
+        // the other entries and kept old GPU colours/alpha indefinitely.
+        const uint64_t paletteKey = contentHash(header + word(header + 0x18u),
+                                                psm == 0x00u ? 0u : (psm == 0x14u ? 64u : 1024u),
+                                                0xcbf29ce484222325ull);
         const uint64_t sampled = sample(header + word(header + 0x14u), pixelBytes, 64u) ^
-                                 sample(header + word(header + 0x18u), psm == 0x14u ? 64u : 1024u, 16u) * 31u ^ format;
+                                 paletteKey * 31u ^ format ^ g_ram[(header + 0x1Fu) & 0x1FFFFFFu];
         uint64_t key = sampled;
+        const auto fullKey = [&]
+        {
+            uint32_t bytes = 0;
+            for (uint32_t level = 0, w = width, h = height, levels = std::clamp((format >> 12) & 0xFu, 1u, 7u); level < levels && w >= 1u && h >= 1u;
+                 ++level, w /= 2u, h /= 2u)
+                bytes += psm == 0x00u ? w * h * 4u : (psm == 0x13u ? w * h : w * h / 2u);
+            uint64_t h = contentHash(header + word(header + 0x14u), bytes, 0x84222325cbf29ce4ull ^ format);
+            h = contentHash(header + word(header + 0x18u), psm == 0x00u ? 0u : (psm == 0x14u ? 64u : 1024u), h ^ g_ram[(header + 0x1Fu) & 0x1FFFFFFu]);
+            return (h & 0x03FFFFFFFFFFFFFFull) | (1ull << 58);
+        };
         bool changedInPlace = false;
         if (native_renderer::tuning().fastHooks)
         {
@@ -616,31 +633,32 @@ namespace sotc_native
             struct ContentMemo
             {
                 uint32_t address = 0;
-                uint64_t frame = ~0ull, sampled = 0, key = 0;
+                uint64_t frame = ~0ull, sampled = 0, key = 0, verifiedAt = 0;
+                bool rewritten = false;
             };
             static WayMemo<ContentMemo, 512> memos;
             bool found = false;
             ContentMemo &memo = memos.find(header, (header >> 4) ^ (header >> 13), found);
-            if (found && memo.sampled == sampled)
+            const bool reuse = found && memo.sampled == sampled && !memo.rewritten &&
+                               (memo.frame == g_frame || memo.frame + 1u == g_frame) && g_frame - memo.verifiedAt < 16u;
+            if (reuse)
             {
                 key = memo.key;
                 memo.frame = g_frame;
             }
             else
             {
-                // Drawn in the last two frames and changed: rewritten where it is
-                // (animated), decoded at once, not on the worker.
-                changedInPlace = found && memo.frame != ~0ull && memo.frame + 2u >= g_frame;
-                uint32_t bytes = 0;
-                for (uint32_t level = 0, w = width, h = height, levels = std::clamp((format >> 12) & 0xFu, 1u, 7u); level < levels && w >= 1u && h >= 1u;
-                     ++level, w /= 2u, h /= 2u)
-                    bytes += psm == 0x00u ? w * h * 4u : (psm == 0x13u ? w * h : w * h / 2u);
-                uint64_t h = contentHash(header + word(header + 0x14u), bytes, 0x84222325cbf29ce4ull ^ format);
-                h = contentHash(header + word(header + 0x18u), psm == 0x00u ? 0u : (psm == 0x14u ? 64u : 1024u), h ^ g_ram[(header + 0x1Fu) & 0x1FFFFFFu]);
-                key = (h & 0x03FFFFFFFFFFFFFFull) | (1ull << 58);
-                memo = {header, g_frame, sampled, key};
+                key = fullKey();
+                // Sparse samples cannot prove that streamed or animated bytes
+                // are unchanged. Check every byte periodically and on return
+                // after a gap; once animated, check fully on every frame.
+                changedInPlace = found && key != memo.key && memo.frame + 2u >= g_frame;
+                const bool rewritten = found && (memo.rewritten || changedInPlace);
+                memo = {header, g_frame, sampled, key, g_frame, rewritten};
             }
         }
+        else
+            key = fullKey(); // diagnostic slow path must not reuse sparse keys either
         if (native_renderer::hasTexture(key))
             return key;
         if ((psm != 0x00u && psm != 0x13u && psm != 0x14u) || width > 1024u || height > 1024u)
@@ -825,15 +843,15 @@ namespace sotc_native
     // first second: ids by address rebuilt the whole scene each time (~2 400
     // packets and ~100 textures, five times in ~20 frames, every one of them
     // the same bytes as before). A memo by address keeps a packet's id while a
-    // sample of its contents (32 words) stays the same, so the full hash runs
-    // only when the packet is new there; the same packet drawn again in a
+    // sample of its contents is unchanged between periodic full checks;
+    // the same packet drawn again in a
     // frame (instances) takes the id it had. Without fast hooks: the address
-    // and size, and the sample (another area loaded in its place makes new ids).
+    // fast hooks disabled: all contents checked on every call.
     struct PacketMemo
     {
         uint32_t address = 0, size = 0;
-        uint64_t frame = ~0ull, sample = 0, id = 0;
-        uint64_t quick = 0, sampledAt = 0; // four words; the frame of the last full sample
+        uint64_t frame = ~0ull, id = 0;
+        uint64_t quick = 0, verifiedAt = 0; // four words; last hash of ALL bytes
         bool rewritten = false;            // seen changed in place
     };
     // Four words of a packet, spread over it (the quick check).
@@ -854,42 +872,30 @@ namespace sotc_native
     uint64_t packetId(uint32_t data, uint32_t size, bool fast)
     {
         g_packetChangedInPlace = false;
-        if (!fast)
-            return ((static_cast<uint64_t>(size) << 32) | data) ^ (sample(data, size, 32u) & 0x7FFF000000000000ull);
         bool found = false;
         PacketMemo &memo = g_packetMemo.find(data, (data >> 4) ^ (data >> 15), found);
         found = found && memo.size == size;
-        if (found && memo.frame == g_frame)
+        if (fast && found && memo.frame == g_frame && !memo.rewritten)
             return memo.id;
-        // Never rewritten in place: four words, the full sample one frame in
-        // 16 (by address, so not all on the same frame).
-        if (found && !memo.rewritten && native_renderer::tuning().packetQuickCheck && g_frame - memo.sampledAt < 16u &&
+        // A sample is only a shortcut between bounded full-content checks.
+        // Returning after a gap may mean streaming reused the address: always
+        // check every byte then, even if all sampled words happen to match.
+        if (fast && found && !memo.rewritten && native_renderer::tuning().packetQuickCheck && g_frame - memo.verifiedAt < 16u &&
+            memo.frame + 1u == g_frame &&
             ((g_frame + (data >> 5)) & 15u) != 0u)
         {
-            // Drawn the frame before too: taken as it was (the full sample
-            // comes round within 16 frames). Back after a while: four words.
-            if (memo.frame + 1u == g_frame || quickSample(data, size) == memo.quick)
+            if (quickSample(data, size) == memo.quick)
             {
                 memo.frame = g_frame;
                 return memo.id;
             }
         }
-        const uint64_t sampled = sample(data, size, 32u);
-        if (found && memo.sample == sampled)
-        {
-            memo.frame = g_frame;
-            memo.sampledAt = g_frame;
-            memo.quick = quickSample(data, size);
-            return memo.id;
-        }
-        // Drawn in the last two frames and changed: rewritten in place
-        // (animated). Long unused: another packet loaded there (async is fine).
-        g_packetChangedInPlace = found && memo.frame != ~0ull && memo.frame + 2u >= g_frame;
         // Bit 59 set, 60-63 clear: apart from the per-frame meshes' ids
         // (bits 60, 62, 63 and a count) and the second pass's (bit 61 flipped).
         const uint64_t id = (contentHash(data, size, 0x9E3779B97F4A7C15ull ^ size) & 0x07FFFFFFFFFFFFFFull) | (1ull << 59);
+        g_packetChangedInPlace = found && id != memo.id && memo.frame + 2u >= g_frame;
         const bool rewritten = found && (memo.rewritten || g_packetChangedInPlace);
-        memo = {data, size, g_frame, sampled, id, quickSample(data, size), g_frame, rewritten};
+        memo = {data, size, g_frame, id, quickSample(data, size), g_frame, rewritten};
         return id;
     }
 
@@ -1757,7 +1763,7 @@ namespace sotc_native
         {0x010A24C0u, 0x010A5270u}, // spriteDrawSpriteTexNoSet .. spriteDrawSpriteST2 (menus, title, map)
         {0x0108A288u, 0x0108A758u}, // drawFrontFog, fadeScreen, drawDemoBar (cinema bars)
         {0x0134B490u, 0x0134B6F8u}, // subtitles (pre-rendered lines, a textured sprite)
-        {0x013F6B20u, 0x013F78A8u}, // HUD gauges (fans and strips)
+        {0x013F6B20u, 0x013F8AA0u}, // all HUD gauge helpers, including the attack-charge ring
         {0x014033F0u, 0x01403558u}, // title menu backdrop
         {0x001C2DD0u, 0x001C30D0u}, // loading indicator (lines)
         {0x0114FD00u, 0x01150278u}, // spriteDraw*, windowPrintf (windows)
@@ -1909,6 +1915,18 @@ namespace sotc_native
         const size_t n = v.size();
         switch (a.prim & 7u)
         {
+        case 0: // GS point: one logical pixel, also used by dotted effects
+        {
+            native_renderer::Vertex q[4] = {o, o, o, o};
+            q[1].x += 2.0f / 512.0f;
+            q[2].y -= 2.0f / 448.0f;
+            q[3].x = q[1].x;
+            q[3].y = q[2].y;
+            emit2D(q[0], q[1], q[2]);
+            emit2D(q[1], q[3], q[2]);
+            v.clear();
+            break;
+        }
         case 1: case 2: // line, line strip: one pixel wide
             if (n >= 2)
             {

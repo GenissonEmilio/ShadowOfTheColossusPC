@@ -40,6 +40,6 @@ namespace hostmenu
     // True while the menu owns the controller (open, or a button pressed in
     // it is still held): the game sees no input then.
     bool inputBlocked();
-    // The player chose "Quit game".
+    // The player chose "Return to launcher".
     bool quitRequested();
 }

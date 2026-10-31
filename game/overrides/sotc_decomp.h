@@ -37,6 +37,7 @@ namespace sotc_decomp
         // code is run once and not to its return (a sleep returns to the
         // other context, which goes on for a frame or more).
         bool switches = false, once = false;
+        bool collision = false; // unverified native rewrites are opt-in for physics
     };
 
     std::vector<Function> &registry();
@@ -44,9 +45,9 @@ namespace sotc_decomp
     struct Registrar
     {
         Registrar(uint32_t address, const char *name, PS2Runtime::RecompiledFunction native, bool returnsFloat = false, bool switches = false,
-                  bool once = false)
+                  bool once = false, bool collision = false)
         {
-            registry().push_back({address, name, native, returnsFloat, switches, once});
+            registry().push_back({address, name, native, returnsFloat, switches, once, collision});
         }
     };
 
@@ -123,6 +124,8 @@ namespace sotc_decomp
     static const ::sotc_decomp::Registrar sotc_decomp_registrar_##name{address, #name, fn}
 #define SOTC_DECOMP_FLOAT_FUNCTION(address, name, fn) \
     static const ::sotc_decomp::Registrar sotc_decomp_registrar_##name{address, #name, fn, true}
+#define SOTC_DECOMP_COLLISION_FUNCTION(address, name, fn) \
+    static const ::sotc_decomp::Registrar sotc_decomp_registrar_##name{address, #name, fn, false, false, false, true}
 // A context switch that returns to its caller after a round trip (wake).
 #define SOTC_DECOMP_SWITCH_FUNCTION(address, name, fn) \
     static const ::sotc_decomp::Registrar sotc_decomp_registrar_##name{address, #name, fn, false, true, false}
