@@ -2,6 +2,7 @@
 #include <cmath>
 #include <algorithm>
 #include "runtime/host_menu.h"
+#include "runtime/desktop_input.h"
 #include <map>
 #include <sstream>
 #include <string>
@@ -234,6 +235,23 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
         data[5] = toByte(ry);
     }
 
+    auto setStick = [&data](int xIndex, int yIndex, int x, int y)
+    {
+        if (x == 0 && y == 0)
+            return;
+        data[xIndex] = static_cast<uint8_t>(x < 0 ? 0x00 : (x > 0 ? 0xFF : kPadStickCenter));
+        data[yIndex] = static_cast<uint8_t>(y < 0 ? 0x00 : (y > 0 ? 0xFF : kPadStickCenter));
+    };
+#if defined(__linux__) && !defined(__ANDROID__)
+    const auto desktop = desktop_input::read();
+    btns &= ~desktop.buttons;
+    if (desktop.lx != 128 || desktop.ly != 128) {
+        data[6] = desktop.lx; data[7] = desktop.ly;
+    }
+    if (desktop.rx != 128 || desktop.ry != 128) {
+        data[4] = desktop.rx; data[5] = desktop.ry;
+    }
+#else
     // Keyboard, laid out like an arcade panel (works alongside a gamepad):
     //   WASD = left stick, arrows = D-pad
     //   Y U I O = Square Triangle L1 L2 (top row)
@@ -270,14 +288,9 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
 
     auto keyAxis = [](int negative, int positive) -> int
     { return (IsKeyDown(positive) ? 1 : 0) - (IsKeyDown(negative) ? 1 : 0); };
-    auto setStick = [&data](int xIndex, int yIndex, int x, int y)
-    {
-        if (x == 0 && y == 0)
-            return;
-        data[xIndex] = static_cast<uint8_t>(x < 0 ? 0x00 : (x > 0 ? 0xFF : kPadStickCenter));
-        data[yIndex] = static_cast<uint8_t>(y < 0 ? 0x00 : (y > 0 ? 0xFF : kPadStickCenter));
-    };
     setStick(6, 7, keyAxis(KEY_A, KEY_D), keyAxis(KEY_W, KEY_S));
+
+#endif
 
     // PS2X_INPUT_SCRIPT="<sec>:<BUTTON>:<duration>;..." scripted presses for testing.
     // Besides buttons, LS_UP/LS_DOWN/LS_LEFT/LS_RIGHT push the left stick.

@@ -11,6 +11,7 @@
 #include <filesystem>
 #include "runtime/native_tuning.h"
 #include "runtime/host_menu.h"
+#include "runtime/desktop_input.h"
 #include "runtime/desktop_video.h"
 #if defined(__linux__) && !defined(__ANDROID__)
 #include "rlgl.h"
@@ -1037,6 +1038,7 @@ bool PS2Runtime::initialize(const char *title)
         native_renderer::setGlContext([] {});
 #endif
         hostmenu::load();
+        desktop_input::initialize();
 #if defined(__linux__) && !defined(__ANDROID__)
         if (!std::getenv("PS2X_HIDDEN_WINDOW"))
             desktop_video::setFullscreen(hostmenu::settings().fullscreen);
@@ -3473,6 +3475,7 @@ void PS2Runtime::run()
         }
 #endif
         hostmenu::update();
+        desktop_input::poll(hostmenu::inputBlocked());
 
         if (WindowShouldClose() || hostmenu::quitRequested())
         {

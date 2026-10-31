@@ -1,5 +1,6 @@
 // Real raylib/GLFW input -> DualShock packet. Driven by virtual USB devices
 // in the local integration test; no game files or keyboard injection.
+#include "../../PS2Recomp/ps2xRuntime/src/lib/desktop_input.cpp"
 #include "../../PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp"
 #include "raylib.h"
 #include <thread>

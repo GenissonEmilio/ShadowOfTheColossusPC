@@ -67,14 +67,26 @@ diretamente. Veja [o formato e exemplos](docs/SHADERS.md).
 
 | Teclado | Controle PS2 |
 | --- | --- |
-| WASD | analógico esquerdo |
-| setas | direcional |
-| H / J / Y / U | ✕ / ○ / □ / △ |
-| I / O | L1 / L2 |
-| K / L | R1 / R2 |
-| Z / X | Start / Select |
-| F1 | configurações do port |
-| F11 | tela cheia |
+| WASD | movimentar |
+| Espaço | pular · ✕ |
+| Mouse | mover a câmera |
+| Clique esquerdo / direito / central | atacar · □ / agarrar · R1 / ação · ○ |
+| Q / E | arma anterior / próxima arma |
+| F / R | L1 / L2 |
+| C / Shift esquerdo | Agro · △ / R2 |
+| Esc / I | Start / Select |
+| ↑ / ↓ | direcional para cima / baixo |
+| ← / → / Page Up / Page Down | câmera pelo teclado |
+| Ctrl esquerdo / V | L3 / R3 |
+| F1 | configurações, liberar cursor e **Sistema → Voltar ao launcher** |
+| F11 | alternar janela / tela cheia |
+
+Na aba **Controles → Personalizar teclado e mouse**, cada ação aceita outra tecla
+ou botão do mouse. Ajuste a sensibilidade e a inversão dos dois eixos ou desative
+a câmera pelo mouse. O perfil é salvo localmente e aplicado na próxima abertura.
+F1 e F11 são reservados; Delete remove uma atribuição no editor.
+O cursor é liberado ao abrir F1 ou trocar de janela; comandos mantidos durante
+a transição precisam ser soltos antes de voltar ao jogo. Esc pausa sem encerrar.
 
 Controles USB/Bluetooth também são aceitos. O menu F1 ajusta vídeo, efeitos,
 som e idioma da interface do port. Os textos originais do disco são preservados.

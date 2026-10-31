@@ -34,6 +34,16 @@ jobs:
           docker run --rm --init --cpus=2 --memory=1600m --memory-swap=1600m --network=none \
             -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
             sotc-linux-builder bash tools/linux/test_scheduler.sh
+          docker run --rm --init --cpus=2 --memory=1000m --memory-swap=1000m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_desktop_input.sh
+      - name: Keyboard and mouse profile editor (frozen GTK, no ROM)
+        run: |
+          docker run --rm --init --cpus=2 --memory=1000m --memory-swap=1000m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder xvfb-run -a -s '-screen 0 1280x800x24' \
+            python3 tools/linux/test_desktop_controls.py \
+            --program dist/ShadowOfTheColossusPC/ShadowOfTheColossusPC --out artifacts/desktop-controls-ci
       - name: Native memory-card persistence (synthetic data)
         run: |
           docker run --rm --init --cpus=2 --network=none -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
@@ -63,9 +73,9 @@ jobs:
           done
       - name: Package content check
         run: |
-          test -f dist/ShadowOfTheColossusPC-0.2.4-linux-x86_64.tar.gz
+          test -f dist/ShadowOfTheColossusPC-0.2.5-linux-x86_64.tar.gz
           cd dist
-          sha256sum -c ShadowOfTheColossusPC-0.2.4-linux-x86_64.tar.gz.sha256
+          sha256sum -c ShadowOfTheColossusPC-0.2.5-linux-x86_64.tar.gz.sha256
       - uses: actions/upload-artifact@v4
         with:
           name: ShadowOfTheColossusPC-linux-x86_64

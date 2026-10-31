@@ -247,26 +247,47 @@ class Launcher:
         return page
 
     def controls(self):
-        page=box(spacing=24)
-        page.pack_start(label("Pronto para jogar?", "section-title"),False,False,0)
-        page.pack_start(label("Jogue com teclado ou controle USB/Bluetooth.\nH / J / Y / U são os botões ✕ / ○ / □ / △. F1 abre as configurações.\nOs controles originais do jogo estão disponíveis; use F1 para ajustar a imagem e o áudio.","muted",wrap=True),False,False,0)
-        self.controller_status = label("Perfis automáticos para controles Xbox, PlayStation e genéricos.\nSe os botões não responderem ou estiverem trocados, configure seu controle.", "muted", wrap=True)
+        page=box(spacing=18)
+        page.pack_start(label("Sua maneira de jogar", "section-title"),False,False,0)
+        page.pack_start(label("Teclado e mouse ou controle USB/Bluetooth.\nF1 abre o menu, libera o cursor e oferece Voltar ao launcher. Esc pausa o jogo.","muted",wrap=True),False,False,0)
+        edit=style(Gtk.Button(label="Personalizar teclado e mouse…"),"secondary")
+        edit.connect("clicked", self.configure_desktop_input)
+        page.pack_start(edit,False,False,0)
+        self.keyboard_summary = label("", "muted", wrap=True)
+        page.pack_start(self.keyboard_summary,False,False,0)
+        self.refresh_keyboard_summary()
+        page.pack_start(label("F1 · Configurações e sair do jogo    /    F11 · Tela cheia", "small", wrap=True),False,False,0)
+        page.pack_start(label("Controle USB / Bluetooth", "panel-title"),False,False,8)
+        self.controller_status = label("Perfis automáticos para Xbox, PlayStation e genéricos.\nSe os botões não responderem ou estiverem trocados, configure seu controle.", "muted", wrap=True)
         page.pack_start(self.controller_status, False, False, 0)
         self.controller_button = style(Gtk.Button(label="Configurar meu controle…"), "secondary")
         self.controller_button.connect("clicked", self.configure_controller)
         page.pack_start(self.controller_button, False, False, 0)
-        grid=Gtk.Grid(column_spacing=28,row_spacing=15); style(grid,"panel")
-        rows=[("W A S D","Mover · analógico esquerdo"),("↑ ↓ ← →","Direcional"),
-              ("H / J / Y / U","✕ / ○ / □ / △"),("I / O","L1 / L2"),("K / L","R1 / R2"),
-              ("Z / X","Start / Select"),("F1","Menu de configurações"),("F11","Tela cheia")]
-
-
-        for i,(keys,description) in enumerate(rows):
-            a=label(keys,"key"); a.set_margin_start(20); a.set_margin_top(8)
-            b=label(description,"muted"); b.set_margin_end(25)
-            grid.attach(a,0,i,1,1); grid.attach(b,1,i,1,1)
-        page.pack_start(grid,False,False,0); page.pack_start(Gtk.Box(),True,True,0)
+        page.pack_start(Gtk.Box(),True,True,0)
         return page
+
+    def refresh_keyboard_summary(self):
+        from controls import Controls, binding_label
+        values = Controls(self.library).load()
+        def keys(*names):
+            return " / ".join(binding_label(values[name]) for name in names)
+        self.keyboard_summary.set_text(
+            f"{keys('move_up','move_left','move_down','move_right')}  ·  Movimentar\n"
+            f"{keys('jump')}  ·  Pular    |    {keys('attack')}  ·  Atacar\n"
+            f"{keys('grab')}  ·  Agarrar    |    {keys('action')}  ·  Ação / luz da espada\n"
+            f"{keys('weapon_left','weapon_right')}  ·  Trocar arma    |    {keys('horse')}  ·  Agro\n"
+            f"{keys('look','camera_reset')}  ·  L1 / L2    |    {keys('crouch')}  ·  R2\n"
+            f"{keys('start','select')}  ·  Start / Select\n"
+            + ("Mouse  ·  Câmera" if values['mouse_camera'] else "Câmera pelo mouse desativada"))
+
+    def configure_desktop_input(self, *_):
+        if self.busy or self.process:
+            self.error("Feche o jogo", "O perfil será aplicado na próxima abertura do jogo.")
+            return
+        from controls_dialog import ControlsDialog
+        dialog = ControlsDialog(self.window, self.library)
+        dialog.connect("destroy", lambda *_: self.refresh_keyboard_summary())
+        dialog.show_all()
 
     def configure_controller(self, *_):
         if self.busy or self.process or self.controller_process:

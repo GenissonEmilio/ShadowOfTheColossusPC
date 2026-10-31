@@ -11,7 +11,7 @@ import tempfile
 from import_disc import import_disc, EXPECTED
 from pipeline import Pipeline
 
-VERSION = "0.2.4"
+VERSION = "0.2.5"
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 APPLICATION_ID = "io.github.GenissonEmilio.ShadowOfTheColossusPC"
 
@@ -89,6 +89,9 @@ class Library:
         mapping = self.directory / "controllers/gamecontrollerdb.txt"
         if mapping.is_file():
             environment["PS2X_GAMEPAD_MAPPINGS"] = str(mapping)
+        # The native backend supplies the same defaults when no profile exists.
+        from controls import Controls
+        environment["PS2X_DESKTOP_INPUT"] = str(Controls(self).path)
         from graphics import Graphics
         selected = Graphics(self).selected()
         environment["SOTC_SHADER"] = str(selected) if selected else ""
