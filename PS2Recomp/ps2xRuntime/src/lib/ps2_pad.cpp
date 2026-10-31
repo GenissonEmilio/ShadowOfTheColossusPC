@@ -223,6 +223,7 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
         uint64_t repeatEvery = 0, firstVblank = 0, nextVblank = 0;
     };
     static constexpr uint16_t kStickUp = 0xF001u, kStickDown = 0xF002u, kStickLeft = 0xF003u, kStickRight = 0xF004u, kSnap = 0xF005u;
+    static constexpr uint16_t kRStickUp = 0xF006u, kRStickDown = 0xF007u, kRStickLeft = 0xF008u, kRStickRight = 0xF009u;
     static std::vector<ScriptEntry> script = []
     {
         std::vector<ScriptEntry> out;
@@ -234,7 +235,8 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
             {"CROSS", PAD_CROSS}, {"CIRCLE", PAD_CIRCLE}, {"SQUARE", PAD_SQUARE}, {"TRIANGLE", PAD_TRIANGLE},
             {"L1", PAD_L1}, {"L2", PAD_L2}, {"R1", PAD_R1}, {"R2", PAD_R2},
             {"START", PAD_START}, {"SELECT", PAD_SELECT}, {"WAIT", 0}, {"SNAP", kSnap},
-            {"LS_UP", kStickUp}, {"LS_DOWN", kStickDown}, {"LS_LEFT", kStickLeft}, {"LS_RIGHT", kStickRight}};
+            {"LS_UP", kStickUp}, {"LS_DOWN", kStickDown}, {"LS_LEFT", kStickLeft}, {"LS_RIGHT", kStickRight},
+            {"RS_UP", kRStickUp}, {"RS_DOWN", kRStickDown}, {"RS_LEFT", kRStickLeft}, {"RS_RIGHT", kRStickRight}};
         std::stringstream all(env);
         std::string item;
         while (std::getline(all, item, ';'))
@@ -383,6 +385,10 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
             case kStickDown: setStick(6, 7, 0, 1); break;
             case kStickLeft: setStick(6, 7, -1, 0); break;
             case kStickRight: setStick(6, 7, 1, 0); break;
+            case kRStickUp: setStick(4, 5, 0, -1); break;
+            case kRStickDown: setStick(4, 5, 0, 1); break;
+            case kRStickLeft: setStick(4, 5, -1, 0); break;
+            case kRStickRight: setStick(4, 5, 1, 0); break;
             default: clearBit(e.mask); break;
             }
         }
