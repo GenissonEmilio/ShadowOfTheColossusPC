@@ -250,6 +250,15 @@ namespace ps2recomp
             return false;
         }
 
+        // A tail J must reach the installed hook/native just like a JAL.
+        // Keep the direct original as the unchanged/missing-slot fast path;
+        // call replacements without creating a guest call frame, changing ra,
+        // adding a checkpoint, or consuming a callee's continuation PC.
+        // Same dispatch correction as celosia 84bf8d5009, using existing APIs.
+        m_ss << fmt::format("{}if (const auto tail = runtime->guestFunctionAt(0x{:X}u); tail && tail != &{}) {{\n",
+                            indent, target, functionName);
+        m_ss << fmt::format("{}    tail(rdram, ctx, runtime); return;\n", indent);
+        m_ss << fmt::format("{}}}\n", indent);
         m_ss << indent << functionName << "(rdram, ctx, runtime); return;\n";
         return true;
     }
