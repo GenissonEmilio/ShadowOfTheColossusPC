@@ -43,6 +43,14 @@ namespace
 
 void PSPadBackend::setScriptMemory(const uint8_t *rdram) { g_scriptRam = rdram; }
 
+int PSPadBackend::gamepadIndex() { return IsGamepadAvailable(0) ? 0 : -1; }
+
+const char *PSPadBackend::gamepadName()
+{
+    const int pad = gamepadIndex();
+    return pad >= 0 ? GetGamepadName(pad) : nullptr;
+}
+
 bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t size)
 {
     if (!data || size < 32)
