@@ -26,6 +26,14 @@ jobs:
         run: |
           LD_LIBRARY_PATH="$PWD/artifacts/compiler/lib" artifacts/compiler/bin/ps2_recomp --help
           test -f artifacts/compiler/manifest.json
+      - name: Native fidelity, vector contexts and callback stacks (no ROM)
+        run: |
+          docker run --rm --init --cpus=2 --memory=1600m --memory-swap=1600m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_fidelity.sh
+          docker run --rm --init --cpus=2 --memory=1600m --memory-swap=1600m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_scheduler.sh
       - name: Native memory-card persistence (synthetic data)
         run: |
           docker run --rm --init --cpus=2 --network=none -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
@@ -40,11 +48,24 @@ jobs:
               /src/artifacts/compiler/bin/sotc-video-tool --self-test /src/artifacts/video-$geometry
             python3 tools/linux/check_video.py artifacts/video-$geometry
           done
+      - name: Launcher artwork and navigation pages (no ROM)
+        run: |
+          python3 tools/linux/test_desktop_services.py --program dist/ShadowOfTheColossusPC/ShadowOfTheColossusPC --out artifacts/desktop-services-ci
+          for asset in hero.png icon.png; do
+            cmp tools/desktop/assets/$asset dist/ShadowOfTheColossusPC/_internal/assets/$asset
+          done
+          for page in home graphics controls about; do
+            docker run --rm --init --cpus=2 --network=none -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+              sotc-linux-clean xvfb-run -a -s '-screen 0 1920x1080x24' \
+              /src/dist/ShadowOfTheColossusPC/ShadowOfTheColossusPC \
+              --data-dir /src/artifacts/launcher-ci --page "$page" --screenshot "/src/artifacts/launcher-ci/$page.png"
+            test -s "artifacts/launcher-ci/$page.png"
+          done
       - name: Package content check
         run: |
-          test -f dist/ShadowOfTheColossusPC-0.2.0-linux-x86_64.tar.gz
+          test -f dist/ShadowOfTheColossusPC-0.2.4-linux-x86_64.tar.gz
           cd dist
-          sha256sum -c ShadowOfTheColossusPC-0.2.0-linux-x86_64.tar.gz.sha256
+          sha256sum -c ShadowOfTheColossusPC-0.2.4-linux-x86_64.tar.gz.sha256
       - uses: actions/upload-artifact@v4
         with:
           name: ShadowOfTheColossusPC-linux-x86_64

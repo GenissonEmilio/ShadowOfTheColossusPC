@@ -6,7 +6,7 @@ import shutil
 import tarfile
 ROOT=Path(__file__).resolve().parents[3]
 NAME='ShadowOfTheColossusPC'
-VERSION='0.2.0'
+VERSION='0.2.4'
 OUT=ROOT / 'dist' / NAME
 if OUT.exists():shutil.rmtree(OUT)
 shutil.copytree(ROOT / 'artifacts/frozen' / NAME,OUT)
@@ -28,6 +28,8 @@ Requisitos: Linux x86_64 com glibc 2.39+ (Ubuntu 24.04+, Fedora 40+), OpenGL 3.3
 WASD: analógico esquerdo. H/J/Y/U: ✕/○/□/△. I/O: L1/L2. K/L: R1/R2.
 Z/X: Start/Select. F1: configurações. Controle USB/Bluetooth também funciona.
 F11: alterna tela cheia na resolução do monitor e janela.
+Na aba Controles, "Configurar meu controle" associa botoes e analogicos de
+controles sem perfil automatico. O perfil e salvo e usado tambem no menu F1.
 
 Na aba Gráficos, escolha Original 4:3 (faixas laterais) ou Esticar (tela toda).
 Importe fragment shaders GLSL 330 (.frag/.fs/.glsl) ou use Nitidez HD.
@@ -35,6 +37,9 @@ Shaders são validados no driver local; mudanças valem na próxima abertura.
 São filtros da imagem final, não pacotes de texturas HD. Desativar remove o filtro.
 
 Dados e saves: ~/.local/share/ShadowOfTheColossusPC (ou XDG_DATA_HOME).
+Meus saves: importe/exporte cartões PS2/PCSX2 .ps2 de 8 MB entre computadores.
+Feche o jogo antes. O cartão anterior fica em player/memcards/backups ao importar.
+No jogo, escolha Carregar jogo para continuar a aventura importada.
 Os arquivos originais não são alterados. Nenhum dado é enviado para a internet.
 No painel Sobre é possível adicionar o jogo ao menu de aplicativos.
 
@@ -47,6 +52,7 @@ O runtime e os scripts de build estão em compiler/source.
 GCC 13 e bibliotecas Ubuntu: fontes em https://archive.ubuntu.com/ubuntu/pool/
 (identificadas pelos pacotes em packages.txt); GCC em https://gcc.gnu.org/gcc-13/.
 
+Artes do launcher: _internal/assets/ARTWORK.md (origem e prompts das adaptações).
 Shadow of the Colossus pertence a Sony / Team Ico. Projeto independente.
 ''',encoding='utf-8')
 for p in OUT.rglob('*'):

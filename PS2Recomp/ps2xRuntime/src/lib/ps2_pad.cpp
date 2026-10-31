@@ -12,6 +12,16 @@
 #include "runtime/ps2_stats.h"
 #include "ps2_host_backend.h"
 #include <cstring>
+#include <atomic>
+#include <fstream>
+#include <mutex>
+#include <array>
+#if defined(__linux__) && !defined(__ANDROID__)
+#include "runtime/linux_gamepad_mappings.h"
+// GLFW is linked by the desktop raylib backend. A present joystick may have
+// no mapping: raylib still reports it available, but returns no gamepad input.
+extern "C" int glfwJoystickIsGamepad(int jid);
+#endif
 
 namespace
 {
@@ -34,7 +44,91 @@ namespace
     constexpr uint16_t PAD_L1 = 0x0400u;
     constexpr uint16_t PAD_R2 = 0x0200u;
     constexpr uint16_t PAD_L2 = 0x0100u;
+
+    void loadGamepadMappings()
+    {
+#if defined(__linux__) && !defined(__ANDROID__)
+        if (!IsWindowReady())
+            return;
+        // The Zikway HID / GameSir Nova Lite layout is exposed by SDL's HID
+        // backend, but is missing from GLFW's bundled Linux mapping database.
+        // Use GLFW's GUID (without SDL's name CRC) and its evdev axis order.
+        static std::once_flag loaded;
+        std::call_once(loaded, [] {
+            SetGamepadMappings(ps2pad::kLinuxMappings);
+            SetGamepadMappings(
+                "03000000373500004110000011010000,Zikway HID gamepad,"
+                "a:b0,b:b1,x:b3,y:b4,back:b10,guide:b12,start:b11,"
+                "leftstick:b13,rightstick:b14,leftshoulder:b6,rightshoulder:b7,"
+                "dpup:h0.1,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,"
+                "leftx:a0,lefty:a1,rightx:a2,righty:a3,"
+                "lefttrigger:a5,righttrigger:a4,platform:Linux,");
+            // A caller can supply a mapping from a controller configurator without
+            // Steam, or reuse SDL's standard environment setting. User mappings win.
+            if (const char *path = std::getenv("PS2X_GAMEPAD_MAPPINGS")) {
+                std::ifstream input(path, std::ios::binary | std::ios::ate);
+                if (input && input.tellg() >= 0 && input.tellg() <= 1024 * 1024) {
+                    std::string text(static_cast<size_t>(input.tellg()), '\0');
+                    input.seekg(0);
+                    if (input.read(text.data(), static_cast<std::streamsize>(text.size())))
+                        SetGamepadMappings(text.c_str());
+                }
+            }
+            if (const char *text = std::getenv("SDL_GAMECONTROLLERCONFIG"))
+                SetGamepadMappings(text);
+        });
+#endif
+    }
 }
+
+namespace {
+    std::mutex gamepadMutex;
+    std::array<ps2pad::GamepadState, 4> gamepads;
+    int selectedGamepad = -1;
+}
+
+void ps2pad::pollGamepads()
+{
+    loadGamepadMappings();
+    std::array<GamepadState, 4> snapshot;
+    for (int i = 0; i < 4; ++i) {
+        if (!IsGamepadAvailable(i)) continue;
+#if defined(__linux__) && !defined(__ANDROID__)
+        if (!glfwJoystickIsGamepad(i)) continue;
+#endif
+        snapshot[i].index = i;
+        for (int button = GAMEPAD_BUTTON_LEFT_FACE_UP; button <= GAMEPAD_BUTTON_RIGHT_THUMB; ++button)
+            snapshot[i].buttons[button] = IsGamepadButtonDown(i, button);
+        for (int axis = GAMEPAD_AXIS_LEFT_X; axis <= GAMEPAD_AXIS_RIGHT_TRIGGER; ++axis)
+            snapshot[i].axes[axis] = GetGamepadAxisMovement(i, axis);
+    }
+    std::lock_guard<std::mutex> lock(gamepadMutex);
+    gamepads = snapshot;
+}
+
+ps2pad::GamepadState ps2pad::readGamepad()
+{
+    std::lock_guard<std::mutex> lock(gamepadMutex);
+    int first = -1;
+    for (int i = 0; i < 4; ++i) {
+        if (gamepads[i].index < 0) continue;
+        if (first < 0) first = i;
+        bool pressed = false;
+        for (int button = GAMEPAD_BUTTON_LEFT_FACE_UP; button <= GAMEPAD_BUTTON_RIGHT_THUMB; ++button)
+            pressed |= gamepads[i].buttons[button];
+        for (int axis = GAMEPAD_AXIS_LEFT_X; axis <= GAMEPAD_AXIS_RIGHT_Y; ++axis)
+            pressed |= std::fabs(gamepads[i].axes[axis]) > 0.35f;
+        if (pressed) {
+            selectedGamepad = i;
+            return gamepads[i];
+        }
+        if (i == selectedGamepad) first = selectedGamepad;
+    }
+    selectedGamepad = first;
+    return first >= 0 ? gamepads[first] : GamepadState{};
+}
+
+int ps2pad::activeGamepad() { return readGamepad().index; }
 
 namespace
 {
@@ -56,52 +150,52 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
     data[4] = data[5] = data[6] = data[7] = kPadStickCenter;
 
     uint16_t btns = 0xFFFFu;
-    constexpr int kGamepad = 0;
+    const auto gamepad = ps2pad::readGamepad();
     if (hostmenu::inputBlocked())
         return true; // the settings menu owns the controller: nothing pressed
-    const bool useGamepad = IsGamepadAvailable(kGamepad);
+    const bool useGamepad = gamepad.index >= 0;
     auto clearBit = [&btns](uint16_t mask)
     { btns &= ~mask; };
 
     if (useGamepad)
     {
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_FACE_UP))
+        if (gamepad.buttons[GAMEPAD_BUTTON_LEFT_FACE_UP])
             clearBit(PAD_UP);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_FACE_DOWN))
+        if (gamepad.buttons[GAMEPAD_BUTTON_LEFT_FACE_DOWN])
             clearBit(PAD_DOWN);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_FACE_LEFT))
+        if (gamepad.buttons[GAMEPAD_BUTTON_LEFT_FACE_LEFT])
             clearBit(PAD_LEFT);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_FACE_RIGHT))
+        if (gamepad.buttons[GAMEPAD_BUTTON_LEFT_FACE_RIGHT])
             clearBit(PAD_RIGHT);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_FACE_DOWN))
+        if (gamepad.buttons[GAMEPAD_BUTTON_RIGHT_FACE_DOWN])
             clearBit(PAD_CROSS);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT))
+        if (gamepad.buttons[GAMEPAD_BUTTON_RIGHT_FACE_RIGHT])
             clearBit(PAD_CIRCLE);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_FACE_LEFT))
+        if (gamepad.buttons[GAMEPAD_BUTTON_RIGHT_FACE_LEFT])
             clearBit(PAD_SQUARE);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_FACE_UP))
+        if (gamepad.buttons[GAMEPAD_BUTTON_RIGHT_FACE_UP])
             clearBit(PAD_TRIANGLE);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_TRIGGER_1))
+        if (gamepad.buttons[GAMEPAD_BUTTON_LEFT_TRIGGER_1])
             clearBit(PAD_L1);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_TRIGGER_1))
+        if (gamepad.buttons[GAMEPAD_BUTTON_RIGHT_TRIGGER_1])
             clearBit(PAD_R1);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_TRIGGER_2))
+        if (gamepad.buttons[GAMEPAD_BUTTON_LEFT_TRIGGER_2])
             clearBit(PAD_L2);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_TRIGGER_2))
+        if (gamepad.buttons[GAMEPAD_BUTTON_RIGHT_TRIGGER_2])
             clearBit(PAD_R2);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_MIDDLE_RIGHT))
+        if (gamepad.buttons[GAMEPAD_BUTTON_MIDDLE_RIGHT])
             clearBit(PAD_START);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_MIDDLE_LEFT))
+        if (gamepad.buttons[GAMEPAD_BUTTON_MIDDLE_LEFT])
             clearBit(PAD_SELECT);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_THUMB))
+        if (gamepad.buttons[GAMEPAD_BUTTON_LEFT_THUMB])
             clearBit(PAD_L3);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_THUMB))
+        if (gamepad.buttons[GAMEPAD_BUTTON_RIGHT_THUMB])
             clearBit(PAD_R3);
 
-        float lx = GetGamepadAxisMovement(kGamepad, GAMEPAD_AXIS_LEFT_X);
-        float ly = GetGamepadAxisMovement(kGamepad, GAMEPAD_AXIS_LEFT_Y);
-        float rx = GetGamepadAxisMovement(kGamepad, GAMEPAD_AXIS_RIGHT_X);
-        float ry = GetGamepadAxisMovement(kGamepad, GAMEPAD_AXIS_RIGHT_Y);
+        float lx = gamepad.axes[GAMEPAD_AXIS_LEFT_X];
+        float ly = gamepad.axes[GAMEPAD_AXIS_LEFT_Y];
+        float rx = gamepad.axes[GAMEPAD_AXIS_RIGHT_X];
+        float ry = gamepad.axes[GAMEPAD_AXIS_RIGHT_Y];
         // A modern stick at rest reads a few percent off centre and never
         // still; the DualShock 2 came back to 0x80. Games aim with the raw
         // values (SotC's sword follows them every frame), so a radial dead

@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import os
+import subprocess
 from pathlib import Path
 import sys
 import threading
@@ -37,7 +38,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 gi.require_foreign("cairo")
-from gi.repository import Gdk, GLib, Gtk, Pango
+from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, Pango
 import cairo
 
 
@@ -61,39 +62,59 @@ def box(orientation=Gtk.Orientation.VERTICAL, spacing=0, margin=0, classes=()):
     return widget
 
 
-def monument(cr, x, y, scale):
-    cr.save(); cr.translate(x,y); cr.scale(scale,scale)
-    # Original vector artwork: an ancient stone guardian and a sword of light.
-    cr.set_source_rgb(.23,.27,.25)
-    cr.move_to(-70,80); cr.line_to(-60,-14); cr.line_to(-38,-43); cr.line_to(-30,-76)
-    cr.line_to(28,-76); cr.line_to(42,-43); cr.line_to(64,-14); cr.line_to(76,80); cr.close_path(); cr.fill()
-    cr.set_source_rgb(.39,.42,.37)
-    for x1,y1,w,h in [(-28,-69,54,29),(-41,-32,82,30),(-48,6,96,25),(-52,39,107,30)]:
-        cr.rectangle(x1,y1,w,h); cr.fill()
-    cr.set_source_rgb(.43,.87,.78)
-    for dx in (-17,17): cr.rectangle(dx-5,-57,10,4); cr.fill()
-    cr.set_line_width(2); cr.move_to(0,-27);cr.line_to(-10,-12);cr.line_to(0,4);cr.line_to(10,-12);cr.close_path();cr.stroke()
-    cr.set_source_rgb(.76,.7,.53);cr.rectangle(-87,-88,4,155);cr.fill();cr.rectangle(-100,50,30,4);cr.fill()
-    cr.set_source_rgb(.65,.87,.8);cr.move_to(-85,-103);cr.line_to(-90,-86);cr.line_to(-80,-86);cr.close_path();cr.fill()
-    cr.restore()
-
-
 class Artwork(Gtk.DrawingArea):
+    """Responsive illustration, with actual transparent artwork for the brand."""
+    _images = {}
+
     def __init__(self, small=False):
-        super().__init__(); self.small=small
-        self.set_size_request(45 if small else 220,55 if small else 220)
-        self.connect("draw",self.draw)
-        self.get_accessible().set_name("Guardião de pedra e espada luminosa, ilustração decorativa")
+        super().__init__()
+        self.small = small
+        self.set_size_request(48 if small else 0, 64 if small else 260)
+        name = "icon.png" if small else "hero.png"
+        if name not in self._images:
+            self._images[name] = GdkPixbuf.Pixbuf.new_from_file(
+                str(assets_directory() / name))
+        self.picture = self._images[name]
+        self.connect("draw", self.draw)
+        self.get_accessible().set_name(
+            "Wander erguendo a espada sobre um colosso de olhos azuis")
 
     def draw(self, widget, cr):
-        w,h=self.get_allocated_width(),self.get_allocated_height()
-        if not self.small:
-            glow=cairo.RadialGradient(w/2,h/2,5,w/2,h/2,140)
-            glow.add_color_stop_rgba(0,.35,.7,.62,.18); glow.add_color_stop_rgba(1,.1,.1,.1,0)
-            cr.set_source(glow); cr.paint()
-            cr.set_source_rgba(.7,.7,.6,.15)
-            for dx in (20,170): cr.rectangle(dx,10,14,195);cr.fill()
-        monument(cr,w/2+8,h/2+12,.24 if self.small else .94)
+        w, h = self.get_allocated_width(), self.get_allocated_height()
+        iw, ih = self.picture.get_width(), self.picture.get_height()
+        cr.save()
+        if self.small:
+            scale = min(w / iw, h / ih)
+            cr.translate((w - iw * scale) / 2, (h - ih * scale) / 2)
+            cr.scale(scale, scale)
+            Gdk.cairo_set_source_pixbuf(cr, self.picture, 0, 0)
+            cr.paint()
+        else:
+            radius = 13
+            for cx, cy, start in ((w-radius, radius, -math.pi/2),
+                                  (w-radius, h-radius, 0),
+                                  (radius, h-radius, math.pi/2),
+                                  (radius, radius, math.pi)):
+                cr.arc(cx, cy, radius, start, start + math.pi/2)
+            cr.close_path()
+            cr.clip()
+            # Cover without distortion. Right alignment keeps Wander and the
+            # glowing eyes visible when the user makes the window narrower.
+            scale = max(w / iw, h / ih)
+            cr.save()
+            cr.translate(w - iw * scale, (h - ih * scale) / 2)
+            cr.scale(scale, scale)
+            Gdk.cairo_set_source_pixbuf(cr, self.picture, 0, 0)
+            cr.paint()
+            cr.restore()
+            # Keep copy readable even when a narrow window crops away the
+            # quiet left half of the wide illustration.
+            shade = cairo.LinearGradient(0, 0, min(w, 460), 0)
+            for at, alpha in ((0, .75), (.70, .80), (1, 0)):
+                shade.add_color_stop_rgba(at, .07, .11, .09, alpha)
+            cr.set_source(shade)
+            cr.paint()
+        cr.restore()
         return False
 
 
@@ -103,6 +124,7 @@ class Launcher:
         self.library = Library(args.data_dir)
         self.graphics = Graphics(self.library)
         self.busy = False; self.process = None; self.closing = False; self.failed = False
+        self.controller_process = None
         provider = Gtk.CssProvider(); provider.load_from_path(str(assets_directory() / "style.css"))
         Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         settings = Gtk.Settings.get_default()
@@ -170,9 +192,13 @@ class Launcher:
 
     def home(self):
         page = box(spacing=22)
-        hero_outer = style(Gtk.Box(),"hero")
+        hero_outer = style(Gtk.Overlay(), "hero")
+        artwork = Artwork()
+        for edge in ("top", "bottom", "start", "end"):
+            getattr(artwork, "set_margin_" + edge)(1)
+        hero_outer.add(artwork)
         hero = box(Gtk.Orientation.HORIZONTAL, margin=24)
-        hero_outer.add(hero)
+        hero_outer.add_overlay(hero)
         copy = box(spacing=12)
         copy.pack_start(label("DAS TERRAS PROIBIDAS AO SEU PC", "eyebrow"),False,False,0)
         copy.pack_start(label("Shadow of the\nColossus", "hero-title",wrap=True),False,False,0)
@@ -181,7 +207,7 @@ class Launcher:
         for text in ("PORT NATIVO","JOGO ORIGINAL","OFFLINE"):
             pills.pack_start(label(text,"pill"),False,False,0)
         copy.pack_start(pills,False,False,4)
-        hero.pack_start(copy,True,True,0); hero.pack_end(Artwork(),False,False,0)
+        hero.pack_start(copy, True, True, 0)
         page.pack_start(hero_outer,False,False,0)
         panel_outer = style(Gtk.Box(orientation=Gtk.Orientation.VERTICAL),"panel")
         panel = box(spacing=17,margin=22); panel_outer.pack_start(panel,True,True,0)
@@ -224,6 +250,11 @@ class Launcher:
         page=box(spacing=24)
         page.pack_start(label("Pronto para jogar?", "section-title"),False,False,0)
         page.pack_start(label("Jogue com teclado ou controle USB/Bluetooth.\nH / J / Y / U são os botões ✕ / ○ / □ / △. F1 abre as configurações.\nOs controles originais do jogo estão disponíveis; use F1 para ajustar a imagem e o áudio.","muted",wrap=True),False,False,0)
+        self.controller_status = label("Perfis automáticos para controles Xbox, PlayStation e genéricos.\nSe os botões não responderem ou estiverem trocados, configure seu controle.", "muted", wrap=True)
+        page.pack_start(self.controller_status, False, False, 0)
+        self.controller_button = style(Gtk.Button(label="Configurar meu controle…"), "secondary")
+        self.controller_button.connect("clicked", self.configure_controller)
+        page.pack_start(self.controller_button, False, False, 0)
         grid=Gtk.Grid(column_spacing=28,row_spacing=15); style(grid,"panel")
         rows=[("W A S D","Mover · analógico esquerdo"),("↑ ↓ ← →","Direcional"),
               ("H / J / Y / U","✕ / ○ / □ / △"),("I / O","L1 / L2"),("K / L","R1 / R2"),
@@ -236,6 +267,37 @@ class Launcher:
             grid.attach(a,0,i,1,1); grid.attach(b,1,i,1,1)
         page.pack_start(grid,False,False,0); page.pack_start(Gtk.Box(),True,True,0)
         return page
+
+    def configure_controller(self, *_):
+        if self.busy or self.process or self.controller_process:
+            self.controller_status.set_text("Feche o jogo antes de configurar o controle.")
+            return
+        tool = self.library.program / "compiler/bin/sotc-input-tool"
+        if not tool.is_file():
+            self.error("Atualize o pacote", "A ferramenta de configuração não está neste pacote.")
+            return
+        profile = self.library.directory / "controllers/gamecontrollerdb.txt"
+        profile.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with (self.library.directory / "last-controller.log").open("w") as log:
+                self.controller_process = subprocess.Popen([str(tool), "--output", str(profile)],
+                    env=self.library.game_environment(), stdout=log, stderr=subprocess.STDOUT)
+        except OSError as exc:
+            self.error("Não foi possível configurar o controle", str(exc))
+            return
+        self.controller_button.set_sensitive(False)
+        self.controller_status.set_text("Siga as instruções na janela de configuração.")
+        GLib.timeout_add(250, self.watch_controller)
+
+    def watch_controller(self):
+        code = self.controller_process.poll()
+        if code is None:
+            return True
+        self.controller_process = None
+        self.controller_button.set_sensitive(True)
+        self.controller_status.set_text("Perfil salvo. Ele será usado na próxima abertura do jogo." if code == 0
+            else "Configuração não concluída. Os perfis anteriores foram preservados.")
+        return False
 
     def graphics_page(self):
         page = box(spacing=20)
@@ -339,7 +401,7 @@ class Launcher:
             import shutil
             path=self.library.directory/"shaders/modelo.frag"; path.parent.mkdir(parents=True,exist_ok=True)
             if not path.exists(): shutil.copy2(assets_directory()/"shaders/modelo.frag",path)
-            Gtk.show_uri_on_window(self.window,path.as_uri(),Gdk.CURRENT_TIME)
+            self.open_desktop_path(path)
         except (OSError,GLib.Error) as exc:
             self.error("Não foi possível abrir o modelo",str(exc))
 
@@ -440,7 +502,7 @@ class Launcher:
         return False
 
     def play(self,*_):
-        if self.busy or self.process: return False
+        if self.busy or self.process or self.controller_process: return False
         self.busy=True; self.play_button.set_sensitive(False); self.choose_button.set_sensitive(False)
         self.update_status("Abrindo sua próxima aventura…")
         self.progress.show(); GLib.timeout_add(80,self.pulse)
@@ -504,8 +566,76 @@ class Launcher:
         dialog.format_secondary_text(text); dialog.run(); dialog.destroy()
 
     def open_saves(self,*_):
-        path=self.library.player_directory / "memcards"; path.mkdir(parents=True,exist_ok=True)
-        Gtk.show_uri_on_window(self.window,path.as_uri(),Gdk.CURRENT_TIME)
+        from saves import SaveCards
+        cards = SaveCards(self.library)
+        dialog = Gtk.Dialog(title="Meus saves", transient_for=self.window, modal=True)
+        dialog.set_default_size(620, 260)
+        dialog.add_button("Fechar", Gtk.ResponseType.CLOSE)
+        panel = box(spacing=16, margin=24)
+        panel.pack_start(label("Leve sua aventura para outro PC", "section-title"), False, False, 0)
+        panel.pack_start(label("Importe seu cartão ou exporte uma cópia para usar em outro computador.\n"
+                               "Depois, escolha Carregar jogo no menu do próprio jogo.", "muted", wrap=True), False, False, 0)
+        location = label(str(cards.directory), "muted", wrap=True)
+        location.set_selectable(True)
+        panel.pack_start(location, False, False, 0)
+        status = label("Cartão 1 disponível." if cards.card.is_file() else "Nenhum cartão salvo neste computador.", wrap=True)
+        panel.pack_start(status, False, False, 0)
+        row = box(Gtk.Orientation.HORIZONTAL, spacing=12)
+        folder = Gtk.Button(label="Abrir pasta ↗")
+        def open_folder(*_):
+            try:
+                cards.directory.mkdir(parents=True, exist_ok=True)
+                self.open_desktop_path(cards.directory)
+            except OSError as exc:
+                self.error("Não foi possível abrir a pasta", str(exc))
+        folder.connect("clicked", open_folder)
+        row.pack_start(folder, False, False, 0)
+        for importing, caption in ((True, "Importar cartão…"), (False, "Exportar cartão…")):
+            button = Gtk.Button(label=caption)
+            button.set_sensitive(not self.busy and self.process is None)
+            def transfer(_, importing=importing):
+                if self.busy or self.process is not None:
+                    status.set_text("Feche o jogo antes de importar ou exportar o cartão.")
+                    return
+                chooser = Gtk.FileChooserDialog(title="Importar cartão PS2" if importing else "Exportar cartão PS2",
+                    transient_for=dialog, action=Gtk.FileChooserAction.OPEN if importing else Gtk.FileChooserAction.SAVE)
+                chooser.add_buttons("Cancelar", Gtk.ResponseType.CANCEL, "Importar" if importing else "Exportar", Gtk.ResponseType.OK)
+                if importing:
+                    pattern = Gtk.FileFilter(); pattern.set_name("Cartão PS2 (.ps2)")
+                    pattern.add_pattern("*.ps2"); pattern.add_pattern("*.PS2"); chooser.add_filter(pattern)
+                else:
+                    chooser.set_current_name("Mcd001.ps2"); chooser.set_do_overwrite_confirmation(True)
+                response = chooser.run(); selected = chooser.get_filename(); chooser.destroy()
+                if response != Gtk.ResponseType.OK or not selected:
+                    return
+                try:
+                    if importing:
+                        backup = cards.import_card(selected)
+                        status.set_text("Cartão importado. Abra o jogo e escolha Carregar jogo." +
+                                        (f"\nCartão anterior preservado em {backup}" if backup else ""))
+                    else:
+                        cards.export_card(selected)
+                        status.set_text("Cópia exportada. No outro PC, use Meus saves → Importar cartão.")
+                except (OSError, ValueError) as exc:
+                    self.error("Não foi possível transferir o cartão", str(exc))
+            button.connect("clicked", transfer)
+            row.pack_start(button, False, False, 0)
+        panel.pack_start(row, False, False, 0)
+        if self.busy or self.process is not None:
+            panel.pack_start(label("Feche o jogo para importar ou exportar com segurança.", "muted", wrap=True), False, False, 0)
+        dialog.get_content_area().pack_start(panel, True, True, 0)
+        dialog.show_all(); dialog.run(); dialog.destroy()
+
+    def open_desktop_path(self, path):
+        # Running xdg-open/GIO with the frozen GTK libraries can break host
+        # file managers on other distributions. Keep this off the GTK thread.
+        from desktop_services import open_path
+        def worker():
+            try:
+                open_path(path)
+            except OSError as exc:
+                GLib.idle_add(self.error, "Não foi possível abrir o aplicativo padrão", str(exc))
+        threading.Thread(target=worker, daemon=True).start()
 
     def install_menu(self,*_):
         try:

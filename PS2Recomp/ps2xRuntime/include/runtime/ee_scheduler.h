@@ -433,23 +433,9 @@ private:
     std::unordered_map<int, GuestThread> m_threads;
     int m_threadCacheId = -1;                // thread(): the last one found
     GuestThread *m_threadCache = nullptr;
-    // Shared VU0 register state (see EeScheduler::run()).
-    struct Vu0OwnerKey
-    {
-        int threadId = 0;
-        size_t depth = 0;
-        uint64_t sequence = 0;
-        bool operator==(const Vu0OwnerKey &o) const
-        {
-            return threadId == o.threadId && depth == o.depth && sequence == o.sequence;
-        }
-    };
-    std::vector<uint8_t> m_vu0Global;
-    Vu0OwnerKey m_vu0Owner{};
-    bool m_vu0OwnerValid = false;
-    void saveGlobalVu0(R5900Context &ctx);
-    void loadGlobalVu0(R5900Context &ctx);
-    void flushVu0Owner();
+    // Keep VF/VI/ACC/Q/flags in their suspended execution context. Only
+    // the random generator is shared across guest threads and callbacks.
+    __m128 m_sharedVu0Random{};
     std::unordered_map<int, EeSemaphore> m_semaphores;
     std::unordered_map<int, EeEventFlag> m_eventFlags;
     std::unordered_map<int, EeAlarm> m_alarms;

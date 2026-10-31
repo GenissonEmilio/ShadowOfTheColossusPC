@@ -1,5 +1,6 @@
 #include "runtime/host_menu.h"
 #include "runtime/native_tuning.h"
+#include "runtime/ps2_pad.h"
 
 #include "raylib.h"
 
@@ -330,19 +331,19 @@ namespace
     {
         std::memcpy(g_prev, g_down, sizeof(g_down));
         std::memset(g_down, 0, sizeof(g_down));
-        const int pad = 0;
-        if (IsGamepadAvailable(pad))
+        const auto pad = ps2pad::readGamepad();
+        if (pad.index >= 0)
         {
-            g_down[kUp] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_FACE_UP) || GetGamepadAxisMovement(pad, GAMEPAD_AXIS_LEFT_Y) < -0.6f;
-            g_down[kDown] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_FACE_DOWN) || GetGamepadAxisMovement(pad, GAMEPAD_AXIS_LEFT_Y) > 0.6f;
-            g_down[kLeft] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_FACE_LEFT) || GetGamepadAxisMovement(pad, GAMEPAD_AXIS_LEFT_X) < -0.6f;
-            g_down[kRight] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_FACE_RIGHT) || GetGamepadAxisMovement(pad, GAMEPAD_AXIS_LEFT_X) > 0.6f;
-            g_down[kCross] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_RIGHT_FACE_DOWN);
-            g_down[kCircle] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT);
-            g_down[kTriangle] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_RIGHT_FACE_UP);
-            g_down[kL1] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_TRIGGER_1);
-            g_down[kR1] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_RIGHT_TRIGGER_1);
-            g_down[kSelect] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_MIDDLE_LEFT);
+            g_down[kUp] = pad.buttons[GAMEPAD_BUTTON_LEFT_FACE_UP] || pad.axes[GAMEPAD_AXIS_LEFT_Y] < -0.6f;
+            g_down[kDown] = pad.buttons[GAMEPAD_BUTTON_LEFT_FACE_DOWN] || pad.axes[GAMEPAD_AXIS_LEFT_Y] > 0.6f;
+            g_down[kLeft] = pad.buttons[GAMEPAD_BUTTON_LEFT_FACE_LEFT] || pad.axes[GAMEPAD_AXIS_LEFT_X] < -0.6f;
+            g_down[kRight] = pad.buttons[GAMEPAD_BUTTON_LEFT_FACE_RIGHT] || pad.axes[GAMEPAD_AXIS_LEFT_X] > 0.6f;
+            g_down[kCross] = pad.buttons[GAMEPAD_BUTTON_RIGHT_FACE_DOWN];
+            g_down[kCircle] = pad.buttons[GAMEPAD_BUTTON_RIGHT_FACE_RIGHT];
+            g_down[kTriangle] = pad.buttons[GAMEPAD_BUTTON_RIGHT_FACE_UP];
+            g_down[kL1] = pad.buttons[GAMEPAD_BUTTON_LEFT_TRIGGER_1];
+            g_down[kR1] = pad.buttons[GAMEPAD_BUTTON_RIGHT_TRIGGER_1];
+            g_down[kSelect] = pad.buttons[GAMEPAD_BUTTON_MIDDLE_LEFT];
         }
         // Keyboard: arrows, Enter = Cross, Backspace = Circle, H = help, Q/E = tabs.
         g_down[kUp] |= IsKeyDown(KEY_UP);
@@ -451,6 +452,7 @@ bool inputBlocked() { return g_open || g_holdBlock; }
 
 void update()
 {
+    ps2pad::pollGamepads();
     readButtons();
     if (g_holdBlock && !anyDown())
         g_holdBlock = false;

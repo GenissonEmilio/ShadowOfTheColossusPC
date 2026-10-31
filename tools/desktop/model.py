@@ -11,7 +11,7 @@ import tempfile
 from import_disc import import_disc, EXPECTED
 from pipeline import Pipeline
 
-VERSION = "0.2.0"
+VERSION = "0.2.4"
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 APPLICATION_ID = "io.github.GenissonEmilio.ShadowOfTheColossusPC"
 
@@ -86,6 +86,9 @@ class Library:
         environment["LD_LIBRARY_PATH"] = str(self.program / "compiler/lib") + (
             os.pathsep + original_ld if original_ld else "")
         environment.setdefault("LP_NUM_THREADS", "2")
+        mapping = self.directory / "controllers/gamecontrollerdb.txt"
+        if mapping.is_file():
+            environment["PS2X_GAMEPAD_MAPPINGS"] = str(mapping)
         from graphics import Graphics
         selected = Graphics(self).selected()
         environment["SOTC_SHADER"] = str(selected) if selected else ""
