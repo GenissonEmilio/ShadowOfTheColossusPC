@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import struct
 import subprocess
+import sys
 
 p=argparse.ArgumentParser()
 p.add_argument('--kit',type=Path,default=Path('artifacts/compiler'))
@@ -32,7 +33,10 @@ config+='single_file_output = false\noutput_worker_threads = 2\npatch_syscalls =
 (out/'config.toml').write_text(config)
 env=dict(os.environ,LD_LIBRARY_PATH=str(kit/'lib'))
 with (out/'generate.log').open('w') as log:
-    subprocess.run([str(compiler),str(out/'config.toml')],env=env,cwd=out,stdout=log,stderr=subprocess.STDOUT,check=True,timeout=30)
+    try:
+        subprocess.run([str(compiler),str(out/'config.toml')],env=env,cwd=out,stdout=log,stderr=subprocess.STDOUT,check=True,timeout=30)
+    except subprocess.SubprocessError:
+        log.flush();sys.stderr.write((out/'generate.log').read_text());raise
 sources=sorted((out/'output').glob('*.cpp'));assert sources,'compiler emitted no sources'
 cmd=['g++','-std=c++20','-O1','-msse4.1','-fno-strict-aliasing','-ffunction-sections','-fdata-sections',
      '-DPS2_RUNTIME_LOGS=1','-DPS2X_ENABLE_IOP_RPC_TRACE=0',
@@ -43,7 +47,10 @@ cmd=['g++','-std=c++20','-O1','-msse4.1','-fno-strict-aliasing','-ffunction-sect
      '-L'+str(kit/'lib'),'-Wl,-rpath-link,'+str(kit/'lib'),'-lavcodec','-lavformat','-lavutil',
      '-lswresample','-lswscale','-lGL','-lX11','-pthread','-ldl','-lm','-o',str(out/'check')]
 with (out/'compile.log').open('w') as log:
-    subprocess.run(cmd,cwd=root,env=env,stdout=log,stderr=subprocess.STDOUT,check=True,timeout=60)
+    try:
+        subprocess.run(cmd,cwd=root,env=env,stdout=log,stderr=subprocess.STDOUT,check=True,timeout=60)
+    except subprocess.SubprocessError:
+        log.flush();sys.stderr.write((out/'compile.log').read_text());raise
 r=subprocess.run([str(out/'check')],env=env,text=True,capture_output=True,timeout=15)
 (out/'run.log').write_text(r.stdout+r.stderr)
 print(r.stdout+r.stderr,end='')
