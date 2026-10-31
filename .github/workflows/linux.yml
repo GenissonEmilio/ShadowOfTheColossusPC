@@ -26,6 +26,11 @@ jobs:
         run: |
           LD_LIBRARY_PATH="$PWD/artifacts/compiler/lib" artifacts/compiler/bin/ps2_recomp --help
           test -f artifacts/compiler/manifest.json
+      - name: GPU sampler transitions and dynamic palette uploads (no ROM)
+        run: |
+          docker run --rm --init --cpus=2 --memory=1000m --memory-swap=1000m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -e LP_NUM_THREADS=2 -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_texture_filters.sh
       - name: Native memory-card persistence (synthetic data)
         run: |
           docker run --rm --init --cpus=2 --network=none -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
