@@ -62,16 +62,29 @@ diretamente. Veja [o formato e exemplos](docs/SHADERS.md).
 
 ## Controles
 
-| Teclado | Controle PS2 |
-| --- | --- |
-| WASD | analógico esquerdo |
-| setas | direcional |
-| H / J / Y / U | ✕ / ○ / □ / △ |
-| I / O | L1 / L2 |
-| K / L | R1 / R2 |
-| Z / X | Start / Select |
-| F1 | configurações do port |
-| F11 | tela cheia |
+Teclado e mouse (clique na janela para capturar o mouse; **Esc** pausa e solta o mouse):
+
+| Teclado / mouse | Ação | Controle PS2 |
+| --- | --- | --- |
+| WASD | mover (segure **Alt esquerdo** para andar devagar) | analógico esquerdo |
+| mouse | câmera | analógico direito |
+| setas | direcional | direcional ← → ↑ ↓ |
+| Espaço | pular | △ |
+| botão esquerdo | usar a arma (espada / arco) | □ |
+| botão direito / F | agarrar (segure) | R1 |
+| E / Enter | chamar e acelerar o Agro, confirmar | ✕ |
+| Shift esquerdo | erguer a espada (procurar a luz do colosso) | ○ |
+| Tab / botão do meio | olhar para o colosso | L1 |
+| rodinha / 1 e 2 | trocar de arma | direcional ← → |
+| Z / X | L2 / R2 | L2 / R2 |
+| C / V | L3 / R3 | L3 / R3 |
+| Esc | pausa | Start |
+| Backspace | Select | Select |
+| F1 | configurações do port | — |
+| F11 | tela cheia | — |
+
+`PS2X_MOUSE_SENS` ajusta a sensibilidade do mouse (padrão 1) e
+`PS2X_MOUSE_INVERT_Y=1` inverte o eixo vertical da câmera.
 
 Controles USB/Bluetooth também são aceitos. O menu F1 ajusta vídeo, efeitos,
 som e idioma da interface do port. Os textos originais do disco são preservados.
