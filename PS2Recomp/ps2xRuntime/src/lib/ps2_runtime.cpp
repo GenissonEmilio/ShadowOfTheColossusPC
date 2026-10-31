@@ -978,6 +978,12 @@ bool PS2Runtime::initialize(const char *title)
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
 #else
         SetConfigFlags(FLAG_WINDOW_RESIZABLE | (std::getenv("PS2X_HIDDEN_WINDOW") ? FLAG_WINDOW_HIDDEN : 0));
+#if defined(__linux__) && !defined(__ANDROID__)
+        // Shown at the screen's refresh (no tearing, no frame shown twice by a
+        // sleep that drifts against the display); PS2X_NO_VSYNC=1 turns it off.
+        if (!std::getenv("PS2X_NO_VSYNC"))
+            SetConfigFlags(FLAG_VSYNC_HINT);
+#endif
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
 #if defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__))
         if (std::getenv("PS2X_GS_HW"))
@@ -1020,9 +1026,14 @@ bool PS2Runtime::initialize(const char *title)
             glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
             glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
             GLFWwindow *mainWindow = glfwGetCurrentContext();
-            GLFWwindow *nativeContext = glfwCreateWindow(16, 16, "native", nullptr, nullptr);
+            // Sharing objects with the window's context: frames go on screen
+            // as textures. PS2X_NATIVE_READBACK=1 (and the screenshot tools)
+            // keep the read back to memory.
+            const bool shared = !std::getenv("PS2X_NATIVE_READBACK") && !std::getenv("PS2X_SNAPSHOT_DIR");
+            GLFWwindow *nativeContext = glfwCreateWindow(16, 16, "native", nullptr, shared ? mainWindow : nullptr);
             glfwWindowHint(GLFW_VISIBLE, GLFW_TRUE);
             glfwMakeContextCurrent(mainWindow);
+            native_renderer::setSharedPresent(shared && nativeContext);
             if (nativeContext)
                 native_renderer::setGlContext([nativeContext]
                                               { glfwMakeContextCurrent(nativeContext); });
@@ -2994,7 +3005,14 @@ void PS2Runtime::run()
             // vblank at most (the Vita: vsync interval 2), so a game frame
             // that takes a little over 33 ms does not alternate 60/30 shows.
             static int presentedFps = 60;
-            const int wantFps = native_renderer::tuning().frameCap30 ? 30 : 60;
+#if defined(__linux__) && !defined(__ANDROID__)
+            // With vsync the swap paces the loop: a 60 fps sleep on top of it
+            // drifts against the display and shows frames twice.
+            static const int fullRate = std::getenv("PS2X_NO_VSYNC") ? 60 : 0;
+#else
+            constexpr int fullRate = 60;
+#endif
+            const int wantFps = native_renderer::tuning().frameCap30 ? 30 : fullRate;
             if (wantFps != presentedFps)
             {
                 presentedFps = wantFps;
@@ -3072,10 +3090,23 @@ void PS2Runtime::run()
         static Texture2D nativeTex{};
         static std::vector<uint8_t> nativePixels;
         bool nativeOnScreen = false;
+        static Texture2D sharedTex{};
+        bool sharedOnScreen = false;
+        hostFrameFlipY = false;
         if (native_renderer::shown())
         {
-            uint32_t nw = 0, nh = 0;
-            if (native_renderer::latestFrame(nativePixels, nw, nh) && nw && nh && nativePixels.size() >= static_cast<size_t>(nw) * nh * 4u)
+            // The next game frame, when it is a moment away: each one shown once.
+            native_renderer::waitNewFrame(12);
+            uint32_t nw = 0, nh = 0, texture = 0;
+            if (native_renderer::sharedFrame(texture, nw, nh) && nw && nh)
+            {
+                sharedTex = Texture2D{texture, static_cast<int>(nw), static_cast<int>(nh), 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+                presentWidth = nw;
+                presentHeight = nh;
+                sharedOnScreen = true;
+                hostFrameFlipY = true; // a GL render target: y-up
+            }
+            else if (native_renderer::latestFrame(nativePixels, nw, nh) && nw && nh && nativePixels.size() >= static_cast<size_t>(nw) * nh * 4u)
             {
                 // The display shows colour only (the PS2's CRTC ignores alpha):
                 // drawn blended over black, the picture's alpha darkened it.
@@ -3096,7 +3127,7 @@ void PS2Runtime::run()
                 nativeOnScreen = true;
             }
         }
-        const Texture2D &shownTex = nativeOnScreen ? nativeTex : (g_directFrame.id ? g_directFrame : frameTex);
+        const Texture2D &shownTex = sharedOnScreen ? sharedTex : nativeOnScreen ? nativeTex : (g_directFrame.id ? g_directFrame : frameTex);
         // F8: the same moment twice, for comparing: the emulated picture (the
         // native one hidden for a few frames so the GS draws), the native one,
         // and the list of the native draws of that frame, in shots/f8_<n>_*.
