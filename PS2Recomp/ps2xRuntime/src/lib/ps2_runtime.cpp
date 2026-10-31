@@ -3452,8 +3452,8 @@ void PS2Runtime::run()
 #if defined(__linux__) && !defined(__ANDROID__)
         if (IsKeyPressed(KEY_F11))
         {
-            desktop_video::setFullscreen(!IsWindowFullscreen());
-            hostmenu::settings().fullscreen = IsWindowFullscreen();
+            desktop_video::setFullscreen(!desktop_video::isFullscreen());
+            hostmenu::settings().fullscreen = desktop_video::isFullscreen();
             hostmenu::saveSettings();
         }
 #endif
