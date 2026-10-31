@@ -19,7 +19,7 @@ As rotinas de colisão originais permanecem selecionadas: `SOTC_NATIVE_COLLISION
 
 | # | Colosso | Situação | Release |
 | --- | --- | --- | --- |
-| 1 | Valus | Pendente; abertura iniciada em novo jogo | — |
+| 1 | Valus | Em andamento; checkpoint próprio salvo no Templo, 0 derrotados | — |
 | 2 | Quadratus | Pendente | — |
 | 3 | Gaius | Pendente, incluindo rampa de acesso | — |
 | 4 | Phaedra | Pendente | — |
@@ -35,5 +35,11 @@ As rotinas de colisão originais permanecem selecionadas: `SOTC_NATIVE_COLLISION
 | 14 | Cenobia | Pendente | — |
 | 15 | Argus | Pendente | — |
 | 16 | Malus e encerramento | Pendente | — |
+
+## Checkpoint inicial e candidato
+
+O jogo foi iniciado por New Game. O cartão novo foi formatado pela interface e salvo no slot 1; a tela confirmou `Shrine of Worship — 0 Defeated` e `Save complete`. Uma cópia desse cartão foi preservada como checkpoint privado. Ainda falta verificar a luta e a derrota de Valus; o salvamento inicial não é uma validação de colosso.
+
+O candidato contém as correções descritas em [gráficos](FIDELITY-2026-10-31-GRAPHICS.md) e [estado do personagem](FIDELITY-2026-10-31-CHARA.md). A [execução completa do CI](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/actions/runs/41245595672) passou para `83d8eff`. A release principal permanece em v0.2.6 enquanto a primeira luta é validada. A investigação de tail jumps está em branch separada e ainda não integra o executável da campanha.
 
 Evidências privadas e comandos da sessão: `artifacts/campaign-2026-10-31/`. ROM, cartões, RAM e código derivado do jogo não são publicados no GitHub.
