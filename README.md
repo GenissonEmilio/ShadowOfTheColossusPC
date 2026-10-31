@@ -13,7 +13,8 @@ continua em andamento na base Celosia.
 
 **Nenhuma ROM, BIOS ou código gerado do jogo é distribuído.**
 
-![Launcher Linux](docs/launcher-linux.png)
+<img width="1109" height="751" alt="image" src="https://github.com/user-attachments/assets/856dbfab-25f1-40a2-95b1-1b8060d062c9" />
+
 
 ## Jogar
 
@@ -38,7 +39,8 @@ de memory card em `player/memcards`. A ROM original permanece intacta.
 
 ## Tela cheia e shaders
 
-![Gráficos e shaders](docs/graphics-linux.png)
+<img width="1109" height="751" alt="image" src="https://github.com/user-attachments/assets/f4dfb9da-b702-46d1-b79a-d151fa18b36a" />
+
 
 Na aba **Gráficos**, escolha **Tela cheia · resolução do monitor** para usar o
 monitor atual por inteiro. **Original 4:3** preserva a proporção e deixa faixas
