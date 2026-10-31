@@ -1532,7 +1532,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
         t.clamp = 0;
-        t.filter = 2;
+        // A reused GL texture keeps its anisotropy across glTexImage2D.
+        // Invalidate an anisotropic sampler so a change back to trilinear
+        // is applied even when the image was just uploaded again.
+        t.filter = t.filter >= 3u ? ~0u : 2u;
         t.mipped = levels > 1u;
         cache.texture = ~0u;
     }
@@ -1898,8 +1901,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, (d.state.clamp & 1u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
                         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, (d.state.clamp & 2u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
                     }
-                    // Quality "Texture filtering": nearest, bilinear, trilinear (anisotropic: Metal only, trilinear here).
-                    const uint32_t filter = d.state.screen ? 2u : static_cast<uint32_t>(std::clamp(native_renderer::tuning().textureFilter + 0.5f, 0.0f, 2.0f)); // 2D keeps the default
+                    // Quality "Texture filtering": nearest, bilinear, trilinear, anisotropic 2x-16x (EXT_texture_filter_anisotropic; Vita: trilinear).
+#if defined(PS2X_NATIVE_VITA)
+                    constexpr float kMaxFilter = 2.0f;
+#else
+                    constexpr float kMaxFilter = 6.0f;
+#endif
+                    const uint32_t filter = d.state.screen ? 2u : static_cast<uint32_t>(std::clamp(native_renderer::tuning().textureFilter + 0.5f, 0.0f, kMaxFilter)); // 2D keeps the default
                     if (tex->second.filter != filter)
                     {
                         tex->second.filter = filter;
@@ -1909,6 +1917,18 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                                         filter == 0 ? (mipped ? GL_NEAREST_MIPMAP_NEAREST : GL_NEAREST)
                                                     : (filter == 1 ? (mipped ? GL_LINEAR_MIPMAP_NEAREST : GL_LINEAR) : (mipped ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR)));
                         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter == 0 ? GL_NEAREST : GL_LINEAR);
+#if !defined(PS2X_NATIVE_VITA)
+                        // Anisotropic levels 3..6 = 2x..16x, up to what the GPU has (0 when it lacks the extension).
+                        static const float maxAniso = []
+                        {
+                            GLfloat v = 0.0f;
+                            glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &v);
+                            return glGetError() == GL_NO_ERROR ? v : 0.0f;
+                        }();
+                        if (maxAniso >= 1.0f)
+                            glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT,
+                                            filter >= 3u && mipped ? std::min(maxAniso, static_cast<float>(1u << (filter - 2u))) : 1.0f);
+#endif
                     }
                 }
                 const float misc[4] = {d.state.fresnel ? -1.0f : (d.state.lit ? 1.0f : 0.0f), d.state.opacity, d.state.uvOffset[0], d.state.uvOffset[1]};
