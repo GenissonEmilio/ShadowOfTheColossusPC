@@ -19,7 +19,7 @@ As rotinas de colisão originais permanecem selecionadas: `SOTC_NATIVE_COLLISION
 
 | # | Colosso | Situação | Release |
 | --- | --- | --- | --- |
-| 1 | Valus | Em combate; estocada e reação de ajoelhar observadas, 0 derrotados | — |
+| 1 | Valus | Derrotado e salvo no cartão de QA; efeitos, recarga e repetição no pacote final em validação | — |
 | 2 | Quadratus | Pendente | — |
 | 3 | Gaius | Pendente, incluindo rampa de acesso | — |
 | 4 | Phaedra | Pendente | — |
@@ -38,11 +38,15 @@ As rotinas de colisão originais permanecem selecionadas: `SOTC_NATIVE_COLLISION
 
 ## Checkpoint inicial e candidato
 
-O jogo foi iniciado por New Game. O cartão novo foi formatado pela interface e salvo no slot 1; a tela confirmou `Shrine of Worship — 0 Defeated` e `Save complete`. Uma cópia desse cartão foi preservada como checkpoint privado. Ainda falta verificar a luta e a derrota de Valus; o salvamento inicial não é uma validação de colosso.
+O jogo foi iniciado por New Game. O cartão novo foi formatado pela interface e salvo no slot 1; a tela confirmou `Shrine of Worship — 0 Defeated` e `Save complete`. Uma cópia desse cartão foi preservada como checkpoint privado. Esse salvamento inicial, isoladamente, não representa uma validação de colosso; a derrota posterior é descrita abaixo.
 
-O percurso até Valus foi feito com entradas normais: trepadeiras, duas lacunas, rolagem sob o pilar, paredes, contorno do pilar final e salto para a cornija. As tentativas anteriores incluíram esgotamento de stamina, alvo de salto inadequado e hoist incompleto; elas não foram classificadas como reprodução inequívoca de atravessamento de chão. A captura privada `g462` confirma Valus visível, barra de vida e dano recebido pelo jogador. A luta ainda não terminou. O altar externo e a rampa de Gaius continuam pendentes.
+O percurso até Valus foi feito com entradas normais: trepadeiras, duas lacunas, rolagem sob o pilar, paredes, contorno do pilar final e salto para a cornija. As tentativas anteriores incluíram esgotamento de stamina, alvo de salto inadequado e hoist incompleto; elas não foram classificadas como reprodução inequívoca de atravessamento de chão. A captura privada `g462` documenta o começo da investigação da luta. O altar externo e a rampa de Gaius continuam pendentes.
 
-No candidato com paleta ativa, uma estocada carregada normal foi aceita na panturrilha: o HP de Valus passou de `200` para `186,928`, e o estado original entrou na reação de ajoelhar à esquerda. O círculo de carga cheio foi observado no HUD. Wander permaneceu agarrado e alcançou bordas da armadura da perna; a subida à cabeça, a derrota, os efeitos finais e o save posterior continuam pendentes. **O progresso validado da campanha permanece em 0/16.**
+No candidato com paleta ativa (`6191f4f`, kit `cb15`), Valus foi derrotado com comandos normais. Foram percorridos a panturrilha, as cornijas, as plataformas das costas e a cabeça. O círculo de carga cheio e o glifo brilhando na cabeça foram observados; as estocadas aceitaram dano na parte correta até sua capacidade de `200`. Um golpe na região adjacente de capacidade `0,130719` foi distinguido dos golpes na marca principal, sem ser classificado como defeito de dano.
+
+O jogo confirmou `Save complete` no cartão próprio de QA: segundo registro, `Shrine of Worship — 1 Defeated / 1:04:39`. O primeiro registro de zero derrotados foi preservado para repetição. As flags originais passaram para um derrotado e próximo colosso, e o cartão pessoal conservou seu hash e data de modificação. A gravação foi finalizada e o jogo saiu normalmente pelo menu, com código zero.
+
+A revisão do trecho de morte, a recarga desse save e a repetição no pacote final com a nova correção de partículas ainda estão pendentes. **O progresso integralmente validado da campanha permanece em 0/16; uma derrota já foi jogada e salva.**
 
 O controle automatizado de QA passou a observar a base original dos controles e a posição do pé durante a aproximação. Isso corrige a orientação dos comandos de teste; não altera os controles nem a física do produto.
 
@@ -54,4 +58,6 @@ O candidato contém as correções descritas em [gráficos](FIDELITY-2026-10-31-
 
 Evidências privadas e comandos da sessão: `artifacts/campaign-2026-10-31/`. ROM, cartões, RAM e código derivado do jogo não são publicados no GitHub.
 
-O candidato do launcher também corrige atalhos recriados que ficavam presos ao diretório de uma versão antiga. Os sete casos do atalho e os demais testes passaram no [CI de `5c84a62`](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/actions/runs/41262842772). O pacote está reservado para a entrega após a primeira luta; a instalação principal continua em v0.2.6.
+O candidato do launcher também corrige atalhos recriados que ficavam presos ao diretório de uma versão antiga. Os sete casos do atalho e os demais testes passaram no [CI de `5c84a62`](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/actions/runs/41262842772). O mesmo binário do launcher integra o pacote de partículas descrito abaixo; a instalação principal continua em v0.2.6.
+
+O [material das partículas](PARTICLE-MATERIAL-FIDELITY.md) foi corrigido em `5ec48fe`: CLAMP por eixo e teste de profundidade sem escrita de Z, conforme o pacote original. O [CI completo](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/actions/runs/41272468970) passou. O pacote exato desse CI foi auditado e instalado como candidato, com kit `d357e14c82a02adeeca1aae3`; apenas o objeto nativo correspondente mudou na biblioteca base. Gerador, configuração, headers, toolchain e demais entradas de ligação permaneceram idênticos, permitindo religar os 284 objetos guest existentes sem recompilação completa. Esse candidato ainda precisa da repetição jogada de Valus antes da publicação. O atalho principal continua apontando para v0.2.6.

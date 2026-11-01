@@ -59,6 +59,16 @@ baseline to compile successfully, fail the depth/wrap assertions semantically,
 and pass the input/blend controls. A compiler or setup failure does not count
 as evidence of the original defect. The candidate must pass every check.
 
-At preparation time no local build or campaign validation was performed for
-this isolated patch while the protected gameplay session was active. CI and
-in-game validation results must be recorded separately before release.
+The [full CI run for `5ec48fe`](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/actions/runs/41272468970)
+passed. The same fixture compiled in both versions: the baseline produced nine
+semantic failures and passed six controls; the candidate passed all 15 checks.
+The remaining CI checks, including fullscreen, GPU, input and card persistence,
+also passed.
+
+After the preceding QA gameplay session exited normally, the exact CI package
+was installed as a separate candidate. A bounded local link reused 284 unchanged
+guest objects after checking identical generator/configuration, headers,
+toolchain, flags and other link inputs. Only the native particle translation
+unit changed inside the base archive. The candidate kit is
+`d357e14c82a02adeeca1aae3`; its campaign replay and scene-specific visual checks
+remain pending before release. The principal installation remains v0.2.6.
