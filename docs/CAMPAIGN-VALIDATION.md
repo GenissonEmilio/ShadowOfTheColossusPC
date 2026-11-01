@@ -19,7 +19,7 @@ As rotinas de colisão originais permanecem selecionadas: `SOTC_NATIVE_COLLISION
 
 | # | Colosso | Situação | Release |
 | --- | --- | --- | --- |
-| 1 | Valus | Em combate; tutorial percorrido normalmente, 0 derrotados | — |
+| 1 | Valus | Em combate; estocada e reação de ajoelhar observadas, 0 derrotados | — |
 | 2 | Quadratus | Pendente | — |
 | 3 | Gaius | Pendente, incluindo rampa de acesso | — |
 | 4 | Phaedra | Pendente | — |
@@ -42,6 +42,10 @@ O jogo foi iniciado por New Game. O cartão novo foi formatado pela interface e 
 
 O percurso até Valus foi feito com entradas normais: trepadeiras, duas lacunas, rolagem sob o pilar, paredes, contorno do pilar final e salto para a cornija. As tentativas anteriores incluíram esgotamento de stamina, alvo de salto inadequado e hoist incompleto; elas não foram classificadas como reprodução inequívoca de atravessamento de chão. A captura privada `g462` confirma Valus visível, barra de vida e dano recebido pelo jogador. A luta ainda não terminou. O altar externo e a rampa de Gaius continuam pendentes.
 
+No candidato com paleta ativa, uma estocada carregada normal foi aceita na panturrilha: o HP de Valus passou de `200` para `186,928`, e o estado original entrou na reação de ajoelhar à esquerda. O círculo de carga cheio foi observado no HUD. Wander permaneceu agarrado e alcançou bordas da armadura da perna; a subida à cabeça, a derrota, os efeitos finais e o save posterior continuam pendentes. **O progresso validado da campanha permanece em 0/16.**
+
+O controle automatizado de QA passou a observar a base original dos controles e a posição do pé durante a aproximação. Isso corrige a orientação dos comandos de teste; não altera os controles nem a física do produto.
+
 Uma auditoria de leitura confirmou 19 rotinas de colisão originais e 31 substituições nativas ativas. As nativas de matemática, matrizes e personagem ainda podem influenciar a física; conservar as rotinas de colisão não prova fidelidade completa. Não houve evidência que justificasse alterar o limite de quadros ou o timestep nesta etapa.
 
 O checkpoint inicial foi recarregado normalmente no candidato `6191f4f`, com `0 Defeated` e a posição do altar preservados. A tentativa de combate anterior causou dano real à perna de Valus, mas foi encerrada sem derrota antes da integração da paleta; nenhum progresso de colosso foi contabilizado. O HUD de carga foi observado aumentando durante a preparação de uma estocada.
@@ -49,3 +53,5 @@ O checkpoint inicial foi recarregado normalmente no candidato `6191f4f`, com `0 
 O candidato contém as correções descritas em [gráficos](FIDELITY-2026-10-31-GRAPHICS.md) e [estado do personagem](FIDELITY-2026-10-31-CHARA.md). A [execução completa do CI](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/actions/runs/41245595672) passou para `83d8eff`. A correção da [paleta de transferência](TRANSFER-PALETTE-FIDELITY.md) também foi integrada; o [CI de `6191f4f`](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/actions/runs/41259725998) passou, incluindo os 22 casos da paleta. O executável local de QA foi ligado às bibliotecas desse pacote exato; a validação visual em combate ainda está em andamento. A release principal permanece em v0.2.6 enquanto a primeira luta é validada. A investigação de tail jumps está em branch separada e ainda não integra o executável da campanha.
 
 Evidências privadas e comandos da sessão: `artifacts/campaign-2026-10-31/`. ROM, cartões, RAM e código derivado do jogo não são publicados no GitHub.
+
+O candidato do launcher também corrige atalhos recriados que ficavam presos ao diretório de uma versão antiga. Os sete casos do atalho e os demais testes passaram no [CI de `5c84a62`](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/actions/runs/41262842772). O pacote está reservado para a entrega após a primeira luta; a instalação principal continua em v0.2.6.
