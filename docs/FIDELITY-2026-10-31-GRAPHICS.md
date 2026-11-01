@@ -85,8 +85,11 @@ Essa observação cobre a primeira derrota no candidato indicado. O registro
 também foi recarregado no candidato de partículas `d357`, mas sua repetição
 da luta ficou incompleta e não demonstrou um novo defeito do produto.
 A alteração de partículas está reservada à candidata v0.2.8, fora do pacote
-publicado na v0.2.7. O CI da v0.2.8 gerou um pacote aprovado, com auditoria e
-validação de gameplay da próxima etapa pendentes.
+publicado na v0.2.7. O CI da v0.2.8 gerou um pacote aprovado, já auditado e
+instalado separadamente. O cache nativo `d357` foi reutilizado após conferir
+as entradas de ligação, headers, toolchain e gerador/configuração. O registro
+de um derrotado carregou normalmente nessa instalação; o percurso até
+Quadratus está em andamento. A validação da segunda etapa permanece pendente.
 Valus conta como a primeira das 16 etapas validadas no nativo `cb15`, incluindo
 salvamento e recarga. Os outros quinze colossos continuam pendentes.
 Os fixtures e a primeira luta no nativo `cb15`

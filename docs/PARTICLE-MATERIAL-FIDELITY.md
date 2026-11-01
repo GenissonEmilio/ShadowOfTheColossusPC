@@ -1,8 +1,8 @@
 # Particle material fidelity
 
 This change is reserved for the **v0.2.8 candidate**. It is excluded from the
-`5c84a62/cb15` package published as v0.2.7. The v0.2.8 CI package is available
-for audit and scene testing; v0.2.8 has not been released.
+`5c84a62/cb15` package published as v0.2.7. The v0.2.8 CI package was audited
+and installed separately for scene testing; v0.2.8 has not been released.
 
 The native particle hook now preserves two material properties written by
 `ptclmanBuildMatPacket` (`0x01099e00`): texture wrapping and depth writes.
@@ -77,8 +77,15 @@ unit changed inside the base archive. The candidate kit is
 `d357e14c82a02adeeca1aae3`. Its replay of Valus remained incomplete; those
 attempts did not demonstrate a new product defect. Scene-specific particle
 validation remains pending. The [v0.2.8 candidate CI](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/actions/runs/41284313971)
-passed and generated a package, whose audit and use in the next campaign stage
-remain pending.
+passed and generated a package. Its SHA-256 is
+`d90aad282cdb8befa9ca5d867d8810af25d81e70071d3d80bdd3a26f09242a08`.
+The audited archive has no unsafe paths or game payloads. Its eleven native
+link inputs, headers, toolchain and generator/configuration files match the
+preceding particle candidate; only documentation and launcher version labels
+differ. The existing `d357` native cache was therefore reused without another
+guest compilation or native link. The separate installation loaded the QA
+record with one colossus defeated through the normal menu. The route to
+Quadratus remains in progress; this is not a completed second-stage validation.
 
 The preceding `cb15` native defeated Valus, showed the darkened corpse and
 post-death tendrils, and saved through the normal game interface. The package
