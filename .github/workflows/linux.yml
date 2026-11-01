@@ -60,6 +60,33 @@ jobs:
           docker run --rm --init --cpus=2 --memory=1000m --memory-swap=1000m --network=none \
             -u "$(id -u):$(id -g)" -e HOME=/tmp -e LP_NUM_THREADS=2 -v "$PWD:/src:z" \
             sotc-linux-builder bash tools/linux/test_renderer_colours.sh
+      - name: Transfer palette selection before and after (no ROM)
+        run: |
+          baseline=83d8eff3c72902822c673dd60709e601777459bd
+          git fetch --no-tags --depth=1 origin "$baseline"
+          git show "$baseline:game/overrides/sotc_native.cpp" > artifacts/transfer-palette-baseline.cpp
+          set +e
+          docker run --rm --init --cpus=2 --memory=1000m --memory-swap=1000m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            -e SOTC_NATIVE_TEST_SOURCE=/src/artifacts/transfer-palette-baseline.cpp \
+            -e SOTC_PALETTE_TEST_OUT=artifacts/transfer-palette-before \
+            sotc-linux-builder bash tools/linux/test_transfer_palette.sh \
+            > artifacts/transfer-palette-before.log 2>&1
+          before_status=$?
+          set -e
+          cat artifacts/transfer-palette-before.log
+          test "$before_status" -eq 1
+          test -x artifacts/transfer-palette-before/check
+          grep -Fx 'Compiled transfer-palette fixture' artifacts/transfer-palette-before.log
+          grep -Fx 'FAIL: 4-bit fast/reference decoders use active transfer colours and zero alpha' artifacts/transfer-palette-before.log
+          grep -Fx 'FAIL: in-place alpha fade changes the key and upload while file CLUT stays fixed' artifacts/transfer-palette-before.log
+          grep -Fx 'PASS: uninitialized work falls back to the file palette' artifacts/transfer-palette-before.log
+          grep -Fx 'PASS: direct RGBA textures do not require any CLUT work' artifacts/transfer-palette-before.log
+          grep -E '^FAIL: [0-9]+ transfer-palette checks, [1-9][0-9]* failures$' artifacts/transfer-palette-before.log
+          docker run --rm --init --cpus=2 --memory=1000m --memory-swap=1000m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_transfer_palette.sh \
+            | tee artifacts/transfer-palette-after.log
       - name: Native memory-card persistence (synthetic data)
         run: |
           docker run --rm --init --cpus=2 --network=none -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \

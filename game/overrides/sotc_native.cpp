@@ -401,6 +401,40 @@ namespace sotc_native
         return key;
     }
 
+    // texTransResolve (0x10a7fe8..0x10a7ff8) uploads the active CLUT at
+    // *(NTO2 + 0xc) + 0xc, not the immutable palette at NTO2 + *(+0x18).
+    // texScaleClutAlpha writes a base copy at work+0x40; texClutScrollOne
+    // can select another copy at work+0x44/+0x48. Use the same selector
+    // for decoding and cache keys, with the file palette as the
+    // fallback before the texture work has been initialized.
+    uint32_t textureClut(uint32_t header, uint32_t bytes)
+    {
+        const auto ramSpan = [](uint32_t address, uint32_t size) -> uint32_t
+        {
+            // Accept only main RAM and its EE direct/uncached aliases. The
+            // normal word() mask alone would turn corrupt/IO pointers into
+            // unrelated RAM, and a CLUT must fit without crossing RAM's end.
+            if (address >= 0x20000000u && address < 0x40000000u)
+                address &= 0x1FFFFFFu;
+            else if (address >= 0x80000000u && address < 0xC0000000u)
+                address &= 0x1FFFFFFFu;
+            if (!address || (address & 3u) || size > 0x2000000u || address > 0x2000000u - size)
+                return 0;
+            return address;
+        };
+        header = ramSpan(header, 0x20u);
+        if (!header)
+            return 0;
+        const uint32_t work = ramSpan(word(header + 0xCu), 0x10u);
+        if (work)
+            if (const uint32_t active = ramSpan(word(work + 0xCu), bytes))
+                return active;
+        const uint32_t offset = word(header + 0x18u);
+        if (offset > 0x2000000u - header)
+            return 0;
+        return ramSpan(header + offset, bytes);
+    }
+
     // A texture as it is in guest memory, copied out (decodable on another
     // thread): its format, the palette (CSM1 order undone), and the bytes of
     // every level from the pixels' address on (and what a level's swizzled
@@ -464,8 +498,10 @@ namespace sotc_native
         src.swizzleBits = g_ram[(header + 0x1Fu) & 0x1FFFFFFu];
         if (src.psm != 0x00u)
         {
-            const uint32_t clut = header + word(header + 0x18u);
             const uint32_t entries = src.psm == 0x14u ? 16u : 256u;
+            const uint32_t clut = textureClut(header, entries * 4u);
+            if (!clut)
+                return false;
             for (uint32_t i = 0; i < entries; ++i)
             {
                 // CSM1: of every 32 entries, 8-15 and 16-23 are swapped.
@@ -605,12 +641,14 @@ namespace sotc_native
         const uint32_t width = 1u << ((format >> 16) & 0xFu), height = 1u << ((format >> 20) & 0xFu);
         const uint32_t pixelBytes = psm == 0x00u ? width * height * 4u :
                                     (psm == 0x14u ? width * height / 2u : width * height);
-        // Palettes are small and animated in place (weak-point fades, death
-        // effects). Sampling 16 words of a 256-colour CLUT missed changes to
-        // the other entries and kept old GPU colours/alpha indefinitely.
-        const uint64_t paletteKey = contentHash(header + word(header + 0x18u),
-                                                psm == 0x00u ? 0u : (psm == 0x14u ? 64u : 1024u),
-                                                0xcbf29ce484222325ull);
+        // Hash every entry of the palette selected for upload. The original
+        // NTO2 palette stays unchanged while weak-point fades/scrolling write
+        // its runtime copies; hashing the original loses those animations.
+        const uint32_t paletteBytes = psm == 0x00u ? 0u : (psm == 0x14u ? 64u : 1024u);
+        const uint32_t clut = paletteBytes ? textureClut(header, paletteBytes) : 0u;
+        if (paletteBytes && !clut)
+            return 0;
+        const uint64_t paletteKey = contentHash(clut, paletteBytes, 0xcbf29ce484222325ull);
         const uint64_t sampled = sample(header + word(header + 0x14u), pixelBytes, 64u) ^
                                  paletteKey * 31u ^ format ^ g_ram[(header + 0x1Fu) & 0x1FFFFFFu];
         uint64_t key = sampled;
@@ -621,7 +659,7 @@ namespace sotc_native
                  ++level, w /= 2u, h /= 2u)
                 bytes += psm == 0x00u ? w * h * 4u : (psm == 0x13u ? w * h : w * h / 2u);
             uint64_t h = contentHash(header + word(header + 0x14u), bytes, 0x84222325cbf29ce4ull ^ format);
-            h = contentHash(header + word(header + 0x18u), psm == 0x00u ? 0u : (psm == 0x14u ? 64u : 1024u), h ^ g_ram[(header + 0x1Fu) & 0x1FFFFFFu]);
+            h = contentHash(clut, paletteBytes, h ^ g_ram[(header + 0x1Fu) & 0x1FFFFFFu]);
             return (h & 0x03FFFFFFFFFFFFFFull) | (1ull << 58);
         };
         bool changedInPlace = false;
@@ -740,8 +778,10 @@ namespace sotc_native
     {
         const uint32_t format = word(header + 0x1Cu), psm = format & 0x3Fu;
         const uint32_t width = 1u << ((format >> 16) & 0xFu), height = 1u << ((format >> 20) & 0xFu);
-        const uint32_t clut = header + word(header + 0x18u);
         const uint32_t entries = psm == 0x14u ? 16u : 256u;
+        const uint32_t clut = psm == 0x00u ? 0u : textureClut(header, entries * 4u);
+        if (psm != 0x00u && !clut)
+            return false;
         uint32_t palette[256];
         if (psm != 0x00u)
             for (uint32_t i = 0; i < entries; ++i)
