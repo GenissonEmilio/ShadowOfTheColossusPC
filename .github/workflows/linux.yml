@@ -16,8 +16,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - name: Import and cache checks (synthetic data only)
+      - name: Import, cache and desktop shortcut checks (synthetic data only)
         run: |
+          # Discovery includes test_shortcut.py (canonical updates and portable fallback).
           python3 -m unittest discover -s tests/linux -v
           python3 -m compileall -q tools/desktop tools/linux
       - name: Build ROM-free compiler and desktop package

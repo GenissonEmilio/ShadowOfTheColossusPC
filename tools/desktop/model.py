@@ -160,14 +160,33 @@ class Library:
         destination = Path(applications) if applications else Path(
             os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))) / "applications"
         destination.mkdir(parents=True, exist_ok=True)
-        command = [str(Path(sys.executable).resolve())] if getattr(sys, "frozen", False) else [
-            sys.executable, str(SOURCE_ROOT / "tools/desktop/main.py")]
+        icon = assets_directory() / "icon.png"
+        if getattr(sys, "frozen", False):
+            executable = Path(sys.executable).resolve()
+            command = [str(executable)]
+            canonical = Path.home() / ".local/opt/ShadowOfTheColossusPC"
+            # Keep installed shortcuts on the update link, but only when that
+            # link belongs to this exact running program. Portable copies and
+            # other installed versions must retain their own entry point.
+            try:
+                entry = canonical / executable.name
+                if (canonical.is_symlink() and canonical.resolve(strict=True) == executable.parent
+                        and entry.resolve(strict=True) == executable):
+                    command = [str(entry)]
+                    try:
+                        icon = canonical / icon.resolve().relative_to(executable.parent)
+                    except ValueError:
+                        pass  # one-file or externally supplied assets
+            except (OSError, RuntimeError):
+                pass  # absent, broken or cyclic installation link
+        else:
+            command = [sys.executable, str(SOURCE_ROOT / "tools/desktop/main.py")]
         def quote(value):
             return '"' + value.replace('%', '%%').replace('\\', '\\\\').replace('"', '\\"').replace('`', '\\`').replace('$', '\\$') + '"'
         path = destination / (APPLICATION_ID + ".desktop")
         path.write_text("[Desktop Entry]\nType=Application\nName=Shadow of the Colossus PC\n"
                         "Comment=Sua próxima aventura começa aqui\nTerminal=false\nCategories=Game;ActionGame;\n"
-                        f"Exec={' '.join(map(quote, command))}\nIcon={assets_directory() / 'icon.png'}\n"
+                        f"Exec={' '.join(map(quote, command))}\nIcon={icon}\n"
                         "StartupWMClass=shadow-of-the-colossus-pc\n")
         path.chmod(0o755)
         return path
