@@ -88,6 +88,33 @@ jobs:
             -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
             sotc-linux-builder bash tools/linux/test_transfer_palette.sh \
             | tee artifacts/transfer-palette-after.log
+      - name: Particle material contract before and after (no ROM)
+        run: |
+          baseline=4396d9981d76a74118b14f82f22993a99a5adcba
+          git fetch --no-tags --depth=1 origin "$baseline"
+          git show "$baseline:game/overrides/sotc_native.cpp" > artifacts/particle-baseline.cpp
+          set +e
+          docker run --rm --init --cpus=2 --memory=1000m --memory-swap=1000m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            -e SOTC_NATIVE_TEST_SOURCE=/src/artifacts/particle-baseline.cpp \
+            -e SOTC_PARTICLE_TEST_OUT=artifacts/particle-before \
+            sotc-linux-builder bash tools/linux/test_particle_fidelity.sh \
+            > artifacts/particle-before.log 2>&1
+          before_status=$?
+          set -e
+          cat artifacts/particle-before.log
+          test "$before_status" -eq 1
+          test -x artifacts/particle-before/check
+          grep -Fx 'Compiled particle-fidelity fixture' artifacts/particle-before.log
+          grep -Fx 'FAIL: normal particles test scene depth without writing Z' artifacts/particle-before.log
+          grep -Fx 'FAIL: unit particle extents clamp both axes like the material packet' artifacts/particle-before.log
+          grep -Fx 'PASS: additive streak retains its blend and six vertices' artifacts/particle-before.log
+          grep -Fx 'PASS: both original functions receive unchanged inputs exactly once per draw' artifacts/particle-before.log
+          grep -E '^FAIL: [0-9]+ particle-fidelity checks, [1-9][0-9]* failures$' artifacts/particle-before.log
+          docker run --rm --init --cpus=2 --memory=1000m --memory-swap=1000m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_particle_fidelity.sh \
+            | tee artifacts/particle-after.log
       - name: Native memory-card persistence (synthetic data)
         run: |
           docker run --rm --init --cpus=2 --network=none -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \

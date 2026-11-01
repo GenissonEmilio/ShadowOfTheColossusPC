@@ -2726,10 +2726,16 @@ namespace sotc_native
         float light[4] = {0, 0, 0, 0}, shade[4] = {0.75f, 0, 0, 0}; // VU 26 / 27 (type 4's lighting)
     } g_ptclEnvState;
     uint32_t g_ptclBlend = 0;
+    uint8_t g_ptclClamp = 0;
 
     void ptclMatHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         g_ptclBlend = GPR_U32(ctx, 4);
+        // ptclmanBuildMatPacket writes CLAMP_1 at packet +0x30: WMS is
+        // CLAMP for f12 <= 1, WMT for f13 <= 1, otherwise REPEAT. Capture
+        // the arguments before the original call can overwrite its registers.
+        g_ptclClamp = (FPU_C_OLE_S(ctx->f[12], 1.0f) ? 1u : 0u) |
+                      (FPU_C_OLE_S(ctx->f[13], 1.0f) ? 2u : 0u);
         g_ptclMat(rdram, ctx, runtime);
     }
 
@@ -2968,6 +2974,11 @@ namespace sotc_native
         native_renderer::DrawState state;
         state.texture = texture(header);
         state.blend = g_ptclBlend == 1u ? native_renderer::Blend::Additive : (g_ptclBlend == 2u ? native_renderer::Blend::Subtract : native_renderer::Blend::Normal);
+        state.clamp = g_ptclClamp;
+        // The material's TEST_1 is 0x51011: ATST NEVER, AFAIL FB_ONLY,
+        // with ZTE GEQUAL. Colour is drawn and depth is tested, but no
+        // particle writes Z, including normal and subtractive materials.
+        state.noDepthWrite = true;
         state.order = layer;
         state.fogged = false;
         native_renderer::draw(mesh, camera, state);
