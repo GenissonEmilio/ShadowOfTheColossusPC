@@ -74,15 +74,21 @@ Na revisão da gravação contínua, o corpo escurece sem o padrão de arco-íri
 nas imagens examinadas, e os tentáculos pretos saem do corpo e alcançam Wander.
 O círculo de carga e o glifo da cabeça também foram observados na luta. A
 sequência chega ao salvamento normal de um colosso derrotado. O pacote do CI
-de `5c84a62`, selecionado para a v0.2.7 planejada, tem as mesmas onze entradas
+de `5c84a62`, publicado na v0.2.7, tem as mesmas onze entradas
 de ligação nativa do pacote usado nessa derrota e conserva o kit `cb15`.
-A recarga do registro nesse pacote exato e a publicação ainda estão pendentes.
+A recarga do registro nesse pacote exato foi confirmada pelo menu original:
+um colosso derrotado, retorno ao templo e Quadratus ativo. O cartão próprio de
+QA conservou seu hash. A release foi publicada como principal, e o atalho local
+foi atualizado para esse pacote.
 
 Essa observação cobre a primeira derrota no candidato indicado. O registro
 também foi recarregado no candidato de partículas `d357`, mas sua repetição
 da luta ficou incompleta e não demonstrou um novo defeito do produto.
 A alteração de partículas está reservada à candidata v0.2.8, fora do pacote
-escolhido para v0.2.7; não há novo pacote v0.2.8 concluído por essa decisão.
+publicado na v0.2.7. O CI da v0.2.8 gerou um pacote aprovado, com auditoria e
+validação de gameplay da próxima etapa pendentes.
+Valus conta como a primeira das 16 etapas validadas no nativo `cb15`, incluindo
+salvamento e recarga. Os outros quinze colossos continuam pendentes.
 Os fixtures e a primeira luta no nativo `cb15`
 não demonstram que todos os pontos fracos, raios de Hydrus ou colisões foram
 corrigidos. O avanço e as pendências estão registrados em

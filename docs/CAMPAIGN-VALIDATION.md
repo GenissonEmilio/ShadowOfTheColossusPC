@@ -17,9 +17,14 @@ As rotinas de colisão originais permanecem selecionadas: `SOTC_NATIVE_COLLISION
 
 ## Progresso
 
+**1/16 etapas validadas:** Valus no nativo `cb15`; os outros quinze colossos e
+o encerramento permanecem pendentes. A [v0.2.7](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.2.7)
+está publicada como principal, com os dois assets conferidos pelo digest do
+GitHub. O atalho local aponta para esse pacote.
+
 | # | Colosso | Situação | Release |
 | --- | --- | --- | --- |
-| 1 | Valus | Derrotado e salvo no candidato cb15, com efeitos revisados; recarga no mesmo pacote escolhido para v0.2.7 pendente | — |
+| 1 | Valus | Validado no nativo cb15: acesso, luta, efeitos da derrota, salvamento e recarga | [v0.2.7](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.2.7) |
 | 2 | Quadratus | Pendente | — |
 | 3 | Gaius | Pendente, incluindo rampa de acesso | — |
 | 4 | Phaedra | Pendente | — |
@@ -48,11 +53,13 @@ O jogo confirmou `Save complete` no cartão próprio de QA: segundo registro, `S
 
 A gravação contínua dessa derrota foi revisada: o corpo escurece sem o padrão de arco-íris nas imagens examinadas, e os tentáculos pretos saem do corpo e alcançam Wander. O trecho foi preservado com hashes e correspondência com os pacotes da gravação original. Essa evidência é do candidato `cb15/6191f4f`; ela não é uma observação da morte no pacote posterior de partículas.
 
-O pacote escolhido para a **v0.2.7 planejada é o do CI de `5c84a62`, kit `cb15`**. Suas onze entradas de ligação nativa foram conferidas como idênticas às do pacote `6191f4f` usado na derrota acima; o launcher inclui a correção do atalho canônico. A recarga do registro de um derrotado nesse pacote exato ainda está pendente. A publicação da release também está pendente.
+O pacote publicado na **v0.2.7 é o do CI de `5c84a62`, kit `cb15`**. Suas onze entradas de ligação nativa foram conferidas como idênticas às do pacote `6191f4f` usado na derrota acima; o launcher inclui a correção do atalho canônico. O nativo conserva o SHA-256 `fa13630ce218387a16e59127564c1e857c1a7a1d821aba71c98ade97d8399d8e`.
+
+A recarga foi confirmada nesse pacote: o menu original selecionou o segundo registro `1 Defeated / 1:04:39`, confirmou a leitura e retornou ao templo. A observação por leitura mostrou um colosso derrotado, Valus derrotado e Quadratus como próximo colosso; o hash do cartão próprio de QA permaneceu igual. A instalação principal e o atalho foram atualizados para a v0.2.7, preservando a v0.2.6 para rollback e os dados pessoais.
 
 O pacote de partículas `d357` foi usado numa investigação separada: carregou normalmente o segundo registro, com um colosso derrotado e retorno ao templo, e depois o registro inicial para repetir Valus. Esse replay ficou incompleto. As tentativas não demonstraram um novo defeito do produto e não substituem a evidência da derrota no nativo `cb15`. A recarga em `d357` preservou os dois registros próprios de QA e não modificou o cartão pessoal.
 
-**O progresso integralmente validado permanece em 0/16 até confirmar a recarga no pacote `5c84a62/cb15`.** A derrota, o salvamento e os efeitos de Valus já foram observados no nativo correspondente. As próximas etapas são confirmar esse checkpoint, publicar a etapa de Valus e prosseguir para Quadratus.
+**O progresso validado é 1/16 no pacote `5c84a62/cb15`.** A derrota, os efeitos, o salvamento e a recarga de Valus estão confirmados no nativo correspondente. A próxima etapa é Quadratus. O replay incompleto em `d357` permanece uma investigação separada.
 
 O controle automatizado de QA passou a observar a base original dos controles e a posição do pé durante a aproximação. Isso corrige a orientação dos comandos de teste; não altera os controles nem a física do produto.
 
@@ -60,10 +67,10 @@ Uma auditoria de leitura confirmou 19 rotinas de colisão originais e 31 substit
 
 O checkpoint inicial foi recarregado normalmente no candidato `6191f4f`, com `0 Defeated` e a posição do altar preservados. A tentativa de combate anterior causou dano real à perna de Valus, mas foi encerrada sem derrota antes da integração da paleta; nenhum progresso de colosso foi contabilizado. O HUD de carga foi observado aumentando durante a preparação de uma estocada.
 
-O candidato escolhido contém as correções descritas em [gráficos](FIDELITY-2026-10-31-GRAPHICS.md) e [estado do personagem](FIDELITY-2026-10-31-CHARA.md). A [execução completa do CI](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/actions/runs/41245595672) passou para `83d8eff`. A correção da [paleta de transferência](TRANSFER-PALETTE-FIDELITY.md) também foi integrada; o [CI de `6191f4f`](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/actions/runs/41259725998) passou, incluindo os 22 casos da paleta. O executável da primeira derrota foi ligado às bibliotecas desse pacote exato. A release principal permanece em v0.2.6 até concluir os gates da v0.2.7. A investigação de tail jumps está em branch separada e ainda não integra o executável da campanha.
+O pacote publicado contém as correções descritas em [gráficos](FIDELITY-2026-10-31-GRAPHICS.md) e [estado do personagem](FIDELITY-2026-10-31-CHARA.md). A [execução completa do CI](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/actions/runs/41245595672) passou para `83d8eff`. A correção da [paleta de transferência](TRANSFER-PALETTE-FIDELITY.md) também foi integrada; o [CI de `6191f4f`](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/actions/runs/41259725998) passou, incluindo os 22 casos da paleta. O executável da primeira derrota foi ligado às bibliotecas desse pacote exato. A release principal é a v0.2.7. A investigação de tail jumps está em branch separada e ainda não integra o executável da campanha.
 
 Evidências privadas e comandos da sessão: `artifacts/campaign-2026-10-31/`. ROM, cartões, RAM e código derivado do jogo não são publicados no GitHub.
 
-O candidato do launcher também corrige atalhos recriados que ficavam presos ao diretório de uma versão antiga. Os sete casos do atalho e os demais testes passaram no [CI de `5c84a62`](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/actions/runs/41262842772). Esse é o pacote selecionado para a v0.2.7, com o nativo `cb15` que corresponde à primeira derrota validada em vídeo; sua recarga e publicação ainda precisam ser confirmadas.
+O launcher também corrige atalhos recriados que ficavam presos ao diretório de uma versão antiga. Os sete casos do atalho e os demais testes passaram no [CI de `5c84a62`](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/actions/runs/41262842772). Esse pacote está publicado e instalado como v0.2.7, com o nativo `cb15` da primeira etapa validada e recarregada.
 
-O [material das partículas](PARTICLE-MATERIAL-FIDELITY.md) foi corrigido em `5ec48fe`: CLAMP por eixo e teste de profundidade sem escrita de Z, conforme o pacote original. O [CI completo](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/actions/runs/41272468970) passou. O pacote exato desse CI foi auditado e usado como candidato local, com kit `d357e14c82a02adeeca1aae3`; apenas o objeto nativo correspondente mudou na biblioteca base. Gerador, configuração, headers, toolchain e demais entradas de ligação permaneceram idênticos, permitindo religar os 284 objetos guest existentes sem recompilação completa. Essa alteração fica reservada à **candidata v0.2.8**, fora do pacote escolhido para v0.2.7. O replay incompleto não valida seus efeitos em combate, e os cenários específicos continuam pendentes. Ainda não há novo pacote v0.2.8 concluído ou release publicada por esta decisão.
+O [material das partículas](PARTICLE-MATERIAL-FIDELITY.md) foi corrigido em `5ec48fe`: CLAMP por eixo e teste de profundidade sem escrita de Z, conforme o pacote original. O [CI completo](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/actions/runs/41272468970) passou. O pacote exato desse CI foi auditado e usado como candidato local, com kit `d357e14c82a02adeeca1aae3`; apenas o objeto nativo correspondente mudou na biblioteca base. Gerador, configuração, headers, toolchain e demais entradas de ligação permaneceram idênticos, permitindo religar os 284 objetos guest existentes sem recompilação completa. Essa alteração fica reservada à **candidata v0.2.8**, fora do pacote publicado na v0.2.7. O replay incompleto não valida seus efeitos em combate, e os cenários específicos continuam pendentes. O [CI da candidata v0.2.8](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/actions/runs/41284313971) passou e gerou um pacote; sua auditoria e adoção na próxima etapa ainda estão pendentes. A v0.2.8 não foi publicada.
