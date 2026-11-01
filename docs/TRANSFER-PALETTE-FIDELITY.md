@@ -39,6 +39,14 @@ failures, successful compilation and passing static-palette/RGBA controls.
 It then requires the current source to pass. The fixture also checks the
 accelerated RAM alias and that copying a `TexSource` freezes the palette
 before a later guest mutation, as needed by asynchronous decoding.
+
+[CI run 41259725998](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/actions/runs/41259725998)
+completed successfully for patch `6191f4f77b7f2ae86ace41ebfae7c4e14a10ab3f`.
+The baseline compiled and failed 13 of the same 22 semantic checks; the patch
+compiled and passed all 22. The complete Linux workflow also passed. This
+fixture intercepts the public renderer upload boundary; it does not create a
+GPU context or test a game asset.
+
 These synthetic checks do not validate sigils in combat, boss death effects,
 Hydrus, collision, or any campaign completion. Gameplay evidence and saves
 remain outside this document and outside the distributed package.
