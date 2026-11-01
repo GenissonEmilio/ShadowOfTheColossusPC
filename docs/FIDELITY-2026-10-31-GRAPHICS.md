@@ -67,15 +67,21 @@ e alpha. A integração também repetiu os oito checks de hooks com sucesso.
 Os testes locais foram serializados com
 `codex-build` limitado a 1024 MiB e containers limitados a 900 MiB e duas CPUs.
 
-## Validação pendente
+## Validação em combate e limites
 
-**Ainda não validado em combate.** Os fixtures demonstram os defeitos
-específicos, mas não substituem observar derrota, transformação do corpo,
-tentáculos e retorno ao templo numa luta concluída. A seleção da máscara nos
-materiais também precisa dessa integração com o desenho real. Não se declara
-que todos os pontos fracos, raios de Hydrus ou colisões foram corrigidos.
-O avanço da campanha é registrado separadamente pelo playthrough com cartão
-próprio de testes. Os cartões do jogador permanecem fora dessa sessão.
+Valus foi derrotado com comandos normais no candidato `6191f4f`, kit `cb15`.
+Na revisão da gravação contínua, o corpo escurece sem o padrão de arco-íris
+nas imagens examinadas, e os tentáculos pretos saem do corpo e alcançam Wander.
+O círculo de carga e o glifo da cabeça também foram observados na luta. A
+sequência chega ao salvamento normal de um colosso derrotado; esse registro
+foi recarregado no candidato posterior de partículas `d357`.
+
+Essa observação cobre a primeira derrota no candidato indicado. A repetição
+da luta no pacote final `d357` continua em andamento. Os fixtures e essa luta
+não demonstram que todos os pontos fracos, raios de Hydrus ou colisões foram
+corrigidos. O avanço e as pendências estão registrados em
+[validação da campanha](CAMPAIGN-VALIDATION.md). Os cartões do jogador
+permanecem fora dessa sessão.
 
 Uma quarta origem foi estudada, sem importar suas mudanças:
 [`30d75994db513027518d1b9e6e8dd2da1bc326c8`](https://github.com/HenryKun55/celosia/commit/30d75994db513027518d1b9e6e8dd2da1bc326c8),
