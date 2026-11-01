@@ -73,11 +73,17 @@ Valus foi derrotado com comandos normais no candidato `6191f4f`, kit `cb15`.
 Na revisão da gravação contínua, o corpo escurece sem o padrão de arco-íris
 nas imagens examinadas, e os tentáculos pretos saem do corpo e alcançam Wander.
 O círculo de carga e o glifo da cabeça também foram observados na luta. A
-sequência chega ao salvamento normal de um colosso derrotado; esse registro
-foi recarregado no candidato posterior de partículas `d357`.
+sequência chega ao salvamento normal de um colosso derrotado. O pacote do CI
+de `5c84a62`, selecionado para a v0.2.7 planejada, tem as mesmas onze entradas
+de ligação nativa do pacote usado nessa derrota e conserva o kit `cb15`.
+A recarga do registro nesse pacote exato e a publicação ainda estão pendentes.
 
-Essa observação cobre a primeira derrota no candidato indicado. A repetição
-da luta no pacote final `d357` continua em andamento. Os fixtures e essa luta
+Essa observação cobre a primeira derrota no candidato indicado. O registro
+também foi recarregado no candidato de partículas `d357`, mas sua repetição
+da luta ficou incompleta e não demonstrou um novo defeito do produto.
+A alteração de partículas está reservada à candidata v0.2.8, fora do pacote
+escolhido para v0.2.7; não há novo pacote v0.2.8 concluído por essa decisão.
+Os fixtures e a primeira luta no nativo `cb15`
 não demonstram que todos os pontos fracos, raios de Hydrus ou colisões foram
 corrigidos. O avanço e as pendências estão registrados em
 [validação da campanha](CAMPAIGN-VALIDATION.md). Os cartões do jogador

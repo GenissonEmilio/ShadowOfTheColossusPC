@@ -1,5 +1,9 @@
 # Particle material fidelity
 
+This change is reserved for the **v0.2.8 candidate**. It is excluded from the
+`5c84a62/cb15` package selected for the planned v0.2.7 release. Neither that
+release nor a newly packaged v0.2.8 is confirmed published by this document.
+
 The native particle hook now preserves two material properties written by
 `ptclmanBuildMatPacket` (`0x01099e00`): texture wrapping and depth writes.
 This change applies only to particle draws. It does not change the game’s
@@ -70,5 +74,12 @@ was installed as a separate candidate. A bounded local link reused 284 unchanged
 guest objects after checking identical generator/configuration, headers,
 toolchain, flags and other link inputs. Only the native particle translation
 unit changed inside the base archive. The candidate kit is
-`d357e14c82a02adeeca1aae3`; its campaign replay and scene-specific visual checks
-remain pending before release. The principal installation remains v0.2.6.
+`d357e14c82a02adeeca1aae3`. Its replay of Valus remained incomplete; those
+attempts did not demonstrate a new product defect. Scene-specific particle
+validation remains pending, and no new v0.2.8 package is complete.
+
+The preceding `cb15` native defeated Valus, showed the darkened corpse and
+post-death tendrils, and saved through the normal game interface. The package
+selected for v0.2.7 has the same eleven native link inputs; its save reload is
+the remaining first-colossus gate before progressing to Quadratus. The particle
+patch and the altar/Hydrus scenes still require their own gameplay validation.
