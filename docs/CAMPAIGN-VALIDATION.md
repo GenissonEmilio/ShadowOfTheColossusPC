@@ -46,7 +46,11 @@ No candidato com paleta ativa (`6191f4f`, kit `cb15`), Valus foi derrotado com c
 
 O jogo confirmou `Save complete` no cartão próprio de QA: segundo registro, `Shrine of Worship — 1 Defeated / 1:04:39`. O primeiro registro de zero derrotados foi preservado para repetição. As flags originais passaram para um derrotado e próximo colosso, e o cartão pessoal conservou seu hash e data de modificação. A gravação foi finalizada e o jogo saiu normalmente pelo menu, com código zero.
 
-A revisão do trecho de morte, a recarga desse save e a repetição no pacote final com a nova correção de partículas ainda estão pendentes. **O progresso integralmente validado da campanha permanece em 0/16; uma derrota já foi jogada e salva.**
+A gravação contínua dessa derrota foi revisada: o corpo escurece sem o padrão de arco-íris nas imagens examinadas, e os tentáculos pretos saem do corpo e alcançam Wander. O trecho foi preservado com hashes e correspondência com os pacotes da gravação original. Essa evidência é do candidato `cb15/6191f4f`; ela não é uma observação da morte no pacote posterior de partículas.
+
+No pacote final de partículas `d357`, o segundo registro foi carregado normalmente: um colosso derrotado, próximo colosso ativo e retorno ao templo. Depois, o menu original voltou à tela inicial e carregou o primeiro registro, de zero derrotados, para repetir Valus no executável que será publicado. A recarga preservou os dois registros próprios de QA e não modificou o cartão pessoal.
+
+Essa repetição ainda está em andamento, incluindo a conferência da morte e do novo salvamento no pacote final. **O progresso integralmente validado da campanha permanece em 0/16; uma derrota já foi jogada, salva e recarregada.**
 
 O controle automatizado de QA passou a observar a base original dos controles e a posição do pé durante a aproximação. Isso corrige a orientação dos comandos de teste; não altera os controles nem a física do produto.
 
