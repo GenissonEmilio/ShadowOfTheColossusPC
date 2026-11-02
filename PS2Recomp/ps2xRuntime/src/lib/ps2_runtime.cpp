@@ -2805,7 +2805,7 @@ void PS2Runtime::HandleIntegerOverflow(R5900Context *ctx)
 void PS2Runtime::run()
 {
     m_stopRequested.store(false, std::memory_order_relaxed);
-    savestates::bind(this);
+    savestates::bind(nullptr);
     ps2_stubs::resetSifState();
     resetIop();
     ps2_stubs::resetAudioStubState();
@@ -3008,6 +3008,7 @@ void PS2Runtime::run()
         try
         {
             m_eeScheduler->reset(m_memory.getRDRAM(), m_cpuContext);
+            savestates::bind(this); // Accept requests only after reset/wake state is ready.
             m_eeScheduler->run();
             uint32_t pc = m_debugPc.load(std::memory_order_relaxed);
             RUNTIME_LOG("Game thread returned. PC=0x" << std::hex << pc

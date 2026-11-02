@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 namespace ps2_stubs {
+bool legacyCardStateCaptureSupported(std::string&);
 bool captureCdState(std::vector<uint8_t>&, std::string&);
 bool validateCdState(const std::vector<uint8_t>&, std::string&);
 bool restoreCdState(const std::vector<uint8_t>&, std::string&);

@@ -479,6 +479,7 @@ namespace ps2_stubs {
         crc=savestates::checksum(bytes); return true;
     }
     bool captureCardState(std::vector<uint8_t> &out,std::string &error) {
+        if (!legacyCardStateCaptureSupported(error)) return false;
         std::lock_guard<std::mutex> lock(g_mutex);
         ps2state::Writer w(out,error); w.pod(uint32_t{0x31445243});
         for (int i=0;i<2;++i) {
@@ -498,6 +499,7 @@ namespace ps2_stubs {
         for (auto &socket:sockets) { r.pod(socket.open); r.pod(socket.port); if (socket.port<0 || socket.port>1) { error="Invalid card socket."; return false; } }
         r.vector(last,1u<<20);
         if (!r.finish() || magic!=0x31445243 || (!last.empty() && last.size()!=kPageSize)) { error="Invalid memory-card state."; return false; }
+        if (!legacyCardStateCaptureSupported(error)) return false;
         std::lock_guard<std::mutex> lock(g_mutex);
         for (int i=0;i<2;++i) {
             if (g_cards[i].file.is_open()) g_cards[i].file.flush();

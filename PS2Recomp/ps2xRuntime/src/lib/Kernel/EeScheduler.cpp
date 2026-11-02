@@ -200,7 +200,8 @@ void EeScheduler::run()
 
     while (!m_stopRequested.load(std::memory_order_relaxed))
     {
-        if (m_stateRequestPending.exchange(false, std::memory_order_acq_rel))
+        if (m_stateRequestPending.load(std::memory_order_relaxed) &&
+            m_stateRequestPending.exchange(false, std::memory_order_acq_rel))
         {
             m_stateOperationClockAnchor = std::chrono::steady_clock::now();
             m_runtime.processStateRequest();

@@ -1,8 +1,11 @@
 // ROM-free restoration, malformed-input and unsupported-mode checks.
 #include "runtime/ps2_memory.h"
+#include "ps2_runtime.h"
 #include "runtime/ps2_vu1.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/native_renderer.h"
+#include "runtime/host_state.h"
+#include "Kernel/Stubs/MemoryCard.h"
 #include "native/native_history_state.h"
 #include "emulator/core/iop_memory.h"
 #include "iop_module_manager.h"
@@ -151,10 +154,27 @@ namespace {
         ps2state::Writer oversized(blob, error, HistoryStateLimit);
         check(!historyStateCodec(oversized, state), "history dimension budget checked before pixel allocation");
     }
+    void legacyCardGuard() {
+        std::string error;
+        R5900Context context{};
+        check(ps2_stubs::legacyCardStateCaptureSupported(error), "unused legacy filesystem card is supported");
+        // No filesystem operation: an unknown fd still records a guest-visible
+        // async command and result. An open-files-only guard would miss it.
+        context.r[4] = _mm_set_epi64x(0, 12345);
+        ps2_stubs::sceMcClose(nullptr, &context, nullptr);
+        check(!ps2_stubs::legacyCardStateCaptureSupported(error), "legacy command metadata blocks states with no open FILE handles");
+        ps2_stubs::sceMcEnd(nullptr, &context, nullptr);
+        check(ps2_stubs::legacyCardStateCaptureSupported(error), "real libmc teardown leaves initial metadata");
+        context.r[5] = _mm_set_epi64x(0, 3);
+        ps2_stubs::mcSetFileSelectWindowCursol(nullptr, &context, nullptr);
+        check(!ps2_stubs::legacyCardStateCaptureSupported(error), "legacy UI cursor blocks states without any card fd");
+        ps2_stubs::mcSetFileSelectWindowCursolInit(nullptr, &context, nullptr);
+        check(ps2_stubs::legacyCardStateCaptureSupported(error), "fixture restores its own legacy cursor");
+    }
 }
 int main() {
     setenv("SOTC_NATIVE", "1", 1); setenv("PS2X_NATIVE_IOP_BOOT", "1", 1); setenv("PS2X_NATIVE_SG2", "1", 1);
     setenv("PS2X_MTVU", "0", 1); setenv("PS2X_GS_HW", "0", 1); setenv("PS2X_GS_NODRAW", "1", 1);
-    memoryState(); vuState(); iopState(); gsState(); historyCodec();
+    memoryState(); vuState(); iopState(); gsState(); historyCodec(); legacyCardGuard();
     std::printf("PASS: %u subsystem state checks; no ROM, GPU context or personal files\n", checks);
 }
