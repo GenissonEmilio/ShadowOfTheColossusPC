@@ -122,11 +122,22 @@ namespace {
         GS gs; gs.init(memory.getGSVRAM(), PS2_GS_VRAM_SIZE, &memory.gs_regs);
         native_renderer::setShown(true);
         memory.getGSVRAM()[17] = 0x55; gs.writeRegister(GS_REG_FRAME_1, 3u | (2ull << 16u));
+        // A strip retains two queued vertices while its kick counter grows
+        // beyond the queue capacity. Exercise the normal public GS path.
+        gs.writeRegister(GS_REG_PRIM, GS_PRIM_TRISTRIP);
+        for (uint64_t i = 0; i < 37; ++i)
+            gs.writeRegister(GS_REG_XYZ2, (i * 16u) | (((i % 7u) * 16u) << 16u) | ((0x1234u + i) << 32u));
         std::vector<uint8_t> state; std::string error;
         check(gs.captureState(state, error), error);
+        check(gs.validateState(state, error), "GS archive accepts more than six cumulative vertex kicks");
         memory.getGSVRAM()[17] = 0; gs.writeRegister(GS_REG_FRAME_1, 0);
+        gs.writeRegister(GS_REG_PRIM, GS_PRIM_POINT);
+        gs.writeRegister(GS_REG_XYZ2, 0);
         check(gs.restoreState(state, error), error);
         check(memory.getGSVRAM()[17] == 0x55 && gs.getDebugSnapshot().ctx[0].frame.fbp == 3, "GS registers and VRAM restored");
+        std::vector<uint8_t> restored;
+        check(gs.captureState(restored, error) && restored == state,
+              "GS strip queue and cumulative vertex counter round trip byte for byte after 37 kicks");
         state.pop_back(); check(!gs.restoreState(state, error), "truncated GS rejected");
         check(memory.getGSVRAM()[17] == 0x55, "invalid GS state does not mutate VRAM");
         native_renderer::setShown(false);

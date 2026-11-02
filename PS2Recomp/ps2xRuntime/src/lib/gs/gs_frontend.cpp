@@ -2079,7 +2079,9 @@ namespace
         GS_VALUE(presentTick);GS_VALUE(imageUploads);GS_VALUE(packedPackets);
 #undef GS_VALUE
         if (!ar.vector(x.vram,PS2_GS_VRAM_SIZE)) return false;
-        if (x.vram.size()!=PS2_GS_VRAM_SIZE||x.trxdir>3||x.count<0||x.count>6||x.index<0||x.index>=6)
+        // index counts all vertex kicks since PRIM/reset; it is not a slot
+        // in the six-element queue. Only count controls queue access.
+        if (x.vram.size()!=PS2_GS_VRAM_SIZE||x.trxdir>3||x.count<0||x.count>6||x.index<0)
             return ar.fail("invalid GS vertex/VRAM state");
         return ar.finish();
     }
