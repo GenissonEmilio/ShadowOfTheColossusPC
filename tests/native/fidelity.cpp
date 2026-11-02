@@ -6,9 +6,9 @@
 #include "runtime/ee_scheduler.h"
 
 extern const uint32_t g_ps2RecompiledFunctionTableBase = 0;
-extern const uint32_t g_ps2RecompiledFunctionTableEnd = 0x10000;
-extern const uint32_t g_ps2RecompiledFunctionTableSlotCount = 0x4000;
-PS2Runtime::RecompiledFunction g_ps2RecompiledFunctionTable[0x4000] = {};
+extern const uint32_t g_ps2RecompiledFunctionTableEnd = 0x200000;
+extern const uint32_t g_ps2RecompiledFunctionTableSlotCount = 0x80000;
+PS2Runtime::RecompiledFunction g_ps2RecompiledFunctionTable[0x80000] = {};
 
 static void noop(uint8_t *, R5900Context *, PS2Runtime *) {}
 static void originalPhysics(uint8_t *, R5900Context *c, PS2Runtime *) { SET_GPR_U32(c, 2, 1); }
@@ -16,6 +16,143 @@ static void experimentalPhysics(uint8_t *, R5900Context *c, PS2Runtime *) { SET_
 
 namespace
 {
+    constexpr uint32_t kSdkDepth = 0x1e10b0, kSdkCount = 0x2132ec;
+    constexpr uint32_t kSdkCurrent = 0x2132f4, kSdkSaved = 0x213308;
+    constexpr uint32_t kPushResumes[] = {0x1c0274, 0x1c0284, 0x1c0290};
+    constexpr uint32_t kPopResumes[] = {0x1bf91c, 0x1bf928, 0x1bf958};
+    uint32_t pushResume = kPushResumes[2], popResume = kPopResumes[1];
+    uint32_t sdkWord(const uint8_t *ram, uint32_t address) {
+        uint32_t value; std::memcpy(&value, ram + address, 4); return value;
+    }
+    void sdkWord(uint8_t *ram, uint32_t address, uint32_t value) {
+        std::memcpy(ram + address, &value, 4);
+    }
+    // Synthetic SDK bodies, not copied instructions. They suspend between the
+    // SDK depth update and current-layer write, with entry arguments clobbered.
+    void sdkPush(uint8_t *ram, R5900Context *c, PS2Runtime *runtime) {
+        if (c->pc == sotc_native::kPushLayer) {
+            const uint32_t depth = sdkWord(ram, kSdkDepth);
+            assert(depth < 256);
+            sdkWord(ram, kSdkSaved + depth * 4, sdkWord(ram, kSdkCurrent));
+            sdkWord(ram, kSdkDepth, depth + 1);
+            SET_GPR_U32(c, 16, GPR_U32(c, 4));
+            SET_GPR_U32(c, 4, 0x1e2c00);
+            c->pc = pushResume;
+            runtime->m_eeClock.unwinding = true;
+            return;
+        }
+        assert(std::find(std::begin(kPushResumes), std::end(kPushResumes), c->pc) != std::end(kPushResumes));
+        sdkWord(ram, kSdkCurrent, GPR_U32(c, 16));
+        c->pc = GPR_U32(c, 31);
+    }
+    void sdkPop(uint8_t *ram, R5900Context *c, PS2Runtime *runtime) {
+        if (c->pc == sotc_native::kPopLayer) {
+            const uint32_t depth = sdkWord(ram, kSdkDepth);
+            assert(depth > 0);
+            sdkWord(ram, kSdkDepth, depth - 1);
+            SET_GPR_U32(c, 16, sdkWord(ram, kSdkSaved + (depth - 1) * 4));
+            SET_GPR_U32(c, 4, 0x1e2c40);
+            c->pc = popResume;
+            runtime->m_eeClock.unwinding = true;
+            return;
+        }
+        assert(std::find(std::begin(kPopResumes), std::end(kPopResumes), c->pc) != std::end(kPopResumes));
+        sdkWord(ram, kSdkCurrent, GPR_U32(c, 16));
+        c->pc = GPR_U32(c, 31);
+    }
+    void layerStateRegression() {
+        using namespace sotc_native;
+        PS2Runtime runtime;
+        std::vector<uint8_t> ram(PS2_RAM_SIZE);
+        g_ram = ram.data(); g_layers.clear(); g_2d = {};
+        sdkWord(ram.data(), kSdkCount, 32);
+        sdkWord(ram.data(), kSdkCurrent, 31); // SDK root, not an active push
+        g_pushLayer = sdkPush; g_popLayer = sdkPop;
+        assert(runtime.registerFunction(kPushLayer, pushLayerHook));
+        assert(runtime.registerFunction(kPopLayer, popLayerHook));
+        for (uint32_t pc : kPushResumes) assert(runtime.registerFunction(pc, sdkPush));
+        for (uint32_t pc : kPopResumes) assert(runtime.registerFunction(pc, sdkPop));
+        runtime.m_eeClock.gate = UINT64_MAX;
+        setenv("SOTC_FORCE_UNDERWATER", "1", 1);
+        setenv("SOTC_FORCE_FEEDBACK", "77", 1);
+        auto enter = [&](uint32_t target, uint32_t layer, uint32_t caller = 0x7000u) {
+            R5900Context c{};
+            c.pc = 0xdeadbeef; // callGuest must install the fresh entry PC
+            SET_GPR_U32(&c, 4, layer); SET_GPR_U32(&c, 31, caller);
+            assert(!runtime.callGuest(ram.data(), &c, target, caller, caller - 8,
+                                      PS2Runtime::GuestBranchKind::DirectCall, "synthetic SDK"));
+            assert(runtime.m_eeClock.unwinding && c.pc != target && c.pc != caller);
+            return c;
+        };
+        auto resume = [&](R5900Context &c) {
+            runtime.m_eeClock.unwinding = false; // dispatcher boundary
+            runtime.lookupFunction(c.pc)(ram.data(), &c, &runtime);
+            assert(c.pc == GPR_U32(&c, 31));
+        };
+        auto call = [&](uint32_t target, uint32_t layer) {
+            auto c = enter(target, layer); resume(c);
+        };
+        auto directPop = [&] {
+            R5900Context c{}; c.pc = kPopLayer; SET_GPR_U32(&c, 31, 0x7000);
+            // iosResetDC uses this direct C++ tail call: no pop hook runs.
+            sdkPop(ram.data(), &c, &runtime); resume(c);
+        };
+        auto observe = [&](std::initializer_list<uint32_t> layers, uint32_t current) {
+            feed2D(0x01, 0x80808080); // existing native consumer, no GPU/ROM
+            assert(g_layers == std::vector<uint32_t>(layers));
+            assert(g_2d.layer == current);
+        };
+        call(kPushLayer, 8); observe({8}, 8);
+        call(kPushLayer, 12); observe({8, 12}, 12);
+        sdkWord(ram.data(), kSdkCurrent, 19); // iosDlSetLayer changes no depth
+        observe({8, 19}, 19);
+        call(kPopLayer, 0); observe({8}, 8);
+        directPop(); observe({}, 25);
+        assert(sdkWord(ram.data(), kSdkCurrent) == 31);
+
+        // Real registration routes continuations to the original bodies. Also
+        // check a wrapper continuation directly: entry-only testing/logging/
+        // alpha side effects must not consume clobbered arguments a second time.
+        auto c = enter(kPushLayer, 17, 0x0109d018);
+        assert(sdkWord(ram.data(), 0x1186328) == 1 && sdkWord(ram.data(), 0x118b740) == 77);
+        sdkWord(ram.data(), 0x1186328, 9); sdkWord(ram.data(), 0x118b740, 33);
+        runtime.m_eeClock.unwinding = false;
+        pushLayerHook(ram.data(), &c, &runtime);
+        assert(sdkWord(ram.data(), 0x1186328) == 9 && sdkWord(ram.data(), 0x118b740) == 33);
+        observe({17}, 17); directPop(); observe({}, 25);
+        g_2d.alpha = 0x44;
+        c = enter(kPushLayer, 29, 0x01089e60);
+        assert(g_2d.alpha == 0x60);
+        g_2d.alpha = 0x22; runtime.m_eeClock.unwinding = false;
+        pushLayerHook(ram.data(), &c, &runtime);
+        assert(g_2d.alpha == 0x22);
+        directPop(); observe({}, 25);
+
+        // More resets than the codec cap: the old push-hook/direct-tail-pop
+        // pairing leaked one host entry per reset despite SDK depth staying 0.
+        for (unsigned i = 0; i < 600; ++i) {
+            pushResume = kPushResumes[i % 3]; popResume = kPopResumes[i % 3];
+            call(kPushLayer, 0); observe({0}, 0);
+            directPop(); observe({}, 25);
+        }
+        NativeState state;
+        state.layers = g_layers;
+        ps2state::Writer writer; nativeCodec(writer, state);
+        assert(writer.finish());
+        state.layers.resize(257);
+        ps2state::Writer oversized; nativeCodec(oversized, state);
+        assert(!oversized.finish()); // retain the actual SDK capacity guard
+        sdkWord(ram.data(), kSdkDepth, 257);
+        const auto before = g_layers;
+        std::string error;
+        assert(!syncLayersFromSdk(ram.data(), &error) && error == "Invalid SDK display-list layer depth.");
+        assert(g_layers == before); // invalid SDK metadata is not clamped
+        unsetenv("SOTC_FORCE_UNDERWATER"); unsetenv("SOTC_FORCE_FEEDBACK");
+        g_ram = nullptr; g_layers.clear(); g_2d = {};
+        g_pushLayer = nullptr; g_popLayer = nullptr;
+        std::puts("PASS: SDK layers, direct tail pops, nested/set layers, all yield resumes and bounded snapshots");
+    }
+
     constexpr uint32_t kVectorEntry = 0x4000, kVectorResume = 0x4010, kVectorHandler = 0x4020;
     constexpr uint32_t kVectorNested = 0x4030, kVectorHandlerResume = 0x4040;
     bool vectorPreserved = false, nestedVectorPreserved = false;
@@ -84,6 +221,7 @@ namespace
 
 int main()
 {
+    layerStateRegression();
     {
         PS2Runtime vectors;
         std::vector<uint8_t> memory(PS2_RAM_SIZE);

@@ -1819,7 +1819,40 @@ namespace sotc_native
         {0x01155B98u, 0x01155ED8u}, // windowSpriteNoTex, windowSprite
     };
 
-    std::vector<uint32_t> g_layers; // iosDlPushLayer stack
+    std::vector<uint32_t> g_layers; // active SDK pushes, excluding the root layer
+    bool syncLayersFromSdk(const uint8_t *rdram, std::string *error = nullptr)
+    {
+        if (!rdram) return false;
+        const auto read = [&](uint32_t address) {
+            uint32_t value;
+            std::memcpy(&value, rdram + address, sizeof(value));
+            return value;
+        };
+        // SCUS iosDlPushLayer/PopLayer/SetLayer use this live SDK context.
+        // numLayers == 0 precedes SDK initialization; keep the native fallback
+        // then (also used by synthetic renderer fixtures without an SDK).
+        if (read(0x002132ECu) == 0u) return true;
+        const uint32_t depth = read(0x001E10B0u);
+        if (depth > 256u)
+        {
+            if (error) *error = "Invalid SDK display-list layer depth.";
+            return false;
+        }
+        // Push stores the PREVIOUS current layer at saved[oldDepth], then
+        // selects its argument. saved[0] is the root, not an active push.
+        // Rebuild instead of counting hooks: iosResetDC's generated tail pop
+        // calls its original C++ function directly, bypassing popLayerHook.
+        g_layers.resize(depth);
+        for (uint32_t i = 0; i + 1u < depth; ++i)
+            g_layers[i] = read(0x00213308u + (i + 1u) * 4u);
+        if (depth) g_layers.back() = read(0x002132F4u);
+        return true;
+    }
+    uint32_t currentLayer(uint32_t fallback)
+    {
+        syncLayersFromSdk(g_ram);
+        return g_layers.empty() ? fallback : g_layers.back();
+    }
     constexpr uint32_t kScreenCopy = 1u; // a 2D "header" for 0x10f37c8's screen copy
     constexpr uint32_t kPreviousFrame = 2u; // and for feedbackBlur's display buffer (the last frame shown)
     uint32_t g_requested = 0;       // NTO2 header of the last texTransRequest
@@ -2056,7 +2089,7 @@ namespace sotc_native
     void feed2D(uint32_t reg, uint64_t value)
     {
         Assembler &a = g_2d;
-        a.layer = g_layers.empty() ? 25u : g_layers.back();
+        a.layer = currentLayer(25u);
         a.header = g_requested;
         switch (reg)
         {
@@ -2302,7 +2335,7 @@ namespace sotc_native
             if (log)
             {
                 static std::set<uint64_t> seen;
-                const uint32_t layer = g_layers.empty() ? 25u : g_layers.back();
+                const uint32_t layer = currentLayer(25u);
                 if (seen.insert((static_cast<uint64_t>(GPR_U32(ctx, 31)) << 8) | layer).second)
                     std::fprintf(stderr, "[gl] ra %08x layer %u qwords %u\n", GPR_U32(ctx, 31), layer, (end - start) / 16u - 2u);
             }
@@ -2327,7 +2360,7 @@ namespace sotc_native
         {
             static std::set<std::pair<uint32_t, uint64_t>> seen;
             if (seen.insert({ra, GPR_U64(ctx, 5)}).second && seen.size() < 300)
-                std::fprintf(stderr, "[gsreg-log] ra %08x layer %u value %016llx\n", ra, g_layers.empty() ? 99u : g_layers.back(),
+                std::fprintf(stderr, "[gsreg-log] ra %08x layer %u value %016llx\n", ra, currentLayer(99u),
                              static_cast<unsigned long long>(GPR_U64(ctx, 5)));
         }
         if (ra >= 0x0109E2A0u && ra < 0x0109FB08u)
@@ -2383,6 +2416,14 @@ namespace sotc_native
 
     void pushLayerHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        // callGuest sets pc to the entry on a fresh call. A continuation has
+        // already consumed the entry arguments and must only run the original.
+        if (ctx->pc != kPushLayer)
+        {
+            g_pushLayer(rdram, ctx, runtime);
+            syncLayersFromSdk(rdram);
+            return;
+        }
         // SOTC_LOG_LAYER=<n> (debugging): who pushes display list layer n (caller, count).
         static const int logLayer = std::getenv("SOTC_LOG_LAYER") ? std::atoi(std::getenv("SOTC_LOG_LAYER")) : -1;
         if (logLayer >= 0 && GPR_U32(ctx, 4) == static_cast<uint32_t>(logLayer))
@@ -2425,15 +2466,14 @@ namespace sotc_native
             const float none = 0.0f;
             std::memcpy(rdram + 0x118629Cu, &none, 4);
         }
-        g_layers.push_back(GPR_U32(ctx, 4));
         g_pushLayer(rdram, ctx, runtime);
+        syncLayersFromSdk(rdram);
     }
 
     void popLayerHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        if (!g_layers.empty())
-            g_layers.pop_back();
         g_popLayer(rdram, ctx, runtime);
+        syncLayersFromSdk(rdram);
     }
 
     // ---- Cloth and hair: meshDisp -------------------------------------------
@@ -2457,7 +2497,7 @@ namespace sotc_native
         syncFrame(rdram);
         const uint32_t object = GPR_U32(ctx, 4);
         const uint32_t header = g_requested;
-        const uint32_t layer = g_layers.empty() ? 2u : g_layers.back();
+        const uint32_t layer = currentLayer(2u);
         g_meshDisp(rdram, ctx, runtime);
         HookTimer hookTimer;
         if (!g_cameraContext || g_ram[(object + 8u) & 0x1FFFFFFu] != '#')
@@ -2780,7 +2820,7 @@ namespace sotc_native
     {
         syncFrame(rdram);
         const uint32_t a = GPR_U32(ctx, 4), count = GPR_U32(ctx, 5);
-        const uint32_t header = g_requested, layer = g_layers.empty() ? 18u : g_layers.back();
+        const uint32_t header = g_requested, layer = currentLayer(18u);
         g_ptclVtx(rdram, ctx, runtime);
         HookTimer hookTimer;
         const bool off = !native_renderer::tuning().particles;
@@ -4055,6 +4095,7 @@ namespace sotc_native {
     }
     bool captureNativeState(PS2Runtime &, std::vector<uint8_t> &out, std::string &error) {
         if (!g_ram) { error="The native scene is not ready yet."; return false; }
+        if (!syncLayersFromSdk(g_ram, &error)) return false;
         // Boss mask is a derived texture; rebuild it from restored guest data.
         NativeState s; s.counter=ps2_stats::vif1Chains.load(); s.camera=g_cameraContext; s.frame=g_frame; s.frameDraws=g_frameDraws; s.modelDraws=g_modelDraws;
         s.skinnedDraws=g_skinnedDraws; s.bloom=g_bloomRan; s.requested=g_requested; s.haveLights=g_haveViewLights;
