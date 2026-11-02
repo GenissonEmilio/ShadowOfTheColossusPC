@@ -16,6 +16,9 @@
 #include <chrono>
 #include <iostream>
 #include <stdexcept>
+#include <bit>
+#include <set>
+#include <type_traits>
 
 namespace
 {
@@ -197,6 +200,11 @@ void EeScheduler::run()
 
     while (!m_stopRequested.load(std::memory_order_relaxed))
     {
+        if (m_stateRequestPending.exchange(false, std::memory_order_acq_rel))
+        {
+            m_stateOperationClockAnchor = std::chrono::steady_clock::now();
+            m_runtime.processStateRequest();
+        }
         processPendingEvents();
         if (m_stopRequested.load(std::memory_order_relaxed))
         {
@@ -402,6 +410,35 @@ void EeScheduler::requestStop()
     m_stopRequested.store(true, std::memory_order_release);
     m_checkpointPending.store(true, std::memory_order_release);
     m_eventCv.notify_all();
+}
+
+void EeScheduler::notifyStateRequest()
+{
+    // The mutex pairs with CV waiters, preventing a request between their
+    // predicate check and sleep from being lost.
+    {
+        std::lock_guard lock(m_eventMutex);
+        m_stateRequestPending.store(true, std::memory_order_release);
+        m_checkpointPending.store(true, std::memory_order_release);
+    }
+    m_eventCv.notify_all();
+}
+
+void EeScheduler::rebaseHostClockAfterStateOperation()
+{
+    assertExecutor();
+    assert(!m_guestExecuting.load(std::memory_order_relaxed));
+    const auto now = std::chrono::steady_clock::now();
+    if (m_stateOperationClockAnchor == std::chrono::steady_clock::time_point{})
+        return;
+    const auto paused = now - m_stateOperationClockAnchor;
+    {
+        std::lock_guard lock(m_eventMutex);
+        m_hostClockBase += paused;
+        for (auto &deadline : m_deadlines)
+            deadline.hostDeadline += paused;
+    }
+    m_stateOperationClockAnchor = {};
 }
 
 void EeScheduler::postEvent(EeEvent event)
@@ -1956,7 +1993,7 @@ void EeScheduler::processPendingEvents()
         std::lock_guard lock(m_eventMutex);
         const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
         const bool cycleEventDue = nextEventCycle != 0u && m_eeCycle >= nextEventCycle;
-        const bool pendingWork = !m_events.empty() || cycleEventDue || m_stopRequested.load(std::memory_order_acquire);
+        const bool pendingWork = m_stateRequestPending.load(std::memory_order_acquire) || !m_events.empty() || cycleEventDue || m_stopRequested.load(std::memory_order_acquire);
         m_checkpointPending.store(pendingWork, std::memory_order_release);
     }
     applyPendingPreemption();
@@ -1993,9 +2030,9 @@ void EeScheduler::processDueDeadlines()
             {
                 ps2_load::Wait pacing;
                 m_eventCv.wait_until(lock, pacingDeadline, [this]()
-                                     { return !m_events.empty() ||
+                                     { return m_stateRequestPending.load(std::memory_order_acquire) || !m_events.empty() ||
                                               m_stopRequested.load(std::memory_order_acquire); });
-                if (!m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
+                if (m_stateRequestPending.load(std::memory_order_acquire) || !m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
                 {
                     updateNextDeadline();
                     return;
@@ -2196,7 +2233,7 @@ void EeScheduler::waitForEvent()
 {
     m_profileContext.store(nullptr, std::memory_order_relaxed);
     std::unique_lock lock(m_eventMutex);
-    if (!m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
+    if (m_stateRequestPending.load(std::memory_order_acquire) || !m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
     {
         return;
     }
@@ -2206,7 +2243,7 @@ void EeScheduler::waitForEvent()
     {
         ps2_load::Wait idle;
         m_eventCv.wait(lock, [this]()
-                       { return !m_events.empty() || m_stopRequested.load(std::memory_order_acquire); });
+                       { return m_stateRequestPending.load(std::memory_order_acquire) || !m_events.empty() || m_stopRequested.load(std::memory_order_acquire); });
         return;
     }
 
@@ -2240,7 +2277,7 @@ void EeScheduler::waitForEvent()
     {
         ps2_load::Wait idle;
         return m_eventCv.wait_until(lock, hostDeadline, [this]()
-                                    { return !m_events.empty() ||
+                                    { return m_stateRequestPending.load(std::memory_order_acquire) || !m_events.empty() ||
                                              m_stopRequested.load(std::memory_order_acquire); });
     }();
     if (!signaled)
@@ -2345,7 +2382,7 @@ void EeScheduler::idleWait()
             return;
     {
         std::unique_lock lock(m_eventMutex);
-        if (!m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
+        if (m_stateRequestPending.load(std::memory_order_acquire) || !m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
             return;
         // A deadline due by cycles is processed first. Host deadlines can lag
         // real time after a slow stretch (each VBlank is scheduled from the
@@ -2362,7 +2399,7 @@ void EeScheduler::idleWait()
         ps2_load::Wait idle;
         const R5900Context *running = m_profileContext.exchange(nullptr, std::memory_order_relaxed);
         m_eventCv.wait_until(lock, until, [this]()
-                             { return !m_events.empty() || m_stopRequested.load(std::memory_order_acquire); });
+                             { return m_stateRequestPending.load(std::memory_order_acquire) || !m_events.empty() || m_stopRequested.load(std::memory_order_acquire); });
         m_profileContext.store(running, std::memory_order_relaxed);
     }
     syncCyclesToHostClock();
@@ -2426,3 +2463,5 @@ void EeScheduler::publishIdleDebugContext()
         publishDebugContext(selected->activeContext());
     }
 }
+
+#include "EeSchedulerState.inc"

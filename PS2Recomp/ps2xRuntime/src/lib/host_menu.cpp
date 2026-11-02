@@ -1,6 +1,7 @@
 #include "runtime/host_menu.h"
 #include "runtime/native_tuning.h"
 #include "runtime/ps2_pad.h"
+#include "runtime/state_manager.h"
 
 #include "raylib.h"
 
@@ -27,8 +28,12 @@ namespace
     bool g_quitArmed = false; // "Quit game" needs a second Cross
     std::atomic<bool> g_holdBlock{false}; // a button pressed in the menu is still held
     int g_tab = 0, g_item = 0;
-    Rectangle g_tabRects[7]{};
+    Rectangle g_tabRects[8]{};
     std::vector<std::pair<Rectangle, int>> g_rowRects;
+    bool g_stateConfirm = false, g_stateConfirmYes = false;
+    int g_stateConfirmItem = 0;
+    Rectangle g_stateConfirmRects[2]{}; // cancel, confirm
+    std::string g_stateMessage;
     double g_lastSelect = -1.0;
 
 #if defined(PLATFORM_VITA)
@@ -76,6 +81,24 @@ namespace
             {"Sound", "Som"},
             {"System", "Sistema"},
             {"About", "Sobre"},
+            {"States", "Estados"},
+            {"Quick state", "Estado rápido"},
+            {"Empty", "Vazio"},
+            {"Save", "Salvar"},
+            {"Load", "Carregar"},
+            {"Delete", "Excluir"},
+            {"Cancel", "Cancelar"},
+            {"Confirm", "Confirmar"},
+            {"Overwrite this state?", "Substituir este estado?"},
+            {"Load this state?", "Carregar este estado?"},
+            {"Delete this state?", "Excluir este estado?"},
+            {"The selected state is empty.", "O estado selecionado está vazio."},
+            {"Please wait for the current operation.", "Aguarde a operação atual terminar."},
+            {"Loading replaces the current game position and progress. Your memory-card file is preserved.",
+             "Carregar substitui a posição e o progresso atuais do jogo. O arquivo do cartão de memória é preservado."},
+            {"This replaces the selected state with the current game session.",
+             "Isto substitui o estado selecionado pela sessão atual do jogo."},
+            {"This removes only the selected state file.", "Isto remove apenas o arquivo do estado selecionado."},
             {"Renderer", "Gráficos"},
             {"Quality", "Qualidade"},
             {"Debug", "Depuração"},
@@ -166,7 +189,7 @@ namespace
     // (the same list as the Mac's F10 panel), each with a last "Defaults" row:
     // Quality the preset, resolution, filtering...; Debug what to draw at
     // all, the layers; Renderer the rest.
-    constexpr int kQualityTab = 1, kRendererTab = 2, kDebugTab = 3;
+    constexpr int kQualityTab = 1, kRendererTab = 2, kDebugTab = 3, kStatesTab = 6;
     const Tab kTabs[] = {
         {"Video", kVideoItems, 3},
         {"Quality", nullptr, -1},
@@ -174,9 +197,10 @@ namespace
         {"Debug", nullptr, -1},
         {"Sound", kSoundItems, 1},
         {"System", kSystemItems, 2},
+        {"States", nullptr, -1},
         {"About", nullptr, 0},
     };
-    constexpr int kTabCount = 7;
+    constexpr int kTabCount = 8;
     int g_tabNow = 0; // the tab the renderer helpers below list
 
     // The list's items of a tuning tab.
@@ -196,7 +220,40 @@ namespace
 
     int itemCount(int tab)
     {
+        if (tab == kStatesTab)
+            return savestates::SlotCount * 3;
         return isTuningTab(tab) ? static_cast<int>(tuningRows(tab).size()) + 1 : kTabs[tab].count;
+    }
+
+    void stateAction(int item, bool confirmed = false)
+    {
+        if (savestates::busy())
+        {
+            // Keep the manager's live progress/result visible after this
+            // operation completes instead of pinning a stale local warning.
+            g_stateMessage.clear();
+            return;
+        }
+        const int slot = item / 3, operation = item % 3;
+        if (slot < 0 || slot >= savestates::SlotCount)
+            return;
+        const auto slots = savestates::slots();
+        if (operation != 0 && !slots[slot].exists)
+        {
+            g_stateMessage = T("The selected state is empty.");
+            return;
+        }
+        if (!confirmed && (operation != 0 || slots[slot].exists))
+        {
+            g_stateConfirm = true;
+            g_stateConfirmYes = false;
+            g_stateConfirmItem = item;
+            return;
+        }
+        g_stateMessage.clear();
+        const savestates::Action action = operation == 0 ? savestates::Action::Save :
+                                          operation == 1 ? savestates::Action::Load : savestates::Action::Delete;
+        savestates::request(action, slot);
     }
 
     // Row i of the current tuning tab -> the list's item (or -1: the reset row).
@@ -374,6 +431,7 @@ namespace
         g_open = false;
         g_help = false;
         g_quitArmed = false;
+        g_stateConfirm = false;
         g_holdBlock = true; // until the closing button is released
     }
 
@@ -415,6 +473,108 @@ namespace
         if (!line.empty())
             flush();
         return lines;
+    }
+
+    void drawStates(int boxX, int boxY, int boxW, int boxH, int listY, int size, int small)
+    {
+        const int pad = size;
+        const Color text{225, 228, 230, 255}, dim{150, 156, 162, 255}, accent{232, 196, 120, 255};
+        if (g_help)
+        {
+            DrawText(T("States"), boxX + pad, listY, size, accent);
+            const char *help = portuguese()
+                ? "Estados retomam a sessão exatamente no ponto salvo e são compatíveis com a mesma versão do núcleo e do jogo. F5 salva no espaço rápido; F8 carrega esse espaço diretamente. Use os cinco espaços manuais para manter outros pontos. Carregar pelo menu, substituir e excluir pedem confirmação. O cartão de memória continua separado: se ele mudar, estados anteriores podem deixar de ser compatíveis."
+                : "States resume the session at its saved position and require the same core and game version. F5 saves the quick slot; F8 loads it directly. Keep other positions in the five manual slots. Menu loads, overwrites and deletions require confirmation. The memory card stays separate: changing it can make an older state incompatible.";
+            drawWrapped(help, boxX + pad, listY + size * 2, boxW - 2 * pad, small, text, small / 3);
+            DrawText(T("Triangle / O: back"), boxX + pad, boxY + boxH - size * 3 / 2, small, dim);
+            return;
+        }
+        const auto slots = savestates::slots();
+        const bool working = savestates::busy();
+        const int statusY = boxY + boxH - size * 9 / 2;
+        const int rowH = std::max(1, (statusY - size / 2 - listY) / savestates::SlotCount);
+        const int labelSize = std::min(small, std::max(10, rowH * 9 / 20));
+        const int metaSize = std::max(10, std::min(size / 2, rowH / 3));
+        const int infoW = (boxW - 2 * pad) * 43 / 100;
+        const int gap = std::max(3, size / 3);
+        const int buttonW = (boxW - 2 * pad - infoW - gap * 3) / 3;
+        for (int slot = 0; slot < savestates::SlotCount; ++slot)
+        {
+            const int y = listY + slot * rowH;
+            if (g_item / 3 == slot)
+                DrawRectangle(boxX + pad / 2, y, boxW - pad, rowH - 1, Color{255, 255, 255, 16});
+            const std::string name = slot == 0 ? T("Quick state") : std::string("Slot ") + std::to_string(slot);
+            DrawText(name.c_str(), boxX + pad, y + 2, labelSize, g_item / 3 == slot ? text : dim);
+            std::string metadata = T("Empty");
+            if (slots[slot].exists)
+            {
+                char bytes[32];
+                std::snprintf(bytes, sizeof(bytes), "  %.1f MiB", static_cast<double>(slots[slot].bytes) / (1024.0 * 1024.0));
+                metadata = slots[slot].modified + bytes;
+            }
+            int metadataSize = metaSize;
+            while (metadataSize > 8 && MeasureText(metadata.c_str(), metadataSize) > infoW - gap)
+                --metadataSize;
+            DrawText(metadata.c_str(), boxX + pad, y + labelSize + 3, metadataSize, dim);
+            for (int operation = 0; operation < 3; ++operation)
+            {
+                const int item = slot * 3 + operation;
+                const int x = boxX + pad + infoW + gap + operation * (buttonW + gap);
+                const bool enabled = !working && (operation == 0 || slots[slot].exists);
+                const Rectangle rectangle{float(x), float(y + 2), float(buttonW), float(std::max(1, rowH - 5))};
+                g_rowRects.push_back({rectangle, item});
+                DrawRectangle(x, y + 2, buttonW, std::max(1, rowH - 5),
+                              g_item == item ? Color{232, 196, 120, 45} : Color{255, 255, 255, 9});
+                const char *label = T(operation == 0 ? "Save" : operation == 1 ? "Load" : "Delete");
+                int font = small;
+                while (font > 8 && MeasureText(label, font) > buttonW - gap)
+                    --font;
+                DrawText(label, x + (buttonW - MeasureText(label, font)) / 2, y + (rowH - font) / 2,
+                         font, enabled ? (g_item == item ? accent : text) : Color{91, 96, 104, 255});
+            }
+        }
+        DrawRectangle(boxX + pad, statusY - size / 3, boxW - 2 * pad, 1, Color{70, 80, 90, 255});
+        const std::string status = g_stateMessage.empty() ? savestates::status() : g_stateMessage;
+        const char *idle = portuguese() ? "F5: salvar rápido   F8: carregar rápido" : "F5: quick save   F8: quick load";
+        int statusSize = small;
+        const char *message = status.empty() ? idle : status.c_str();
+        while (statusSize > 10 && drawWrapped(message, 0, 0, boxW - 2 * pad, statusSize, dim, statusSize / 4, false) *
+               (statusSize + statusSize / 4) > size * 3)
+            --statusSize;
+        drawWrapped(message, boxX + pad, statusY, boxW - 2 * pad, statusSize, working ? accent : dim, statusSize / 4);
+        const char *hint = portuguese() ? "Q/E: abas  Setas: espaço/ação  Enter/clique: escolher  H: ajuda  F1: fechar"
+                                       : "Q/E: tabs  Arrows: slot/action  Enter/click: select  H: help  F1: close";
+        int hintSize = small;
+        while (hintSize > 8 && MeasureText(hint, hintSize) > boxW - 2 * pad) --hintSize;
+        DrawText(hint, boxX + pad, boxY + boxH - size, hintSize, dim);
+
+        if (g_stateConfirm)
+        {
+            DrawRectangle(boxX, boxY, boxW, boxH, Color{0, 0, 0, 205});
+            const int width = boxW - 4 * pad, height = std::min(boxH - 2 * pad, size * 9);
+            const int x = boxX + 2 * pad, y = boxY + (boxH - height) / 2;
+            DrawRectangle(x, y, width, height, Color{20, 24, 30, 255});
+            DrawRectangle(x, y, width, 2, accent);
+            const int operation = g_stateConfirmItem % 3;
+            const char *title = T(operation == 0 ? "Overwrite this state?" : operation == 1 ? "Load this state?" : "Delete this state?");
+            drawWrapped(title, x + pad, y + pad, width - 2 * pad, small, accent, small / 4);
+            const char *explanation = T(operation == 0 ? "This replaces the selected state with the current game session." :
+                                        operation == 1 ? "Loading replaces the current game position and progress. Your memory-card file is preserved." :
+                                                         "This removes only the selected state file.");
+            drawWrapped(explanation, x + pad, y + size * 5 / 2, width - 2 * pad, small, text, small / 4);
+            for (int choice = 0; choice < 2; ++choice)
+            {
+                const int buttonX = x + pad + choice * (width / 2 - pad / 2);
+                const int buttonWidth = width / 2 - pad * 3 / 2;
+                const int buttonY = y + height - size * 2;
+                g_stateConfirmRects[choice] = Rectangle{float(buttonX), float(buttonY), float(buttonWidth), float(size * 3 / 2)};
+                const bool selected = g_stateConfirmYes == (choice == 1);
+                DrawRectangle(buttonX, buttonY, buttonWidth, size * 3 / 2,
+                              selected ? Color{232, 196, 120, 45} : Color{255, 255, 255, 12});
+                const char *label = T(choice == 0 ? "Cancel" : "Confirm");
+                DrawText(label, buttonX + (buttonWidth - MeasureText(label, small)) / 2, buttonY + size / 4, small, selected ? accent : text);
+            }
+        }
     }
 }
 
@@ -482,6 +642,36 @@ void update()
         close();
         return;
     }
+    if (g_stateConfirm)
+    {
+        if (pressed(kCircle) || pressed(kTriangle))
+        {
+            g_stateConfirm = false;
+            return;
+        }
+        bool activate = pressed(kCross);
+        if (pressed(kLeft) || pressed(kRight) || pressed(kUp) || pressed(kDown))
+            g_stateConfirmYes = !g_stateConfirmYes;
+#if defined(__linux__) && !defined(__ANDROID__)
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+        {
+            const Vector2 pointer = GetMousePosition();
+            for (int choice = 0; choice < 2; ++choice)
+                if (CheckCollisionPointRec(pointer, g_stateConfirmRects[choice]))
+                {
+                    g_stateConfirmYes = choice == 1;
+                    activate = true;
+                }
+        }
+#endif
+        if (activate)
+        {
+            g_stateConfirm = false;
+            if (g_stateConfirmYes)
+                stateAction(g_stateConfirmItem, true);
+        }
+        return;
+    }
     if (g_help)
     {
         if (pressed(kTriangle) || pressed(kCircle))
@@ -524,6 +714,21 @@ void update()
     const int count = itemCount(g_tab);
     if (count == 0)
         return;
+    if (g_tab == kStatesTab)
+    {
+        if (pressed(kUp) || pressed(kDown))
+        {
+            const int slot = (g_item / 3 + (pressed(kDown) ? 1 : savestates::SlotCount - 1)) % savestates::SlotCount;
+            g_item = slot * 3 + g_item % 3;
+        }
+        if (pressed(kLeft) || pressed(kRight))
+            g_item = (g_item / 3) * 3 + (g_item % 3 + (pressed(kRight) ? 1 : 2)) % 3;
+        if (mouseActivate || pressed(kCross))
+            stateAction(g_item);
+        if (pressed(kTriangle))
+            g_help = true;
+        return;
+    }
     if (pressed(kUp) || pressed(kDown))
     {
         g_item = (g_item + (pressed(kDown) ? 1 : count - 1)) % count;
@@ -576,7 +781,7 @@ void draw(int screenWidth, int screenHeight)
     g_rowRects.clear();
     // Tabs (smaller when they do not fit the box)
     int tabX = boxX + pad;
-    const int tabY = boxY + pad * 2;
+    int tabY = boxY + pad * 2;
     int tabSize = size, tabGap = size * 3 / 2;
     {
         int total = 0;
@@ -596,6 +801,13 @@ void draw(int screenWidth, int screenHeight)
     {
         const char *label = T(kTabs[i].label);
         const int w = MeasureText(label, tabSize);
+        // The additional States tab must not push controls outside the menu
+        // at smaller window sizes or with longer Portuguese labels.
+        if (tabX > boxX + pad && tabX + w + size / 3 > boxX + boxW - pad)
+        {
+            tabX = boxX + pad;
+            tabY += size * 7 / 4;
+        }
         g_tabRects[i] = Rectangle{float(tabX - size/3), float(tabY - size/4), float(w + size*2/3), float(size*3/2)};
         if (i == g_tab)
             DrawRectangle(tabX - size / 3, tabY + size + size / 4, w + size * 2 / 3, 2, accent);
@@ -609,6 +821,11 @@ void draw(int screenWidth, int screenHeight)
     const int helpY = boxY + boxH - size * 5;
     const bool renderer = isTuningTab(g_tab);
     g_tabNow = g_tab;
+    if (g_tab == kStatesTab)
+    {
+        drawStates(boxX, boxY, boxW, boxH, listY, size, small);
+        return;
+    }
     if (g_help && itemCount(g_tab) > 0)
     {
         DrawText(renderer ? rendererLabel(g_item) : T(tab.items[g_item].label), boxX + pad, listY, size, accent);

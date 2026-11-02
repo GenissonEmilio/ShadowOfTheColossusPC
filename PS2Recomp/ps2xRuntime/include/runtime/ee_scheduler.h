@@ -277,6 +277,18 @@ public:
     void reset(uint8_t *rdram, const R5900Context &mainContext);
     void run();
     void requestStop();
+    // Host requests wake the executor; the runtime handles them only at the
+    // dispatcher boundary, never with a live recompiled/native call stack.
+    void notifyStateRequest();
+    // Called by the runtime's state-operation scope on every exit (success or
+    // failure). Excludes host IO/compression time from clock sync and pacing.
+    void rebaseHostClockAfterStateOperation();
+    // The coordinator must quiesce external producers and call these on the
+    // executor outside guest execution. No host pointers/functions are stored.
+    // Unsupported completion closures fail explicitly instead of being lost.
+    [[nodiscard]] bool captureState(std::vector<uint8_t> &bytes, std::string &error) const;
+    [[nodiscard]] bool validateState(const std::vector<uint8_t> &bytes, std::string &error) const;
+    [[nodiscard]] bool restoreState(const std::vector<uint8_t> &bytes, std::string &error);
     void postEvent(EeEvent event);
     [[nodiscard]] bool checkpointDue(uint32_t cycles = kGeneratedCheckpointCycles) noexcept;
     // The part of a checkpoint past the clock's gate (see EeClock).
@@ -389,6 +401,9 @@ public:
     void publishSnapshot();
 
 private:
+    struct SavedState;
+    [[nodiscard]] bool stateAccessAllowed(std::string &error) const;
+    [[nodiscard]] bool decodeState(const std::vector<uint8_t> &bytes, SavedState &state, std::string &error) const;
     struct ScheduledEvent
     {
         uint64_t deadlineCycle = 0;
@@ -468,12 +483,14 @@ private:
     uint64_t m_accountedCycle = 0; // the EE timers and the IOP have seen the cycles up to here
     bool m_gateEnabled = true;     // PS2X_EE_GATE=0: every checkpoint goes through the scheduler
     std::chrono::steady_clock::time_point m_hostClockBase{};
+    std::chrono::steady_clock::time_point m_stateOperationClockAnchor{};
     bool m_hostClockSync = false;
     uint64_t m_sliceEndCycle = kDefaultTimeSliceCycles;
     std::thread::id m_executorThread{};
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_guestExecuting{false};
     std::atomic<bool> m_stopRequested{false};
+    std::atomic<bool> m_stateRequestPending{false}; // host coordination, not guest state
     std::atomic<bool> &m_checkpointPending;
     uint32_t m_debugPublishCountdown = 0u;
 
