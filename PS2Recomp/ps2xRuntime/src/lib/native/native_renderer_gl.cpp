@@ -12,6 +12,7 @@
 // and stencil (nothing to attach); no depth textures, so the passes that read
 // depth (bloom mask, depth of field) are left out there for now.
 #include "native_backend.h"
+#include "native_history_state.h"
 #include "runtime/native_tuning.h"
 
 #if defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__)) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
@@ -1249,6 +1250,121 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             bloomHistory = false;
             width = w;
             height = h;
+        }
+
+        bool captureHistory(std::vector<uint8_t> &out, std::string &error)
+        {
+#if defined(__linux__) && !defined(__ANDROID__)
+            native_renderer::detail::HistoryState state;
+            state.width = width; state.height = height;
+            state.bloom = bloomHistory; state.gsBloom = gsBloomHistory;
+            if (!width || !height || native_renderer::detail::historyStateBytes(width, height, bloomHistory, gsBloomHistory) >
+                                     native_renderer::detail::HistoryStateLimit - 64u)
+            { error = "Native temporal histories are not ready or exceed the 32 MiB state budget."; return false; }
+            // Called only by GlBackend's synchronous RenderThread command.
+            // Save all transfer state, including PBOs: a pointer must mean a
+            // CPU address here even if the preceding render used a PBO.
+            GLint framebuffer = 0, readBuffer = 0, alignment = 0, rowLength = 0, skipRows = 0, skipPixels = 0, buffer = 0;
+            glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &framebuffer); glGetIntegerv(GL_READ_BUFFER, &readBuffer);
+            glGetIntegerv(GL_PACK_ALIGNMENT, &alignment); glGetIntegerv(GL_PACK_ROW_LENGTH, &rowLength);
+            glGetIntegerv(GL_PACK_SKIP_ROWS, &skipRows); glGetIntegerv(GL_PACK_SKIP_PIXELS, &skipPixels);
+            glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &buffer);
+            struct RestoreReadState {
+                GLint framebuffer, readBuffer, alignment, rowLength, skipRows, skipPixels, buffer;
+                ~RestoreReadState() {
+                    glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer); glReadBuffer(readBuffer);
+                    glPixelStorei(GL_PACK_ALIGNMENT, alignment); glPixelStorei(GL_PACK_ROW_LENGTH, rowLength);
+                    glPixelStorei(GL_PACK_SKIP_ROWS, skipRows); glPixelStorei(GL_PACK_SKIP_PIXELS, skipPixels);
+                    glBindBuffer(GL_PIXEL_PACK_BUFFER, buffer);
+                }
+            } restore{framebuffer, readBuffer, alignment, rowLength, skipRows, skipPixels, buffer};
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+            glPixelStorei(GL_PACK_ALIGNMENT, 1); glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+            glPixelStorei(GL_PACK_SKIP_ROWS, 0); glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+            for (int i = 0; i < 16 && glGetError() != GL_NO_ERROR; ++i) {}
+            glFinish();
+            auto read = [&](const Target &target, uint32_t w, uint32_t h, std::vector<uint8_t> &pixels) {
+                if (!target.fbo || target.width != w || target.height != h) {
+                    error = "Native temporal target dimensions do not match."; return false;
+                }
+                pixels.resize(size_t(w) * h * 4u);
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, target.fbo); glReadBuffer(GL_COLOR_ATTACHMENT0);
+                if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+                    error = "Native temporal framebuffer is incomplete."; return false;
+                }
+                glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+                if (glGetError() != GL_NO_ERROR) { error = "Native temporal history readback failed."; return false; }
+                return true;
+            };
+            if (!read(previous, width, height, state.previous) ||
+                (bloomHistory && !read(bloomTex[2], std::max(width / 4u, 1u), std::max(height / 4u, 1u), state.bloomPixels)) ||
+                (gsBloomHistory && !read(gsBloom[4], 64, 64, state.gsBloomPixels))) return false;
+            ps2state::Writer writer(out, error, native_renderer::detail::HistoryStateLimit);
+            return native_renderer::detail::historyStateCodec(writer, state);
+#else
+            (void)out; error = "Temporal history snapshots currently require desktop Linux OpenGL."; return false;
+#endif
+        }
+
+        bool restoreHistory(const native_renderer::detail::HistoryState &state, std::string &error)
+        {
+#if defined(__linux__) && !defined(__ANDROID__)
+            GLint framebuffer = 0, readFramebuffer = 0, texture = 0, alignment = 0, rowLength = 0, skipRows = 0, skipPixels = 0, buffer = 0;
+            glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &framebuffer); glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFramebuffer);
+            glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture); glGetIntegerv(GL_UNPACK_ALIGNMENT, &alignment);
+            glGetIntegerv(GL_UNPACK_ROW_LENGTH, &rowLength); glGetIntegerv(GL_UNPACK_SKIP_ROWS, &skipRows);
+            glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &skipPixels); glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &buffer);
+            struct RestoreWriteState {
+                GLint framebuffer, readFramebuffer, texture, alignment, rowLength, skipRows, skipPixels, buffer;
+                ~RestoreWriteState() {
+                    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer); glBindFramebuffer(GL_READ_FRAMEBUFFER, readFramebuffer);
+                    glBindTexture(GL_TEXTURE_2D, texture); glPixelStorei(GL_UNPACK_ALIGNMENT, alignment);
+                    glPixelStorei(GL_UNPACK_ROW_LENGTH, rowLength); glPixelStorei(GL_UNPACK_SKIP_ROWS, skipRows);
+                    glPixelStorei(GL_UNPACK_SKIP_PIXELS, skipPixels); glBindBuffer(GL_PIXEL_UNPACK_BUFFER, buffer);
+                }
+            } restore{framebuffer, readFramebuffer, texture, alignment, rowLength, skipRows, skipPixels, buffer};
+            // Those bindings can name targets deleted by ensureTargets or
+            // by the history swap. The next render rebuilds its GL bindings.
+            restore.framebuffer = restore.readFramebuffer = restore.texture = 0;
+            Target staged[3]{};
+            struct DeleteTargets {
+                Target *targets;
+                ~DeleteTargets() { for (int i = 0; i < 3; ++i) {
+                    if (targets[i].fbo) glDeleteFramebuffers(1, &targets[i].fbo);
+                    if (targets[i].texture) glDeleteTextures(1, &targets[i].texture);
+                    if (targets[i].depth) glDeleteTextures(1, &targets[i].depth);
+                } }
+            } cleanup{staged};
+            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1); glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+            glPixelStorei(GL_UNPACK_SKIP_ROWS, 0); glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+            for (int i = 0; i < 16 && glGetError() != GL_NO_ERROR; ++i) {}
+            auto upload = [&](Target &target, uint32_t w, uint32_t h, const std::vector<uint8_t> &pixels) {
+                makeTarget(target, w, h, false);
+                if (!target.texture || !target.fbo || glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+                    error = "Cannot allocate native temporal history targets."; return false;
+                }
+                glBindTexture(GL_TEXTURE_2D, target.texture);
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+                if (glGetError() != GL_NO_ERROR) { error = "Native temporal history upload failed."; return false; }
+                return true;
+            };
+            // Validate and allocate every replacement before swapping any
+            // authoritative history. Object names are never read from disk.
+            if (!upload(staged[0], state.width, state.height, state.previous) ||
+                (state.bloom && !upload(staged[1], std::max(state.width / 4u, 1u), std::max(state.height / 4u, 1u), state.bloomPixels)) ||
+                (state.gsBloom && !upload(staged[2], 64, 64, state.gsBloomPixels))) return false;
+            ensureTargets(state.width, state.height);
+            if (glGetError() != GL_NO_ERROR) { error = "Cannot prepare native state dimensions."; return false; }
+            std::swap(previous, staged[0]);
+            if (state.bloom) std::swap(bloomTex[2], staged[1]);
+            if (state.gsBloom) std::swap(gsBloom[4], staged[2]);
+            bloomHistory = state.bloom; gsBloomHistory = state.gsBloom;
+            boundFbo = boundProgram = ~0u; cache = {};
+            return true;
+#else
+            (void)state; error = "Temporal history snapshots currently require desktop Linux OpenGL."; return false;
+#endif
         }
 
         // Blending as the Metal pipelines set it (alpha: source kept), or
@@ -2611,7 +2727,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             r->bloom = m_rec.bloom;
             r->glow = m_rec.glow;
             r->dof = m_rec.dof;
-            r->hold = m_rec.hold;
+            r->hold = m_rec.hold || m_skipStateFrame;
+            m_skipStateFrame = false;
             m_rec.hold = false;
             clearFrame();
             m_rec.uploads.clear();
@@ -2638,6 +2755,36 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 c.renderThread = threaded;
             }
         }
+        bool resetStateFrame() override
+        {
+            std::unique_lock<std::mutex> lock(m_mutex);
+            waitIdle(lock);
+            clearFrame(); m_rec.uploads.clear();
+            m_recUploadBytes = m_frameUploadBytes = 0;
+            m_knownMeshes = {}; m_knownTextures = {};
+            m_keepMeshes.clear(); m_keepTextures.clear();
+            m_skipStateFrame = true;
+            return true;
+        }
+        bool captureState(std::vector<uint8_t> &out, std::string &error) const override
+        {
+            return const_cast<GlBackend *>(this)->stateCommand([&] { return r->captureHistory(out, error); }, error);
+        }
+        bool validateState(const std::vector<uint8_t> &data, std::string &error) const override
+        {
+#if defined(__linux__) && !defined(__ANDROID__)
+            native_renderer::detail::HistoryState state;
+            return native_renderer::detail::decodeHistoryState(data, state, error);
+#else
+            (void)data; error = "Temporal history snapshots currently require desktop Linux OpenGL."; return false;
+#endif
+        }
+        bool restoreState(const std::vector<uint8_t> &data, std::string &error) override
+        {
+            native_renderer::detail::HistoryState state;
+            if (!validateState(data, error) || !native_renderer::detail::decodeHistoryState(data, state, error)) return false;
+            return stateCommand([&] { return r->restoreHistory(state, error); }, error);
+        }
         void finishFrames() override
         {
             std::unique_lock<std::mutex> lock(m_mutex);
@@ -2657,6 +2804,21 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         }
 
     private:
+        bool stateCommand(std::function<bool()> work, std::string &error)
+        {
+            std::unique_lock<std::mutex> lock(m_mutex);
+            waitIdle(lock);
+            if (!m_started || !m_initOk) { error = "Native RenderThread is unavailable."; return false; }
+            bool success = false;
+            m_stateCommand = [&] {
+                try { success = work(); }
+                catch (const std::exception &exception) { error = std::string("Native state operation failed: ") + exception.what(); }
+                catch (...) { error = "Native state operation failed."; }
+            };
+            m_work.notify_one();
+            waitIdle(lock);
+            return success;
+        }
         // vitaGL is one GL for every thread: the host and this take turns.
         struct Lock
         {
@@ -2977,8 +3139,20 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             for (;;)
             {
                 std::unique_lock<std::mutex> lock(m_mutex);
-                while (!m_queued && m_side.empty())
+                while (!m_queued && m_side.empty() && !m_stateCommand)
                     m_work.wait_for(lock, kRecheck);
+                if (m_stateCommand)
+                {
+                    auto operation = std::move(m_stateCommand);
+                    m_stateCommand = {};
+                    m_busy = true;
+                    lock.unlock();
+                    { Lock gl; operation(); }
+                    lock.lock();
+                    m_busy = false;
+                    m_idle.notify_all();
+                    continue;
+                }
                 // Flushed uploads first (they were asked for before this frame's).
                 if (!m_side.empty())
                 {
@@ -3059,10 +3233,12 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         static constexpr std::chrono::milliseconds kRecheck{2};
         void waitIdle(std::unique_lock<std::mutex> &lock)
         {
-            while (m_queued || m_busy)
+            while (m_queued || m_busy || !m_side.empty() || m_stateCommand)
                 m_idle.wait_for(lock, kRecheck);
         }
+        std::function<void()> m_stateCommand;
         bool m_started = false, m_initOk = false;
+        bool m_skipStateFrame = false;
         bool m_queued = false; // a frame handed over, not started yet
         bool m_busy = false;   // the render thread drawing
         bool m_uploadsOnly = false; // what is handed over is uploads alone (flushUploads, SOTC_GL_FLUSH_WAIT)

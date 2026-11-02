@@ -66,6 +66,13 @@ namespace native_renderer::detail
         // A backend that draws on a thread of its own: returns once every
         // frame handed over is drawn.
         virtual void finishFrames() {}
+        virtual bool resetStateFrame() { return false; }
+        virtual bool captureState(std::vector<uint8_t> &, std::string &error) const
+        { error = "This native backend cannot capture temporal histories."; return false; }
+        virtual bool validateState(const std::vector<uint8_t> &, std::string &error) const
+        { error = "This native backend cannot validate temporal histories."; return false; }
+        virtual bool restoreState(const std::vector<uint8_t> &, std::string &error)
+        { error = "This native backend cannot restore temporal histories."; return false; }
         // It fills the frame log's render / present times itself (else the
         // front times endFrame).
         virtual bool timesItself() { return false; }

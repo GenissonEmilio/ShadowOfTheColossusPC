@@ -846,6 +846,46 @@ namespace native_renderer
             ++frameCounters().asyncJobs;
         return true;
     }
+    bool stateBarrier(std::string &error)
+    {
+        // No new jobs can be submitted: the only producer is this executor.
+        auto &a = asyncBuilds();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!a.pending.empty()) {
+            a.takeUp();
+            if (std::chrono::steady_clock::now() >= deadline) { error = "Native resource builds are still busy. Try again."; return false; }
+            if (!a.pending.empty()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (g_backend) g_backend->finishFrames();
+        return true;
+    }
+    bool resetStateFrame(std::string &error)
+    {
+        if (!stateBarrier(error)) return false;
+        if (!g_backend || !g_backend->resetStateFrame()) { error = "This native renderer cannot restore states."; return false; }
+        frameCounters() = {};
+        return true;
+    }
+    bool captureState(std::vector<uint8_t> &out, std::string &error)
+    {
+        error.clear();
+        if (!stateBarrier(error)) return false;
+        if (!g_backend) { error = "The native renderer has not initialized."; return false; }
+        return g_backend->captureState(out, error);
+    }
+    bool validateState(const std::vector<uint8_t> &data, std::string &error)
+    {
+        error.clear();
+        if (!g_backend) { error = "The native renderer has not initialized."; return false; }
+        return g_backend->validateState(data, error);
+    }
+    bool restoreState(const std::vector<uint8_t> &data, std::string &error)
+    {
+        error.clear();
+        if (!stateBarrier(error)) return false;
+        if (!g_backend) { error = "The native renderer has not initialized."; return false; }
+        return g_backend->restoreState(data, error);
+    }
     bool asyncPending(uint64_t id)
     {
         const AsyncBuilds &a = asyncBuilds();

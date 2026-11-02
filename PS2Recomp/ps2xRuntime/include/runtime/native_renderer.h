@@ -194,6 +194,12 @@ namespace native_renderer
     // build) and a draw naming one of them, as its mesh or its texture, is
     // left out. False (nothing run) when the tuning is off: the caller
     // builds it itself.
+    // Executor-only: drain native jobs/frames before a machine-state operation.
+    bool stateBarrier(std::string &error);
+    bool resetStateFrame(std::string &error);
+    bool captureState(std::vector<uint8_t> &out, std::string &error);
+    bool validateState(const std::vector<uint8_t> &data, std::string &error);
+    bool restoreState(const std::vector<uint8_t> &data, std::string &error);
     bool buildAsync(std::vector<uint64_t> ids, std::function<void()> work, std::function<void()> finish);
 
     // Draws of one frame: `clip` (column-major) takes model space to clip
