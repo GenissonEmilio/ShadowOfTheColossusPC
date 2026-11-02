@@ -1,4 +1,5 @@
 #include "iop_memory.h"
+#include "ps2x/iop/save_state_archive.h"
 
 #include <algorithm>
 #include <cstring>
@@ -397,5 +398,95 @@ namespace ps2x::iop::detail
             result.push_back(ch);
         }
         return result;
+    }
+}
+
+namespace ps2x::iop::detail
+{
+    namespace
+    {
+        struct NativeMemoryChunk
+        {
+            std::vector<uint8_t> ram, owned, scratch;
+            std::unordered_map<uint32_t, uint32_t> hardware;
+            std::vector<IopMemory::Allocation> allocations;
+            uint32_t cursor = 0, status = 0, mask = 0, control = 0;
+        };
+
+        bool decodeNativeMemory(const std::vector<uint8_t> &data, NativeMemoryChunk &x, std::string &error)
+        {
+            ps2state::Reader r(data, error);
+            uint32_t magic = 0, version = 0, endian = 0, count = 0;
+            if (!r.pod(magic) || !r.pod(version) || !r.pod(endian) ||
+                magic != 0x314d4f49u || version != 1 || endian != 0x01020304u)
+                return r.fail("unsupported native IOP memory state");
+            if (!r.vector(x.ram, IopMemory::RamSize) || !r.vector(x.owned, IopMemory::RamSize) ||
+                !r.vector(x.scratch, IopMemory::ScratchSize) || !r.pod(count)) return false;
+            if (x.ram.size() != IopMemory::RamSize || x.owned.size() != IopMemory::RamSize ||
+                x.scratch.size() != IopMemory::ScratchSize || count > 65536)
+                return r.fail("invalid native IOP memory dimensions");
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                uint32_t address = 0, value = 0;
+                if (!r.pod(address) || !r.pod(value)) return false;
+                if ((address & 3u) || !x.hardware.emplace(address, value).second)
+                    return r.fail("invalid duplicate/unaligned IOP hardware register");
+            }
+            if (!r.vector(x.allocations, 65536) || !r.pod(x.cursor) || !r.pod(x.status) ||
+                !r.pod(x.mask) || !r.pod(x.control) || !r.finish()) return false;
+            if (x.cursor < IopMemory::HeapBase || x.cursor > IopMemory::HeapLimit || x.control > 1)
+                return r.fail("invalid native IOP allocator/interrupt state");
+            for (uint8_t owned : x.owned) if (owned > 1) return r.fail("invalid IOP ownership bit");
+            auto sorted = x.allocations;
+            std::sort(sorted.begin(), sorted.end(), [](auto a, auto b) { return a.address < b.address; });
+            uint32_t end = IopMemory::HeapBase;
+            for (const auto &block : sorted)
+            {
+                if (block.address < end || block.address > IopMemory::HeapLimit || !block.size ||
+                    block.size > IopMemory::HeapLimit - block.address || (block.size & 15u))
+                    return r.fail("invalid overlapping IOP allocation");
+                end = block.address + block.size;
+                for (uint32_t j = block.address; j < end; ++j)
+                    if (!x.owned[j]) return r.fail("unowned IOP allocation bytes");
+            }
+            return true;
+        }
+    }
+
+    bool IopMemory::captureState(std::vector<uint8_t> &out, std::string &error) const
+    {
+        error.clear();
+        if (m_dmaStart) { error = "native IOP snapshot requires no pending SPU2 DMA"; return false; }
+        ps2state::Writer w(out, error);
+        w.pod(uint32_t{0x314d4f49u}); w.pod(uint32_t{1}); w.pod(uint32_t{0x01020304u});
+        w.vector(m_ram, RamSize); w.vector(m_owned, RamSize); w.vector(m_scratch, ScratchSize);
+        std::vector<std::pair<uint32_t, uint32_t>> registers(m_hardware.begin(), m_hardware.end());
+        std::sort(registers.begin(), registers.end());
+        w.pod(static_cast<uint32_t>(registers.size()));
+        for (const auto &[address, value] : registers) { w.pod(address); w.pod(value); }
+        w.vector(m_allocations, 65536); w.pod(m_heapCursor); w.pod(m_interruptStatus);
+        w.pod(m_interruptMask); w.pod(m_interruptControl);
+        return w.finish();
+    }
+
+    bool IopMemory::validateState(const std::vector<uint8_t> &data, std::string &error) const
+    {
+        NativeMemoryChunk x;
+        return decodeNativeMemory(data, x, error);
+    }
+
+    bool IopMemory::restoreState(const std::vector<uint8_t> &data, std::string &error)
+    {
+        NativeMemoryChunk x;
+        if (!decodeNativeMemory(data, x, error)) return false;
+        if (m_dmaStart) { error = "native IOP restore requires no pending SPU2 DMA"; return false; }
+        // Keep existing storage addresses stable for any live bound views.
+        std::copy(x.ram.begin(), x.ram.end(), m_ram.begin());
+        std::copy(x.owned.begin(), x.owned.end(), m_owned.begin());
+        std::copy(x.scratch.begin(), x.scratch.end(), m_scratch.begin());
+        m_hardware.swap(x.hardware); m_allocations.swap(x.allocations);
+        m_heapCursor = x.cursor; m_interruptStatus = x.status;
+        m_interruptMask = x.mask; m_interruptControl = x.control;
+        return true;
     }
 }

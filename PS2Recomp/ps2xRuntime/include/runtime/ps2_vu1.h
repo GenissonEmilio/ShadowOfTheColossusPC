@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <vector>
+#include <string>
 
 class GS;
 class PS2Memory;
@@ -48,6 +49,9 @@ public:
     explicit VU1Interpreter(Unit unit = Unit::VU1);
 
     void reset();
+    bool captureState(std::vector<uint8_t> &out, std::string &error) const;
+    bool validateState(const std::vector<uint8_t> &data, std::string &error) const;
+    bool restoreState(const std::vector<uint8_t> &data, std::string &error);
 
     void execute(uint8_t *vuCode, uint32_t codeSize,
                  uint8_t *vuData, uint32_t dataSize,

@@ -1,4 +1,5 @@
 #include "ps2x/iop/iop_subsystem.h"
+#include "ps2x/iop/save_state_archive.h"
 
 #include "iop_service.h"
 #include "iop_module_manager.h"
@@ -346,5 +347,62 @@ namespace ps2x::iop
             snapshot.services.push_back(std::move(row));
         }
         return snapshot;
+    }
+}
+
+namespace ps2x::iop
+{
+    namespace
+    {
+        bool decodeNativeSubsystem(const std::vector<uint8_t> &data, std::vector<uint8_t> &modules,
+                                   std::vector<uint8_t> &emulator, std::string &error)
+        {
+            ps2state::Reader r(data, error);
+            uint32_t magic = 0, version = 0, endian = 0;
+            if (!r.pod(magic) || !r.pod(version) || !r.pod(endian) || magic != 0x31534f49u ||
+                version != 1 || endian != 0x01020304u) return r.fail("unsupported IOP subsystem state");
+            return r.vector(modules, 2u * 1024u * 1024u) &&
+                   r.vector(emulator, 48u * 1024u * 1024u) && r.finish();
+        }
+    }
+
+    bool IopSubsystem::captureState(std::vector<uint8_t> &out, std::string &error) const
+    {
+        error.clear();
+        if (!m_impl->native) { error = "IOP save states require native boot mode"; return false; }
+        std::vector<uint8_t> modules, emulator;
+        if (!m_impl->moduleManager.captureState(modules, error) || !m_impl->emulator.captureState(emulator, error)) return false;
+        ps2state::Writer w(out, error);
+        w.pod(uint32_t{0x31534f49u}); w.pod(uint32_t{1}); w.pod(uint32_t{0x01020304u});
+        w.vector(modules, 2u * 1024u * 1024u); w.vector(emulator, 48u * 1024u * 1024u);
+        return w.finish();
+    }
+
+    bool IopSubsystem::validateState(const std::vector<uint8_t> &data, std::string &error) const
+    {
+        error.clear();
+        if (!m_impl->native) { error = "IOP save states require native boot mode"; return false; }
+        std::vector<uint8_t> modules, emulator;
+        return decodeNativeSubsystem(data, modules, emulator, error) &&
+               m_impl->moduleManager.validateState(modules, error) && m_impl->emulator.validateState(emulator, error);
+    }
+
+    bool IopSubsystem::restoreState(const std::vector<uint8_t> &data, std::string &error)
+    {
+        error.clear();
+        if (!m_impl->native) { error = "IOP save states require native boot mode"; return false; }
+        std::vector<uint8_t> modules, emulator;
+        if (!decodeNativeSubsystem(data, modules, emulator, error) ||
+            !m_impl->moduleManager.validateState(modules, error) || !m_impl->emulator.validateState(emulator, error)) return false;
+        auto moduleManager = m_impl->moduleManager;
+        if (!moduleManager.restoreState(modules, error) || !m_impl->emulator.restoreState(emulator, error)) return false;
+        m_impl->moduleManager = std::move(moduleManager);
+        // Rebuild live service pointers from the current factories, not bytes
+        // from the state file. Card/filesystem host state is a separate chunk.
+        m_impl->rebuildRoutes();
+        m_impl->loggedDroppedRpcs.clear();
+        m_impl->loadOutcomes.clear(); m_impl->loggedLoadPaths.clear();
+        if (!m_impl->lastError.empty()) { error = m_impl->lastError; return false; }
+        return true;
     }
 }

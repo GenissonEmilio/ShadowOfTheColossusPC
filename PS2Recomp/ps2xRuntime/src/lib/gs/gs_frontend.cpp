@@ -2012,3 +2012,156 @@ void GS::updatePreferredDisplaySourceForDraw(const GSPrimitiveBatch &batch)
         m_hasPreferredDisplaySource = true;
     }
 }
+
+
+#include "runtime/save_state_archive.h"
+namespace
+{
+    bool gsNativeStateMode(std::string &error)
+    {
+        const char *native=std::getenv("SOTC_NATIVE"), *nodraw=std::getenv("PS2X_GS_NODRAW");
+        const char *hw=std::getenv("PS2X_GS_HW");
+        if (!native || std::atoi(native)!=1 || (nodraw && std::atoi(nodraw)==0) ||
+            (hw && std::atoi(hw)!=0)) {
+            error="GS save states currently require native rendering with CPU GS fallback"; return false;
+        }
+        return true;
+    }
+    struct GsStateChunk
+    {
+        GSContext ctx[2]{};
+        GSPrimReg prim{},primRegister{},prmodeRegister{};
+        uint8_t r=128,g=128,b=128,a=128,fog=0,fogR=0,fogG=0,fogB=0;
+        float q=1,s=0,t=0;
+        uint16_t u=0,v=0;
+        bool prmodecont=true,pabe=false;
+        uint64_t scanmsk=0,dimx=0,dthe=0,colclamp=0;
+        GSTexaReg texa{};
+        GSTexClutReg texclut{};
+        GSBitBltBuf bitbltbuf{};
+        GSTrxPos trxpos{};
+        GSTrxReg trxreg{};
+        uint32_t trxdir=3;
+        GSVertex vertices[6]{};
+        int count=0,index=0;
+        uint32_t lastDisplay=0,preferredDest=0;
+        GSFrameReg preferredFrame{};
+        bool hasPreferred=false;
+        uint64_t presentTick=0,imageUploads=0,packedPackets=0;
+        std::vector<uint8_t> vram;
+    };
+    template<class A> bool visitGsChunk(A &ar,GsStateChunk &x)
+    {
+        uint32_t magic=0x31535347u,version=1,endian=0x01020304u;
+        if (!ar.pod(magic)||!ar.pod(version)||!ar.pod(endian)||
+            magic!=0x31535347u||version!=1||endian!=0x01020304u) return ar.fail("incompatible GS state");
+        auto prim=[&](GSPrimReg &p) {
+            return ar.pod(p.type)&&ar.pod(p.iip)&&ar.pod(p.tme)&&ar.pod(p.fge)&&ar.pod(p.abe)&&
+                   ar.pod(p.aa1)&&ar.pod(p.fst)&&ar.pod(p.ctxt)&&ar.pod(p.fix)&&
+                   (p.type<=GS_PRIM_SPRITE||ar.fail("invalid GS primitive"));
+        };
+        for (auto &c : x.ctx) {
+            if (!ar.pod(c.frame)||!ar.pod(c.scissor)||!ar.pod(c.tex0)||!ar.pod(c.xyoffset)||
+                !ar.pod(c.zbuf.zbp)||!ar.pod(c.zbuf.psm)||!ar.pod(c.zbuf.zmask)||
+                !ar.pod(c.tex1)||!ar.pod(c.miptbp1)||!ar.pod(c.miptbp2)||!ar.pod(c.clamp)||
+                !ar.pod(c.alpha)||!ar.pod(c.test)||!ar.pod(c.fba)) return false;
+            if (c.frame.fbw>63 || c.tex0.tw>15 || c.tex0.th>15) return ar.fail("invalid GS register state");
+        }
+        if (!prim(x.prim)||!prim(x.primRegister)||!prim(x.prmodeRegister)) return false;
+#define GS_VALUE(f) if (!ar.pod(x.f)) return false
+        GS_VALUE(r);GS_VALUE(g);GS_VALUE(b);GS_VALUE(a);GS_VALUE(fog);
+        GS_VALUE(fogR);GS_VALUE(fogG);GS_VALUE(fogB);GS_VALUE(q);GS_VALUE(s);GS_VALUE(t);GS_VALUE(u);GS_VALUE(v);
+        GS_VALUE(prmodecont);GS_VALUE(pabe);GS_VALUE(scanmsk);GS_VALUE(dimx);GS_VALUE(dthe);GS_VALUE(colclamp);
+        GS_VALUE(texa.ta0);GS_VALUE(texa.aem);GS_VALUE(texa.ta1);GS_VALUE(texclut);
+        GS_VALUE(bitbltbuf);GS_VALUE(trxpos);GS_VALUE(trxreg);GS_VALUE(trxdir);
+        GS_VALUE(vertices);GS_VALUE(count);GS_VALUE(index);GS_VALUE(lastDisplay);
+        GS_VALUE(preferredDest);GS_VALUE(preferredFrame);GS_VALUE(hasPreferred);
+        GS_VALUE(presentTick);GS_VALUE(imageUploads);GS_VALUE(packedPackets);
+#undef GS_VALUE
+        if (!ar.vector(x.vram,PS2_GS_VRAM_SIZE)) return false;
+        if (x.vram.size()!=PS2_GS_VRAM_SIZE||x.trxdir>3||x.count<0||x.count>6||x.index<0||x.index>=6)
+            return ar.fail("invalid GS vertex/VRAM state");
+        return ar.finish();
+    }
+}
+
+bool GS::prepareStateCapture(std::string &error)
+{
+    error.clear();
+    if (!gsNativeStateMode(error)) return false;
+    {
+        std::lock_guard<std::mutex> lock(m_gifMutex);
+        if (!m_gifLocal.empty()||!m_gifQueue.empty()||(m_gifWorkerEnabled&&!m_gifSleeping)) {
+            error="GS snapshot requires drained GIF worker"; return false;
+        }
+    }
+    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    if (!m_backend||!m_localMemoryStorage||m_localMemorySize!=PS2_GS_VRAM_SIZE) {
+        error="GS is not initialized"; return false;
+    }
+    m_backend->Flush();
+    m_backend->Sync(GSSyncReason::Reset);
+    const auto transfer=m_backend->GetTransferSnapshot();
+    if (transfer.localToHostPendingBytes || transfer.copiedPixels<transfer.totalPixels) {
+        error="GS snapshot cannot interrupt a partial image/readback transfer"; return false;
+    }
+    return true;
+}
+
+bool GS::captureState(std::vector<uint8_t> &out,std::string &error) const
+{
+    auto &self=*const_cast<GS *>(this);
+    if (!self.prepareStateCapture(error)) return false;
+    if (!skipRaster()) { error="GS snapshot currently requires a native gameplay frame"; return false; }
+    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    GsStateChunk x;
+    std::copy(std::begin(m_ctx),std::end(m_ctx),std::begin(x.ctx));
+    x.prim=m_prim;x.primRegister=m_primRegister;x.prmodeRegister=m_prmodeRegister;
+    x.r=m_curR;x.g=m_curG;x.b=m_curB;x.a=m_curA;x.q=m_curQ;x.s=m_curS;x.t=m_curT;x.u=m_curU;x.v=m_curV;
+    x.fog=m_curFog;x.fogR=m_fogR;x.fogG=m_fogG;x.fogB=m_fogB;
+    x.prmodecont=m_prmodecont;x.pabe=m_pabe;x.scanmsk=m_scanmsk;x.dimx=m_dimx;x.dthe=m_dthe;x.colclamp=m_colclamp;
+    x.texa=m_texa;x.texclut=m_texclut;x.bitbltbuf=m_bitbltbuf;x.trxpos=m_trxpos;x.trxreg=m_trxreg;x.trxdir=m_trxdir;
+    std::copy(std::begin(m_vtxQueue),std::end(m_vtxQueue),std::begin(x.vertices));
+    x.count=m_vtxCount;x.index=m_vtxIndex;x.lastDisplay=m_lastDisplayBaseBytes;
+    x.preferredFrame=m_preferredDisplaySourceFrame;x.preferredDest=m_preferredDisplayDestFbp;x.hasPreferred=m_hasPreferredDisplaySource;
+    x.presentTick=m_hostPresentationTick.load();x.imageUploads=m_nativeImageUploadCount;x.packedPackets=m_nativePackedGIFPacketCount;
+    m_backend->SnapshotVram(x.vram);
+    ps2state::Writer writer(out,error);
+    return visitGsChunk(writer,x);
+}
+
+bool GS::validateState(const std::vector<uint8_t> &data,std::string &error) const
+{
+    if (!gsNativeStateMode(error)) return false;
+    GsStateChunk x;ps2state::Reader reader(data,error);
+    return visitGsChunk(reader,x);
+}
+
+bool GS::restoreState(const std::vector<uint8_t> &data,std::string &error)
+{
+    GsStateChunk x;ps2state::Reader reader(data,error);
+    if (!visitGsChunk(reader,x)||!prepareStateCapture(error)) return false;
+    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    // CPU fallback resources contain decoded pages and transfer cursors from
+    // the later timeline. Recreate them against the existing VRAM allocation.
+    // Hardware GS fallback is explicitly excluded above; native GPU resources
+    // are reset separately by the coordinator on their owning host thread.
+    m_backend->Initialize(m_localMemoryStorage,m_localMemorySize);
+    std::memcpy(m_localMemoryStorage,x.vram.data(),x.vram.size());
+    std::copy(std::begin(x.ctx),std::end(x.ctx),std::begin(m_ctx));
+    m_prim=x.prim;m_primRegister=x.primRegister;m_prmodeRegister=x.prmodeRegister;
+    m_curR=x.r;m_curG=x.g;m_curB=x.b;m_curA=x.a;m_curQ=x.q;m_curS=x.s;m_curT=x.t;m_curU=x.u;m_curV=x.v;
+    m_curFog=x.fog;m_fogR=x.fogR;m_fogG=x.fogG;m_fogB=x.fogB;
+    m_prmodecont=x.prmodecont;m_pabe=x.pabe;m_scanmsk=x.scanmsk;m_dimx=x.dimx;m_dthe=x.dthe;m_colclamp=x.colclamp;
+    m_texa=x.texa;m_texclut=x.texclut;m_bitbltbuf=x.bitbltbuf;m_trxpos=x.trxpos;m_trxreg=x.trxreg;m_trxdir=x.trxdir;
+    std::copy(std::begin(x.vertices),std::end(x.vertices),std::begin(m_vtxQueue));
+    m_vtxCount=x.count;m_vtxIndex=x.index;m_lastDisplayBaseBytes=x.lastDisplay;
+    m_preferredDisplaySourceFrame=x.preferredFrame;m_preferredDisplayDestFbp=x.preferredDest;m_hasPreferredDisplaySource=x.hasPreferred;
+    m_nativeImageUploadCount=x.imageUploads;m_nativePackedGIFPacketCount=x.packedPackets;m_hostPresentationTick.store(x.presentTick);
+    { std::lock_guard<std::mutex> snapshot(m_snapshotMutex);m_displaySnapshot.clear(); }
+    { std::lock_guard<std::mutex> presentation(m_presentationMutex);
+      m_hostPresentationFrame.clear();m_hostPresentationWidth=0;m_hostPresentationHeight=0;
+      m_hostPresentationDisplayFbp=0;m_hostPresentationSourceFbp=0;m_hostPresentationUsedPreferred=false;m_hasHostPresentationFrame=false; }
+    m_debugHistoryWrite=0;m_debugHistoryCount=0;m_debugNextSeq=1;m_debugLastVsyncTick=UINT64_MAX;
+    return true;
+}

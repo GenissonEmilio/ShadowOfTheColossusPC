@@ -54,6 +54,8 @@ namespace ps2x::iop::detail
 
         [[nodiscard]] bool hasServer(uint32_t sid) const noexcept;
         [[nodiscard]] size_t serverCount() const noexcept { return m_servers.size(); }
+        [[nodiscard]] bool pristineForNativeState() const noexcept
+        { return m_servers.empty() && m_nextDmaId == 1u && !m_sifInitialized; }
 
     private:
         struct RpcServer

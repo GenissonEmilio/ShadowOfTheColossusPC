@@ -1,4 +1,5 @@
 #include "ThreadNaming.h"
+#include "runtime/save_state_archive.h"
 #include "runtime/ps2_thread_load.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_stats.h"
@@ -3092,4 +3093,203 @@ bool PS2Memory::hostChannelBusy(uint32_t channelBase)
     const bool busy = (readIORegister(channelBase) & 0x100u) != 0u;
     t_hostIo = false;
     return busy;
+}
+
+
+// Save-state chunks are applied only by the quiescent runtime coordinator.
+namespace
+{
+    struct MemoryStateChunk
+    {
+        std::vector<uint8_t> ram, scratch, iop, vram, vu0Code, vu0Data, vu1Code, vu1Data;
+        std::array<uint64_t, 20> gs{};
+        VIFRegisters vif[2]{};
+        DMARegisters dma[10]{};
+        struct Io { uint32_t address = 0, value = 0; };
+        std::vector<Io> io;
+        std::vector<PS2Memory::TLBEntry> tlb;
+        std::array<PS2Memory::EeTimer, 4> timers{};
+        uint64_t timerDeferred = 0, timerBudget = 0;
+        uint32_t timerIrq = 0;
+        bool seenGif = false, gifScanned = false, path3Masked = false, directHl = false;
+        bool mtvu = false, deferredGif = false, deferredVif = false;
+        uint32_t pendingImageQwc = 0, mtvuFbrst = 0;
+        std::array<uint64_t, 6> counters{};
+        std::vector<std::vector<uint8_t>> masked;
+        std::vector<PS2Memory::PendingTransfer> pending[3];
+        std::vector<uint32_t> completed;
+        struct Code { uint32_t start = 0, end = 0; std::vector<uint8_t> modified; };
+        std::vector<Code> code;
+    };
+    template<class A> bool memoryChunk(A &a, MemoryStateChunk &s)
+    {
+        uint32_t magic = 0x314d5350, version = 1, endian = 0x01020304;
+        if (!a.pod(magic) || !a.pod(version) || !a.pod(endian) ||
+            magic != 0x314d5350 || version != 1 || endian != 0x01020304)
+            return a.fail("unsupported memory state header");
+        if (!a.vector(s.ram, PS2_RAM_SIZE) || !a.vector(s.scratch, PS2_SCRATCHPAD_SIZE) ||
+            !a.vector(s.iop, 2u << 20) || !a.vector(s.vram, PS2_GS_VRAM_SIZE) ||
+            !a.vector(s.vu0Code, PS2_VU0_CODE_SIZE) || !a.vector(s.vu0Data, PS2_VU0_DATA_SIZE) ||
+            !a.vector(s.vu1Code, PS2_VU1_CODE_SIZE) || !a.vector(s.vu1Data, PS2_VU1_DATA_SIZE)) return false;
+        if (s.ram.size() != PS2_RAM_SIZE || s.scratch.size() != PS2_SCRATCHPAD_SIZE ||
+            s.iop.size() != (2u << 20) || s.vram.size() != PS2_GS_VRAM_SIZE ||
+            s.vu0Code.size() != PS2_VU0_CODE_SIZE || s.vu0Data.size() != PS2_VU0_DATA_SIZE ||
+            s.vu1Code.size() != PS2_VU1_CODE_SIZE || s.vu1Data.size() != PS2_VU1_DATA_SIZE)
+            return a.fail("memory state buffer size mismatch");
+        if (!a.pod(s.gs) || !a.pod(s.vif) || !a.pod(s.dma) ||
+            !a.vector(s.io, 65536) || !a.pod(s.timers) ||
+            !a.pod(s.timerDeferred) || !a.pod(s.timerBudget) || !a.pod(s.timerIrq) ||
+            !a.pod(s.seenGif) || !a.pod(s.gifScanned) || !a.pod(s.path3Masked) || !a.pod(s.directHl) ||
+            !a.pod(s.mtvu) || !a.pod(s.deferredGif) || !a.pod(s.deferredVif) ||
+            !a.pod(s.pendingImageQwc) || !a.pod(s.mtvuFbrst) || !a.pod(s.counters)) return false;
+        uint32_t n = static_cast<uint32_t>(s.tlb.size());
+        if (!a.pod(n) || n > 128) return a.fail("invalid TLB state count");
+        s.tlb.resize(n);
+        for (auto &v : s.tlb)
+            if (!a.pod(v.vpn) || !a.pod(v.pfn) || !a.pod(v.mask) || !a.pod(v.valid)) return false;
+        n = static_cast<uint32_t>(s.masked.size());
+        if (!a.pod(n) || n > 4096) return a.fail("invalid masked GIF queue");
+        s.masked.resize(n);
+        for (auto &v : s.masked) if (!a.vector(v, 32u << 20)) return false;
+        for (auto &queue : s.pending) {
+            n = static_cast<uint32_t>(queue.size());
+            if (!a.pod(n) || n > 4096) return a.fail("invalid DMA queue");
+            queue.resize(n);
+            for (auto &v : queue) {
+                if (!a.pod(v.fromScratchpad) || !a.pod(v.srcAddr) || !a.pod(v.qwc) ||
+                    !a.vector(v.chainData, 32u << 20)) return false;
+                if (v.qwc > PS2_RAM_SIZE / 16u || (v.chainData.size() & 15u))
+                    return a.fail("invalid pending DMA transfer");
+            }
+        }
+        if (!a.vector(s.completed, 65536)) return false;
+        if (s.pendingImageQwc>65536u || (s.timerIrq & ~15u))
+            return a.fail("invalid VIF image/timer IRQ state");
+        n = static_cast<uint32_t>(s.code.size());
+        if (!a.pod(n) || n > 4096) return a.fail("invalid code-region count");
+        s.code.resize(n);
+        for (auto &v : s.code) {
+            if (!a.pod(v.start) || !a.pod(v.end) || !a.vector(v.modified, PS2_RAM_SIZE / 4u)) return false;
+            if (v.start >= v.end || uint64_t(v.end) - v.start > PS2_RAM_SIZE ||
+                v.modified.size() != (uint64_t(v.end) - v.start + 3u) / 4u ||
+                std::any_of(v.modified.begin(), v.modified.end(), [](uint8_t b) { return b > 1; }))
+                return a.fail("invalid code-region bitmap");
+        }
+        std::unordered_map<uint32_t, bool> keys;
+        for (const auto &v : s.io)
+            if (!keys.emplace(v.address, true).second) return a.fail("duplicate MMIO state key");
+        return a.finish();
+    }
+    bool decodeMemoryChunk(const std::vector<uint8_t> &data, MemoryStateChunk &s, std::string &error)
+    {
+        ps2state::Reader reader(data, error);
+        return memoryChunk(reader, s);
+    }
+}
+
+bool PS2Memory::captureState(std::vector<uint8_t> &out, std::string &error) const
+{
+    error.clear();
+    auto &self = *const_cast<PS2Memory *>(this);
+    self.syncVu1();
+    if (m_mtvuOutstanding.load(std::memory_order_acquire) ||
+        (m_gifArbiter && !m_gifArbiter->empty())) {
+        error = "memory snapshot requires drained VU/GIF workers"; return false;
+    }
+    if (!m_rdram || !m_scratchpad || !iop_ram || !m_gsVRAM ||
+        !m_vu0Code || !m_vu0Data || !m_vu1Code || !m_vu1Data) {
+        error = "memory is not initialized"; return false;
+    }
+    MemoryStateChunk s;
+    auto copy = [](auto &v, const uint8_t *p, size_t n) { v.assign(p, p + n); };
+    copy(s.ram, m_rdram, PS2_RAM_SIZE); copy(s.scratch, m_scratchpad, PS2_SCRATCHPAD_SIZE);
+    copy(s.iop, iop_ram, 2u << 20); copy(s.vram, m_gsVRAM, PS2_GS_VRAM_SIZE);
+    copy(s.vu0Code, m_vu0Code, PS2_VU0_CODE_SIZE); copy(s.vu0Data, m_vu0Data, PS2_VU0_DATA_SIZE);
+    copy(s.vu1Code, m_vu1Code, PS2_VU1_CODE_SIZE); copy(s.vu1Data, m_vu1Data, PS2_VU1_DATA_SIZE);
+    const GSRegisters &g = gs_regs;
+    s.gs = {g.pmode,g.smode1,g.smode2,g.srfsh,g.synch1,g.synch2,g.syncv,g.dispfb1,g.display1,
+            g.dispfb2,g.display2,g.extbuf,g.extdata,g.extwrite,g.bgcolor,
+            g.csr.load(),g.vsyncTick.load(),g.imr,g.busdir,g.siglblid};
+    s.vif[0] = vif0_regs; s.vif[1] = vif1_regs;
+    std::copy(std::begin(dma_regs), std::end(dma_regs), std::begin(s.dma));
+    for (auto [address,value] : m_ioRegisters) s.io.push_back({address,value});
+    std::sort(s.io.begin(), s.io.end(), [](const auto &a, const auto &b) { return a.address < b.address; });
+    s.tlb = m_tlbEntries; s.timers = m_eeTimers;
+    s.timerDeferred=m_timerDeferred; s.timerBudget=m_timerBudget; s.timerIrq=m_timerIrqLatched;
+    s.seenGif=m_seenGifCopy; s.gifScanned=m_gifScanned; s.path3Masked=m_path3Masked;
+    s.directHl=m_vif1PendingPath2DirectHl; s.pendingImageQwc=m_vif1PendingPath2ImageQwc;
+    s.mtvu=m_mtvuEnabled; s.mtvuFbrst=m_mtvuFbrst;
+    s.deferredGif=m_mtvuDeferredGif; s.deferredVif=m_mtvuDeferredVif1;
+    s.counters={m_dmaStartCount.load(),m_gifCopyCount.load(),m_gsWriteCount.load(),
+                m_vifWriteCount.load(),m_vu0CodeGeneration.load(),m_vu1CodeGeneration.load()};
+    s.masked=m_path3MaskedFifo; s.pending[0]=m_pendingGifTransfers;
+    s.pending[1]=m_pendingVif0Transfers; s.pending[2]=m_pendingVif1Transfers;
+    { std::lock_guard<std::mutex> lock(self.m_completedDmacMutex); s.completed=m_completedDmacCauses; }
+    for (const auto &v : m_codeRegions) {
+        MemoryStateChunk::Code c; c.start=v.start; c.end=v.end;
+        c.modified.reserve(v.modified.size()); for (bool bit : v.modified) c.modified.push_back(bit ? 1u : 0u);
+        s.code.push_back(std::move(c));
+    }
+    ps2state::Writer writer(out, error);
+    return memoryChunk(writer, s);
+}
+
+bool PS2Memory::validateState(const std::vector<uint8_t> &data, std::string &error) const
+{
+    MemoryStateChunk s;
+    if (!decodeMemoryChunk(data,s,error)) return false;
+    if (s.mtvu != m_mtvuEnabled) { error="state MTVU mode differs from runtime"; return false; }
+    if (!m_rdram || !m_scratchpad || !iop_ram || !m_gsVRAM ||
+        !m_vu0Code || !m_vu0Data || !m_vu1Code || !m_vu1Data) {
+        error="memory is not initialized"; return false;
+    }
+    return true;
+}
+
+bool PS2Memory::restoreState(const std::vector<uint8_t> &data, std::string &error)
+{
+    MemoryStateChunk s;
+    if (!decodeMemoryChunk(data,s,error)) return false;
+    if (s.mtvu != m_mtvuEnabled) { error="state MTVU mode differs from runtime"; return false; }
+    if (!m_rdram || !m_scratchpad || !iop_ram || !m_gsVRAM ||
+        !m_vu0Code || !m_vu0Data || !m_vu1Code || !m_vu1Data) {
+        error="memory is not initialized"; return false;
+    }
+    syncVu1();
+    if (m_gifArbiter && !m_gifArbiter->empty()) { error="restore requires an empty GIF arbiter"; return false; }
+    // All allocation/validation takes place before changing bound guest storage.
+    std::unordered_map<uint32_t,uint32_t> io;
+    for (const auto &v : s.io) io.emplace(v.address,v.value);
+    std::vector<CodeRegion> code;
+    for (const auto &v : s.code) {
+        CodeRegion r; r.start=v.start; r.end=v.end;
+        r.modified.assign(v.modified.begin(),v.modified.end()); code.push_back(std::move(r));
+    }
+    std::memcpy(m_rdram,s.ram.data(),s.ram.size()); std::memcpy(m_scratchpad,s.scratch.data(),s.scratch.size());
+    std::memcpy(iop_ram,s.iop.data(),s.iop.size()); std::memcpy(m_gsVRAM,s.vram.data(),s.vram.size());
+    std::memcpy(m_vu0Code,s.vu0Code.data(),s.vu0Code.size()); std::memcpy(m_vu0Data,s.vu0Data.data(),s.vu0Data.size());
+    std::memcpy(m_vu1Code,s.vu1Code.data(),s.vu1Code.size()); std::memcpy(m_vu1Data,s.vu1Data.data(),s.vu1Data.size());
+    auto &g=gs_regs;
+    g.pmode=s.gs[0]; g.smode1=s.gs[1]; g.smode2=s.gs[2]; g.srfsh=s.gs[3]; g.synch1=s.gs[4];
+    g.synch2=s.gs[5]; g.syncv=s.gs[6]; g.dispfb1=s.gs[7]; g.display1=s.gs[8];
+    g.dispfb2=s.gs[9]; g.display2=s.gs[10]; g.extbuf=s.gs[11]; g.extdata=s.gs[12];
+    g.extwrite=s.gs[13]; g.bgcolor=s.gs[14]; g.csr.store(s.gs[15]); g.vsyncTick.store(s.gs[16]);
+    g.imr=s.gs[17]; g.busdir=s.gs[18]; g.siglblid=s.gs[19];
+    vif0_regs=s.vif[0]; vif1_regs=s.vif[1]; std::copy(std::begin(s.dma),std::end(s.dma),std::begin(dma_regs));
+    m_ioRegisters.swap(io); m_tlbEntries.swap(s.tlb); m_eeTimers=s.timers;
+    m_timerDeferred=s.timerDeferred; m_timerBudget=s.timerBudget; m_timerIrqLatched=s.timerIrq;
+    m_seenGifCopy=s.seenGif; m_gifScanned=s.gifScanned; m_path3Masked=s.path3Masked;
+    m_vif1PendingPath2DirectHl=s.directHl; m_vif1PendingPath2ImageQwc=s.pendingImageQwc;
+    m_mtvuFbrst=s.mtvuFbrst; m_mtvuDeferredGif=s.deferredGif; m_mtvuDeferredVif1=s.deferredVif;
+    m_dmaStartCount.store(s.counters[0]); m_gifCopyCount.store(s.counters[1]);
+    m_gsWriteCount.store(s.counters[2]); m_vifWriteCount.store(s.counters[3]);
+    // Code caches use generations, not serialized host addresses.
+    m_vu0CodeGeneration.store(std::max(m_vu0CodeGeneration.load(),s.counters[4])+1u);
+    m_vu1CodeGeneration.store(std::max(m_vu1CodeGeneration.load(),s.counters[5])+1u);
+    m_path3MaskedFifo.swap(s.masked); m_pendingGifTransfers.swap(s.pending[0]);
+    m_pendingVif0Transfers.swap(s.pending[1]); m_pendingVif1Transfers.swap(s.pending[2]);
+    { std::lock_guard<std::mutex> lock(m_completedDmacMutex); m_completedDmacCauses.swap(s.completed); }
+    m_codeRegions.swap(code);
+    ps2SetScratchpadHostPtr(m_scratchpad);
+    return true;
 }

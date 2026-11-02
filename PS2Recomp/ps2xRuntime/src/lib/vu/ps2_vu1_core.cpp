@@ -1,4 +1,5 @@
 #include <vector>
+#include <memory>
 #include <string>
 #include <chrono>
 #include <mutex>
@@ -2594,4 +2595,118 @@ static void verifyNativeLoop(VU1Interpreter &I, vu1native::LoopFn fn, uint8_t *v
             std::fprintf(stderr, " %08llx:%llu", static_cast<unsigned long long>(hash >> 32), static_cast<unsigned long long>(runs));
         std::fprintf(stderr, "\n");
     }
+}
+
+
+#include "runtime/save_state_archive.h"
+namespace
+{
+    template<class A, class V> bool visitVuState(A &a, V &v)
+    {
+        uint32_t magic=0x31555356u, version=1, endian=0x01020304u;
+        uint8_t unit=static_cast<uint8_t>(v.m_unit);
+        if (!a.pod(magic)||!a.pod(version)||!a.pod(endian)||!a.pod(unit) ||
+            magic!=0x31555356u||version!=1||endian!=0x01020304u||unit!=static_cast<uint8_t>(v.m_unit))
+            return a.fail("incompatible VU state");
+#define VU_VALUE(x) if (!a.pod(v.x)) return false
+        VU_VALUE(m_state.vf); VU_VALUE(m_state.vi); VU_VALUE(m_state.acc);
+        VU_VALUE(m_state.q); VU_VALUE(m_state.p); VU_VALUE(m_state.i); VU_VALUE(m_state.r);
+        VU_VALUE(m_state.pc); VU_VALUE(m_state.mac); VU_VALUE(m_state.clip); VU_VALUE(m_state.status);
+        VU_VALUE(m_state.cycles); VU_VALUE(m_state.ebit); VU_VALUE(m_state.haltAfterDelaySlot);
+        VU_VALUE(m_state.dBitEnabled); VU_VALUE(m_state.tBitEnabled);
+        VU_VALUE(m_state.stoppedByD); VU_VALUE(m_state.stoppedByT);
+        VU_VALUE(m_state.top); VU_VALUE(m_state.itop);
+        VU_VALUE(m_state.branchPending); VU_VALUE(m_state.branchTarget); VU_VALUE(m_state.branchDelay);
+        VU_VALUE(m_nextCommitCycle); VU_VALUE(m_macStatusFlagsLive); VU_VALUE(m_stickyFlagsLive);
+        for (auto &p : v.m_flagPipeline) {
+            if (!a.pod(p.readyCycle)||!a.pod(p.issueCycle)||!a.pod(p.mac)||!a.pod(p.status)||
+                !a.pod(p.extraSticky)||!a.pod(p.clip)||!a.pod(p.valid)||!a.pod(p.writesMac)||
+                !a.pod(p.writesStatus)||!a.pod(p.writesSticky)||!a.pod(p.writesClip)) return false;
+        }
+        auto scalar=[&](auto &p) {
+            return a.pod(p.readyCycle)&&a.pod(p.value)&&a.pod(p.statusDi)&&a.pod(p.valid);
+        };
+        if (!scalar(v.m_fdiv)) return false;
+        for (auto &p : v.m_efu) if (!scalar(p)) return false;
+        for (auto &p : v.m_storePipeline) {
+            if (!a.pod(p.readyCycle)||!a.pod(p.address)||!a.pod(p.words)||
+                !a.pod(p.laneMask)||!a.pod(p.valid)) return false;
+            if (p.laneMask>15 || p.address>0xffffu) return a.fail("invalid VU store");
+        }
+        for (auto &p : v.m_vfWritePipeline) {
+            if (!a.pod(p.readyCycle)||!a.pod(p.sequence)||!a.pod(p.value)||
+                !a.pod(p.reg)||!a.pod(p.laneMask)||!a.pod(p.valid)) return false;
+            if (p.reg>=32 || p.laneMask>15) return a.fail("invalid VU VF pipeline");
+        }
+        for (auto &p : v.m_viWritePipeline) {
+            if (!a.pod(p.readyCycle)||!a.pod(p.sequence)||!a.pod(p.value)||
+                !a.pod(p.reg)||!a.pod(p.valid)) return false;
+            if (p.reg>=16) return a.fail("invalid VU VI pipeline");
+        }
+        for (auto &p : v.m_accWritePipeline) {
+            if (!a.pod(p.readyCycle)||!a.pod(p.sequence)||!a.pod(p.value)||
+                !a.pod(p.laneMask)||!a.pod(p.valid)) return false;
+            if (p.laneMask>15) return a.fail("invalid VU ACC pipeline");
+        }
+        VU_VALUE(m_xgkick.packet); VU_VALUE(m_xgkick.sourceAddress); VU_VALUE(m_xgkick.totalBytes);
+        VU_VALUE(m_xgkick.copiedBytes); VU_VALUE(m_xgkick.currentTagEnd); VU_VALUE(m_xgkick.cycleCredit);
+        VU_VALUE(m_xgkick.issueCycle); VU_VALUE(m_xgkick.progressedCycle);
+        VU_VALUE(m_xgkick.active); VU_VALUE(m_xgkick.currentTagEop); VU_VALUE(m_xgkickDue);
+        VU_VALUE(m_vfReady); VU_VALUE(m_viReady); VU_VALUE(m_accReady);
+        VU_VALUE(m_vfLatestWrite); VU_VALUE(m_viLatestWrite); VU_VALUE(m_accLatestWrite);
+        VU_VALUE(m_cycle); VU_VALUE(m_nextWriteSequence); VU_VALUE(m_efuResourceReady);
+        VU_VALUE(m_workingClip); VU_VALUE(m_currentUpperInstruction);
+        VU_VALUE(m_viBranchBackupValue); VU_VALUE(m_viBranchBackupReg); VU_VALUE(m_viBranchBackupValid);
+        VU_VALUE(m_stopRequested); VU_VALUE(m_pendingHaltD); VU_VALUE(m_pendingHaltT);
+#undef VU_VALUE
+        const uint32_t codeSize=unit==0?PS2_VU0_CODE_SIZE:PS2_VU1_CODE_SIZE;
+        if ((v.m_state.pc&7u)||v.m_state.pc>=codeSize||v.m_state.branchDelay>2||
+            v.m_viBranchBackupReg>=16||v.m_xgkick.totalBytes>v.m_xgkick.packet.size()||
+            v.m_xgkick.copiedBytes>v.m_xgkick.packet.size()||
+            v.m_xgkick.currentTagEnd>v.m_xgkick.packet.size()||
+            (v.m_xgkick.totalBytes && (v.m_xgkick.copiedBytes>v.m_xgkick.totalBytes||
+                                      v.m_xgkick.currentTagEnd>v.m_xgkick.totalBytes)))
+            return a.fail("invalid VU execution state");
+        return a.finish();
+    }
+}
+
+bool VU1Interpreter::captureState(std::vector<uint8_t> &out, std::string &error) const
+{
+    if (m_gifCapture || m_gifCaptureOnly) { error="cannot snapshot VU verification capture"; return false; }
+    ps2state::Writer writer(out,error);
+    return visitVuState(writer,*this);
+}
+
+bool VU1Interpreter::validateState(const std::vector<uint8_t> &data, std::string &error) const
+{
+    auto staged=std::make_unique<VU1Interpreter>(m_unit);
+    ps2state::Reader reader(data,error);
+    return visitVuState(reader,*staged);
+}
+
+bool VU1Interpreter::restoreState(const std::vector<uint8_t> &data, std::string &error)
+{
+    auto staged=std::make_unique<VU1Interpreter>(m_unit);
+    ps2state::Reader reader(data,error);
+    if (!visitVuState(reader,*staged)) return false;
+#define VU_COPY(x) x=staged->x
+    VU_COPY(m_state); VU_COPY(m_nextCommitCycle);
+    VU_COPY(m_macStatusFlagsLive); VU_COPY(m_stickyFlagsLive); VU_COPY(m_flagPipeline);
+    VU_COPY(m_fdiv); VU_COPY(m_efu); VU_COPY(m_storePipeline); VU_COPY(m_vfWritePipeline);
+    VU_COPY(m_viWritePipeline); VU_COPY(m_accWritePipeline); VU_COPY(m_xgkick); VU_COPY(m_xgkickDue);
+    VU_COPY(m_vfReady); VU_COPY(m_viReady); VU_COPY(m_accReady);
+    VU_COPY(m_vfLatestWrite); VU_COPY(m_viLatestWrite); VU_COPY(m_accLatestWrite);
+    VU_COPY(m_cycle); VU_COPY(m_nextWriteSequence); VU_COPY(m_efuResourceReady);
+    VU_COPY(m_workingClip); VU_COPY(m_currentUpperInstruction);
+    VU_COPY(m_viBranchBackupValue); VU_COPY(m_viBranchBackupReg); VU_COPY(m_viBranchBackupValid);
+    VU_COPY(m_stopRequested); VU_COPY(m_pendingHaltD); VU_COPY(m_pendingHaltT);
+#undef VU_COPY
+    // Bindings belong to the current runtime; next execute/resume rebinds them.
+    m_activeVuData=nullptr; m_activeVuDataSize=0; m_activeGs=nullptr; m_activeMemory=nullptr;
+    m_recFn=nullptr; m_recGeneration=~0ull; m_recCode=nullptr; m_recHash=0;
+    m_cachedVuCode=nullptr; m_cachedMemory=nullptr; m_cachedCodeSize=0; m_cachedCodeGeneration=0;
+    m_decodedCodeCacheValid=false; m_flagScanValid=false; m_flagScanCode=nullptr;
+    m_traceRunData.clear(); m_gifCapture=nullptr; m_gifCaptureOnly=false;
+    return true;
 }

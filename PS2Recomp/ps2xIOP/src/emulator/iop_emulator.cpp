@@ -1,6 +1,7 @@
 #include <iostream>
 #include <cstdlib>
 #include "iop_emulator.h"
+#include "ps2x/iop/save_state_archive.h"
 #include <cstring>
 #include "imports/iop_cdvd.h"
 #include "core/iop_cpu.h"
@@ -961,4 +962,88 @@ namespace ps2x::iop::detail
         return static_cast<uint32_t>(m_impl->rpc.serverCount());
     }
 
+}
+
+namespace ps2x::iop::detail
+{
+    bool IopEmulator::stateSupported(std::string &error) const
+    {
+        const auto &x = *m_impl;
+        if (!x.cpuHalted || x.totalInstructions || x.activeCpu || x.callDepth ||
+            x.kernel.threadCount() || !x.rpc.pristineForNativeState() ||
+            !x.pendingDmaInterrupts.empty() || !x.pendingGuestCallbacks.empty() ||
+            x.servicingDmaInterrupts || x.servicingGuestCallbacks || x.servicingSpuInterrupt ||
+            x.secrMcCommandHandler.function || x.secrMcDevIdHandler.function || x.checkKelfPathCallback.function ||
+            x.moduleCursor != kModuleLoadBase)
+        {
+            error = "save states require native IOP from boot; emulated IOP CPU/SPU2 or callbacks are unsupported";
+            return false;
+        }
+        for (const auto &[id, module] : x.modules)
+            if (module.base || module.size || module.entry || module.gp || !module.resident)
+            { error = "save states cannot contain executed IOP modules"; return false; }
+        return true;
+    }
+
+    bool IopEmulator::captureState(std::vector<uint8_t> &out, std::string &error) const
+    {
+        error.clear();
+        if (!stateSupported(error)) return false;
+        if (!m_impl->sg2Loaded.load(std::memory_order_acquire))
+        { error = "save states require the native SG2 audio driver to be initialized"; return false; }
+        std::vector<uint8_t> memory, sound;
+        if (!m_impl->memory.captureState(memory, error) || !m_impl->sg2.captureState(sound, error)) return false;
+        ps2state::Writer w(out, error);
+        w.pod(uint32_t{0x31504f49u}); w.pod(uint32_t{1}); w.pod(uint32_t{0x01020304u});
+        w.pod(m_impl->nextModuleId); w.pod(m_impl->moduleCursor);
+        w.pod(m_impl->totalCycles); w.pod(m_impl->idleUntil); w.pod(m_impl->eeCycleCarry);
+        w.pod(static_cast<uint32_t>(m_impl->modules.size()));
+        for (const auto &[id, module] : m_impl->modules)
+        { w.pod(id); w.string(module.path); w.string(module.name, 256); }
+        w.vector(memory, 8u * 1024u * 1024u); w.vector(sound, 32u * 1024u * 1024u);
+        return w.finish();
+    }
+
+    bool IopEmulator::decodeState(const std::vector<uint8_t> &data, bool apply, std::string &error)
+    {
+        error.clear();
+        if (!stateSupported(error)) return false;
+        ps2state::Reader r(data, error);
+        uint32_t magic = 0, version = 0, endian = 0, nextId = 0, cursor = 0, count = 0;
+        uint64_t cycles = 0, idle = 0, carry = 0;
+        std::map<int, Impl::Module> modules;
+        std::vector<uint8_t> memory, sound;
+        if (!r.pod(magic) || !r.pod(version) || !r.pod(endian) || magic != 0x31504f49u ||
+            version != 1 || endian != 0x01020304u) return r.fail("unsupported native IOP state");
+        if (!r.pod(nextId) || !r.pod(cursor) || !r.pod(cycles) || !r.pod(idle) ||
+            !r.pod(carry) || !r.pod(count)) return false;
+        if (!nextId || nextId >= 0x40000000u || cursor != kModuleLoadBase || carry >= 8 || count > 4096)
+            return r.fail("invalid native IOP module/clock state");
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            Impl::Module module;
+            if (!r.pod(module.id) || !r.string(module.path) || !r.string(module.name, 256)) return false;
+            module.resident = true;
+            if (module.id <= 0 || static_cast<uint32_t>(module.id) >= nextId ||
+                !modules.emplace(module.id, std::move(module)).second)
+                return r.fail("invalid duplicate native IOP module ID");
+        }
+        if (!r.vector(memory, 8u * 1024u * 1024u) || !r.vector(sound, 32u * 1024u * 1024u) || !r.finish() ||
+            !m_impl->memory.validateState(memory, error) || !m_impl->sg2.validateState(sound, error)) return false;
+        if (!apply) return true;
+        // Values only: the existing host, driver, memory owner and callback
+        // objects survive. Audio is quiesced by the enclosing coordinator.
+        if (!m_impl->memory.restoreState(memory, error) || !m_impl->sg2.restoreState(sound, error)) return false;
+        m_impl->modules.swap(modules); m_impl->nextModuleId = nextId; m_impl->moduleCursor = cursor;
+        m_impl->totalCycles = cycles; m_impl->idleUntil = idle; m_impl->eeCycleCarry = carry;
+        m_impl->lastError.clear();
+        m_impl->sg2Loaded.store(true, std::memory_order_release);
+        return true;
+    }
+
+    bool IopEmulator::validateState(const std::vector<uint8_t> &data, std::string &error) const
+    { return const_cast<IopEmulator *>(this)->decodeState(data, false, error); }
+
+    bool IopEmulator::restoreState(const std::vector<uint8_t> &data, std::string &error)
+    { return decodeState(data, true, error); }
 }

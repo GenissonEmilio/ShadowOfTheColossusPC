@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <vector>
+#include <string>
 
 #include "runtime/gs/gs_backend.h"
 
@@ -109,6 +110,12 @@ public:
 
     void init(uint8_t *vram, uint32_t vramSize, struct GSRegisters *privRegs = nullptr);
     void reset();
+    // Native skip-raster path only. Call after PS2Memory::syncVu1 and with
+    // the EE stopped; the host presentation owner must also be quiescent.
+    bool captureState(std::vector<uint8_t> &out, std::string &error) const;
+    bool validateState(const std::vector<uint8_t> &data, std::string &error) const;
+    bool restoreState(const std::vector<uint8_t> &data, std::string &error);
+    bool prepareStateCapture(std::string &error);
     void setRasterBackend(std::unique_ptr<GSRasterBackend> backend);
 
     // From the VU1 worker with the GIF worker enabled, packets are copied and
