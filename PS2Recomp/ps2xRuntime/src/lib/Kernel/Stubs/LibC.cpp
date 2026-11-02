@@ -1,9 +1,84 @@
 #include "Common.h"
 #include "runtime/host_state.h"
 #include "runtime/save_state_archive.h"
-namespace { bool g_stateHostRandomTouched = false; }
 #include "LibC.h"
 #include "ps2_log.h"
+#include <stdexcept>
+
+namespace
+{
+    std::mutex g_libcRandomMutex;
+#if defined(__linux__) && defined(__GLIBC__)
+    // glibc rand() delegates to random(): its default is TYPE_3, 128 bytes,
+    // degree 31, separation 3, initially seeded with 1. Keep that exact stream
+    // private to guest libc so host libraries cannot consume the guest state.
+    // https://github.com/bminor/glibc/blob/release/2.39/master/stdlib/random.c
+    constexpr uint32_t kRandomType = 3, kRandomDegree = 31, kRandomSeparation = 3;
+    constexpr uint32_t kRandomTypes = 5;
+    struct LibcRandomSnapshot
+    {
+        uint32_t type = kRandomType, degree = kRandomDegree, separation = kRandomSeparation, rear = 0;
+        std::array<int32_t, kRandomDegree> words{};
+    };
+    struct GuestRandom
+    {
+        alignas(int32_t) std::array<int32_t, kRandomDegree + 1> words{};
+        struct random_data engine{};
+
+        GuestRandom()
+        {
+            if (::initstate_r(1u, reinterpret_cast<char *>(words.data()), sizeof(words), &engine) != 0)
+                throw std::runtime_error("Cannot initialize guest glibc random state.");
+        }
+        explicit GuestRandom(const LibcRandomSnapshot &saved)
+        {
+            // setstate_r first writes metadata to its PREVIOUS buffer. That
+            // buffer must be separate from the restored one, or it overwrites
+            // the saved rear index before reading it. No bootstrap pointer
+            // survives the switch to this object's owned, aligned storage.
+            alignas(int32_t) std::array<int32_t, kRandomDegree + 1> bootstrap{};
+            if (::initstate_r(1u, reinterpret_cast<char *>(bootstrap.data()), sizeof(bootstrap), &engine) != 0)
+                throw std::runtime_error("Cannot initialize guest glibc random restore.");
+            words[0] = static_cast<int32_t>(kRandomTypes * saved.rear + saved.type);
+            std::copy(saved.words.begin(), saved.words.end(), words.begin() + 1);
+            if (::setstate_r(reinterpret_cast<char *>(words.data()), &engine) != 0)
+                throw std::runtime_error("Cannot restore guest glibc random state.");
+        }
+        GuestRandom(const GuestRandom &) = delete;
+        GuestRandom &operator=(const GuestRandom &) = delete;
+    };
+    std::unique_ptr<GuestRandom> g_guestRandom;
+
+    GuestRandom &guestRandom()
+    {
+        // All callers hold g_libcRandomMutex, including lazy initialization.
+        if (!g_guestRandom) g_guestRandom = std::make_unique<GuestRandom>();
+        return *g_guestRandom;
+    }
+    bool captureRandom(LibcRandomSnapshot &saved, std::string &error)
+    {
+        const auto &rng = guestRandom();
+        const auto &engine = rng.engine;
+        const int32_t *state = rng.words.data() + 1;
+        uint32_t rear = kRandomDegree;
+        for (uint32_t i = 0; i < kRandomDegree; ++i)
+            if (engine.rptr == state + i) rear = i;
+        if (engine.rand_type != kRandomType || engine.rand_deg != kRandomDegree ||
+            engine.rand_sep != kRandomSeparation || engine.state != state ||
+            engine.end_ptr != state + kRandomDegree || rear >= kRandomDegree ||
+            engine.fptr != state + ((rear + kRandomSeparation) % kRandomDegree))
+        {
+            error = "Invalid live guest glibc random state.";
+            return false;
+        }
+        saved.rear = rear;
+        std::copy(rng.words.begin() + 1, rng.words.end(), saved.words.begin());
+        return true;
+    }
+#else
+    bool g_stateHostRandomTouched = false;
+#endif
+}
 
 namespace ps2_stubs
 {
@@ -1173,14 +1248,28 @@ namespace ps2_stubs
 
     void rand(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        std::lock_guard<std::mutex> lock(g_libcRandomMutex);
+#if defined(__linux__) && defined(__GLIBC__)
+        int32_t value = 0;
+        if (::random_r(&guestRandom().engine, &value) != 0)
+            throw std::runtime_error("Cannot advance guest glibc random state.");
+        setReturnS32(ctx, value & 0x7FFF);
+#else
         g_stateHostRandomTouched = true;
         setReturnS32(ctx, std::rand() & 0x7FFF);
+#endif
     }
 
     void srand(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        std::lock_guard<std::mutex> lock(g_libcRandomMutex);
+#if defined(__linux__) && defined(__GLIBC__)
+        if (::srandom_r(getRegU32(ctx, 4), &guestRandom().engine) != 0)
+            throw std::runtime_error("Cannot seed guest glibc random state.");
+#else
         g_stateHostRandomTouched = true;
         std::srand(getRegU32(ctx, 4));
+#endif
         setReturnS32(ctx, 0);
     }
 
@@ -1288,21 +1377,71 @@ namespace ps2_stubs
 }
 
 namespace ps2_stubs {
+    namespace {
+        struct LibcStateChunk {
+            uint32_t next = 0;
+#if defined(__linux__) && defined(__GLIBC__)
+            LibcRandomSnapshot random;
+#endif
+        };
+        template<class Archive> bool visitLibcState(Archive &ar, LibcStateChunk &state) {
+#if defined(__linux__) && defined(__GLIBC__)
+            constexpr uint32_t expectedMagic = 0x3243424c;
+#else
+            constexpr uint32_t expectedMagic = 0x3143424c;
+#endif
+            uint32_t magic = expectedMagic;
+            if (!ar.pod(magic) || !ar.pod(state.next) || magic != expectedMagic || !state.next)
+                return ar.fail("Invalid C library state.");
+#if defined(__linux__) && defined(__GLIBC__)
+            auto &rng = state.random;
+            if (!ar.pod(rng.type) || !ar.pod(rng.degree) || !ar.pod(rng.separation) || !ar.pod(rng.rear))
+                return false;
+            // setstate_r trusts the packed rear/type word and does not bound
+            // rear against degree. Reject it ourselves before any host pointer
+            // is formed, and never serialize random_data or its host pointers.
+            if (rng.type != kRandomType || rng.degree != kRandomDegree ||
+                rng.separation != kRandomSeparation || rng.rear >= kRandomDegree)
+                return ar.fail("Invalid guest glibc random metadata.");
+            for (auto &word : rng.words) if (!ar.pod(word)) return false;
+#endif
+            return ar.finish();
+        }
+    }
     bool captureLibcState(std::vector<uint8_t> &out,std::string &error) {
-        std::lock_guard<std::mutex> lock(g_file_mutex);
+        // The only two-lock order in this backend is file -> random. Guest
+        // rand/srand take just the random lock; file operations take just file.
+        std::lock_guard<std::mutex> files(g_file_mutex);
         if (!g_file_map.empty()) { error="A C library file is open. Finish loading and try again."; return false; }
+        std::lock_guard<std::mutex> random(g_libcRandomMutex);
+        LibcStateChunk state; state.next = g_next_file_handle;
+#if defined(__linux__) && defined(__GLIBC__)
+        if (!captureRandom(state.random, error)) return false;
+#else
         if (g_stateHostRandomTouched) { error="Host C random state is not serializable for this game profile."; return false; }
-        ps2state::Writer w(out,error); w.pod(uint32_t{0x3143424c}); w.pod(g_next_file_handle); return w.finish();
+#endif
+        ps2state::Writer writer(out,error); return visitLibcState(writer,state);
     }
     bool validateLibcState(const std::vector<uint8_t> &b,std::string &e) {
-        ps2state::Reader r(b,e); uint32_t magic=0,next=0; r.pod(magic); r.pod(next);
-        if (!r.finish() || magic!=0x3143424c || !next) { e="Invalid C library state."; return false; } return true;
+        LibcStateChunk state; ps2state::Reader reader(b,e); return visitLibcState(reader,state);
     }
     bool restoreLibcState(const std::vector<uint8_t> &b,std::string &e) {
-        if (!validateLibcState(b,e)) return false;
-        std::lock_guard<std::mutex> lock(g_file_mutex);
+        LibcStateChunk state; ps2state::Reader reader(b,e);
+        if (!visitLibcState(reader,state)) return false;
+#if defined(__linux__) && defined(__GLIBC__)
+        // Construct the complete replacement before touching files or live RNG.
+        // Its pointers refer to its own storage and survive the unique_ptr swap.
+        auto replacement = std::make_unique<GuestRandom>(state.random);
+#endif
+        std::lock_guard<std::mutex> files(g_file_mutex);
+        std::lock_guard<std::mutex> random(g_libcRandomMutex);
         for (auto &[id,file]:g_file_map) if (file) std::fclose(file);
-        ps2state::Reader r(b,e); uint32_t magic=0,next=0; r.pod(magic); r.pod(next);
-        g_file_map.clear(); g_next_file_handle=next; g_stateHostRandomTouched=false; return true;
+        g_file_map.clear(); g_next_file_handle=state.next;
+#if defined(__linux__) && defined(__GLIBC__)
+        g_guestRandom.swap(replacement);
+#else
+        g_stateHostRandomTouched=false;
+#endif
+        return true;
     }
 }

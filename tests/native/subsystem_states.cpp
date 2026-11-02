@@ -5,6 +5,7 @@
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/native_renderer.h"
 #include "runtime/host_state.h"
+#include "Kernel/Stubs/LibC.h"
 #include "Kernel/Stubs/MemoryCard.h"
 #include "native/native_history_state.h"
 #include "emulator/core/iop_memory.h"
@@ -14,6 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <array>
 
 namespace {
     unsigned checks = 0;
@@ -22,6 +24,113 @@ namespace {
         if (!ok) { std::fprintf(stderr, "FAIL: %s\n", what); std::fflush(nullptr); std::_Exit(1); }
     }
     void check(bool ok, const std::string &what) { check(ok, what.c_str()); }
+#if defined(__linux__) && defined(__GLIBC__)
+    void libcRandomState() {
+        R5900Context context;
+        auto seed = [&](uint32_t value, PS2Runtime *owner = nullptr) {
+            context.r[4] = _mm_set_epi64x(0, value);
+            ps2_stubs::srand(nullptr, &context, owner);
+        };
+        auto draw = [&](PS2Runtime *owner = nullptr) {
+            ps2_stubs::rand(nullptr, &context, owner);
+            return static_cast<uint32_t>(_mm_extract_epi32(context.r[2], 0));
+        };
+        // No guest srand yet: preserve the original glibc default seed of 1.
+        std::srand(1);
+        bool same = true;
+        for (int i = 0; i < 512; ++i) {
+            const uint32_t actual = draw();
+            same &= actual == static_cast<uint32_t>(std::rand() & 0x7fff);
+        }
+        check(same, "unseeded guest rand preserves glibc's default sequence");
+        for (uint32_t value : {0u, 1u, 2u, 3u, 31u, 127773u, 0x7fffffffu,
+                               0x80000000u, 0x80000001u, 0xdeadbeefu, 0xfffffffeu, 0xffffffffu}) {
+            seed(value); std::srand(value); same = true;
+            for (int i = 0; i < 4096; ++i) {
+                const uint32_t actual = draw();
+                same &= actual == static_cast<uint32_t>(std::rand() & 0x7fff);
+            }
+            check(same, "4096 guest rand draws match std::rand for seed " + std::to_string(value));
+        }
+
+        std::string error;
+        std::vector<uint8_t> state, restored;
+        for (uint32_t offset = 0; offset < 31; ++offset) {
+            const uint32_t value = 0x80000001u + offset;
+            seed(value); std::srand(value);
+            for (uint32_t i = 0; i < 64u + offset; ++i) {
+                const uint32_t actual = draw();
+                check(actual == static_cast<uint32_t>(std::rand() & 0x7fff), "pre-snapshot glibc sequence agrees");
+            }
+            check(ps2_stubs::captureLibcState(state, error), error);
+            check(ps2_stubs::validateLibcState(state, error), error);
+            std::array<uint32_t, 128> continuation{};
+            for (auto &expected : continuation) expected = std::rand() & 0x7fff;
+            same = true;
+            for (uint32_t expected : continuation) same &= draw() == expected;
+            check(same, "capturing libc random does not advance its sequence");
+            seed(value ^ 0xa5a5a5a5u);
+            for (int i = 0; i < 17; ++i) draw();
+            check(ps2_stubs::restoreLibcState(state, error), error);
+            check(ps2_stubs::captureLibcState(restored, error) && restored == state,
+                  "all 31 rear positions and logical random words round trip byte for byte");
+            same = true;
+            for (uint32_t expected : continuation) same &= draw() == expected;
+            check(same, "restored random generator resumes the exact uninterrupted continuation");
+        }
+
+        // Every malformed archive must preserve both serialized state and the
+        // next sequence, even if its valid-looking prefix contains RNG words.
+        check(ps2_stubs::captureLibcState(state, error), error);
+        auto rejected = [&](const std::vector<uint8_t> &bad) {
+            std::vector<uint8_t> before, after;
+            check(ps2_stubs::captureLibcState(before, error), error);
+            std::array<uint32_t, 64> continuation{};
+            for (auto &expected : continuation) expected = draw();
+            check(ps2_stubs::restoreLibcState(before, error), error);
+            check(!ps2_stubs::validateLibcState(bad, error), "malformed libc random metadata/archive rejected by validation");
+            check(!ps2_stubs::restoreLibcState(bad, error), "malformed libc random archive rejected before commit");
+            check(ps2_stubs::captureLibcState(after, error) && after == before,
+                  "rejected libc random archive leaves live words and cursor unchanged");
+            same = true;
+            for (uint32_t expected : continuation) same &= draw() == expected;
+            check(same, "rejected libc random archive leaves the next draws unchanged");
+            check(ps2_stubs::restoreLibcState(before, error), error);
+        };
+        // Six fixed uint32 fields precede the 31 logical words: magic, next
+        // file handle, generator type, degree, separation and rear position.
+        auto corrupt = [&](size_t field, uint32_t value) {
+            auto bad = state;
+            check(bad.size() >= 6 * sizeof(uint32_t), "libc RNG archive has bounded metadata");
+            std::memcpy(bad.data() + field * sizeof(uint32_t), &value, sizeof(value));
+            rejected(bad);
+        };
+        corrupt(0, 0); corrupt(1, 0);
+        corrupt(2, 0); corrupt(2, 4); corrupt(2, UINT32_MAX);
+        corrupt(3, 0); corrupt(3, 30); corrupt(3, 63);
+        corrupt(4, 1); corrupt(4, UINT32_MAX);
+        corrupt(5, 31); corrupt(5, UINT32_MAX);
+        for (size_t length = 0; length < state.size(); ++length)
+            rejected(std::vector<uint8_t>(state.begin(), state.begin() + length));
+        auto trailing = state; trailing.push_back(0); rejected(trailing);
+
+        // A new runtime owner and a new host random allocation need no state
+        // from the previous owner, its pointers, or a replay of earlier draws.
+        auto owner = std::make_unique<PS2Runtime>();
+        seed(0xfedcba98u, owner.get());
+        for (int i = 0; i < 79; ++i) draw(owner.get());
+        check(ps2_stubs::captureLibcState(state, error), error);
+        std::array<uint32_t, 512> continuation{};
+        for (auto &expected : continuation) expected = draw(owner.get());
+        owner.reset();
+        owner = std::make_unique<PS2Runtime>();
+        seed(7u, owner.get());
+        check(ps2_stubs::restoreLibcState(state, error), error);
+        same = true;
+        for (uint32_t expected : continuation) same &= draw(owner.get()) == expected;
+        check(same, "libc RNG archive restores into a new runtime owner with independent host storage");
+    }
+#endif
     void memoryState() {
         PS2Memory memory;
         check(memory.initialize(), "initialize memory");
@@ -186,6 +295,9 @@ namespace {
 int main() {
     setenv("SOTC_NATIVE", "1", 1); setenv("PS2X_NATIVE_IOP_BOOT", "1", 1); setenv("PS2X_NATIVE_SG2", "1", 1);
     setenv("PS2X_MTVU", "0", 1); setenv("PS2X_GS_HW", "0", 1); setenv("PS2X_GS_NODRAW", "1", 1);
+#if defined(__linux__) && defined(__GLIBC__)
+    libcRandomState();
+#endif
     memoryState(); vuState(); iopState(); gsState(); historyCodec(); legacyCardGuard();
     std::printf("PASS: %u subsystem state checks; no ROM, GPU context or personal files\n", checks);
 }
