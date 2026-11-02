@@ -151,9 +151,11 @@ jobs:
           done
       - name: Package content check
         run: |
-          test -f dist/ShadowOfTheColossusPC-0.2.8-linux-x86_64.tar.gz
+          package_version=$(python3 -c 'import sys; sys.path.insert(0, "tools/desktop"); from model import VERSION; print(VERSION)')
+          package_archive="ShadowOfTheColossusPC-${package_version}-linux-x86_64.tar.gz"
+          test -f "dist/${package_archive}"
           cd dist
-          sha256sum -c ShadowOfTheColossusPC-0.2.8-linux-x86_64.tar.gz.sha256
+          sha256sum -c "${package_archive}.sha256"
       - uses: actions/upload-artifact@v4
         with:
           name: ShadowOfTheColossusPC-linux-x86_64
