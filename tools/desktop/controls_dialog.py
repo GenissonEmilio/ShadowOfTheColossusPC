@@ -39,7 +39,7 @@ class ControlsDialog(Gtk.Dialog):
         content.set_spacing(12)
         content.set_border_width(18)
         intro = Gtk.Label(label="Clique numa atribuição para trocar a tecla ou o botão do mouse.\n"
-                          "F1 abre o menu e libera o cursor. F11 alterna a tela cheia.", xalign=0)
+                          "F5 salva um estado rápido; F8 carrega. F1 gerencia estados e libera o cursor. F11 alterna a tela cheia.", xalign=0)
         intro.set_line_wrap(True)
         content.pack_start(intro, False, False, 0)
         self.mouse = Gtk.CheckButton(label="Mover a câmera com o mouse")
@@ -98,7 +98,7 @@ class ControlsDialog(Gtk.Dialog):
 
         def assign(code):
             if not valid_binding(code):
-                text.set_text("Tecla não suportada ou reservada (F1 / F11). Escolha outra ou cancele.")
+                text.set_text("Tecla não suportada ou reservada (F1 / F5 / F8 / F9 / F11). Escolha outra ou cancele.")
                 return True
             previous = next((title for name, title, _ in ACTIONS
                              if name != key and code and self.values[name] == code), None)

@@ -12,6 +12,9 @@
 // ./memcards) as Mcd001.ps2 / Mcd002.ps2. Slot 1 always holds a card (a blank,
 // unformatted one is created on first use); slot 2 only if its image exists.
 #include "Common.h"
+#include "runtime/save_state_archive.h"
+#include "runtime/state_manager.h"
+#include "runtime/host_state.h"
 
 namespace ps2_stubs
 {
@@ -460,4 +463,54 @@ namespace ps2_stubs
         setReturnS32(ctx, ok ? 1 : 0);
         traceCall("BlockErase", ctx);
     }
+}
+
+namespace ps2_stubs {
+    // Cards remain on their own timeline. Refuse an older state if a real card
+    // has changed, rather than replacing the user's persistent save silently.
+    static bool cardFingerprint(int port, bool &exists, uint32_t &crc, std::string &error) {
+        const auto path=cardDirectory()/(port==0?"Mcd001.ps2":"Mcd002.ps2");
+        std::error_code ec; exists=std::filesystem::exists(path,ec); crc=0;
+        if (ec) { error="Cannot inspect memory card."; return false; }
+        if (!exists) return true;
+        if (std::filesystem::file_size(path,ec)!=kCardBytes || ec) { error="Unsupported memory-card size."; return false; }
+        std::ifstream input(path,std::ios::binary); std::vector<uint8_t> bytes(kCardBytes);
+        if (!input.read(reinterpret_cast<char *>(bytes.data()),bytes.size())) { error="Cannot read memory card."; return false; }
+        crc=savestates::checksum(bytes); return true;
+    }
+    bool captureCardState(std::vector<uint8_t> &out,std::string &error) {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        ps2state::Writer w(out,error); w.pod(uint32_t{0x31445243});
+        for (int i=0;i<2;++i) {
+            if (g_cards[i].file.is_open()) g_cards[i].file.flush();
+            bool exists=false; uint32_t crc=0;
+            if (!cardFingerprint(i,exists,crc,error)) return false;
+            w.pod(exists); w.pod(crc); w.pod(g_cards[i].newCard);
+        }
+        for (const auto &socket:g_sockets) { w.pod(socket.open); w.pod(socket.port); }
+        w.vector(g_lastWrite,1u<<20); return w.finish();
+    }
+    static bool decodeCardState(const std::vector<uint8_t> &blob,bool apply,std::string &error) {
+        ps2state::Reader r(blob,error); uint32_t magic=0; r.pod(magic);
+        std::array<bool,2> exists{},fresh{}; std::array<uint32_t,2> crc{};
+        std::array<Socket,kSockets> sockets{}; std::vector<uint8_t> last;
+        for (int i=0;i<2;++i) { r.pod(exists[i]); r.pod(crc[i]); r.pod(fresh[i]); }
+        for (auto &socket:sockets) { r.pod(socket.open); r.pod(socket.port); if (socket.port<0 || socket.port>1) { error="Invalid card socket."; return false; } }
+        r.vector(last,1u<<20);
+        if (!r.finish() || magic!=0x31445243 || (!last.empty() && last.size()!=kPageSize)) { error="Invalid memory-card state."; return false; }
+        std::lock_guard<std::mutex> lock(g_mutex);
+        for (int i=0;i<2;++i) {
+            if (g_cards[i].file.is_open()) g_cards[i].file.flush();
+            bool current=false; uint32_t hash=0;
+            if (!cardFingerprint(i,current,hash,error)) return false;
+            if (current!=exists[i] || hash!=crc[i]) { error="O cartão foi alterado desde este estado. Use o save normal do jogo para preservar os dados."; return false; }
+        }
+        if (apply) {
+            for (int i=0;i<2;++i) g_cards[i].newCard=fresh[i];
+            g_sockets=sockets; g_lastWrite.swap(last);
+        }
+        return true;
+    }
+    bool validateCardState(const std::vector<uint8_t> &b,std::string &e) { return decodeCardState(b,false,e); }
+    bool restoreCardState(const std::vector<uint8_t> &b,std::string &e) { return decodeCardState(b,true,e); }
 }

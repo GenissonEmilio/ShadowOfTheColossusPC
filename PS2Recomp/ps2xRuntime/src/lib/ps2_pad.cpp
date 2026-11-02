@@ -86,6 +86,7 @@ namespace {
     std::mutex gamepadMutex;
     std::array<ps2pad::GamepadState, 4> gamepads;
     int selectedGamepad = -1;
+    bool stateReleaseGate = false;
 }
 
 void ps2pad::pollGamepads()
@@ -107,9 +108,27 @@ void ps2pad::pollGamepads()
     gamepads = snapshot;
 }
 
+void ps2pad::resetAfterStateLoad()
+{
+    std::lock_guard<std::mutex> lock(gamepadMutex);
+    stateReleaseGate = true;
+}
+
 ps2pad::GamepadState ps2pad::readGamepad()
 {
     std::lock_guard<std::mutex> lock(gamepadMutex);
+    if (stateReleaseGate) {
+        bool held = false;
+        for (const auto &pad : gamepads) {
+            if (pad.index < 0) continue;
+            for (bool button : pad.buttons) held |= button;
+            for (int axis = GAMEPAD_AXIS_LEFT_X; axis <= GAMEPAD_AXIS_RIGHT_Y; ++axis)
+                held |= std::fabs(pad.axes[axis]) > 0.35f;
+            held |= pad.axes[GAMEPAD_AXIS_LEFT_TRIGGER] > 0.35f || pad.axes[GAMEPAD_AXIS_RIGHT_TRIGGER] > 0.35f;
+        }
+        if (!held) stateReleaseGate = false;
+        return {};
+    }
     int first = -1;
     for (int i = 0; i < 4; ++i) {
         if (gamepads[i].index < 0) continue;

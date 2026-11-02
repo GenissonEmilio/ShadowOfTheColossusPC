@@ -1,4 +1,5 @@
 #include "sound_mixer.h"
+#include "ps2x/iop/save_state_archive.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -611,4 +612,113 @@ namespace ps2x::iop::detail
         m_ringRead.store(read + available, std::memory_order_release);
         return available;
     }
+}
+
+namespace ps2x::iop::detail
+{
+    bool SoundMixer::captureStateLocked(std::vector<uint8_t> &out, std::string &error) const
+    {
+        ps2state::Writer w(out, error);
+        w.pod(uint32_t{0x31584D53}); w.vector(m_ram); w.pod(m_voices);
+        for (const auto &core : m_cores)
+        {
+            w.pod(core.dryL);
+            w.pod(core.dryR);
+            w.pod(core.wetL);
+            w.pod(core.wetR);
+            w.pod(core.routing);
+            w.pod(core.masterRawL);
+            w.pod(core.masterRawR);
+            w.pod(core.masterL);
+            w.pod(core.masterR);
+            w.pod(core.reverbL);
+            w.pod(core.reverbR);
+            w.pod(core.externalL);
+            w.pod(core.externalR);
+            w.pod(core.inputL);
+            w.pod(core.inputR);
+            w.pod(core.reverbOn);
+            w.pod(core.revAddr);
+            w.pod(core.revVol);
+            w.pod(core.esa);
+            w.pod(core.eea);
+            w.pod(core.reverbX);
+            w.pod(core.reverbOdd);
+            w.pod(core.revInL);
+            w.pod(core.revInR);
+            w.pod(core.revOutL);
+            w.pod(core.revOutR);
+            w.pod(core.revPrevL);
+            w.pod(core.revPrevR);
+            w.vector(std::vector<std::array<int16_t, 2>>(core.input.begin(), core.input.end()), 65536);
+        }
+        w.pod(m_cycle); w.pod(m_cycleValid);
+        return w.finish();
+    }
+    bool SoundMixer::captureState(std::vector<uint8_t> &out, std::string &error) const
+    { std::lock_guard<std::mutex> lock(m_lock); return captureStateLocked(out, error); }
+
+    bool SoundMixer::decodeStateLocked(const std::vector<uint8_t> &blob, bool apply, std::string &error)
+    {
+        SoundMixer saved;
+        ps2state::Reader r(blob, error);
+        uint32_t magic = 0;
+        r.pod(magic); r.vector(saved.m_ram, kRamWords); r.pod(saved.m_voices);
+        for (auto &core : saved.m_cores)
+        {
+            r.pod(core.dryL);
+            r.pod(core.dryR);
+            r.pod(core.wetL);
+            r.pod(core.wetR);
+            r.pod(core.routing);
+            r.pod(core.masterRawL);
+            r.pod(core.masterRawR);
+            r.pod(core.masterL);
+            r.pod(core.masterR);
+            r.pod(core.reverbL);
+            r.pod(core.reverbR);
+            r.pod(core.externalL);
+            r.pod(core.externalR);
+            r.pod(core.inputL);
+            r.pod(core.inputR);
+            r.pod(core.reverbOn);
+            r.pod(core.revAddr);
+            r.pod(core.revVol);
+            r.pod(core.esa);
+            r.pod(core.eea);
+            r.pod(core.reverbX);
+            r.pod(core.reverbOdd);
+            r.pod(core.revInL);
+            r.pod(core.revInR);
+            r.pod(core.revOutL);
+            r.pod(core.revOutR);
+            r.pod(core.revPrevL);
+            r.pod(core.revPrevR);
+            std::vector<std::array<int16_t, 2>> input;
+            r.vector(input, 65536); core.input.assign(input.begin(), input.end());
+            if (core.esa >= kRamWords || core.eea >= kRamWords || core.reverbX >= kRamWords)
+            { error = "Invalid audio reverb state."; return false; }
+        }
+        r.pod(saved.m_cycle); r.pod(saved.m_cycleValid);
+        if (!r.finish() || magic != 0x31584D53 || saved.m_ram.size() != kRamWords)
+        { error = "Invalid audio mixer state."; return false; }
+        for (const auto &v : saved.m_voices)
+            if (static_cast<uint8_t>(v.phase) > static_cast<uint8_t>(Phase::Release) ||
+                v.start >= kRamWords || v.loop >= kRamWords || v.next >= kRamWords ||
+                v.blockIndex > 28 || v.pitch > 0x3fff)
+            { error = "Invalid audio voice state."; return false; }
+        if (apply)
+        {
+            m_ram.swap(saved.m_ram); m_voices = saved.m_voices; m_cores.swap(saved.m_cores);
+            m_cycle = saved.m_cycle; m_cycleValid = saved.m_cycleValid;
+            // Discard host output belonging to the abandoned timeline. The audio
+            // callback holds m_lock too, so it cannot race this cursor reset.
+            m_ringRead.store(0); m_ringWrite.store(0); m_outputStarted = false;
+        }
+        return true;
+    }
+    bool SoundMixer::validateState(const std::vector<uint8_t> &blob, std::string &error) const
+    { return const_cast<SoundMixer *>(this)->decodeStateLocked(blob, false, error); }
+    bool SoundMixer::restoreState(const std::vector<uint8_t> &blob, std::string &error)
+    { std::lock_guard<std::mutex> lock(m_lock); return decodeStateLocked(blob, true, error); }
 }

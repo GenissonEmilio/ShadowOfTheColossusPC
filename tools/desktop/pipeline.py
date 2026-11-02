@@ -107,7 +107,11 @@ class Pipeline:
                     raise
             return obj
         result = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        try:
+            workers = max(1, min(2, int(self.env.get("SOTC_BUILD_JOBS", "2"))))
+        except ValueError:
+            workers = 1
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             for i, obj in enumerate(pool.map(batch,enumerate(batches)),1):
                 result.append(obj)
                 self.progress(f"Compilando para Linux: {i}/{len(batches)} blocos…")

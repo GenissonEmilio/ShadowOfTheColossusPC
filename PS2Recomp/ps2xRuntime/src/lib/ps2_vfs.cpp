@@ -1,4 +1,5 @@
 #include "runtime/ps2_vfs.h"
+#include "runtime/save_state_archive.h"
 
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_rom_device.h"
@@ -201,7 +202,7 @@ int32_t PS2Vfs::open(std::string_view path, uint32_t flags, const PS2VfsMounts &
     if (m_nextDescriptor < 3)
         m_nextDescriptor = 3;
     const int32_t descriptor = m_nextDescriptor++;
-    m_descriptors.emplace(descriptor, OpenDescriptor{std::move(file), parsed.deviceName, std::string(path)});
+    m_descriptors.emplace(descriptor, OpenDescriptor{std::move(file), parsed.deviceName, std::string(path), flags});
     return descriptor;
 }
 
@@ -310,3 +311,74 @@ std::vector<PS2VfsDescriptorInfo> PS2Vfs::descriptors() const
         result.push_back({descriptor, entry.device, entry.path});
     return result;
 }
+
+// Descriptors carry PS2 paths and offsets, never FILE* or host addresses.
+// Writable descriptors are deliberately refused: loading must not roll back or
+// truncate a player's real card/files behind their back.
+bool PS2Vfs::captureState(std::vector<uint8_t> &out, std::string &error) const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    ps2state::Writer w;
+    w.pod(uint32_t{0x31534656});
+    w.pod(m_nextDescriptor);
+    w.pod(uint32_t(m_descriptors.size()));
+    for (const auto &[id, entry] : m_descriptors)
+    {
+        if ((entry.flags & PS2_FIO_O_RDWR) != PS2_FIO_O_RDONLY ||
+            (entry.flags & (PS2_FIO_O_CREAT | PS2_FIO_O_TRUNC | PS2_FIO_O_APPEND)))
+        {
+            error = "A file is being written. Finish saving in the game and try again.";
+            return false;
+        }
+        const int64_t offset = entry.file->seek(0, SEEK_CUR);
+        if (offset < 0) { error = "Cannot read an open file's offset."; return false; }
+        w.pod(id); w.string(entry.path); w.pod(entry.flags); w.pod(offset);
+    }
+    if (!w.finish()) { error = w.error; return false; }
+    out = std::move(w.data);
+    return true;
+}
+
+bool PS2Vfs::decodeState(const std::vector<uint8_t> &blob, const PS2VfsMounts &mounts,
+                         const PS2RomDevice &rom, bool apply, std::string &error)
+{
+    ps2state::Reader r(blob);
+    uint32_t magic = 0, count = 0;
+    int32_t next = 0;
+    if (!r.pod(magic) || magic != 0x31534656 || !r.pod(next) || next < 3 ||
+        !r.pod(count) || count > 4096) { error = "Invalid VFS state."; return false; }
+    PS2Vfs staged;
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        int32_t id = 0; uint32_t flags = 0; int64_t offset = -1; std::string path;
+        if (!r.pod(id) || id < 3 || id >= next || !r.string(path, 4096) ||
+            !r.pod(flags) || (flags & PS2_FIO_O_RDWR) != PS2_FIO_O_RDONLY ||
+            (flags & (PS2_FIO_O_CREAT | PS2_FIO_O_TRUNC | PS2_FIO_O_APPEND)) ||
+            !r.pod(offset) || offset < 0 || staged.m_descriptors.count(id))
+        { error = "Invalid file descriptor in state."; return false; }
+        const int32_t temporary = staged.open(path, flags, mounts, rom);
+        if (temporary < 0) { error = "A file needed by this state is missing: " + path; return false; }
+        auto node = staged.m_descriptors.extract(temporary);
+        if (node.mapped().file->seek(offset, SEEK_SET) != offset)
+        { error = "Cannot restore a file offset: " + path; return false; }
+        node.key() = id;
+        staged.m_descriptors.insert(std::move(node));
+        // Keep generated temporary descriptors distinct from restored IDs.
+        staged.m_nextDescriptor = next;
+    }
+    if (!r.finish()) { error = "Trailing or truncated VFS state."; return false; }
+    if (apply)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_descriptors.swap(staged.m_descriptors);
+        m_nextDescriptor = next;
+    }
+    return true;
+}
+
+bool PS2Vfs::validateState(const std::vector<uint8_t> &blob, const PS2VfsMounts &mounts,
+                           const PS2RomDevice &rom, std::string &error) const
+{ return const_cast<PS2Vfs *>(this)->decodeState(blob, mounts, rom, false, error); }
+bool PS2Vfs::restoreState(const std::vector<uint8_t> &blob, const PS2VfsMounts &mounts,
+                          const PS2RomDevice &rom, std::string &error)
+{ return decodeState(blob, mounts, rom, true, error); }

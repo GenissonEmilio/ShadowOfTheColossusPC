@@ -32,7 +32,7 @@ SPECIAL_KEYS = {32: "Espaço", 256: "Esc", 257: "Enter", 258: "Tab", 259: "Backs
 
 def valid_binding(code):
     return type(code) is int and (-7 <= code <= 0 or
-                                 32 <= code <= 348 and code not in (290, 300))
+                                 32 <= code <= 348 and code not in (290, 294, 297, 298, 300))
 
 
 def binding_label(code):
@@ -81,7 +81,7 @@ class Controls:
         result = {key: values.get(key, default) for key, default in DEFAULTS.items()}
         for key, _, _ in ACTIONS:
             if not valid_binding(result[key]):
-                raise ValueError("Tecla inválida. F1 e F11 são atalhos reservados.")
+                raise ValueError("Tecla inválida. F1, F5, F8, F9 e F11 são atalhos reservados.")
         used = [result[key] for key, _, _ in ACTIONS if result[key]]
         if len(used) != len(set(used)):
             raise ValueError("Cada tecla ou botão deve ter apenas uma ação. Remova a atribuição anterior.")

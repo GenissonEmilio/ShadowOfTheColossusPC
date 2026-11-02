@@ -1,4 +1,5 @@
 #include "iop_sg2.h"
+#include "ps2x/iop/save_state_archive.h"
 
 #include "emulator/core/iop_memory.h"
 
@@ -752,4 +753,98 @@ namespace ps2x::iop::detail
         if (bytes && m_memory.readRam(iopAddress, data.data(), bytes))
             m_mixer.writeRam(spuAddress, data.data(), bytes);
     }
+}
+
+namespace ps2x::iop::detail
+{
+    bool Sg2Driver::captureState(std::vector<uint8_t> &out, std::string &error) const
+    {
+        auto lock = m_mixer.hold();
+        std::vector<uint8_t> mixer;
+        if (!m_mixer.captureStateLocked(mixer, error)) return false;
+        ps2state::Writer w(out, error);
+        w.pod(uint32_t{0x31324753});
+        w.pod(m_eea);
+        w.pod(m_coreVolumes);
+        w.pod(m_voiceVolumes);
+        w.pod(m_reply);
+        w.pod(m_streams);
+        w.pod(m_streamOps);
+        w.pod(m_opWrite);
+        w.pod(m_opRead);
+        w.pod(m_pendingAdvance);
+        w.pod(m_effects);
+        w.pod(m_transfer);
+        w.pod(m_pcmBuffer);
+        w.pod(m_pcmSize);
+        w.pod(m_pcmPosition);
+        w.pod(m_pcmFirst);
+        w.pod(m_pcmOn);
+        w.pod(m_pcmVolL);
+        w.pod(m_pcmVolR);
+        w.vector(mixer);
+        return w.finish();
+    }
+    bool Sg2Driver::decodeState(const std::vector<uint8_t> &blob, bool apply, std::string &error)
+    {
+        Sg2Driver saved(m_host, m_memory);
+        ps2state::Reader r(blob, error);
+        uint32_t magic = 0; r.pod(magic);
+        r.pod(saved.m_eea);
+        r.pod(saved.m_coreVolumes);
+        r.pod(saved.m_voiceVolumes);
+        r.pod(saved.m_reply);
+        r.pod(saved.m_streams);
+        r.pod(saved.m_streamOps);
+        r.pod(saved.m_opWrite);
+        r.pod(saved.m_opRead);
+        r.pod(saved.m_pendingAdvance);
+        r.pod(saved.m_effects);
+        r.pod(saved.m_transfer);
+        r.pod(saved.m_pcmBuffer);
+        r.pod(saved.m_pcmSize);
+        r.pod(saved.m_pcmPosition);
+        r.pod(saved.m_pcmFirst);
+        r.pod(saved.m_pcmOn);
+        r.pod(saved.m_pcmVolL);
+        r.pod(saved.m_pcmVolR);
+        std::vector<uint8_t> mixer; r.vector(mixer, 8u << 20);
+        if (!r.finish() || magic != 0x31324753 || saved.m_opRead >= 128 || saved.m_opWrite >= 128 ||
+            saved.m_pcmBuffer > (2u << 20) || saved.m_pcmSize > (2u << 20) - saved.m_pcmBuffer ||
+            (saved.m_pcmOn && (!saved.m_pcmSize || saved.m_pcmPosition >= saved.m_pcmSize)) ||
+            !m_mixer.validateState(mixer, error))
+        { if (error.empty()) error = "Invalid SG2 sound driver state."; return false; }
+        if (apply)
+        {
+            auto lock = m_mixer.hold();
+            if (!m_mixer.decodeStateLocked(mixer, true, error)) return false;
+            m_eea = saved.m_eea;
+            m_reply = saved.m_reply;
+            m_streams = saved.m_streams;
+            m_streamOps = saved.m_streamOps;
+            m_opWrite = saved.m_opWrite;
+            m_opRead = saved.m_opRead;
+            m_pendingAdvance = saved.m_pendingAdvance;
+            m_effects = saved.m_effects;
+            m_transfer = saved.m_transfer;
+            m_pcmBuffer = saved.m_pcmBuffer;
+            m_pcmSize = saved.m_pcmSize;
+            m_pcmPosition = saved.m_pcmPosition;
+            m_pcmFirst = saved.m_pcmFirst;
+            m_pcmOn = saved.m_pcmOn;
+            m_pcmVolL = saved.m_pcmVolL;
+            m_pcmVolR = saved.m_pcmVolR;
+            std::memcpy(m_coreVolumes, saved.m_coreVolumes, sizeof(m_coreVolumes));
+            std::memcpy(m_voiceVolumes, saved.m_voiceVolumes, sizeof(m_voiceVolumes));
+            // Recreate the callback with this driver's address, never a saved pointer.
+            m_mixer.setInputRefill(m_pcmOn ? std::function<void(int)>([this](int core) {
+                if (core == 0) pcmRefill();
+            }) : std::function<void(int)>{});
+        }
+        return true;
+    }
+    bool Sg2Driver::validateState(const std::vector<uint8_t> &blob, std::string &error) const
+    { return const_cast<Sg2Driver *>(this)->decodeState(blob, false, error); }
+    bool Sg2Driver::restoreState(const std::vector<uint8_t> &blob, std::string &error)
+    { return decodeState(blob, true, error); }
 }

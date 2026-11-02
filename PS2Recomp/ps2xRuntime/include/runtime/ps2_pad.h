@@ -14,6 +14,7 @@ namespace ps2pad
     // Poll on the window thread; the guest reads a synchronized copy.
     void pollGamepads();
     GamepadState readGamepad();
+    void resetAfterStateLoad();
     // Shared by the game and the host menu; reconnects and non-zero slots work.
     int activeGamepad();
 }

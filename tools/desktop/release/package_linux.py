@@ -6,7 +6,7 @@ import shutil
 import tarfile
 ROOT=Path(__file__).resolve().parents[3]
 NAME='ShadowOfTheColossusPC'
-VERSION='0.2.8'
+VERSION='0.3.0'
 OUT=ROOT / 'dist' / NAME
 if OUT.exists():shutil.rmtree(OUT)
 shutil.copytree(ROOT / 'artifacts/frozen' / NAME,OUT)
@@ -31,7 +31,12 @@ Enter: confirmar nos menus. Backspace: voltar nos menus. Espaço também monta A
 Mouse: câmera. Esquerdo: atacar. Direito: agarrar. Central: ação/luz da espada.
 F1: configurações, liberar cursor e Voltar ao launcher (Sistema).
 Personalize todas as atribuições, sensibilidade e inversão na aba Controles.
-F1/F11 são reservados. Alterações de perfil valem na próxima abertura do jogo.
+F1/F5/F8/F9/F11 são reservados. Alterações de perfil valem na próxima abertura do jogo.
+F5: salvar estado rápido. F8: carregar estado rápido.
+F1 > Estados: slot rápido e cinco slots manuais, com data, tamanho e exclusão.
+Estados exigem o mesmo runtime e disco. Aguarde o fim de vídeos/carregamentos.
+Continuar salvando nos altares permite transferir progresso entre versões.
+Carregar estado não substitui o cartão real; cartão alterado bloqueia o load.
 Controle USB/Bluetooth também funciona junto com teclado e mouse.
 F11: alterna tela cheia na resolução do monitor e janela.
 Na aba Controles, "Configurar meu controle" associa botoes e analogicos de
@@ -62,7 +67,7 @@ Artes do launcher: _internal/assets/ARTWORK.md (origem e prompts das adaptaçõe
 Shadow of the Colossus pertence a Sony / Team Ico. Projeto independente.
 ''',encoding='utf-8')
 for p in OUT.rglob('*'):
-    if p.is_file() and (p.suffix.lower() in ('.iso','.7z','.rar','.xff','.elf','.ps2') or p.name in ('NICO.DAT','SCUS_974.72') or p.name.startswith('func_') or p.name=='complete.json'):
+    if p.is_file() and (p.suffix.lower() in ('.iso','.7z','.rar','.xff','.elf','.ps2','.sotcstate') or p.name in ('NICO.DAT','SCUS_974.72') or p.name.startswith('func_') or p.name=='complete.json'):
         raise ValueError('Unexpected game-derived file in package: '+str(p))
 archive=ROOT / 'dist' / f'{NAME}-{VERSION}-linux-x86_64.tar.gz'
 with tarfile.open(archive,'w:gz',compresslevel=6) as t:t.add(OUT,arcname=NAME)

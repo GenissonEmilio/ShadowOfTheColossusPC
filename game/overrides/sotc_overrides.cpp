@@ -9,6 +9,7 @@
 #include "ps2_runtime_macros.h"
 #include "game_overrides.h"
 #include "runtime/ee_scheduler.h"
+#include "runtime/save_state_archive.h"
 #include "ps2x/iop/iop_subsystem.h"
 #include "runtime/ps2_stats.h"
 
@@ -29,16 +30,17 @@ namespace
 
     PS2Runtime::RecompiledFunction g_gamecoreEntry = nullptr;
     bool g_gamecoreEntered = false;
+    bool g_gamecoreEntryEnabled = false;
+    uint64_t g_lastFrameRelease = 0;
 
     // Module placement depends on the guest heap, which is only reproducible
     // while emulated time is driven purely by executed cycles. Once all code
     // modules are loaded, switch to real-time pacing.
     void gamecoreEntryHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        static bool enabled = false;
-        if (!enabled)
+        if (!g_gamecoreEntryEnabled)
         {
-            enabled = true;
+            g_gamecoreEntryEnabled = true;
             g_gamecoreEntered = true;
             runtime->eeScheduler().enableHostClockSync();
             std::cerr << "[sotc] GAMECORE entered; host clock sync enabled" << std::endl;
@@ -499,11 +501,10 @@ namespace
     void gpReleaseFrameHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         static const uint64_t interval = std::strtoull(std::getenv("SOTC_FRAME_INTERVAL"), nullptr, 10);
-        static uint64_t lastRelease = 0;
         const uint64_t tick = runtime->eeScheduler().currentVSyncTick();
-        if (tick < lastRelease + interval)
+        if (tick < g_lastFrameRelease + interval)
             return; // the GP thread calls again at the next VBlank
-        lastRelease = tick;
+        g_lastFrameRelease = tick;
         g_gpReleaseFrame(rdram, ctx, runtime);
     }
 
@@ -912,3 +913,31 @@ namespace
 }
 
 PS2_REGISTER_GAME_OVERRIDE("Shadow of the Colossus (USA)", "SCUS_974.72", 0u, 0u, applySotcOverrides)
+
+namespace decomp_collision { extern uint64_t g_guestRuns; }
+bool captureSotcSystemState(std::vector<uint8_t> &out,std::string &error)
+{
+    if (std::getenv("SOTC_DIFFTEST") || std::getenv("PS2X_INPUT_SCRIPT")) {
+        error="Disable differential/scripted debug execution before creating a player state."; return false;
+    }
+    ps2state::Writer w(out,error); w.pod(uint32_t{0x31535953});
+    w.pod(g_gamecoreEntered); w.pod(g_gamecoreEntryEnabled); w.pod(g_gamecoreImageAllocated);
+    w.pod(g_lastFrameRelease); w.pod(sysnative::g_rapBase);
+    return w.finish();
+}
+static bool decodeSotcSystemState(const std::vector<uint8_t> &blob,bool apply,std::string &error)
+{
+    ps2state::Reader r(blob,error); uint32_t magic=0; bool entered=false,enabled=false,allocated=false; uint64_t release=0,rap=0;
+    r.pod(magic); r.pod(entered); r.pod(enabled); r.pod(allocated); r.pod(release); r.pod(rap);
+    if (!r.finish() || magic!=0x31535953 || !entered || !enabled) { error="Invalid native system state."; return false; }
+    if (apply) {
+        g_gamecoreEntered=entered; g_gamecoreEntryEnabled=enabled; g_gamecoreImageAllocated=allocated;
+        g_lastFrameRelease=release; sysnative::g_rapBase=rap;
+        g_pendingYawPitch.clear();
+        // Invalidate address-based collision lookup memos from the abandoned timeline.
+        ++decomp_collision::g_guestRuns;
+    }
+    return true;
+}
+bool validateSotcSystemState(const std::vector<uint8_t> &b,std::string &e) { return decodeSotcSystemState(b,false,e); }
+bool restoreSotcSystemState(const std::vector<uint8_t> &b,std::string &e) { return decodeSotcSystemState(b,true,e); }

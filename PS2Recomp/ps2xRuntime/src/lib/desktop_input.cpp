@@ -2,6 +2,7 @@
 #if defined(__linux__) && !defined(__ANDROID__)
 #include "raylib.h"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -35,12 +36,13 @@ namespace {
     bool captured = false, waitingRelease = true;
     std::mutex mutex;
     State snapshot;
+    std::atomic<bool> resetPending{false};
     using Clock = std::chrono::steady_clock;
     Clock::time_point sampledAt;
 
     bool validCode(int code) {
         return (code >= -7 && code <= 0) ||
-            (code >= 32 && code <= 348 && code != KEY_F1 && code != KEY_F11);
+            (code >= 32 && code <= 348 && code != KEY_F1 && code != KEY_F5 && code != KEY_F8 && code != KEY_F9 && code != KEY_F11);
     }
     bool down(int code) {
         return code < 0 ? IsMouseButtonDown(-code - 1) : code > 0 && IsKeyDown(code);
@@ -77,7 +79,9 @@ void initialize()
 
 void poll(bool menuBlocked)
 {
-    const bool active = IsWindowFocused() && !menuBlocked;
+    const bool reset = resetPending.exchange(false);
+    if (reset) waitingRelease = true;
+    const bool active = IsWindowFocused() && !menuBlocked && !reset;
     const bool wantCapture = active && mouseCamera;
     const bool changed = captured != wantCapture;
     if (changed) {
@@ -87,7 +91,7 @@ void poll(bool menuBlocked)
     State next;
     if (!active) waitingRelease = true;
     else {
-        bool held = IsKeyDown(KEY_F1);
+        bool held = IsKeyDown(KEY_F1) || IsKeyDown(KEY_F5) || IsKeyDown(KEY_F8);
         for (const auto &binding : bindings) held |= down(binding.code);
         if (waitingRelease && !held) waitingRelease = false;
         if (!waitingRelease) {
@@ -112,6 +116,12 @@ void poll(bool menuBlocked)
     sampledAt = Clock::now();
 }
 
+void resetAfterStateLoad()
+{
+    std::lock_guard<std::mutex> lock(mutex);
+    snapshot = {}; sampledAt = Clock::now(); resetPending.store(true);
+}
+
 State read()
 {
     std::lock_guard<std::mutex> lock(mutex);
@@ -124,5 +134,6 @@ namespace desktop_input {
 void initialize() {}
 void poll(bool) {}
 State read() { return {}; }
+void resetAfterStateLoad() {}
 }
 #endif

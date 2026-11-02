@@ -326,3 +326,14 @@ void PS2AudioBackend::stopAll()
     m_impl->activeSounds.clear();
 #endif
 }
+
+bool PS2AudioBackend::stateCaptureSupported(std::string &error) const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_sampleBank.empty() || !m_loadOrderSamples.empty() || !m_loadOrderSampleKeys.empty() ||
+        m_mostRecentSampleKey || (m_impl && !m_impl->activeSounds.empty())) {
+        error="Legacy VAG/LibSD host playback is not supported by this native SG2 state format.";
+        return false;
+    }
+    return true;
+}

@@ -42,6 +42,26 @@ jogo antes de transferir; ao importar, o cartão anterior fica em
 O botão **Abrir pasta** usa o aplicativo padrão do sistema com o ambiente de
 bibliotecas restaurado, inclusive no pacote portátil. A ROM original permanece intacta.
 
+## Save states
+
+**F5** grava o estado rápido; **F8** restaura esse ponto. No menu **F1 → Estados**,
+escolha o slot rápido ou um dos cinco slots manuais para salvar, carregar e
+excluir. O gerenciador mostra a data e o tamanho dos estados e pede confirmação
+para substituir ou excluir um slot. Os arquivos ficam em `player/savestates`;
+o launcher mostra os atalhos e abre essa pasta em **Meus saves**.
+
+O formato inclui execução, memória, áudio e serviços nativos e exige o mesmo
+executável do runtime e a mesma edição do disco. Estados de outra compilação ou
+arquivos incompletos são recusados antes de alterar a partida. A gravação é
+atômica. A primeira versão funciona no modo nativo Linux padrão do launcher;
+aguarde o fim de vídeos ou operações de carregamento se aparecer uma mensagem
+de ponto ainda não suportado. Caches de renderização são reconstruídos ao carregar.
+
+Continue salvando nos altares: o cartão normal é o caminho para transferir o
+progresso entre versões. Carregar um estado não substitui o cartão real. Se esse
+cartão mudou desde a captura, o carregamento do estado é recusado para preservar
+os saves persistentes.
+
 ## Tela cheia e shaders
 
 <img width="1109" height="751" alt="image" src="https://github.com/user-attachments/assets/f4dfb9da-b702-46d1-b79a-d151fa18b36a" />
@@ -82,12 +102,13 @@ diretamente. Veja [o formato e exemplos](docs/SHADERS.md).
 | ← / → / Page Up / Page Down | câmera pelo teclado |
 | Ctrl esquerdo / V | L3 / R3 |
 | F1 | configurações, liberar cursor e **Sistema → Voltar ao launcher** |
+| F5 / F8 | salvar / carregar o estado rápido |
 | F11 | alternar janela / tela cheia |
 
 Na aba **Controles → Personalizar teclado e mouse**, cada ação aceita outra tecla
 ou botão do mouse. Ajuste a sensibilidade e a inversão dos dois eixos ou desative
 a câmera pelo mouse. O perfil é salvo localmente e aplicado na próxima abertura.
-F1 e F11 são reservados; Delete remove uma atribuição no editor.
+F1, F5, F8, F9 (diagnóstico) e F11 são reservados; Delete remove uma atribuição no editor.
 O cursor é liberado ao abrir F1 ou trocar de janela; comandos mantidos durante
 a transição precisam ser soltos antes de voltar ao jogo. Esc pausa sem encerrar.
 

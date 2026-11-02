@@ -1,5 +1,7 @@
 #include "Common.h"
 #include "Audio.h"
+#include "runtime/save_state_archive.h"
+#include "runtime/host_state.h"
 
 namespace ps2_stubs
 {
@@ -654,4 +656,25 @@ namespace ps2_stubs
     {
         TODO_NAMED("sceSynthSizerLfoTriangle", rdram, ctx, runtime);
     }
+}
+
+namespace ps2_stubs {
+    template<class Archive> static bool audioCodec(Archive &a, AudioStubState &s)
+    {
+        a.pod(s.initialized);
+        for (auto &v : s.voiceTransfers) { a.pod(v.sourceAddress); a.pod(v.destinationAddress); a.pod(v.size); a.pod(v.mode); a.pod(v.completed); }
+        for (auto &b : s.blockTransfers) { a.pod(b.base); a.pod(b.size); a.pod(b.pauseBase); a.pod(b.offset); a.pod(b.mode); a.pod(b.active); a.pod(b.loop); }
+        return a.good();
+    }
+    bool captureAudioState(std::vector<uint8_t> &out, std::string &error)
+    { std::lock_guard<std::mutex> lock(g_audio_stub_mutex); ps2state::Writer w(out,error); w.pod(uint32_t{0x31445541}); audioCodec(w,g_audio_stub_state); return w.finish(); }
+    static bool decodeAudioState(const std::vector<uint8_t> &blob, bool apply, std::string &error)
+    {
+        ps2state::Reader r(blob,error); uint32_t magic = 0; AudioStubState s; r.pod(magic); audioCodec(r,s);
+        if (!r.finish() || magic != 0x31445541) { error = "Invalid audio transfer state."; return false; }
+        if (apply) { std::lock_guard<std::mutex> lock(g_audio_stub_mutex); g_audio_stub_state = s; }
+        return true;
+    }
+    bool validateAudioState(const std::vector<uint8_t> &b,std::string &e) { return decodeAudioState(b,false,e); }
+    bool restoreAudioState(const std::vector<uint8_t> &b,std::string &e) { return decodeAudioState(b,true,e); }
 }

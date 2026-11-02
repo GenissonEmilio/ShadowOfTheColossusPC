@@ -1,5 +1,7 @@
 #include "Common.h"
 #include "MPEG.h"
+#include "runtime/save_state_archive.h"
+#include "runtime/host_state.h"
 #include "runtime/ee_scheduler.h"
 
 #if !defined(PS2X_HAS_FFMPEG)
@@ -2570,4 +2572,39 @@ namespace ps2_stubs
         getPlaybackState(mpegAddr).imageBufferAddr = imageBufferAddr;
         setReturnS32(ctx, 0);
     }
+}
+
+namespace ps2_stubs {
+    bool captureMpegState(std::vector<uint8_t> &out, std::string &error)
+    {
+        std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+        if (!g_mpeg_stub_state.playbackByMpeg.empty() || !g_mpeg_stub_state.callbacksByMpeg.empty())
+        { error = "A movie decoder is active. Finish the movie and try again."; return false; }
+        ps2state::Writer w(out, error); w.pod(uint32_t{0x3147504d});
+        w.pod(g_mpeg_stub_state.initialized);
+        w.pod(g_mpeg_stub_state.nextCallbackHandle);
+        w.pod(g_mpeg_stub_state.cdStreamGeneration);
+        w.pod(g_mpeg_stub_state.cdStreamBytesProduced);
+        w.pod(g_mpeg_stub_state.cdStreamBytesDemuxed);
+        w.pod(g_mpeg_stub_state.cdStreamEofPending);
+        w.pod(g_mpeg_stub_state.currentCdStreamEofSeen);
+        return w.finish();
+    }
+    static bool decodeMpegState(const std::vector<uint8_t> &blob, bool apply, std::string &error)
+    {
+        MpegStubState saved; ps2state::Reader r(blob, error); uint32_t magic = 0; r.pod(magic);
+        r.pod(saved.initialized);
+        r.pod(saved.nextCallbackHandle);
+        r.pod(saved.cdStreamGeneration);
+        r.pod(saved.cdStreamBytesProduced);
+        r.pod(saved.cdStreamBytesDemuxed);
+        r.pod(saved.cdStreamEofPending);
+        r.pod(saved.currentCdStreamEofSeen);
+        if (!r.finish() || magic != 0x3147504d || !saved.nextCallbackHandle)
+        { error = "Invalid movie subsystem state."; return false; }
+        if (apply) { std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex); g_mpeg_stub_state = std::move(saved); }
+        return true;
+    }
+    bool validateMpegState(const std::vector<uint8_t> &blob, std::string &error) { return decodeMpegState(blob, false, error); }
+    bool restoreMpegState(const std::vector<uint8_t> &blob, std::string &error) { return decodeMpegState(blob, true, error); }
 }

@@ -11,7 +11,7 @@ import tempfile
 from import_disc import import_disc, EXPECTED
 from pipeline import Pipeline
 
-VERSION = "0.2.8"
+VERSION = "0.3.0"
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 APPLICATION_ID = "io.github.GenissonEmilio.ShadowOfTheColossusPC"
 
@@ -83,6 +83,7 @@ class Library:
         environment["SOTC_NATIVE_GL"] = "1"
         environment["PS2X_GS_THREADS"] = "2"
         environment["PS2X_MEMCARD_DIR"] = str(self.player_directory / "memcards")
+        environment["PS2X_STATE_DIR"] = str(self.player_directory / "savestates")
         environment["LD_LIBRARY_PATH"] = str(self.program / "compiler/lib") + (
             os.pathsep + original_ld if original_ld else "")
         environment.setdefault("LP_NUM_THREADS", "2")

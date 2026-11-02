@@ -22,13 +22,14 @@ class DesktopControlsTests(unittest.TestCase):
             restarted = Library(Path(tmp), Path(tmp)/'program')
             self.assertEqual(Controls(restarted).load(), values)
             self.assertEqual(restarted.game_environment()['PS2X_DESKTOP_INPUT'], str(profile.path))
+            self.assertEqual(restarted.game_environment()['PS2X_STATE_DIR'], str(restarted.player_directory / 'savestates'))
 
     def test_failed_or_invalid_edit_keeps_previous_profile(self):
         with tempfile.TemporaryDirectory() as tmp:
             profile = Controls(Library(Path(tmp), Path(tmp)/'program'))
             profile.save(DEFAULTS)
             before = profile.path.read_bytes()
-            for override in ({'jump': 87}, {'attack': 290}, {'attack': 300},
+            for override in ({'jump': 87}, {'attack': 290}, {'attack': 294}, {'attack': 297}, {'attack': 298}, {'attack': 300},
                              {'attack': -8}, {'attack': None}, {'sensitivity': float('nan')}):
                 with self.assertRaises(ValueError):
                     profile.save(dict(DEFAULTS, **override))

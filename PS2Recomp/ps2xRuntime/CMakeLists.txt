@@ -444,6 +444,7 @@ add_library(ps2_runtime STATIC
     src/lib/ps2_pad.cpp
     src/lib/desktop_input.cpp
     src/lib/host_menu.cpp
+    src/lib/state_manager.cpp
     src/lib/desktop_video.cpp
     src/lib/ps2_rom_device.cpp
     src/lib/ps2_vfs.cpp

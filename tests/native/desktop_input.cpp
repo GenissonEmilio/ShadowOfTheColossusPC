@@ -76,6 +76,13 @@ int main(int argc, char **argv)
     focused = false; poll(); assert(!cursor); assert(packet(data) == 0);
     focused = true; poll(); assert(packet(data) == 0);
     neutral();
+    // Loading releases keyboard/mouse latches, including a held quickload key.
+    mouse[0] = true; keys[KEY_F8] = true; poll();
+    desktop_input::resetAfterStateLoad(); assert(packet(data) == 0);
+    poll(); assert(packet(data) == 0); poll(); assert(packet(data) == 0);
+    neutral(); mouse[0] = true; poll(); assert(packet(data) == 0x8000);
+    for (int key : {KEY_F1, KEY_F5, KEY_F8, KEY_F9, KEY_F11}) assert(!desktop_input::validCode(key));
+    neutral();
     // Real user configuration replaces defaults for both keyboard and mouse.
     std::ofstream(argv[1]) << "attack=66\ngrab=-4\nstart=89\nsensitivity=2\ninvert_x=1\ninvert_y=1\nmove_up=84\n";
     setenv("PS2X_DESKTOP_INPUT", argv[1], 1);
@@ -93,6 +100,8 @@ int main(int argc, char **argv)
       gamepads[2].buttons[GAMEPAD_BUTTON_RIGHT_FACE_UP] = true;
       gamepads[2].axes[GAMEPAD_AXIS_RIGHT_X] = 1; }
     assert(packet(data) == 0x1000 && data[4] == 255);
+    ps2pad::resetAfterStateLoad(); assert(packet(data) == 0 && data[4] == 128);
+    assert(packet(data) == 0);
     { std::lock_guard<std::mutex> lock(gamepadMutex); gamepads = {}; }
     keys[KEY_B] = true; poll();
     std::this_thread::sleep_for(std::chrono::milliseconds(260));

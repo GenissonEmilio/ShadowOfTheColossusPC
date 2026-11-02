@@ -12,4 +12,5 @@ namespace desktop_input
     void poll(bool menuBlocked);
     // Guest thread reads only this synchronized snapshot, never GLFW state.
     State read();
+    void resetAfterStateLoad();
 }

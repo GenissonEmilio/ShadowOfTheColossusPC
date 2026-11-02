@@ -81,7 +81,11 @@ base_hash.update(sources[0].read_bytes())
 base_key=base_dir / 'key.txt'
 objects=[str(base_dir / f'base-{i}.o') for i in range(len(sources))]
 if not (base_key.is_file() and base_key.read_text()==base_hash.hexdigest() and all(Path(p).is_file() for p in objects)):
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+    try:
+        workers=max(1,min(2,int(os.environ.get('SOTC_BUILD_JOBS','2'))))
+    except ValueError:
+        workers=1
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         objects=list(pool.map(compile_source,enumerate(sources)))
     base_key.write_text(base_hash.hexdigest())
 base=OUT / 'lib/libbase.a';base.parent.mkdir(exist_ok=True)

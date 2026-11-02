@@ -1,4 +1,7 @@
 #include "Common.h"
+#include "runtime/host_state.h"
+#include "runtime/save_state_archive.h"
+namespace { bool g_stateHostRandomTouched = false; }
 #include "LibC.h"
 #include "ps2_log.h"
 
@@ -1170,11 +1173,13 @@ namespace ps2_stubs
 
     void rand(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        g_stateHostRandomTouched = true;
         setReturnS32(ctx, std::rand() & 0x7FFF);
     }
 
     void srand(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        g_stateHostRandomTouched = true;
         std::srand(getRegU32(ctx, 4));
         setReturnS32(ctx, 0);
     }
@@ -1280,4 +1285,24 @@ namespace ps2_stubs
         setReturnU64(ctx, static_cast<uint64_t>(num / den));
     }
 
+}
+
+namespace ps2_stubs {
+    bool captureLibcState(std::vector<uint8_t> &out,std::string &error) {
+        std::lock_guard<std::mutex> lock(g_file_mutex);
+        if (!g_file_map.empty()) { error="A C library file is open. Finish loading and try again."; return false; }
+        if (g_stateHostRandomTouched) { error="Host C random state is not serializable for this game profile."; return false; }
+        ps2state::Writer w(out,error); w.pod(uint32_t{0x3143424c}); w.pod(g_next_file_handle); return w.finish();
+    }
+    bool validateLibcState(const std::vector<uint8_t> &b,std::string &e) {
+        ps2state::Reader r(b,e); uint32_t magic=0,next=0; r.pod(magic); r.pod(next);
+        if (!r.finish() || magic!=0x3143424c || !next) { e="Invalid C library state."; return false; } return true;
+    }
+    bool restoreLibcState(const std::vector<uint8_t> &b,std::string &e) {
+        if (!validateLibcState(b,e)) return false;
+        std::lock_guard<std::mutex> lock(g_file_mutex);
+        for (auto &[id,file]:g_file_map) if (file) std::fclose(file);
+        ps2state::Reader r(b,e); uint32_t magic=0,next=0; r.pod(magic); r.pod(next);
+        g_file_map.clear(); g_next_file_handle=next; g_stateHostRandomTouched=false; return true;
+    }
 }

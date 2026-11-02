@@ -25,6 +25,7 @@
 #include "ps2_runtime_macros.h"
 #include "runtime/native_tuning.h"
 #include "runtime/native_renderer.h"
+#include "runtime/save_state_archive.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
 #include "runtime/gs/ps2_gs_psmt4.h"
@@ -52,12 +53,17 @@
 #include <utility>
 #include <vector>
 
+bool captureSotcSystemState(std::vector<uint8_t> &,std::string &);
+bool validateSotcSystemState(const std::vector<uint8_t> &,std::string &);
+bool restoreSotcSystemState(const std::vector<uint8_t> &,std::string &);
+
 namespace sotc_native
 {
     constexpr uint32_t kModelDisp = 0x01097118u, kGetCameraContext = 0x0108F518u;
     PS2Runtime::RecompiledFunction g_modelDisp = nullptr, g_getCameraContext = nullptr;
     uint32_t g_cameraContext = 0;
     uint64_t g_frame = 0;
+    uint64_t g_stateEpoch = 0;
     uint32_t g_frameDraws = 0;
     uint32_t g_modelDraws = 0; // 3D draws this frame
 
@@ -676,6 +682,8 @@ namespace sotc_native
                 bool rewritten = false;
             };
             static WayMemo<ContentMemo, 512> memos;
+            static uint64_t epoch = 0;
+            if (epoch != g_stateEpoch) { memos = {}; epoch = g_stateEpoch; }
             bool found = false;
             ContentMemo &memo = memos.find(header, (header >> 4) ^ (header >> 13), found);
             const bool reuse = found && memo.sampled == sampled && !memo.rewritten &&
@@ -4007,6 +4015,77 @@ namespace sotc_native
     }
 }
 
+namespace sotc_native {
+    struct NativeState {
+        uint32_t camera = 0; uint64_t counter = 0, frame = 0; uint32_t frameDraws = 0, modelDraws = 0; uint64_t skinnedDraws = 0;
+        bool bloom = false; uint32_t requested = 0; bool haveLights = false; float lights[32]{};
+        ParticleEnv particles{}; uint32_t blend = 0; uint8_t clamp = 0;
+        native_renderer::Fog fog; std::vector<uint32_t> layers;
+        Assembler assembler; std::vector<native_renderer::Vertex> volume;
+        std::vector<uint8_t> system, gpu;
+    };
+    template<class A> void nativeCodec(A &a, NativeState &s) {
+        a.pod(s.camera); a.pod(s.counter); a.pod(s.frame); a.pod(s.frameDraws); a.pod(s.modelDraws); a.pod(s.skinnedDraws);
+        a.pod(s.bloom); a.pod(s.requested); a.pod(s.haveLights); a.pod(s.lights);
+        a.pod(s.particles); a.pod(s.blend); a.pod(s.clamp);
+        a.pod(s.fog.enabled);
+        a.pod(s.fog.start);
+        a.pod(s.fog.width);
+        a.pod(s.fog.steps);
+        a.pod(s.fog.order);
+        a.pod(s.fog.vertexFog);
+        a.pod(s.fog.base);
+        a.pod(s.fog.scale);
+        a.pod(s.fog.colour);
+        a.pod(s.assembler.prim);
+        a.pod(s.assembler.rgbaq);
+        a.pod(s.assembler.alpha);
+        a.pod(s.assembler.s);
+        a.pod(s.assembler.t);
+        a.pod(s.assembler.u);
+        a.pod(s.assembler.v);
+        a.pod(s.assembler.header);
+        a.pod(s.assembler.layer);
+        a.pod(s.assembler.batchKey);
+        a.pod(s.assembler.batchPrim);
+        a.pod(s.assembler.batchAlpha);
+        a.pod(s.assembler.batchHeader);
+        a.pod(s.assembler.batchLayer);
+        a.vector(s.layers, 256); a.vector(s.assembler.strip, 65536); a.vector(s.assembler.batch, 1u<<20); a.vector(s.volume, 1u<<20); a.vector(s.system,65536); a.vector(s.gpu,32u<<20);
+    }
+    bool captureNativeState(PS2Runtime &, std::vector<uint8_t> &out, std::string &error) {
+        if (!g_ram) { error="The native scene is not ready yet."; return false; }
+        // Boss mask is a derived texture; rebuild it from restored guest data.
+        NativeState s; s.counter=ps2_stats::vif1Chains.load(); s.camera=g_cameraContext; s.frame=g_frame; s.frameDraws=g_frameDraws; s.modelDraws=g_modelDraws;
+        s.skinnedDraws=g_skinnedDraws; s.bloom=g_bloomRan; s.requested=g_requested; s.haveLights=g_haveViewLights;
+        std::memcpy(s.lights,g_viewLights,sizeof(s.lights)); s.particles=g_ptclEnvState; s.blend=g_ptclBlend; s.clamp=g_ptclClamp;
+        s.fog=g_fog; s.layers=g_layers; s.assembler=g_2d; s.volume=g_volume;
+        if (!captureSotcSystemState(s.system,error) || !native_renderer::captureState(s.gpu,error)) return false;
+        ps2state::Writer w(out,error); w.pod(uint32_t{0x31544f53}); nativeCodec(w,s); return w.finish();
+    }
+    bool decodeNativeState(PS2Runtime &runtime, const std::vector<uint8_t> &blob, bool apply, std::string &error) {
+        NativeState s; ps2state::Reader r(blob,error); uint32_t magic=0; r.pod(magic); nativeCodec(r,s);
+        if (!r.finish() || magic!=0x31544f53 || s.camera>=PS2_RAM_SIZE || s.layers.size()>256) { error="Invalid native scene state."; return false; }
+        if (!validateSotcSystemState(s.system,error) || !native_renderer::validateState(s.gpu,error)) return false;
+        if (apply) {
+            if (!native_renderer::resetStateFrame(error)) return false;
+            if (!native_renderer::restoreState(s.gpu,error) || !restoreSotcSystemState(s.system,error)) return false;
+            ++g_stateEpoch; for (auto &memo:g_textureMemo) memo={}; g_packetMemo={};
+            g_packetChangedInPlace=false; g_skinnedPackets.clear(); g_skinnedPacketBytes=0; g_litPackets={}; g_skinnedIds={};
+            g_bossMask.id.store(0); g_bossMask.frame.store(~0ull); g_bossMask.hash=0; g_bossMask.slot=0; g_bossMask.rgba.clear();
+            ps2_stats::vif1Chains.store(s.counter);
+            g_ram=runtime.memory().getRDRAM(); g_cameraContext=s.camera; g_frame=s.frame; g_frameDraws=s.frameDraws; g_modelDraws=s.modelDraws;
+            g_skinnedDraws=s.skinnedDraws; g_bloomRan=s.bloom; g_requested=s.requested; g_haveViewLights=s.haveLights;
+            std::memcpy(g_viewLights,s.lights,sizeof(g_viewLights)); g_ptclEnvState=s.particles; g_ptclBlend=s.blend; g_ptclClamp=s.clamp;
+            g_fog=s.fog; g_layers.swap(s.layers); g_2d=std::move(s.assembler); g_volume.swap(s.volume);
+            native_renderer::noteFrontendMemory(0);
+        }
+        return true;
+    }
+    bool validateNativeState(PS2Runtime &r,const std::vector<uint8_t> &b,std::string &e) { return decodeNativeState(r,b,false,e); }
+    bool restoreNativeState(PS2Runtime &r,const std::vector<uint8_t> &b,std::string &e) { return decodeNativeState(r,b,true,e); }
+}
+
 void installSotcNative(PS2Runtime &runtime)
 {
     using namespace sotc_native;
@@ -4017,6 +4096,7 @@ void installSotcNative(PS2Runtime &runtime)
         std::cerr << "[sotc:native] no native renderer on this platform" << std::endl;
         return;
     }
+    runtime.setStateHooks(captureNativeState, validateNativeState, restoreNativeState);
     g_modelDisp = runtime.lookupFunction(kModelDisp);
     runtime.registerFunction(kModelDisp, modelDispHook);
     g_getCameraContext = runtime.lookupFunction(kGetCameraContext);

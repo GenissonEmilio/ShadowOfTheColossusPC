@@ -40,3 +40,7 @@ celosia_settings.cfg
 *.rar
 *.elf
 *.ps2
+
+# Player execution snapshots contain original local game data.
+*.sotcstate
+.state-*.tmp

@@ -7,6 +7,7 @@
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace ps2x::iop::detail
@@ -87,7 +88,15 @@ namespace ps2x::iop::detail
         size_t readOutput(int16_t *destination, size_t frames);
         [[nodiscard]] static bool pullMode();
 
+        // Persistent guest audio state; host output already queued is discarded on load.
+        bool captureState(std::vector<uint8_t> &out, std::string &error) const;
+        bool validateState(const std::vector<uint8_t> &blob, std::string &error) const;
+        bool restoreState(const std::vector<uint8_t> &blob, std::string &error);
+
     private:
+        friend class Sg2Driver;
+        bool captureStateLocked(std::vector<uint8_t> &out, std::string &error) const;
+        bool decodeStateLocked(const std::vector<uint8_t> &blob, bool apply, std::string &error);
         enum class Phase : uint8_t
         {
             Off,
@@ -144,7 +153,7 @@ namespace ps2x::iop::detail
         void render(int16_t *destination, uint32_t frames);
         void pushOutput(const int16_t *frames, size_t count);
 
-        std::mutex m_lock;
+        mutable std::mutex m_lock;
         std::vector<uint16_t> m_ram;
         std::array<Voice, 48> m_voices{};
         std::array<Core, 2> m_cores{};

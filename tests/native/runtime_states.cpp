@@ -101,7 +101,7 @@ namespace
         std::memcpy(image.data()+0x20,&end,4);
         std::memcpy(image.data()+0x2e,&stride,2);
         std::memcpy(image.data()+0x30,&count,2);
-        std::memcpy(image.data()+0x40,"sg2iop_driver",12);
+        std::memcpy(image.data()+0x40,"sg2iop_driver",13);
         check(runtime->iopSubsystem()->writeMemory(0x1000,image.data(),image.size()),"write synthetic native-driver identification");
         check(runtime->iopSubsystem()->loadModuleBuffer(0x1000).moduleId>0,"select real SG2 native service");
         check(runtime->iopSubsystem()->loadModule("rom0:LIBSD").moduleId>0,"initialize real HLE service routes");

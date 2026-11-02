@@ -11,6 +11,7 @@
 #include <filesystem>
 #include "runtime/native_tuning.h"
 #include "runtime/host_menu.h"
+#include "runtime/state_manager.h"
 #include "runtime/desktop_input.h"
 #include "runtime/desktop_video.h"
 #if defined(__linux__) && !defined(__ANDROID__)
@@ -831,7 +832,8 @@ bool PS2Runtime::syncCoreSubsystems()
                               { m_gs.writeRegister(reg, value); });
     {
         extern uint32_t (*g_ps2MmioCaller)();
-        static PS2Runtime *self = this;
+        static PS2Runtime *self = nullptr;
+        self = this; // A restored/new runtime owns the process MMIO callback.
         g_ps2MmioCaller = []() -> uint32_t
         {
             const R5900Context *context = self->m_eeScheduler ? self->m_eeScheduler->currentContext() : nullptr;
@@ -930,9 +932,11 @@ namespace
     // Host audio: the IOP's SPU2 produces 48 kHz stereo into a ring buffer
     // that raylib's audio thread drains through this callback.
     std::atomic<ps2x::iop::IopSubsystem *> g_spu2AudioSource{nullptr};
+    std::mutex g_stateAudioMutex;
 
     void spu2AudioCallback(void *buffer, unsigned int frames)
     {
+        std::lock_guard<std::mutex> stateLock(g_stateAudioMutex);
         auto *out = static_cast<int16_t *>(buffer);
         size_t produced = 0;
         if (ps2x::iop::IopSubsystem *iop = g_spu2AudioSource.load(std::memory_order_acquire))
@@ -2801,6 +2805,7 @@ void PS2Runtime::HandleIntegerOverflow(R5900Context *ctx)
 void PS2Runtime::run()
 {
     m_stopRequested.store(false, std::memory_order_relaxed);
+    savestates::bind(this);
     ps2_stubs::resetSifState();
     resetIop();
     ps2_stubs::resetAudioStubState();
@@ -2871,7 +2876,7 @@ void PS2Runtime::run()
                 if (now - windowStart >= 1.0)
                 {
                     const uint64_t chains = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
-                    gameFps = static_cast<int>((chains - lastChains) / (now - windowStart) + 0.5);
+                    gameFps = chains >= lastChains ? static_cast<int>((chains - lastChains) / (now - windowStart) + 0.5) : 0;
                     lastChains = chains;
                     windowStart = now;
                 }
@@ -2884,6 +2889,18 @@ void PS2Runtime::run()
                 m_debugUiDrawCallback(*this, m_debugUiUserData);
             }
             hostmenu::draw(GetScreenWidth(), GetScreenHeight());
+            if (!hostmenu::isOpen()) {
+                static std::string stateMessage;
+                static double stateMessageAt = 0;
+                const std::string current = savestates::status();
+                if (current != stateMessage) { stateMessage = current; stateMessageAt = GetTime(); }
+                if (!stateMessage.empty() && (savestates::busy() || GetTime()-stateMessageAt < 8.0)) {
+                    const int size=18;
+                    const int width=std::min(GetScreenWidth()-32,MeasureText(stateMessage.c_str(),size)+24);
+                    DrawRectangle(16,16,width,38,Color{12,18,16,235});
+                    DrawText(stateMessage.c_str(),28,26,size,Color{235,217,165,255});
+                }
+            }
 #if defined(__linux__) && !defined(__ANDROID__)
             static bool presentationCaptured = false;
             if (!presentationCaptured && GetTime() >= 12.0)
@@ -3120,13 +3137,13 @@ void PS2Runtime::run()
             }
         }
         const Texture2D &shownTex = nativeOnScreen ? nativeTex : (g_directFrame.id ? g_directFrame : frameTex);
-        // F8: the same moment twice, for comparing: the emulated picture (the
+        // F9: the same moment twice, for comparing: the emulated picture (the
         // native one hidden for a few frames so the GS draws), the native one,
         // and the list of the native draws of that frame, in shots/f8_<n>_*.
         {
             static int f8Wait = 0, f8Count = 0;
             static bool f8WasNative = true;
-            if (f8Wait == 0 && IsKeyPressed(KEY_F8))
+            if (f8Wait == 0 && IsKeyPressed(KEY_F9))
             {
                 f8WasNative = native_renderer::tuning().showNative;
                 native_renderer::tuning().showNative = false;
@@ -3480,6 +3497,8 @@ void PS2Runtime::run()
             hostmenu::saveSettings();
         }
 #endif
+        if (IsKeyPressed(KEY_F5)) savestates::request(savestates::Action::Save);
+        if (IsKeyPressed(KEY_F8)) savestates::request(savestates::Action::Load);
         hostmenu::update();
         desktop_input::poll(hostmenu::inputBlocked());
 
@@ -3512,5 +3531,8 @@ void PS2Runtime::run()
 #endif
     CloseWindow();
 
+    savestates::bind(nullptr);
     RUNTIME_LOG("[run] exiting loop");
 }
+
+#include "ps2_runtime_state.inc"
