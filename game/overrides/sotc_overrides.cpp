@@ -22,6 +22,7 @@
 
 void installSotcNative(PS2Runtime &runtime); // sotc_native.cpp
 #include "sotc_decomp.h"
+#include "decomp_ground_support.h"
 
 namespace
 {
@@ -881,6 +882,7 @@ namespace
         installSotcNative(runtime);
         sysnative::install(runtime);
         sotc_decomp::install(runtime);
+        sotc_ground_support::installGroundSupport(runtime);
         if (std::getenv("SOTC_MATH_CHECK") && runtime.hasFunction(0x010816C0u))
         {
             g_yawPitch = runtime.lookupFunction(0x010816C0u);
