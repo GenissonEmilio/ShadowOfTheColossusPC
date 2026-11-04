@@ -56,5 +56,30 @@ um resultado de aprovação da suíte inteira; os recibos locais preservam as
 falhas preexistentes. Os testes de execução focados são um gate obrigatório
 no CI, incluindo a exigência de que pelo menos um teste seja encontrado.
 
-Os resultados do percurso com as duas correções serão acrescentados após a
-validação integrada. A campanha completa continua pendente.
+A validação integrada usou uma cópia isolada do cartão fornecido, carregado
+pelo menu normal, seguida do percurso até a rampa. No runtime final do kit
+`790145de980ce349e7acb515`, a caminhada lenta passou pela subida inferior,
+pelo piso superior e pela descida, sem pular ou agarrar. A corrida normal
+venceu o degrau superior e permaneceu estável por quatro segundos.
+
+Foram aprovados 24 trechos guiados de caminhada, incluindo uma repetição da
+emenda inferior após F5/F8. No trecho de subida Z=-1377,56 até -1381,53,
+a orientação coerente reduziu a travessia do candidato anterior de cerca de
+1.560 quadros para 403 quadros entre a primeira e a última amostra de navegação.
+O log confirmou a nova normal nos três consumidores conhecidos, inclusive
+`caller=010e785c` sobre a face 2313.
+
+Na comparação com o mesmo executável e o mesmo checkpoint, desligar o suporte
+voltou a bloquear a descida em Z=-1378,83. Reiniciar com a configuração padrão,
+sem a variável de desativação, permitiu atravessar novamente até Z=-1374,41.
+
+As amostragens de subida e descida registraram 6.000 e 7.200 amostras com
+contato estático, sem regressão de quadros nem raiz abaixo da superfície
+referenciada. A distância vertical entre a raiz e a superfície ficou em
+0,568–0,797 m na primeira amostragem e 0,675–0,748 m na descida. A raiz fica
+acima dos pés; a leitura externa não é atômica e suas trocas de referência
+entre quadros são registradas como tais, sem tratá-las como defeito físico.
+
+O CI do código final passou nos testes de compilação, branches sintéticos,
+fidelidade, entrada, estados e pacote Linux. A campanha completa continua
+pendente; estes resultados cobrem somente os percursos descritos.
