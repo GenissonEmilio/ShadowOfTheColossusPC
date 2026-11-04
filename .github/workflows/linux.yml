@@ -79,6 +79,14 @@ jobs:
           docker run --rm --init --cpus=2 --memory=1000m --memory-swap=1000m --network=none \
             -u "$(id -u):$(id -g)" -e HOME=/tmp -e LP_NUM_THREADS=2 -v "$PWD:/src:z" \
             sotc-linux-builder bash tools/linux/test_renderer_colours.sh
+      - name: Static ground support boundaries and seam transitions (no ROM)
+        run: |
+          docker run --rm --init --cpus=1 --memory=512m --memory-swap=512m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_ground_support.sh
+          docker run --rm --init --cpus=1 --memory=512m --memory-swap=512m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_ground_support_adapter.sh
       - name: Transfer palette selection before and after (no ROM)
         run: |
           baseline=83d8eff3c72902822c673dd60709e601777459bd

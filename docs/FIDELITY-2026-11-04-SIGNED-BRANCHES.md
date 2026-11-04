@@ -25,12 +25,15 @@ memória suficiente para não haver reclaim ou swap no grupo de testes.
 ## Alteração
 
 O emissor usa `GPR_S64` nas quatro comparações compartilhadas pelas doze
-variantes. A condição continua sendo calculada antes do delay slot. Não há
-alteração das rotinas do jogo, de sua geometria ou de seus materiais.
+variantes. A condição continua sendo calculada antes do delay slot. A geometria e os materiais originais são preservados.
 
-A tentativa anterior de estabilizar normais em pequenas dobras da malha foi
-retirada. A validação desta versão usa a colisão original com o código
-regenerado pelo recompilador corrigido.
+O teste isolado do emissor corrigido confirmou a aterrissagem no degrau superior
+da rampa: corrida normal de Z=-1390 até -1407, seguida de estabilidade no piso.
+Porém a caminhada lenta continuou bloqueada na emenda inferior, em torno de
+(359,2; 31,2; -1373,5), e na descida em torno de Z=-1406. São dois defeitos
+separados. A versão final combina o emissor corrigido com o suporte limitado
+de orientação nas microdobras estáticas, descrito no relatório de 2026-11-03.
+Ele não desloca vértices, alturas ou limites de materiais.
 
 ## Verificação
 
@@ -53,5 +56,5 @@ um resultado de aprovação da suíte inteira; os recibos locais preservam as
 falhas preexistentes. Os testes de execução focados são um gate obrigatório
 no CI, incluindo a exigência de que pelo menos um teste seja encontrado.
 
-Os resultados do percurso com o executável regenerado serão acrescentados
-após sua validação. A campanha completa continua pendente.
+Os resultados do percurso com as duas correções serão acrescentados após a
+validação integrada. A campanha completa continua pendente.
