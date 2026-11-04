@@ -19,9 +19,15 @@ void register_ps2_sif_dma_tests();
 void register_ps2_recompiler_tests();
 void register_ps2_runtime_expansion_tests();
 void reset_ps2_test_function_table();
+bool write_signed_branch_execution_fixture(const std::string &directory);
 
-int main()
+int main(int argc, char **argv)
 {
+    // Generate just the synthetic codegen fixture; avoid rerunning the full
+    // runtime/VU/GS suite when CTest compiles and executes this emitted code.
+    if (argc == 3 && std::string(argv[1]) == "--signed-branch-fixture")
+        return write_signed_branch_execution_fixture(argv[2]) ? 0 : 1;
+
     MiniTest::BeforeEach(reset_ps2_test_function_table);
 
     register_code_generator_tests();

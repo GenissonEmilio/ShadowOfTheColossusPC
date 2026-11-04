@@ -84,6 +84,20 @@ target_link_libraries(ps2x_tests PRIVATE
     ps2_runtime
 )
 
+# Execute actual compiler output against the real context/register helpers.
+# This narrow runner never starts the graphics/runtime test suites or needs ROMs.
+if(BUILD_TESTING AND UNIX AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+    add_test(NAME signed_branch_codegen_execution
+        COMMAND ${CMAKE_COMMAND}
+            "-DGENERATOR=$<TARGET_FILE:ps2x_tests>"
+            "-DCXX=${CMAKE_CXX_COMPILER}"
+            "-DRUNTIME_INCLUDE=${CMAKE_SOURCE_DIR}/ps2xRuntime/include"
+            "-DIOP_INCLUDE=${CMAKE_SOURCE_DIR}/ps2xIOP/include"
+            "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/signed-branch-fixture"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/signed_branch_codegen_execution.cmake")
+    set_tests_properties(signed_branch_codegen_execution PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+endif()
+
 # VU/GS tests intentionally instantiate large interpreter state.
 # Windows executables default to a much smaller stack than Linux, and
 # sanitizer/debug instrumentation can push these test frames over 1 MiB.

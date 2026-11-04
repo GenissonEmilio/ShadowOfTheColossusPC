@@ -454,6 +454,8 @@ namespace ps2recomp
         const uint8_t rsReg = static_cast<uint8_t>(m_branchInst.rs);
         const uint8_t rtReg = static_cast<uint8_t>(m_branchInst.rt);
 
+        // R5900 scalar branches inspect the low 64 bits, including values loaded by
+        // LD. Bit 31 can be set in a positive 64-bit mask; it is not its sign.
         switch (m_branchInst.opcode)
         {
         case OPCODE_BEQ:
@@ -464,10 +466,10 @@ namespace ps2recomp
             return fmt::format("GPR_U64(ctx, {}) != GPR_U64(ctx, {})", rsReg, rtReg);
         case OPCODE_BLEZ:
         case OPCODE_BLEZL:
-            return fmt::format("GPR_S32(ctx, {}) <= 0", rsReg);
+            return fmt::format("GPR_S64(ctx, {}) <= 0", rsReg);
         case OPCODE_BGTZ:
         case OPCODE_BGTZL:
-            return fmt::format("GPR_S32(ctx, {}) > 0", rsReg);
+            return fmt::format("GPR_S64(ctx, {}) > 0", rsReg);
         case OPCODE_REGIMM:
             switch (m_branchInst.rt)
             {
@@ -475,12 +477,12 @@ namespace ps2recomp
             case REGIMM_BLTZL:
             case REGIMM_BLTZAL:
             case REGIMM_BLTZALL:
-                return fmt::format("GPR_S32(ctx, {}) < 0", rsReg);
+                return fmt::format("GPR_S64(ctx, {}) < 0", rsReg);
             case REGIMM_BGEZ:
             case REGIMM_BGEZL:
             case REGIMM_BGEZAL:
             case REGIMM_BGEZALL:
-                return fmt::format("GPR_S32(ctx, {}) >= 0", rsReg);
+                return fmt::format("GPR_S64(ctx, {}) >= 0", rsReg);
             default:
                 return "false";
             }

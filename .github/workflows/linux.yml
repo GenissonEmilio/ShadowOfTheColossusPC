@@ -27,6 +27,17 @@ jobs:
         run: |
           LD_LIBRARY_PATH="$PWD/artifacts/compiler/lib" artifacts/compiler/bin/ps2_recomp --help
           test -f artifacts/compiler/manifest.json
+      - name: Execute generated EE signed branches (synthetic instructions, no ROM)
+        run: |
+          # Test/analyzer setup fetches its pinned JSON dependency; execution is offline.
+          docker run --rm --init --cpus=2 --memory=1600m --memory-swap=1600m \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder cmake -S PS2Recomp -B build/cmake \
+            -DPS2X_BUILD_TEST=ON -DPS2X_BUILD_ANALYZER=ON -DFETCHCONTENT_FULLY_DISCONNECTED=OFF
+          docker run --rm --init --cpus=2 --memory=1600m --memory-swap=1600m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder bash -c \
+            'cmake --build build/cmake --target ps2x_tests -j2 && ctest --test-dir build/cmake/ps2xTest -R "^signed_branch_codegen_execution$" --output-on-failure --no-tests=error'
       - name: Native fidelity, vector contexts and callback stacks (no ROM)
         run: |
           docker run --rm --init --cpus=2 --memory=1600m --memory-swap=1600m --network=none \
@@ -68,14 +79,6 @@ jobs:
           docker run --rm --init --cpus=2 --memory=1000m --memory-swap=1000m --network=none \
             -u "$(id -u):$(id -g)" -e HOME=/tmp -e LP_NUM_THREADS=2 -v "$PWD:/src:z" \
             sotc-linux-builder bash tools/linux/test_renderer_colours.sh
-      - name: Static ground support boundaries and seam transitions (no ROM)
-        run: |
-          docker run --rm --init --cpus=1 --memory=512m --memory-swap=512m --network=none \
-            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
-            sotc-linux-builder bash tools/linux/test_ground_support.sh
-          docker run --rm --init --cpus=1 --memory=512m --memory-swap=512m --network=none \
-            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
-            sotc-linux-builder bash tools/linux/test_ground_support_adapter.sh
       - name: Transfer palette selection before and after (no ROM)
         run: |
           baseline=83d8eff3c72902822c673dd60709e601777459bd

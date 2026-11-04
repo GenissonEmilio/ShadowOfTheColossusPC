@@ -8,6 +8,7 @@
 #include <regex>
 #include <sstream>
 #include <utility>
+#include <array>
 
 using namespace ps2recomp;
 
@@ -164,10 +165,200 @@ static void printGeneratedCode(const std::string& name, const std::string& code)
 #endif
 }
 
+namespace
+{
+struct SignedBranchFixture
+{
+    const char *name;
+    uint32_t opcode;
+    uint32_t rt;
+    unsigned relation; // >=0, <0, >0, <=0
+    bool likely;
+    bool link;
+};
+
+constexpr std::array<SignedBranchFixture, 12> signedBranches{{
+    {"bgez", OPCODE_REGIMM, REGIMM_BGEZ, 0, false, false},
+    {"bgezl", OPCODE_REGIMM, REGIMM_BGEZL, 0, true, false},
+    {"bgezal", OPCODE_REGIMM, REGIMM_BGEZAL, 0, false, true},
+    {"bgezall", OPCODE_REGIMM, REGIMM_BGEZALL, 0, true, true},
+    {"bltz", OPCODE_REGIMM, REGIMM_BLTZ, 1, false, false},
+    {"bltzl", OPCODE_REGIMM, REGIMM_BLTZL, 1, true, false},
+    {"bltzal", OPCODE_REGIMM, REGIMM_BLTZAL, 1, false, true},
+    {"bltzall", OPCODE_REGIMM, REGIMM_BLTZALL, 1, true, true},
+    {"bgtz", OPCODE_BGTZ, 0, 2, false, false},
+    {"bgtzl", OPCODE_BGTZL, 0, 2, true, false},
+    {"blez", OPCODE_BLEZ, 0, 3, false, false},
+    {"blezl", OPCODE_BLEZL, 0, 3, true, false},
+}};
+
+std::string signedBranchCode(const SignedBranchFixture &branch, uint32_t start,
+                             uint8_t rs, const std::string &name)
+{
+    Function fn{};
+    fn.name = name;
+    fn.start = start;
+    fn.end = start + 32;
+    fn.isRecompiled = true;
+    auto condition = makeIType(start, branch.opcode, rs, branch.rt, 4);
+    condition.isBranch = true;
+    condition.hasDelaySlot = true;
+    // The ordinary delay slot overwrites the operand in the rs=s5 variant.
+    // The rs=ra variant instead checks that link assignment cannot influence
+    // the decision. Likely branches must annul the slot when not taken.
+    std::vector<Instruction> code{
+        condition, makeAddiu(start + 4, 21, 0, 0xFFFF),
+        makeAddiu(start + 8, 2, 0, 0), makeJr(start + 12, 31), makeNop(start + 16),
+        makeAddiu(start + 20, 2, 0, 1), makeJr(start + 24, 31), makeNop(start + 28),
+    };
+    CodeGenerator generator({}, {});
+    generator.setRenamedFunctions({{start, name}});
+    return generator.generateFunction(fn, code, false);
+}
+
+std::string materialBranchCode()
+{
+    // Original-style masked-attribute predicate: a nonnegative 64-bit expected
+    // value selects equality; the negative sentinel selects any masked bit.
+    // The caller then inverts the predicate. No game code or data is included.
+    constexpr uint32_t start = 0x200000;
+    Function fn{};
+    fn.name = "material_branch";
+    fn.start = start;
+    fn.end = start + 0x44;
+    fn.isRecompiled = true;
+    auto sign = makeIType(start, OPCODE_REGIMM, 21, REGIMM_BGEZ, 7);
+    sign.isBranch = sign.hasDelaySlot = true;
+    Instruction mask{};
+    mask.address = start + 4;
+    mask.opcode = OPCODE_SPECIAL;
+    mask.function = SPECIAL_AND;
+    mask.rs = 2; mask.rt = 20; mask.rd = 2;
+    mask.raw = (2u << 21) | (20u << 16) | (2u << 11) | SPECIAL_AND;
+    auto zero = makeIType(start + 8, OPCODE_BEQ, 2, 0, 11);
+    zero.isBranch = zero.hasDelaySlot = true;
+    auto equal = makeIType(start + 0x20, OPCODE_BNE, 2, 21, 5);
+    equal.isBranch = equal.hasDelaySlot = true;
+    const std::vector<Instruction> code{
+        sign, mask, zero, makeNop(start + 0xC),
+        makeAddiu(start + 0x10, 2, 0, 0), makeJr(start + 0x14, 31), makeNop(start + 0x18),
+        makeNop(start + 0x1C), equal, makeNop(start + 0x24),
+        makeAddiu(start + 0x28, 2, 0, 0), makeJr(start + 0x2C, 31), makeNop(start + 0x30),
+        makeNop(start + 0x34), makeAddiu(start + 0x38, 2, 0, 1),
+        makeJr(start + 0x3C, 31), makeNop(start + 0x40),
+    };
+    CodeGenerator generator({}, {});
+    generator.setRenamedFunctions({{start, fn.name}});
+    return generator.generateFunction(fn, code, false);
+}
+} // namespace
+
+bool write_signed_branch_execution_fixture(const std::string &directory)
+{
+    try
+    {
+        std::filesystem::create_directories(directory);
+        std::ofstream output(std::filesystem::path(directory) / "signed_branch_fixture.cpp");
+        output << "#include \"ps2_runtime_macros.h\"\n#include \"ps2_runtime.h\"\n"
+                  "#include <array>\n#include <bit>\n#include <cstdio>\n";
+        struct Entry { std::string name; SignedBranchFixture branch; uint32_t pc; unsigned rs; };
+        std::vector<Entry> entries;
+        for (const auto &branch : signedBranches)
+            for (const uint8_t rs : {21, 31})
+            {
+                const auto pc = 0x100000u + static_cast<uint32_t>(entries.size()) * 0x100u;
+                const std::string name = std::string(branch.name) + "_rs" + std::to_string(rs);
+                output << signedBranchCode(branch, pc, rs, name) << '\n';
+                entries.push_back({name, branch, pc, rs});
+            }
+        output << materialBranchCode();
+        output << "\nstruct Fixture { const char* name; void (*fn)(uint8_t*,R5900Context*,PS2Runtime*); unsigned relation; bool likely,link; uint32_t pc; unsigned rs; };\n"
+                  "static const Fixture fixtures[] = {\n";
+        for (const auto &entry : entries)
+            output << "{\"" << entry.name << "\"," << entry.name << ',' << entry.branch.relation << ','
+                   << entry.branch.likely << ',' << entry.branch.link << ',' << entry.pc << ',' << entry.rs << "},\n";
+        output << R"CPP(};
+int main() {
+    constexpr std::array<uint64_t,8> values{
+        0x0000000680000000ULL, 0x0000000080000000ULL, 0x0000000100000000ULL,
+        0x8000000000000000ULL, 0xffffffff7fffffffULL, 0ULL, 1ULL, 0xffffffffffffffffULL};
+    unsigned checks=0,failures=0;
+    for (const auto& fixture : fixtures)
+        for (const auto bits : values)
+            for (const auto upper : {0ULL,0xffffffffffffffffULL}) {
+                R5900Context ctx;
+                SET_GPR_U64(&ctx,31,0x12345678u);
+                SET_GPR_U64(&ctx,21,0x55u);
+                ctx.r[fixture.rs]=_mm_set_epi64x(std::bit_cast<int64_t>(uint64_t(upper)),std::bit_cast<int64_t>(bits));
+                const auto value=std::bit_cast<int64_t>(bits);
+                const bool taken=fixture.relation==0 ? value>=0 : fixture.relation==1 ? value<0 : fixture.relation==2 ? value>0 : value<=0;
+                const auto initialSlot=fixture.rs==21 ? bits : 0x55u;
+                fixture.fn(nullptr,&ctx,nullptr);
+                const auto expectedSlot=(!fixture.likely || taken) ? UINT64_MAX : initialSlot;
+                bool good=GPR_U32(&ctx,2)==unsigned(taken) && GPR_U64(&ctx,21)==expectedSlot;
+                // The existing ALL-not-taken link policy is a separate issue;
+                // do not encode it as an ISA expectation in this width test.
+                if (!(fixture.link && fixture.likely && !taken)) {
+                    const auto initialRa=fixture.rs==31 ? bits : 0x12345678u;
+                    const auto expectedRa=fixture.link ? uint64_t(fixture.pc+8) : initialRa;
+                    good=good && GPR_U64(&ctx,31)==expectedRa;
+                }
+                if (!good) {
+                    std::printf("FAIL %s input=%016llx upper=%016llx result=%u slot=%016llx ra=%016llx\n",
+                        fixture.name,(unsigned long long)bits,(unsigned long long)upper,GPR_U32(&ctx,2),
+                        (unsigned long long)GPR_U64(&ctx,21),(unsigned long long)GPR_U64(&ctx,31));
+                    ++failures;
+                }
+                ++checks;
+            }
+    struct Material { uint64_t attribute,expected; bool inverted; };
+    for (const Material material : {
+        Material{0xa00001000ULL,0x680000000ULL,true},
+        Material{0x680001000ULL,0x680000000ULL,false},
+        Material{0x1000ULL,0x680000000ULL,true},
+        Material{0xa00001000ULL,UINT64_MAX,false},
+        Material{0x1000ULL,UINT64_MAX,true}}) {
+        R5900Context ctx;
+        SET_GPR_U64(&ctx,2,material.attribute);
+        SET_GPR_U64(&ctx,20,0xf80000000ULL);
+        SET_GPR_U64(&ctx,21,material.expected);
+        SET_GPR_U64(&ctx,31,0x12345678u);
+        material_branch(nullptr,&ctx,nullptr);
+        if (GPR_U32(&ctx,2)!=unsigned(material.inverted)) {
+            std::printf("FAIL material attribute=%llx expected=%llx result=%u\n",
+                (unsigned long long)material.attribute,(unsigned long long)material.expected,GPR_U32(&ctx,2));
+            ++failures;
+        }
+        ++checks;
+    }
+    std::printf("%s: %u generated signed-branch execution cases, %u failures\n",failures?"FAIL":"PASS",checks,failures);
+    return failures?1:0;
+}
+)CPP";
+        return output.good();
+    }
+    catch (const std::exception &error)
+    {
+        std::cerr << "Cannot write signed branch fixture: " << error.what() << '\n';
+        return false;
+    }
+}
+
 void register_code_generator_tests()
 {
     MiniTest::Case("CodeGenerator", [](TestCase &tc)
                    {
+    tc.Run("signed branch families compare the low 64 bits before delay and link", [](TestCase &t) {
+        for (const auto &branch : signedBranches)
+            for (const uint8_t rs : {21,31})
+            {
+                const auto generated=signedBranchCode(branch,0x100000,rs,"signed_width");
+                t.IsTrue(generated.find("GPR_S64(ctx, " + std::to_string(rs) + ")")!=std::string::npos,
+                         std::string(branch.name)+" must compare a signed 64-bit operand");
+                t.IsTrue(generated.find("GPR_S32(ctx, " + std::to_string(rs) + ")")==std::string::npos,
+                         std::string(branch.name)+" must not truncate its operand to 32 bits");
+            }
+    });
     tc.Run("Generated sources cannot be shadowed by stale local declaration headers", [](TestCase &t) {
         Function func;
         func.name = "header_lookup";
