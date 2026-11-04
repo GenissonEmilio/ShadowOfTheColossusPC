@@ -70,8 +70,8 @@ bool closed(const MeshView& mesh,uint32_t id) {
 
 } // namespace
 
-bool resolveSupportPlane(const MeshView& mesh,uint32_t face,Vec3 contact,
-                         float radius,std::array<float,4>& plane) {
+static bool resolveStrictSupportPlane(const MeshView& mesh,uint32_t face,Vec3 contact,
+                                     float radius,std::array<float,4>& plane) {
     if(!mesh.vertices||!mesh.triangles||mesh.vertexCount>8192||mesh.triangleCount>8192||
        !finite(contact)||!std::isfinite(radius)||radius<.05f||radius>1.f) return false;
     Face seed;
@@ -140,6 +140,154 @@ bool resolveSupportPlane(const MeshView& mesh,uint32_t face,Vec3 contact,
         return true;
     }
     return false;
+}
+
+namespace {
+
+// An XZ disk may overlap an edge, but a closest vertex alone cannot establish
+// a strip crossing. Use a positive radial margin and refuse corner donors.
+bool footprintDonor(const MeshView& mesh,uint32_t face,Vec3 contact,
+                    float radius,double& distanceSquared) {
+    const auto& t=mesh.triangles[face];
+    const Vec3 a=mesh.vertices[t.vertex[0]],b=mesh.vertices[t.vertex[1]],c=mesh.vertices[t.vertex[2]];
+    const double ux=double(b.x)-a.x,uz=double(b.z)-a.z;
+    const double vx=double(c.x)-a.x,vz=double(c.z)-a.z;
+    const double determinant=ux*vz-uz*vx;
+    if(std::abs(determinant)<1e-10) return false;
+    const double px=double(contact.x)-a.x,pz=double(contact.z)-a.z;
+    const double s=(px*vz-pz*vx)/determinant;
+    const double u=(ux*pz-uz*px)/determinant;
+    constexpr double epsilon=1e-6;
+    const double bary[3]={1-s-u,s,u};
+    if(*std::min_element(bary,bary+3)>=-epsilon) {
+        int onEdges=0; for(double v:bary) onEdges+=v<=epsilon;
+        if(onEdges>=2) return false;
+        distanceSquared=0;
+        return true;
+    }
+    distanceSquared=std::numeric_limits<double>::infinity();
+    bool interiorEdge=false;
+    for(int e=0;e<3;++e) {
+        const Vec3 p=mesh.vertices[t.vertex[e]],q=mesh.vertices[t.vertex[(e+1)%3]];
+        const double dx=double(q.x)-p.x,dz=double(q.z)-p.z;
+        const double lengthSquared=dx*dx+dz*dz;
+        if(lengthSquared<1e-12) return false;
+        const double along=std::clamp(((double(contact.x)-p.x)*dx+(double(contact.z)-p.z)*dz)/lengthSquared,0.,1.);
+        const double ex=double(contact.x)-p.x-along*dx,ez=double(contact.z)-p.z-along*dz;
+        const double d=ex*ex+ez*ez;
+        if(d<distanceSquared) {
+            distanceSquared=d;
+            interiorEdge=along>epsilon&&along<1-epsilon;
+        }
+    }
+    return interiorEdge&&distanceSquared<=.75*.75*double(radius)*radius;
+}
+
+bool resolveFootprintSupportPlane(const MeshView& mesh,uint32_t face,Vec3 contact,
+                                 float radius,std::array<float,4>& plane) {
+    if(!mesh.vertices||!mesh.triangles||mesh.vertexCount>8192||mesh.triangleCount>8192||
+       !finite(contact)||!std::isfinite(radius)||radius<.05f||radius>1.f) return false;
+    Face seed;
+    if(!describe(mesh,face,seed)||seed.n.y<=.15f||seed.n.y>=.85f||!closed(mesh,face)) return false;
+    const auto& start=mesh.triangles[face];
+    constexpr uint32_t unsafe=std::numeric_limits<uint32_t>::max();
+    if(start.attribute==unsafe) return false;
+    const double r2=double(radius)*radius;
+    const auto thin=[&](const Face& f) {
+        return f.n.y>.01f&&f.altitude<=.75*radius&&f.area<=6*r2;
+    };
+    const auto broad=[&](const Face& f) { return f.n.y>=.85f&&f.area>=8*r2; };
+    if(!thin(seed)) return false;
+    const auto edge=sub(mesh.vertices[start.vertex[(seed.longest+1)%3]],
+                        mesh.vertices[start.vertex[seed.longest]]);
+    Vec3 across={-edge.z,0,edge.x}; const double length=std::sqrt(dot(across,across));
+    if(length<radius) return false;
+    across=mul(across,float(1/length));
+    struct Node { uint32_t face; int parent,depth; Face geometry; };
+    std::array<Node,64> nodes{};
+    int count=1; nodes[0]={face,-1,0,seed};
+    for(int at=0;at<count;++at) {
+        if(broad(nodes[at].geometry)||nodes[at].depth>=6) continue;
+        const auto& t=mesh.triangles[nodes[at].face];
+        for(int e=0;e<3;++e) {
+            if(!reciprocal(mesh,nodes[at].face,e)) return false;
+            const uint32_t next=uint32_t(t.neighbor[e]);
+            bool seen=false; for(int k=0;k<count;++k) seen|=nodes[k].face==next;
+            if(seen||mesh.triangles[next].attribute==unsafe) continue;
+            Face f; if(!describe(mesh,next,f)) return false;
+            if(!closed(mesh,next)) continue;
+            // A different material is allowed only as a terminal geometric
+            // exit. It is never traversed, normalized or used as the donor.
+            if(!broad(f)&&(mesh.triangles[next].attribute!=start.attribute||!thin(f))) continue;
+            if(count==int(nodes.size())) return false;
+            nodes[count++]={next,at,nodes[at].depth+1,f};
+        }
+    }
+    std::array<bool,64> viable{};
+    std::array<double,64> distances{};
+    const auto branch=[&](int n) {
+        while(nodes[n].parent>0) n=nodes[n].parent;
+        return n;
+    };
+    for(int i=1;i<count;++i) {
+        const Face& a=nodes[i].geometry;
+        if(!broad(a)||mesh.triangles[nodes[i].face].attribute!=start.attribute||
+           !footprintDonor(mesh,nodes[i].face,contact,radius,distances[i])) continue;
+        for(int j=1;j<count;++j) {
+            const Face& b=nodes[j].geometry;
+            // Opposite centroids alone do not prove enclosure: both paths
+            // must leave the seed across distinct edges, not fork later on
+            // the same side of a wall or an excluded material boundary.
+            if(i==j||!broad(b)||branch(i)==branch(j)||dot(a.n,b.n)<.99) continue;
+            const double sa=dot(sub(a.center,seed.center),across);
+            const double sb=dot(sub(b.center,seed.center),across);
+            if(sa*sb>=0||std::min(std::abs(sa),std::abs(sb))<radius) continue;
+            const double ya=-(a.n.x*double(contact.x)+a.n.z*double(contact.z)+a.d)/a.n.y;
+            const double yb=-(b.n.x*double(contact.x)+b.n.z*double(contact.z)+b.d)/b.n.y;
+            if(std::abs(ya-yb)>.5*radius) continue;
+            bool fits=true;
+            double low=std::numeric_limits<double>::infinity(),high=-low;
+            for(int endpoint:{i,j}) for(int n=nodes[endpoint].parent;n>=0;n=nodes[n].parent) {
+                const auto& t=mesh.triangles[nodes[n].face];
+                for(uint32_t v:t.vertex) {
+                    const auto p=mesh.vertices[v];
+                    const double position=dot(sub(p,seed.center),across);
+                    low=std::min(low,position);high=std::max(high,position);
+                    if(std::abs(dot(a.n,p)+a.d)>.6*radius||
+                       std::abs(dot(b.n,p)+b.d)>.6*radius) fits=false;
+                }
+            }
+            if(fits&&high-low<=radius) viable[i]=true;
+        }
+    }
+    int chosen=-1;
+    for(int i=1;i<count;++i) if(viable[i]) {
+        // Consider every viable donor before selecting one. Nearby but
+        // disagreeing overlapping floors are ambiguous, not a first-match win.
+        for(int j=1;j<i;++j) if(viable[j]) {
+            const Face& a=nodes[i].geometry; const Face& b=nodes[j].geometry;
+            const double ya=-(a.n.x*double(contact.x)+a.n.z*double(contact.z)+a.d)/a.n.y;
+            const double yb=-(b.n.x*double(contact.x)+b.n.z*double(contact.z)+b.d)/b.n.y;
+            if(dot(a.n,b.n)<.9999||std::abs(ya-yb)>.05*radius) return false;
+        }
+        if(chosen<0||distances[i]<distances[chosen]) chosen=i;
+    }
+    if(chosen<0) return false;
+    const Vec3 normal=nodes[chosen].geometry.n;
+    // Orientation only: the caller's actual contact remains the anchor. No
+    // extrapolated floor height and no exit normal enters the result.
+    plane={normal.x,normal.y,normal.z,float(-dot(normal,contact))};
+    return true;
+}
+
+} // namespace
+
+bool resolveSupportPlane(const MeshView& mesh,uint32_t face,Vec3 contact,
+                         float radius,std::array<float,4>& plane,bool allowFootprint) {
+    if(resolveStrictSupportPlane(mesh,face,contact,radius,plane)) return true;
+    if(!allowFootprint||!mesh.vertices||!mesh.triangles||mesh.vertexCount>8192||mesh.triangleCount>8192||
+       !finite(contact)||!std::isfinite(radius)||radius<.05f||radius>1.f) return false;
+    return resolveFootprintSupportPlane(mesh,face,contact,radius,plane);
 }
 
 #ifndef SOTC_GROUND_SUPPORT_GEOMETRY_ONLY
@@ -291,6 +439,34 @@ bool loadPart(const uint8_t* ram,uint32_t gp,uint32_t& face) {
     return true;
 }
 
+// GP+20 is the probe/root, not the terrain hit. The selected rigid GP keeps
+// its actual local hit at +10. Accept it only after transforming and checking
+// the original triangle; a stale or unrelated contact cannot enable fallback.
+bool terrainAnchor(const uint8_t* ram,uint32_t gp,const MeshView& mesh,
+                   uint32_t face,const Face& geometry,Vec3 probe,float radius,
+                   Vec3& anchor) {
+    const Vec3 local=read<Vec3>(ram,gp+0x10);
+    const float w=read<float>(ram,gp+0x1c);
+    if(!finite(local)||!std::isfinite(w)||std::abs(w-1.f)>1e-4f) return false;
+    const auto& m=cached.matrix;
+    anchor={m[0]*local.x+m[4]*local.y+m[8]*local.z+m[12],
+            m[1]*local.x+m[5]*local.y+m[9]*local.z+m[13],
+            m[2]*local.x+m[6]*local.y+m[10]*local.z+m[14]};
+    if(!finite(anchor)||!finite(probe)||
+       std::abs(dot(geometry.n,anchor)+geometry.d)>.015) return false;
+    const double dx=double(anchor.x)-probe.x,dz=double(anchor.z)-probe.z;
+    if(dx*dx+dz*dz>.05*.05*double(radius)*radius) return false;
+    const auto& t=mesh.triangles[face];
+    const Vec3 u=sub(mesh.vertices[t.vertex[1]],mesh.vertices[t.vertex[0]]);
+    const Vec3 v=sub(mesh.vertices[t.vertex[2]],mesh.vertices[t.vertex[0]]);
+    const Vec3 p=sub(anchor,mesh.vertices[t.vertex[0]]);
+    const double uu=dot(u,u),uv=dot(u,v),vv=dot(v,v),pu=dot(p,u),pv=dot(p,v);
+    const double determinant=uu*vv-uv*uv;
+    if(determinant<=1e-12) return false;
+    const double a=(pu*vv-pv*uv)/determinant,b=(pv*uu-pu*uv)/determinant;
+    return a>=-.002&&b>=-.002&&a+b<=1.002;
+}
+
 void planeHook(uint8_t* ram,R5900Context* ctx,PS2Runtime* runtime) {
     const uint32_t directRA=GPR_U32(ctx,31),sp=GPR_U32(ctx,29),gp=GPR_U32(ctx,4);
     const uint32_t outerRA=range(sp,16)?read<uint32_t>(ram,sp):0;
@@ -319,7 +495,13 @@ void planeHook(uint8_t* ram,R5900Context* ctx,PS2Runtime* runtime) {
     // slide-query f12 radius. +6d0 is a movement offset vector, not radius.
     const float radius=read<float>(ram,owner+0xe0c);
     std::array<float,4> support;
-    if(!resolveSupportPlane(mesh,face,contact,radius,support)) return;
+    bool corrected=resolveSupportPlane(mesh,face,contact,radius,support);
+    if(!corrected&&(slide||slope)&&read<uint32_t>(ram,player+0x1b4)) {
+        Vec3 terrain;
+        if(terrainAnchor(ram,gp,mesh,face,current,contact,radius,terrain))
+            corrected=resolveFootprintSupportPlane(mesh,face,terrain,radius,support);
+    }
+    if(!corrected) return;
     // Both accessors reserve 16 bytes and save the outer RA at SP. Their
     // callers own these output slots throughout the following consumption:
     // XZ: SP+180 is unused (frame260; later vectors end at170, scalars at1a0).

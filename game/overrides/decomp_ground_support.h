@@ -27,8 +27,13 @@ struct MeshView {
 
 // Orientation only. No height, vertex, collision reference, or mesh is changed.
 // The input adapter must establish that this is a static rigid layout mesh.
+// contact is an actual terrain point. The optional footprint policy is for
+// slope/slide orientation only: a same-material donor must overlap the actor's
+// footprint and have a compatible broad exit across a closed, bounded fold.
+// It must not be enabled for movement clipping or used to assign floor height.
 bool resolveSupportPlane(const MeshView& mesh, uint32_t face, Vec3 contact,
-                         float radius, std::array<float, 4>& plane);
+                         float radius, std::array<float, 4>& plane,
+                         bool allowFootprint = false);
 
 // Install after the optional decomp/native registry has selected its callees.
 void installGroundSupport(PS2Runtime& runtime);

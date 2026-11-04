@@ -36,5 +36,36 @@ após carregar um estado no mesmo endereço.
 
 ## Validação
 
-Resultados de gameplay e pacote serão registrados depois dos testes da versão
-candidata. Até lá, este documento registra a investigação e o escopo técnico.
+O teste integrado com os branches signed64 corrigidos confirmou a caminhada
+lenta na subida inferior e a aterrissagem no degrau superior. Uma descida lenta
+encontrou outra microdobra. A mesma reprodução, com o suporte desligado, bloqueou
+no mesmo local tanto a 60 quanto a 30 atualizações de simulação por segundo.
+
+O rastreamento das rotinas originais mostrou consulta de movimento sem colisão,
+aterrissagem válida e ausência de obstrução adicional. O deslocamento pedido já
+apontava contra a caminhada: a normal inclinada da face estreita participa da
+força de deslizamento antes dessas consultas.
+
+## Apoio dentro do raio do personagem
+
+A extensão para essa situação considera o raio de apoio em XZ. Usa a normal de
+uma face larga do mesmo material que ainda se encontra dentro desse raio.
+Exige também uma saída larga do outro lado da dobra, alcançada por outra aresta
+inicial. As cadeias permanecem fechadas, recíprocas, estreitas e limitadas a seis
+arestas. A face de saída confirma a continuidade geométrica; seus atributos
+originais são preservados e sua normal não é misturada à normal devolvida.
+
+A política adicional fica restrita aos dois acessos de deslizamento do Wander
+com apoio estático válido. O acesso XZ mantém o resolvedor estrito anterior.
+O ponto local de terreno em GP+0x10 é transformado pela matriz da parte e
+verificado contra o triângulo original antes de ancorar o plano temporário.
+GP+0x20 contém a sonda do personagem, que pode estar acima do contato real.
+
+As fixtures sintéticas cobrem a separação das duas cadeias, limites de seis e
+sete arestas, materiais distintos, raio tangencial, vértices, saídas ausentes,
+categorias condicionais, paredes e planos de apoio ambíguos. O adaptador confere
+o contexto completo e toda a RAM fora dos 16 bytes temporários do chamador,
+incluindo rejeição de contatos inválidos e do personagem sem apoio.
+
+Resultados do percurso com a extensão serão registrados após a validação
+integrada. A campanha completa continua pendente.

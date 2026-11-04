@@ -67,6 +67,34 @@ void fixture(bool compressed) {
     require(std::abs(cached.vertices[0].x-8)<1e-4&&std::abs(cached.vertices[0].z+31)<1e-4,
             "adapter applies matrix translation");
 }
+void footprintFixture() {
+    fixture(false);
+    const float xs[]={-2,-1,1,2},zs[]={-1,-.06f,-.058f,.035f,.06f,1};
+    std::vector<Vec3> points;
+    for(float z:zs) for(float x:xs)
+        points.push_back({x,.2f*z+(z==-.058f?-.1f:0),z});
+    std::memcpy(ram.data()+vertices,points.data(),points.size()*sizeof(Vec3));
+    put<uint32_t>(record,uint32_t(points.size()));put<uint32_t>(record+16,30);
+    put<uint64_t>(attributes+23*16,(uint64_t(1)<<59)|0x1000);
+    uint32_t id=0;
+    for(uint16_t z=0;z<5;++z) for(uint16_t x=0;x<3;++x) {
+        const uint16_t a=z*4+x,b=a+4,c=a+1,d=b+1;
+        for(auto ids:{std::array<uint16_t,3>{a,b,c},std::array<uint16_t,3>{c,b,d}}) {
+            put<uint16_t>(faces+id*20,z==4?23:19);
+            std::memcpy(ram.data()+faces+id*20+2,ids.data(),6);++id;
+        }
+    }
+    put<uint32_t>(gp+4,0x8000000f);put<uint32_t>(player+0x1b4,1);
+    uint32_t face;require(loadPart(ram.data(),gp,face),"footprint part decodes");
+    MeshView view{cached.vertices.data(),cached.vertices.size(),cached.triangles.data(),cached.triangles.size()};
+    Face f;require(describe(view,face,f),"footprint face normal decodes");
+    const std::array<float,4> plane{f.n.x,f.n.y,f.n.z,float(f.d)};
+    std::memcpy(ram.data()+rawPlane,plane.data(),16);
+    put<Vec3>(gp+0x10,{f.center.x-10,f.center.y-20,f.center.z+30});put<float>(gp+0x1c,1);
+    put<Vec3>(gp+0x20,{f.center.x,f.center.y+.75f,f.center.z});
+    require(cached.triangles[3].attribute!=cached.triangles[26].attribute,
+            "real bit59 remains distinct in donor/exit material keys");
+}
 void invoke(uint32_t outer,uint32_t direct,bool correction) {
     std::fill(ram.begin()+stack-16,ram.begin()+stack+0x1b0,0xa5);
     put<uint32_t>(stack,outer);
@@ -141,6 +169,31 @@ int main() {
         const float decoded=cached.vertices[0].x;
         put<float>(decomp,1);require(loadPart(ram.data(),gp,face)&&cached.vertices[0].x==decoded+1,
                                    "same-address decompression edit invalidates cache");
+        footprintFixture();
+        invoke(0x10E785C,0x1132898,false); // new policy never enters XZ accessor
+        invoke(0x10DCB98,0x1132898,true);
+        invoke(0x10DCB8C,0x1132840,true);
+        Vec3 anchor;
+        MeshView view{cached.vertices.data(),cached.vertices.size(),cached.triangles.data(),cached.triangles.size()};
+        Face f;require(describe(view,15,f),"footprint seed remains original");
+        require(terrainAnchor(ram.data(),gp,view,15,f,read<Vec3>(ram.data(),gp+0x20),.3f,anchor),
+                "terrain anchor is independently validated");
+        const auto result=read<std::array<float,4>>(ram.data(),stack+16+0x30);
+        require(std::abs(result[0]*anchor.x+result[1]*anchor.y+result[2]*anchor.z+result[3])<1e-4,
+                "fallback plane is anchored at terrain, not elevated probe");
+        put<uint32_t>(player+0x1b4,0);invoke(0x10DCB98,0x1132898,false);
+        put<uint32_t>(player+0x1b4,1);
+        const auto local=read<Vec3>(ram.data(),gp+0x10);
+        put<float>(gp+0x14,local.y+.2f);invoke(0x10DCB98,0x1132898,false);
+        put<Vec3>(gp+0x10,local);put<float>(gp+0x1c,0);invoke(0x10DCB98,0x1132898,false);
+        put<float>(gp+0x1c,1);
+        put<Vec3>(gp+0x10,{local.x+5,local.y,local.z});
+        put<Vec3>(gp+0x20,{local.x+15,local.y+20.75f,local.z-30});
+        invoke(0x10DCB98,0x1132898,false); // coplanar but outside selected face
+        footprintFixture();put<float>(gp+0x20,read<float>(ram.data(),gp+0x20)+.1f);
+        invoke(0x10DCB98,0x1132898,false); // probe and hit no longer correspond
+        footprintFixture();put<uint64_t>(attributes+23*16,(uint64_t(1)<<59)|0x480001000ull);
+        invoke(0x10DCB98,0x1132898,false); // unknown exit category stays rejected
         std::cout<<"PASS: rigid adapter, scoped hooks, original callee state, caller scratch, content invalidation\n";
     } catch(const std::exception& e) {std::cerr<<"FAIL: "<<e.what()<<'\n';return 1;}
 }
