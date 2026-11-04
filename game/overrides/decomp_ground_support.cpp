@@ -496,10 +496,15 @@ void planeHook(uint8_t* ram,R5900Context* ctx,PS2Runtime* runtime) {
     const float radius=read<float>(ram,owner+0xe0c);
     std::array<float,4> support;
     bool corrected=resolveSupportPlane(mesh,face,contact,radius,support);
-    if(!corrected&&(slide||slope)&&read<uint32_t>(ram,player+0x1b4)) {
+    bool usedFootprint=false;
+    // XZ rotates the requested movement using the normal's XYZ components.
+    // Keep that orientation coherent with both subsequent slide projections.
+    if(!corrected&&read<uint32_t>(ram,player+0x1b4)) {
         Vec3 terrain;
-        if(terrainAnchor(ram,gp,mesh,face,current,contact,radius,terrain))
-            corrected=resolveFootprintSupportPlane(mesh,face,terrain,radius,support);
+        if(terrainAnchor(ram,gp,mesh,face,current,contact,radius,terrain)) {
+            usedFootprint=resolveFootprintSupportPlane(mesh,face,terrain,radius,support);
+            corrected=usedFootprint;
+        }
     }
     if(!corrected) return;
     // Both accessors reserve 16 bytes and save the outer RA at SP. Their
@@ -511,9 +516,13 @@ void planeHook(uint8_t* ram,R5900Context* ctx,PS2Runtime* runtime) {
     std::memcpy(ram+output,support.data(),16);
     SET_GPR_U32(ctx,2,output);
     static const bool log=std::getenv("SOTC_GROUND_SUPPORT_LOG")!=nullptr;
+    static const char* logFace=std::getenv("SOTC_GROUND_SUPPORT_LOG_FACE");
+    static const uint32_t filter=logFace?uint32_t(std::strtoul(logFace,nullptr,0)):
+        std::numeric_limits<uint32_t>::max();
     static unsigned accepted=0;
-    if(log&&accepted++<16) std::fprintf(stderr,"[ground-support] face=%u caller=%08x normal=(%.6f,%.6f,%.6f)->(%.6f,%.6f,%.6f)\n",
-        face,outerRA,original[0],original[1],original[2],support[0],support[1],support[2]);
+    if(log&&(filter==std::numeric_limits<uint32_t>::max()||filter==face)&&accepted++<64)
+        std::fprintf(stderr,"[ground-support] face=%u caller=%08x footprint=%u normal=(%.6f,%.6f,%.6f)->(%.6f,%.6f,%.6f)\n",
+            face,outerRA,unsigned(usedFootprint),original[0],original[1],original[2],support[0],support[1],support[2]);
 }
 } // namespace
 

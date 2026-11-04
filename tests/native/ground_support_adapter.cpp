@@ -170,7 +170,7 @@ int main() {
         put<float>(decomp,1);require(loadPart(ram.data(),gp,face)&&cached.vertices[0].x==decoded+1,
                                    "same-address decompression edit invalidates cache");
         footprintFixture();
-        invoke(0x10E785C,0x1132898,false); // new policy never enters XZ accessor
+        invoke(0x10E785C,0x1132898,true); // same normal for movement rotation and slide
         invoke(0x10DCB98,0x1132898,true);
         invoke(0x10DCB8C,0x1132840,true);
         Vec3 anchor;
@@ -182,6 +182,7 @@ int main() {
         require(std::abs(result[0]*anchor.x+result[1]*anchor.y+result[2]*anchor.z+result[3])<1e-4,
                 "fallback plane is anchored at terrain, not elevated probe");
         put<uint32_t>(player+0x1b4,0);invoke(0x10DCB98,0x1132898,false);
+        invoke(0x10E785C,0x1132898,false);
         put<uint32_t>(player+0x1b4,1);
         const auto local=read<Vec3>(ram.data(),gp+0x10);
         put<float>(gp+0x14,local.y+.2f);invoke(0x10DCB98,0x1132898,false);

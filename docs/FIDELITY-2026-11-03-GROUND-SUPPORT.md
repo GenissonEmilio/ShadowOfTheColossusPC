@@ -55,8 +55,11 @@ inicial. As cadeias permanecem fechadas, recíprocas, estreitas e limitadas a se
 arestas. A face de saída confirma a continuidade geométrica; seus atributos
 originais são preservados e sua normal não é misturada à normal devolvida.
 
-A política adicional fica restrita aos dois acessos de deslizamento do Wander
-com apoio estático válido. O acesso XZ mantém o resolvedor estrito anterior.
+A política adicional fica restrita aos três acessos conhecidos do Wander com
+apoio estático válido. A orientação XZ do deslocamento e os dois acessos de
+deslizamento recebem a mesma normal, mantendo os cálculos de movimento coerentes.
+O consumidor XZ utiliza somente XYZ para construir sua rotação; o termo D do
+plano não entra no deslocamento.
 O ponto local de terreno em GP+0x10 é transformado pela matriz da parte e
 verificado contra o triângulo original antes de ancorar o plano temporário.
 GP+0x20 contém a sonda do personagem, que pode estar acima do contato real.
