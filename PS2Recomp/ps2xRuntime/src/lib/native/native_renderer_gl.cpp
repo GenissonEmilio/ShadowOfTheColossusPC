@@ -619,7 +619,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // Tuning midFrameRedraw: the picture up to a mid-frame effect's layer
         // drawn again into a target of its own (one per effect), and the
         // heat haze's 256 x 256 copy apart from the water's.
-        Target prefix[3], hazeSmall;
+        Target prefix[3], hazeSmall[3]; // one reduced haze source per bounded prefix slot
         Target shownFrame[2]; // what the host shows, alternately (the GPU draws later: never the target being drawn)
         int shownIndex = 0;
         Target glowLayer, glowSmall[4]; // bossDeathEffect: layer 8 apart (on the picture's depth); 256, 128, 64, 64
@@ -629,6 +629,126 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         Target gsBloom[7];
         bool gsBloomHistory = false;
         uint32_t width = 0, height = 0;
+#if defined(__linux__) && !defined(__ANDROID__)
+        // Opt-in investigation only: the first 240 frames containing the
+        // underwater screen-copy layer. Readbacks intentionally synchronize GL.
+        uint32_t waterCopyTraceFrames = 0, waterCopyTraceDraws = 0;
+        bool waterCopyTraceActive = false;
+        const Target *waterCopyTraceTarget(GLuint texture) const
+        {
+            for (const Target *t : {&color, &snapshot, &refraction, &refractionHalf,
+                                    &hazeSmall[0], &hazeSmall[1], &hazeSmall[2], &previous,
+                                    &prefix[0], &prefix[1], &prefix[2]})
+                if (texture && t->texture == texture) return t;
+            return nullptr;
+        }
+        void traceWaterCopy(const char *stage, const Target &target, const Target *input = nullptr,
+                            uint32_t order = 0, GLuint sampled = 0)
+        {
+            if (!waterCopyTraceActive) return;
+            GLint readFbo = 0, readBuffer = 0, drawFbo = 0, alignment = 0, rowLength = 0;
+            GLint skipRows = 0, skipPixels = 0, packBuffer = 0, activeTexture = 0, sampledBinding = 0;
+            GLint viewport[4] = {};
+            glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFbo);
+            glGetIntegerv(GL_READ_BUFFER, &readBuffer);
+            glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawFbo);
+            glGetIntegerv(GL_VIEWPORT, viewport);
+            glGetIntegerv(GL_PACK_ALIGNMENT, &alignment); glGetIntegerv(GL_PACK_ROW_LENGTH, &rowLength);
+            glGetIntegerv(GL_PACK_SKIP_ROWS, &skipRows); glGetIntegerv(GL_PACK_SKIP_PIXELS, &skipPixels);
+            glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &packBuffer);
+            glGetIntegerv(GL_ACTIVE_TEXTURE, &activeTexture);
+            glActiveTexture(GL_TEXTURE3); glGetIntegerv(GL_TEXTURE_BINDING_2D, &sampledBinding);
+            glActiveTexture(activeTexture);
+            GLenum before = GL_NO_ERROR, error = GL_NO_ERROR;
+            uint32_t beforeCount = 0;
+            for (int i = 0; i < 16; ++i) {
+                const GLenum e = glGetError();
+                if (e == GL_NO_ERROR) break;
+                if (!beforeCount++) before = e;
+            }
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+            glPixelStorei(GL_PACK_ALIGNMENT, 1); glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+            glPixelStorei(GL_PACK_SKIP_ROWS, 0); glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, target.fbo); glReadBuffer(GL_COLOR_ATTACHMENT0);
+            const GLenum status = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER);
+            std::vector<uint8_t> pixels(size_t(target.width) * target.height * 4u);
+            if (status == GL_FRAMEBUFFER_COMPLETE && !pixels.empty())
+                glReadPixels(0, 0, target.width, target.height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+            error = glGetError();
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo); glReadBuffer(readBuffer);
+            glPixelStorei(GL_PACK_ALIGNMENT, alignment); glPixelStorei(GL_PACK_ROW_LENGTH, rowLength);
+            glPixelStorei(GL_PACK_SKIP_ROWS, skipRows); glPixelStorei(GL_PACK_SKIP_PIXELS, skipPixels);
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, packBuffer);
+            uint64_t sum[3] = {}, hash = 14695981039346656037ull;
+            for (size_t i = 0; i < pixels.size(); i += 4u)
+                for (int c = 0; c < 3; ++c) {
+                    sum[c] += pixels[i + c]; hash = (hash ^ pixels[i + c]) * 1099511628211ull;
+                }
+            const double count = std::max(size_t(1), pixels.size() / 4u);
+            std::fprintf(stderr, "[water-copy] frame=%llu trace=%u stage=%s order=%u "
+                         "in=%u/%u/%ux%u out=%u/%u/%ux%u drawFbo=%d viewport=%d,%d,%d,%d "
+                         "sample=%u bound3=%d rgb=%.6f,%.6f,%.6f hash=%016llx status=%x errors=%x/%u/%x\n",
+                         (unsigned long long)arenaFrame, waterCopyTraceFrames, stage, order,
+                         input ? input->texture : 0, input ? input->fbo : 0,
+                         input ? input->width : 0, input ? input->height : 0,
+                         target.texture, target.fbo, target.width, target.height, drawFbo,
+                         viewport[0], viewport[1], viewport[2], viewport[3], sampled, sampledBinding,
+                         sum[0] / count, sum[1] / count, sum[2] / count, (unsigned long long)hash,
+                         status, before, beforeCount, error);
+        }
+        void traceWaterGeometry(const Draw &draw, const Mesh &mesh)
+        {
+            GLboolean depthMask = GL_FALSE;
+            GLint depthFunc = 0;
+            glGetBooleanv(GL_DEPTH_WRITEMASK, &depthMask); glGetIntegerv(GL_DEPTH_FUNC, &depthFunc);
+            const bool available = mesh.dynamic && !mesh.skinned && !mesh.indexed && mesh.frame == arenaFrame &&
+                size_t(mesh.first) <= arena.size() && mesh.count <= arena.size() - size_t(mesh.first);
+            std::fprintf(stderr, "[water-copy-depth] frame=%llu trace=%u test=%u func=%x mask=%u "
+                         "geometry=%s dynamic=%u indexed=%u meshFrame=%llu\n",
+                         (unsigned long long)arenaFrame, waterCopyTraceFrames, glIsEnabled(GL_DEPTH_TEST), depthFunc,
+                         depthMask, available ? "arena" : "unavailable", mesh.dynamic, mesh.indexed,
+                         (unsigned long long)mesh.frame);
+            if (!available) return;
+            // x/y/z/w of the actual shader clip position, followed by UV and
+            // NDC x/y. No guest reads and no assumption about static GPU meshes.
+            float low[8], high[8];
+            std::fill_n(low, 8, INFINITY); std::fill_n(high, 8, -INFINITY);
+            uint32_t invalid = 0, outside[6] = {}, alphaLow = 255, alphaHigh = 0;
+            uint32_t rgbaLow[3] = {255, 255, 255}, rgbaHigh[3] = {};
+            uint64_t hash = 14695981039346656037ull;
+            for (uint32_t i = 0; i < mesh.count; ++i) {
+                const native_renderer::Vertex &v = arena.data()[size_t(mesh.first) + i];
+                float c[4];
+                for (int k = 0; k < 4; ++k)
+                    c[k] = draw.clip[k] * v.x + draw.clip[4 + k] * v.y + draw.clip[8 + k] * v.z + draw.clip[12 + k];
+                const float q[8] = {c[0], c[1], c[3] - 0.2f, c[3], v.u + draw.state.uvOffset[0],
+                                    v.v + draw.state.uvOffset[1], c[0] / c[3], c[1] / c[3]};
+                bool finite = true;
+                for (int k = 0; k < 8; ++k) {
+                    finite = finite && std::isfinite(q[k]);
+                    if (std::isfinite(q[k])) { low[k] = std::min(low[k], q[k]); high[k] = std::max(high[k], q[k]); }
+                    uint32_t bits; std::memcpy(&bits, q + k, sizeof(bits));
+                    for (int b = 0; b < 4; ++b) hash = (hash ^ ((bits >> (8 * b)) & 255u)) * 1099511628211ull;
+                }
+                invalid += !finite;
+                for (int k = 0; k < 3; ++k) {
+                    outside[k * 2] += q[k] < -q[3]; outside[k * 2 + 1] += q[k] > q[3];
+                }
+                const uint8_t rgb[3] = {v.r, v.g, v.b};
+                for (int k = 0; k < 3; ++k) { rgbaLow[k] = std::min(rgbaLow[k], uint32_t(rgb[k])); rgbaHigh[k] = std::max(rgbaHigh[k], uint32_t(rgb[k])); }
+                alphaLow = std::min(alphaLow, uint32_t(v.a)); alphaHigh = std::max(alphaHigh, uint32_t(v.a));
+            }
+            std::fprintf(stderr, "[water-copy-geometry] frame=%llu trace=%u vertices=%u invalid=%u "
+                         "clipX=%g..%g clipY=%g..%g clipZ=%g..%g clipW=%g..%g uv=%g..%g,%g..%g "
+                         "ndc=%g..%g,%g..%g outside=%u,%u,%u,%u,%u,%u rgba=%u..%u,%u..%u,%u..%u,%u..%u hash=%016llx\n",
+                         (unsigned long long)arenaFrame, waterCopyTraceFrames, mesh.count, invalid,
+                         low[0], high[0], low[1], high[1], low[2], high[2], low[3], high[3],
+                         low[4], high[4], low[5], high[5], low[6], high[6], low[7], high[7],
+                         outside[0], outside[1], outside[2], outside[3], outside[4], outside[5],
+                         rgbaLow[0], rgbaHigh[0], rgbaLow[1], rgbaHigh[1], rgbaLow[2], rgbaHigh[2], alphaLow, alphaHigh,
+                         (unsigned long long)hash);
+        }
+#endif
         // What is bound now (render() starts from nothing known: the host
         // draws with its own state between frames). Binding only on a change
         // keeps vitaGL from redoing its per-call work every draw.
@@ -1215,7 +1335,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             makeTarget(reflection, 256, 256, true);
 #endif
             makeTarget(refraction, 256, 256, false);
-            makeTarget(hazeSmall, 256, 256, false);
+            for (Target &t : hazeSmall)
+                if (t.texture) makeTarget(t, 256, 256, false);
             for (Target &t : prefix)
                 if (t.texture)
                     makeTarget(t, w, h, true);
@@ -1706,6 +1827,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     {
         ensureTargets(w, h);
         boundFbo = boundProgram = ~0u;
+#if defined(__linux__) && !defined(__ANDROID__)
+        static const bool waterCopyTrace = std::getenv("SOTC_WATER_COPY_TRACE") != nullptr;
+        waterCopyTraceActive = waterCopyTrace && waterCopyTraceFrames < 240u &&
+            std::any_of(draws.begin(), draws.end(), [](const Draw &d) { return d.state.screenCopy && d.state.order == 19u; });
+        waterCopyTraceDraws = 0;
+        if (waterCopyTraceActive) ++waterCopyTraceFrames;
+#endif
         if (!arena.empty())
         {
             // One upload for every dynamic mesh of the frame (in place of one
@@ -1746,7 +1874,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #endif
         // What the water (textured 3) and the heat haze (4) read when the
         // mid-frame redraw made them their own copies (0: the usual sources).
-        GLuint waterSource = 0, hazeSourceTexture = 0;
+        GLuint waterSource = 0;
+        std::unordered_map<uint32_t, GLuint> hazeSourceTextures;
         uint32_t softOrder = 0;
         float softAmount = 0.0f;
         if (!hardShadows)
@@ -1999,7 +2128,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 {
                     const native_renderer::Tuning &t = native_renderer::tuning();
                     const int source = static_cast<int>((textured == 4 ? t.hazeSource : t.waterSource) + 0.5f);
-                    const GLuint redrawn = textured == 4 ? hazeSourceTexture : waterSource;
+                    const auto hazeSource = hazeSourceTextures.find(d.state.order);
+                    const GLuint redrawn = textured == 4 ? (hazeSource == hazeSourceTextures.end() ? 0u : hazeSource->second) : waterSource;
                     bindTexture(3, redrawn && source != 2 ? redrawn : (source == 2 ? previous.texture : (source == 1 ? snapshot.texture : refraction.texture)));
                 }
                 if (textured == 1)
@@ -2076,7 +2206,67 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 uniform4(uFogC, fogC, 1);
                 uniform4(uFogColour, fogColour, 1);
                 uniform4(uDebug, debug, 1);
+#if defined(__linux__) && !defined(__ANDROID__)
+                const bool traceHaze = waterCopyTraceActive && textured == 4 && d.state.order == 19u && waterCopyTraceDraws++ < 4u;
+                GLuint traceQuery = 0;
+                bool traceQueryStarted = false;
+                if (traceHaze) {
+                    GLint active = 0, source = 0;
+                    glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+                    glActiveTexture(GL_TEXTURE3); glGetIntegerv(GL_TEXTURE_BINDING_2D, &source);
+                    glActiveTexture(active);
+                    std::fprintf(stderr, "[water-copy-draw] frame=%llu trace=%u mesh=%016llx order=%u blend=%u "
+                                 "opacity=%.6f hazeSource=%.3f redraw=%.3f texture=%d count=%u first=%d\n",
+                                 (unsigned long long)arenaFrame, waterCopyTraceFrames, (unsigned long long)d.mesh,
+                                 d.state.order, static_cast<unsigned>(d.state.blend), d.state.opacity,
+                                 native_renderer::tuning().hazeSource, native_renderer::tuning().midFrameRedraw,
+                                 source, mesh->second.count, firstVertex);
+                    if (const Target *sample = waterCopyTraceTarget(source))
+                        traceWaterCopy("haze-sample", *sample, nullptr, d.state.order, source);
+                    traceWaterCopy("haze-before", target, nullptr, d.state.order, source);
+                    traceWaterGeometry(d, mesh->second);
+                    GLint samples = 0, anySamples = 0, conservativeSamples = 0;
+                    glGetQueryiv(GL_SAMPLES_PASSED, GL_CURRENT_QUERY, &samples);
+                    glGetQueryiv(GL_ANY_SAMPLES_PASSED, GL_CURRENT_QUERY, &anySamples);
+                    static const bool conservativeQuery = [] {
+                        GLint major = 0, minor = 0;
+                        glGetIntegerv(GL_MAJOR_VERSION, &major); glGetIntegerv(GL_MINOR_VERSION, &minor);
+                        if (major > 4 || (major == 4 && minor >= 3)) return true;
+                        GLint count = 0; glGetIntegerv(GL_NUM_EXTENSIONS, &count);
+                        for (GLint i = 0; i < count; ++i)
+                            if (std::strcmp(reinterpret_cast<const char *>(glGetStringi(GL_EXTENSIONS, i)), "GL_ARB_ES3_compatibility") == 0)
+                                return true;
+                        return false;
+                    }();
+                    if (conservativeQuery)
+                        glGetQueryiv(GL_ANY_SAMPLES_PASSED_CONSERVATIVE, GL_CURRENT_QUERY, &conservativeSamples);
+                    if (!samples && !anySamples && !conservativeSamples) {
+                        glGenQueries(1, &traceQuery);
+                        glBeginQuery(GL_SAMPLES_PASSED, traceQuery);
+                        GLint current = 0;
+                        glGetQueryiv(GL_SAMPLES_PASSED, GL_CURRENT_QUERY, &current);
+                        traceQueryStarted = traceQuery && current == static_cast<GLint>(traceQuery);
+                    }
+                    if (!traceQueryStarted)
+                        std::fprintf(stderr, "[water-copy-coverage] frame=%llu trace=%u skipped=1 active=%d,%d,%d error=%x\n",
+                                     (unsigned long long)arenaFrame, waterCopyTraceFrames, samples, anySamples,
+                                     conservativeSamples, glGetError());
+                }
+#endif
                 drawMesh(mesh->second, firstVertex);
+#if defined(__linux__) && !defined(__ANDROID__)
+                if (traceHaze) {
+                    if (traceQueryStarted) {
+                        glEndQuery(GL_SAMPLES_PASSED);
+                        GLuint samples = 0;
+                        glGetQueryObjectuiv(traceQuery, GL_QUERY_RESULT, &samples);
+                        std::fprintf(stderr, "[water-copy-coverage] frame=%llu trace=%u skipped=0 samples=%u error=%x\n",
+                                     (unsigned long long)arenaFrame, waterCopyTraceFrames, samples, glGetError());
+                    }
+                    if (traceQuery) glDeleteQueries(1, &traceQuery);
+                    traceWaterCopy("haze-after", target, nullptr, d.state.order);
+                }
+#endif
             }
             resolveShadows();
             for (GLuint i = 1; i < 6; ++i)
@@ -2244,27 +2434,52 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             quad(color, 9, QuadBlend::Darken, amount);
         };
         bool haveRefraction = false;
-        uint32_t screenCopyOrder = 0;
+        std::vector<uint32_t> screenCopyOrders;
         for (const Draw &d : draws)
         {
             if (d.state.refractionSample)
                 haveRefraction = true;
-            if (d.state.screenCopy && !screenCopyOrder)
-                screenCopyOrder = d.state.order;
+            if (d.state.screenCopy)
+                screenCopyOrders.push_back(d.state.order);
         }
-        auto doRefraction = [&]
+        std::sort(screenCopyOrders.begin(), screenCopyOrders.end());
+        screenCopyOrders.erase(std::unique(screenCopyOrders.begin(), screenCopyOrders.end()), screenCopyOrders.end());
+        // Submission order is not layer order. Every consumer layer needs the
+        // picture immediately before itself, even when another layer submitted
+        // its copy draw first. In particular underwater19 cannot read a copy
+        // scheduled at23 (or the previous frame's DoF/refraction scratch).
+        std::vector<uint32_t> copyOrders = screenCopyOrders;
+        if (haveRefraction) copyOrders.push_back(9u);
+        std::sort(copyOrders.begin(), copyOrders.end());
+        copyOrders.erase(std::unique(copyOrders.begin(), copyOrders.end()), copyOrders.end());
+        auto doRefraction = [&]([[maybe_unused]] uint32_t order)
         {
             // The copies the chosen sources need (Tuning hazeSource / waterSource).
             const native_renderer::Tuning &t = native_renderer::tuning();
             const int haze = static_cast<int>(t.hazeSource + 0.5f), water = static_cast<int>(t.waterSource + 0.5f);
             if (haze == 2 && water == 2)
                 return;
+#if defined(__linux__) && !defined(__ANDROID__)
+            traceWaterCopy("screen-source", color, nullptr, order);
+#endif
             snapshotColor();
+#if defined(__linux__) && !defined(__ANDROID__)
+            traceWaterCopy("screen-snapshot", snapshot, &color, order);
+#endif
             if (haze == 0 || water == 0)
             {
                 copy(snapshot, refraction);
+#if defined(__linux__) && !defined(__ANDROID__)
+                traceWaterCopy("screen-256", refraction, &snapshot, order);
+#endif
                 copy(refraction, refractionHalf);
+#if defined(__linux__) && !defined(__ANDROID__)
+                traceWaterCopy("screen-128", refractionHalf, &refraction, order);
+#endif
                 copy(refractionHalf, refraction);
+#if defined(__linux__) && !defined(__ANDROID__)
+                traceWaterCopy("screen-restored-256", refraction, &refractionHalf, order);
+#endif
             }
             // Each draw binds its source (textured 3 / 4 in pass).
         };
@@ -2355,10 +2570,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #endif
         if (softShadows)
             events.push_back({softOrder, -3});
-        if (haveRefraction)
-            events.push_back({9u, -4});
-        if (screenCopyOrder)
-            events.push_back({screenCopyOrder, -4});
+        for (uint32_t order : copyOrders)
+            events.push_back({order, -4}); // water and haze at the same layer share one capture
 #if !defined(PS2X_NATIVE_VITA) // vitaGL framebuffers cannot share the picture's depth
         if (glow.enabled)
             events.push_back({glow.order, -2});
@@ -2391,7 +2604,16 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // light, the screen went white). Costs the draws below that layer a
         // second time, only in frames with such an effect.
         const float redrawMode = native_renderer::tuning().midFrameRedraw;
-        if (redrawMode >= 1.5f ? native_renderer::inEmulator() : redrawMode >= 0.5f)
+        bool redraw = redrawMode >= 1.5f ? native_renderer::inEmulator() : redrawMode >= 0.5f;
+#if defined(__linux__) && !defined(__ANDROID__)
+        // A plain prefix pass replays meshes, not intervening composites such
+        // as DoF20. With several copy layers it would also feed those stale
+        // prefixes into later ones. Desktop GL can resume the main target
+        // reliably: preserve chronological effects for these frames. Vita's
+        // redraw remains necessary for its target-switching implementation.
+        if (copyOrders.size() > 1u) redraw = false;
+#endif
+        if (redraw)
         {
             const native_renderer::Tuning &t = native_renderer::tuning();
             const int hazeFrom = static_cast<int>(t.hazeSource + 0.5f), waterFrom = static_cast<int>(t.waterSource + 0.5f);
@@ -2401,7 +2623,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             for (Event &ev : events)
             {
                 const bool water = ev.blur == -4 && haveRefraction && ev.order == 9u && waterFrom != 2;
-                const bool haze = ev.blur == -4 && screenCopyOrder && ev.order == screenCopyOrder && hazeFrom != 2;
+                const bool haze = ev.blur == -4 &&
+                    std::binary_search(screenCopyOrders.begin(), screenCopyOrders.end(), ev.order) && hazeFrom != 2;
                 if (!(ev.blur >= 0 || water || haze))
                     continue;
                 // Effects at the same layer read the same picture (the draws
@@ -2424,9 +2647,21 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 Target &pre = prefix[ev.prefix];
                 auto small = [&](Target &to) // the PS2's: 256 x 256, blurred once through 128 x 128
                 {
+#if defined(__linux__) && !defined(__ANDROID__)
+                    traceWaterCopy("prefix-source", pre, nullptr, ev.order);
+#endif
                     copy(pre, to);
+#if defined(__linux__) && !defined(__ANDROID__)
+                    traceWaterCopy("prefix-256", to, &pre, ev.order);
+#endif
                     copy(to, refractionHalf);
+#if defined(__linux__) && !defined(__ANDROID__)
+                    traceWaterCopy("prefix-128", refractionHalf, &to, ev.order);
+#endif
                     copy(refractionHalf, to);
+#if defined(__linux__) && !defined(__ANDROID__)
+                    traceWaterCopy("prefix-restored-256", to, &refractionHalf, ev.order);
+#endif
                 };
                 if (water)
                 {
@@ -2437,8 +2672,12 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 if (haze)
                 {
                     if (hazeFrom == 0)
-                        small(hazeSmall);
-                    hazeSourceTexture = hazeFrom == 0 ? hazeSmall.texture : pre.texture;
+                    {
+                        Target &to = hazeSmall[ev.prefix];
+                        if (!to.texture) makeTarget(to, 256, 256, false);
+                        small(to);
+                    }
+                    hazeSourceTextures[ev.order] = hazeFrom == 0 ? hazeSmall[ev.prefix].texture : pre.texture;
                 }
             }
         }
@@ -2458,7 +2697,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             else if (ev.blur == -5)
                 doDof();
             else if (ev.blur == -4)
-                doRefraction();
+                doRefraction(ev.order);
             else if (ev.blur == -3)
                 doShadow();
             else if (ev.blur == -2)
