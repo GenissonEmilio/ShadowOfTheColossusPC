@@ -1943,7 +1943,11 @@ namespace sotc_native
         const float zA = real(g_cameraContext + 0x4A0u + 10u * 4u), zB = real(g_cameraContext + 0x4A0u + 14u * 4u);
         const float d = static_cast<float>(z) - zA;
         const float w = d > 0.0f ? zB / d : 1e6f;
-        return std::isfinite(w) ? std::clamp(w, 0.11f, 1e6f) : 1e6f;
+        // The native vertex stage clips at w = 0.1 (depth zero). GS depths
+        // nearer than that, including refractionEnd's maximum 24-bit Z,
+        // belong on this boundary: 0.11 put them behind visible geometry
+        // with 0.1 <= w < 0.11 instead of preserving their depth ordering.
+        return std::isfinite(w) ? std::clamp(w, 0.1f, 1e6f) : 1e6f;
     }
 
     // z: the GS Z of XYZ2 / XYZ3 (32 bits) or XYZF2 / XYZF3 (24).
@@ -2313,6 +2317,129 @@ namespace sotc_native
     constexpr uint32_t kGlEnd = 0x0108D060u;
     PS2Runtime::RecompiledFunction g_glEnd = nullptr;
 
+    // Opt-in, bounded scene evidence. This never changes guest or draw state.
+    // Limit both the number of callers and events, even across long QA runs.
+    bool effectDiagnosticEvent(uint32_t caller)
+    {
+        static const bool enabled = std::getenv("SOTC_HYDRUS_TRACE") != nullptr;
+        if (!enabled)
+            return false;
+        struct Seen { uint32_t count = 0; uint64_t frame = ~0ull; };
+        static std::map<uint32_t, Seen> counts;
+        if (counts.size() >= 32u && !counts.count(caller) && caller != 0x01385528u)
+            return false;
+        Seen &seen = counts[caller];
+        if (seen.count >= 64u || seen.frame == g_frame || (seen.count >= 4u && g_frame - seen.frame < 60u))
+            return false;
+        ++seen.count;
+        seen.frame = g_frame;
+        return true;
+    }
+
+    void diagnoseGlPacket(uint32_t caller, uint32_t start, uint32_t end)
+    {
+        if (!start || end <= start + 0x20u || end - start >= 0x100000u || !effectDiagnosticEvent(caller))
+            return;
+        uint64_t test[2] = {}, prim = 0;
+        uint32_t tests = 0, vertices = 0, minZ = ~0u, maxZ = 0;
+        uint32_t minX = ~0u, maxX = 0, minY = ~0u, maxY = 0;
+        for (uint32_t q = start + 0x20u; q + 16u <= end; q += 16u)
+        {
+            uint64_t value;
+            std::memcpy(&value, g_ram + (q & 0x1FFFFF0u), 8);
+            const uint32_t reg = word(q + 8u) & 0xFFu;
+            if (reg == 0x47u || reg == 0x48u)
+            {
+                test[reg - 0x47u] = value;
+                tests |= 1u << (reg - 0x47u);
+            }
+            if (reg == 0u)
+                prim = value;
+            if (reg == 4u || reg == 5u || reg == 12u || reg == 13u)
+            {
+                const uint32_t z = static_cast<uint32_t>(value >> 32) & ((reg == 4u || reg == 12u) ? 0xFFFFFFu : ~0u);
+                const uint32_t x = value & 0xFFFFu, y = (value >> 16) & 0xFFFFu;
+                minX = std::min(minX, x); maxX = std::max(maxX, x);
+                minY = std::min(minY, y); maxY = std::max(maxY, y);
+                minZ = std::min(minZ, z); maxZ = std::max(maxZ, z);
+                ++vertices;
+            }
+        }
+        std::fprintf(stderr, "[effect-gl] frame %llu ra %08x layer %u header %08x prim %03llx tests %x test1 %016llx test2 %016llx vertices %u xy %u,%u..%u,%u z %08x..%08x\n",
+                     static_cast<unsigned long long>(g_frame), caller, currentLayer(25u), g_requested,
+                     static_cast<unsigned long long>(prim), tests, static_cast<unsigned long long>(test[0]),
+                     static_cast<unsigned long long>(test[1]), vertices, minX, minY, maxX, maxY, minZ, maxZ);
+    }
+
+    // refractionEnd emits its grid through gsReg rather than glEnd. Summarize
+    // the preceding frame on its next invocation; never log every vertex.
+    void diagnoseUnderwaterRegister(uint32_t reg, uint64_t value)
+    {
+        static const bool enabled = std::getenv("SOTC_HYDRUS_TRACE") != nullptr;
+        if (!enabled)
+            return;
+        struct Packet
+        {
+            uint64_t frame = ~0ull, test = 0, prim = 0;
+            uint32_t vertices = 0, minZ = ~0u, maxZ = 0;
+        };
+        static Packet packet;
+        if (packet.frame != g_frame)
+        {
+            if (packet.vertices && effectDiagnosticEvent(0x0109C610u))
+                std::fprintf(stderr, "[effect-underwater] frame %llu layer 19 test %016llx prim %03llx vertices %u z %08x..%08x view %g..%g fog %u\n",
+                             static_cast<unsigned long long>(packet.frame), static_cast<unsigned long long>(packet.test),
+                             static_cast<unsigned long long>(packet.prim), packet.vertices, packet.minZ, packet.maxZ,
+                             viewDepth(packet.minZ), viewDepth(packet.maxZ), word(0x1186328u));
+            packet = {};
+            packet.frame = g_frame;
+        }
+        if (reg == 0x47u) packet.test = value;
+        if (reg == 0u) packet.prim = value;
+        if (reg == 4u || reg == 5u || reg == 12u || reg == 13u)
+        {
+            const uint32_t z = static_cast<uint32_t>(value >> 32) & ((reg == 4u || reg == 12u) ? 0xFFFFFFu : ~0u);
+            packet.minZ = std::min(packet.minZ, z);
+            packet.maxZ = std::max(packet.maxZ, z);
+            ++packet.vertices;
+        }
+    }
+
+    void diagnoseWeakSurface(uint32_t header, uint32_t surface, uint32_t s, uint64_t flags, uint64_t textureId)
+    {
+        static const bool enabled = std::getenv("SOTC_HYDRUS_TRACE") != nullptr;
+        if (!enabled)
+            return;
+        // SCRExecBossPreProcess uses the signed upper ten flag bits, minus
+        // one, as getWeakPointEffectIntensity's index. Zero is not a weak map.
+        const int32_t index = static_cast<int32_t>(static_cast<int64_t>(flags) >> 54) - 1;
+        if (index < 0 || index >= 8 || !effectDiagnosticEvent(0xF0000000u | static_cast<uint32_t>(index)))
+            return;
+        const auto ramSpan = [](uint32_t address, uint32_t size) -> uint32_t
+        {
+            address &= 0x0FFFFFFFu;
+            return address && size <= 0x02000000u && address <= 0x02000000u - size ? address : 0u;
+        };
+        const uint32_t texIndex = word(s + 0x2Cu);
+        const uint32_t object = texIndex < word(header + 0x44u) ? word(word(header + 0x40u) + texIndex * 0x20u + 0x10u) : 0u;
+        const uint32_t nto = object ? ramSpan(word(object + 0x20u), 0x20u) : 0u;
+        const uint32_t psm = nto ? word(nto + 0x1Cu) & 0x3Fu : ~0u;
+        const uint32_t bytes = psm == 0x14u ? 64u : (psm == 0x13u ? 1024u : 0u);
+        const uint32_t clut = bytes ? textureClut(nto, bytes) : 0u;
+        uint32_t minAlpha = 255u, maxAlpha = 0u, nonzero = 0u;
+        if (clut)
+            for (uint32_t i = 0; i < bytes / 4u; ++i)
+            {
+                const uint32_t alpha = word(clut + i * 4u) >> 24;
+                minAlpha = std::min(minAlpha, alpha); maxAlpha = std::max(maxAlpha, alpha);
+                nonzero += alpha != 0u;
+            }
+        std::fprintf(stderr, "[effect-weak] frame %llu model %08x surface %u flags %016llx index %d intensity %g nto %08x texture %016llx clut %08x alpha %u..%u nonzero %u/%u\n",
+                     static_cast<unsigned long long>(g_frame), header, surface, static_cast<unsigned long long>(flags), index,
+                     real(0x011E62A4u + static_cast<uint32_t>(index) * 120u), nto, static_cast<unsigned long long>(textureId),
+                     clut, clut ? minAlpha : 0u, maxAlpha, nonzero, bytes / 4u);
+    }
+
     void glEndHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         syncFrame(rdram);
@@ -2320,6 +2447,7 @@ namespace sotc_native
         const uint32_t start = word(0x01186398u), end = word(0x01186394u);
         // Not drawn here: bossDeathEffectBegin's fan goes to an off-screen buffer.
         const uint32_t ra = GPR_U32(ctx, 31);
+        diagnoseGlPacket(ra, start, end);
         const bool offScreen = ra >= 0x01085640u && ra < 0x01085E40u;
         if (offScreen)
             captureBossFan(start, end);
@@ -2388,6 +2516,7 @@ namespace sotc_native
             // screen at layer 19, its ST waving over refractionBegin's 256 x 256
             // copy of the picture so far.
             syncFrame(rdram);
+            diagnoseUnderwaterRegister(GPR_U32(ctx, 4) & 0xFFu, GPR_U64(ctx, 5));
             const uint32_t requested = g_requested;
             g_requested = kScreenCopy;
             feed2D(GPR_U32(ctx, 4) & 0xFFu, GPR_U64(ctx, 5));
@@ -2821,6 +2950,23 @@ namespace sotc_native
         syncFrame(rdram);
         const uint32_t a = GPR_U32(ctx, 4), count = GPR_U32(ctx, 5);
         const uint32_t header = g_requested, layer = currentLayer(18u);
+        const uint32_t caller = GPR_U32(ctx, 31);
+        // dischargeMain submits two type-2 sprites here. Preserve its inputs
+        // before the guest builder overwrites caller-saved registers.
+        if (caller == 0x01385528u && count && count <= 4096u && effectDiagnosticEvent(caller))
+        {
+            const ParticleEnv &env = g_ptclEnvState;
+            for (uint32_t i = 0; i < std::min(count, 2u); ++i)
+            {
+                const uint32_t q = a + i * 48u;
+                std::fprintf(stderr, "[effect-discharge] frame %llu ra %08x layer %u header %08x type %u blend %u count %u i %u p %g %g %g size %g rgba %g %g %g %g q2 %g %g %g %g vec %g %g k %g %g %g matrix %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g\n",
+                             static_cast<unsigned long long>(g_frame), caller, layer, header, env.type, g_ptclBlend, count, i,
+                             real(q), real(q + 4u), real(q + 8u), real(q + 12u), real(q + 16u), real(q + 20u), real(q + 24u), real(q + 28u),
+                             real(q + 32u), real(q + 36u), real(q + 40u), real(q + 44u), env.vec[0], env.vec[1], env.k[0], env.k[1], env.k[2],
+                             env.m[0], env.m[1], env.m[2], env.m[3], env.m[4], env.m[5], env.m[6], env.m[7],
+                             env.m[8], env.m[9], env.m[10], env.m[11], env.m[12], env.m[13], env.m[14], env.m[15]);
+            }
+        }
         g_ptclVtx(rdram, ctx, runtime);
         HookTimer hookTimer;
         const bool off = !native_renderer::tuning().particles;
@@ -3890,6 +4036,7 @@ namespace sotc_native
             uint64_t bossMask = 0;
             uint64_t effectFlags;
             std::memcpy(&effectFlags, g_ram + ((s + 0x18u) & 0x1FFFFF8u), 8);
+            diagnoseWeakSurface(header, surface, s, effectFlags, state.texture);
             if (bossMaskOn() && ((effectFlags >> 17) & 1u))
             {
                 bossMask = bossMaskTexture();
