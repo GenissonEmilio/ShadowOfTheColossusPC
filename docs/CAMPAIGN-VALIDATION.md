@@ -8,6 +8,14 @@ A campanha de QA usa `~/.local/share/ShadowOfTheColossusPC-QA/campaign-2026-10-3
 
 As rotinas de colisão originais permanecem selecionadas: `SOTC_NATIVE_COLLISION` e `SOTC_DIFFTEST` ficam ausentes. A tela cheia do produto é preservada; a sessão de teste pode usar janela para observação.
 
+A investigação de Hydrus iniciada em 5 de novembro usa outra pasta isolada,
+`ShadowOfTheColossusPC-QA/hydrus-2026-11-05`, com uma cópia do cartão de oito
+derrotados fornecido pelo usuário. Esses oito derrotados importados **não são
+oito batalhas validadas**. Novos registros nos altares e estados rápidos dessa
+sessão pertencem somente à cópia de QA; o cartão pessoal e o cartão da campanha
+inicial são preservados. A revanche de Hydrus foi iniciada pela oração normal
+nos restos do colosso, sem alterar flags ou memória do jogo.
+
 ## Critério de conclusão por colosso
 
 1. Percorrer o acesso e jogar a luta com comandos normais. Observar terreno, plataformas, pelo/agarrar, mudanças de câmera e possíveis quedas pela geometria.
@@ -18,19 +26,22 @@ As rotinas de colisão originais permanecem selecionadas: `SOTC_NATIVE_COLLISION
 ## Progresso
 
 **1/16 etapas validadas:** Valus no nativo `cb15`; os outros quinze colossos e
-o encerramento permanecem pendentes. A [v0.2.7](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.2.7)
-está publicada como principal, com os dois assets conferidos pelo digest do
-GitHub. O atalho local aponta para esse pacote.
+o encerramento permanecem pendentes. Em 6 de novembro, a versão principal
+publicada e instalada é a [v0.3.2](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.2),
+com o pacote conferido pelo digest do GitHub. O launcher instalado seleciona
+o runtime `70a4414bc89b7f26bdfcc76e`, cuja captura de água foi corrigida e
+[verificada em 240 quadros de Hydrus](FIDELITY-2026-11-05-COPY-LAYERS.md).
+Isso ainda não representa uma batalha completa validada.
 
 | # | Colosso | Situação | Release |
 | --- | --- | --- | --- |
 | 1 | Valus | Validado no nativo cb15: acesso, luta, efeitos da derrota, salvamento e recarga | [v0.2.7](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.2.7) |
-| 2 | Quadratus | Em andamento na candidata v0.2.8; derrota ainda pendente | — |
-| 3 | Gaius | Pendente, incluindo rampa de acesso | — |
+| 2 | Quadratus | Acesso investigado na v0.2.8; derrota ainda pendente | — |
+| 3 | Gaius | Subida, piso e descida da rampa testados; luta e novo replay visual da água pendentes | — |
 | 4 | Phaedra | Pendente | — |
 | 5 | Avion | Pendente | — |
 | 6 | Barba | Pendente | — |
-| 7 | Hydrus | Pendente, incluindo raios | — |
+| 7 | Hydrus | Revanche em andamento na v0.3.2; dois pontos elétricos desativados com ataques normais; cabeça e derrota pendentes | — |
 | 8 | Kuromori | Pendente | — |
 | 9 | Basaran | Pendente | — |
 | 10 | Dirge | Pendente | — |
@@ -42,6 +53,12 @@ GitHub. O atalho local aponta para esse pacote.
 | 16 | Malus e encerramento | Pendente | — |
 
 ## Checkpoint inicial e candidato
+
+As seções seguintes conservam o histórico da campanha inicial e das candidatas
+daquela etapa. Suas referências à instalação então principal não substituem o
+estado atual informado acima. A validação específica da rampa de Gaius está
+documentada em [apoio do piso](FIDELITY-2026-11-03-GROUND-SUPPORT.md) e
+[comparações signed](FIDELITY-2026-11-04-SIGNED-BRANCHES.md).
 
 O jogo foi iniciado por New Game. O cartão novo foi formatado pela interface e salvo no slot 1; a tela confirmou `Shrine of Worship — 0 Defeated` e `Save complete`. Uma cópia desse cartão foi preservada como checkpoint privado. Esse salvamento inicial, isoladamente, não representa uma validação de colosso; a derrota posterior é descrita abaixo.
 
