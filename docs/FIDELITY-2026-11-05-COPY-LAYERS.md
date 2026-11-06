@@ -52,7 +52,14 @@ controls and readbacks pass. Sorted submission exposes the later stale reader;
 reversed submission exposes the earlier reader using a previous-frame source.
 The corrected build passes all eight combinations. The near-depth GPU check,
 renderer-state round trips, and 14 sampler transitions/palette/mipmap checks
-also pass. Live corrected replay is still pending.
+also pass. The corrected Hydrus replay verifies current layer-19 texture identity and hash
+in all 240 traced frames, compared with 144 wrong sources before correction.
+Captures were ordered 19 then 23 in 177 frames, and only 19 in 63 frames where
+no later capture was emitted. Coverage remained complete and no GL, geometry
+or depth failures were recorded. The sampled video interval was stable
+(maximum consecutive average-luma change 1.426; no changes above 5 levels).
+The earlier Hydrus interval was also visually stable: this is direct proof of
+correct source scheduling, not a completed Gaius flicker replay or boss fight.
 
 Electrical effects, weak-point brightness, actor deformation and full battles
 against Hydrus and Pelagia remain separate validation work.
