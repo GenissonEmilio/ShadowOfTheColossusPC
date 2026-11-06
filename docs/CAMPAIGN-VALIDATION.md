@@ -27,11 +27,14 @@ nos restos do colosso, sem alterar flags ou memória do jogo.
 
 **1/16 etapas validadas:** Valus no nativo `cb15`; os outros quinze colossos e
 o encerramento permanecem pendentes. Em 6 de novembro, a versão principal
-publicada e instalada é a [v0.3.2](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.2),
+publicada e instalada é a [v0.3.3](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.3),
 com o pacote conferido pelo digest do GitHub. O launcher instalado seleciona
-o runtime `70a4414bc89b7f26bdfcc76e`, cuja captura de água foi corrigida e
+o runtime `7fe91f38ffee26ff8a553bdd`, que conserva a captura de água corrigida e
 [verificada em 240 quadros de Hydrus](FIDELITY-2026-11-05-COPY-LAYERS.md).
-Isso ainda não representa uma batalha completa validada.
+O executável corrigido também concluiu a revanche de Hydrus e restaurou o
+progresso original, mas o brilho inequívoco do sigilo e a aprovação visual
+integral continuam pendentes. Hydrus ainda não é contabilizado como etapa
+completamente validada.
 
 | # | Colosso | Situação | Release |
 | --- | --- | --- | --- |
@@ -41,7 +44,7 @@ Isso ainda não representa uma batalha completa validada.
 | 4 | Phaedra | Pendente | — |
 | 5 | Avion | Pendente | — |
 | 6 | Barba | Pendente | — |
-| 7 | Hydrus | Revanche em andamento na v0.3.2; dois pontos elétricos desativados com ataques normais; cabeça e derrota pendentes | — |
+| 7 | Hydrus | Revanche concluída: três espinhos, cabeça, derrota, retorno e F5/F8; brilho inequívoco do sigilo e aprovação visual integral ainda pendentes | [v0.3.3, correção de materiais](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.3) |
 | 8 | Kuromori | Pendente | — |
 | 9 | Basaran | Pendente | — |
 | 10 | Dirge | Pendente | — |
