@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 from compiler_key import compiler_key
+from stage_source import stage_source
 
 ROOT=Path(__file__).resolve().parents[2]
 BUILD=ROOT / 'build/cmake'
@@ -34,15 +35,7 @@ def deps(binary,directory,skip_system=True):
             continue
         copy(src,directory / src.name)
 
-for name in ('PS2Recomp','game','tools','tests'):
-    copy(ROOT / name,OUT / 'source' / name)
-for name in ('raylib.h','raymath.h','rlgl.h'):
-    copy(BUILD / '_deps/raylib-src/src' / name,OUT / 'source/raylib' / name)
-for name in ('LICENSE','README.md','celosia'):
-    copy(ROOT / name,OUT / 'source' / name)
-copy(ROOT / 'docs/SHADERS.md',OUT / 'source/docs/SHADERS.md')
-for report in (ROOT / 'docs').glob('FIDELITY-*.md'):
-    copy(report, OUT / 'source/docs' / report.name)
+stage_source(ROOT, BUILD, OUT)
 copy(ROOT / 'PS2Recomp/ps2xRuntime/third_party/gamecontrollerdb/LICENSE',
      OUT / 'licenses/SDL_GameControllerDB.LICENSE')
 copy(BUILD / '_deps/raylib-src/LICENSE',OUT / 'licenses/raylib.LICENSE')
