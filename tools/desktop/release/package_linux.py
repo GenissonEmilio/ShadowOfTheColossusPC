@@ -6,7 +6,7 @@ import shutil
 import tarfile
 ROOT=Path(__file__).resolve().parents[3]
 NAME='ShadowOfTheColossusPC'
-VERSION='0.3.2'
+VERSION='0.3.3'
 OUT=ROOT / 'dist' / NAME
 if OUT.exists():shutil.rmtree(OUT)
 shutil.copytree(ROOT / 'artifacts/frozen' / NAME,OUT)

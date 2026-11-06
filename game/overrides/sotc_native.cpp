@@ -123,7 +123,7 @@ namespace sotc_native
     {
         const uint32_t end = addr + size;
         uint32_t p = addr;
-        uint32_t positions = 0, normals = 0, colours = 0, uvs = 0, pairs = 0, skin = 0, count = 0;
+        uint32_t positions = 0, normals = 0, colours = 0, uvs = 0, pairs = 0, normalPairs = 0, skin = 0, count = 0;
         while (p < end)
         {
             const uint32_t code = m.word(p);
@@ -152,6 +152,10 @@ namespace sotc_native
                     uvs = p;
                     break;
                 case 0x6Du: // two ST pairs, or a normal
+                    // Skinned two-texture batches have both: field 2 is
+                    // the packed normal and field 3 contains the ST pairs.
+                    if (field == 2u)
+                        normalPairs = p;
                     pairs = p;
                     break;
                 case 0x6Cu:
@@ -191,9 +195,10 @@ namespace sotc_native
                             v.ny = m.real(normals + i * 12u + 4u);
                             v.nz = m.real(normals + i * 12u + 8u);
                         }
-                        else if (pairs && uvs)
+                        else if (const uint32_t normal = uvs ? pairs :
+                                     (skin && normalPairs != pairs ? normalPairs : 0u))
                         {
-                            const uint32_t xy = m.word(pairs + i * 8u), z = m.word(pairs + i * 8u + 4u);
+                            const uint32_t xy = m.word(normal + i * 8u), z = m.word(normal + i * 8u + 4u);
                             v.nx = static_cast<int16_t>(xy & 0xFFFFu) / 4096.0f;
                             v.ny = static_cast<int16_t>(xy >> 16) / 4096.0f;
                             v.nz = static_cast<int16_t>(z & 0xFFFFu) / 4096.0f;
@@ -225,7 +230,7 @@ namespace sotc_native
                     }
                     out.push_back(std::move(strip));
                 }
-                positions = normals = colours = uvs = pairs = skin = count = 0;
+                positions = normals = colours = uvs = pairs = normalPairs = skin = count = 0;
             }
             p += words * 4u;
         }
@@ -1173,6 +1178,7 @@ namespace sotc_native
         uint8_t bones;
         float u, v;         // as native_renderer::Vertex has them:
         uint8_t r, g, b, a; // u, v, then the colour
+        float u2, v2;
     };
     static_assert(offsetof(SkinBind, r) == offsetof(SkinBind, u) + 8u && offsetof(native_renderer::Vertex, u) == 24u &&
                       offsetof(native_renderer::Vertex, r) == 32u && sizeof(native_renderer::Vertex) == 36u,
@@ -1215,6 +1221,7 @@ namespace sotc_native
                 }
                 b.u = v.u, b.v = v.v;
                 b.r = v.r, b.g = v.g, b.b = v.b, b.a = v.a;
+                b.u2 = v.u2, b.v2 = v.v2;
                 packet.bind.push_back(b);
             }
             packet.stripEnd.push_back(static_cast<uint32_t>(packet.bind.size()));
@@ -1246,7 +1253,7 @@ namespace sotc_native
     // A skinned packet's bind pose for the GPU (native_renderer::uploadSkinnedMesh):
     // the strip vertices, and the strips' triangles as indices (those with two
     // corners the same vertex left out: no matrix pulls them apart).
-    void uploadSkinned(uint64_t id, const SkinnedPacket &packet)
+    void uploadSkinned(uint64_t id, const SkinnedPacket &packet, bool secondTexture = false)
     {
         static std::vector<native_renderer::SkinVertex> vertices;
         static std::vector<uint32_t> indices;
@@ -1258,7 +1265,7 @@ namespace sotc_native
             o = {};
             o.x = b.x, o.y = b.y, o.z = b.z;
             o.nx = b.nx, o.ny = b.ny, o.nz = b.nz;
-            o.u = b.u, o.v = b.v;
+            o.u = secondTexture ? b.u2 : b.u, o.v = secondTexture ? b.v2 : b.v;
             o.r = b.r, o.g = b.g, o.b = b.b, o.a = b.a;
             for (uint32_t k = 0; k < b.bones; ++k)
             {
@@ -1297,7 +1304,7 @@ namespace sotc_native
         const uint32_t *index = nullptr; // indexed: the indices (from `base`)
         uint32_t base = 0;
     };
-    PosedMesh poseSkinned(const SkinnedPacket &packet, const float *palette, native_renderer::Vertex *out)
+    PosedMesh poseSkinned(const SkinnedPacket &packet, const float *palette, native_renderer::Vertex *out, bool secondTexture = false)
     {
         static std::vector<Posed> posed;
         const size_t count = packet.bind.size();
@@ -1358,7 +1365,7 @@ namespace sotc_native
             const SkinBind &src = packet.bind[i];
             o.x = p.p[0], o.y = p.p[1], o.z = p.p[2];
             o.nx = normal[0], o.ny = normal[1], o.nz = normal[2];
-            o.u = src.u, o.v = src.v;
+            o.u = secondTexture ? src.u2 : src.u, o.v = secondTexture ? src.v2 : src.v;
             o.r = src.r, o.g = src.g, o.b = src.b, o.a = src.a;
         };
         PosedMesh mesh;
@@ -3886,7 +3893,7 @@ namespace sotc_native
                     }
                 }
             }
-            uint64_t mesh = id;
+            uint64_t mesh = id, secondMesh = id ^ (1ull << 61);
             const float *transform = clip;
             bool posed = false;                         // skinned: camera space
             uint32_t skinPalette = 0, skinPaletteCount = 0; // posed by the GPU: its palette
@@ -3903,6 +3910,8 @@ namespace sotc_native
                     // id, this instance's matrices sent with the draw.
                     if (!native_renderer::hasMesh(id))
                         uploadSkinned(id, packet);
+                    if (twoPasses && !native_renderer::hasMesh(secondMesh))
+                        uploadSkinned(secondMesh, packet, true);
                     if (!paletteHandle || paletteLo != packet.lo || paletteHi != packet.hi)
                     {
                         paletteHandle = native_renderer::framePalette(palette.data() + packet.lo * 4u, packet.hi - packet.lo);
@@ -3925,12 +3934,20 @@ namespace sotc_native
                         const PosedMesh written = poseSkinned(packet, palette.data(), out);
                         native_renderer::commitFrameMesh(mesh, written.vertices, written.indices);
                     }
+                    if (twoPasses)
+                    {
+                        secondMesh = (1ull << 63) | g_skinnedDraws++;
+                        if (native_renderer::Vertex *out = native_renderer::frameMesh(std::max<uint32_t>(packet.maxVertices, static_cast<uint32_t>(packet.bind.size()))))
+                        {
+                            const PosedMesh written = poseSkinned(packet, palette.data(), out, true);
+                            native_renderer::commitFrameMesh(secondMesh, written.vertices, written.indices);
+                        }
+                    }
                     transform = projection;
                 }
                 else
                 {
-                    vertices.clear();
-                    triangulate(skinnedPacket->second.strips, [](const BatchVertex &v, native_renderer::Vertex &o)
+                    const auto place = [](const BatchVertex &v, native_renderer::Vertex &o)
                     {
                         o.x = o.y = o.z = o.nx = o.ny = o.nz = 0.0f;
                         for (uint32_t b = 0; b < v.bones; ++b)
@@ -3944,9 +3961,18 @@ namespace sotc_native
                             o.ny += w * (m[1] * v.nx + m[5] * v.ny + m[9] * v.nz);
                             o.nz += w * (m[2] * v.nx + m[6] * v.ny + m[10] * v.nz);
                         }
-                    }, vertices);
+                    };
+                    vertices.clear();
+                    triangulate(packet.strips, place, vertices);
                     mesh = (1ull << 63) | g_skinnedDraws++;
                     native_renderer::uploadMesh(mesh, vertices.data(), static_cast<uint32_t>(vertices.size()), true);
+                    if (twoPasses)
+                    {
+                        vertices.clear();
+                        triangulate(packet.strips, place, vertices, true);
+                        secondMesh = (1ull << 63) | g_skinnedDraws++;
+                        native_renderer::uploadMesh(secondMesh, vertices.data(), static_cast<uint32_t>(vertices.size()), true);
+                    }
                     transform = projection;
                 }
             }
@@ -4082,7 +4108,7 @@ namespace sotc_native
             // being 0x20; the splash rings drawn after on the surface stay visible.
             if ((word(s + 0x18u) & 0x2200u) == 0x2200u)
                 state.noDepthWrite = true;
-            const bool twoTextures = word(s + 0x1Cu) == 2u && !posed && !state.debugColour;
+            const bool twoTextures = twoPasses && !state.debugColour;
             if (twoTextures)
                 state.writeDepth = true;
             native_renderer::draw(mesh, transform, state);
@@ -4108,7 +4134,7 @@ namespace sotc_native
                 }
                 second.writeDepth = false;
                 second.overlay = true;
-                native_renderer::draw(id ^ (1ull << 61), transform, second);
+                native_renderer::draw(secondMesh, transform, second);
                 ++g_frameDraws;
             }
             // Reflecting surfaces (flags 0x2200, modelDisp): their pass packet
