@@ -358,7 +358,9 @@ namespace
     }
 }
 
-void Vif1Compactor::feed(const uint8_t *data, uint32_t bytes)
+void Vif1Compactor::feed(const uint8_t *data, uint32_t bytes) { feedImpl<false>(data,bytes,{}); }
+void Vif1Compactor::feedObserved(const uint8_t *data, uint32_t bytes, gs_provenance::Source source) { feedImpl<true>(data,bytes,source); }
+template<bool Observe> void Vif1Compactor::feedImpl(const uint8_t *data, uint32_t bytes, gs_provenance::Source source)
 {
     uint32_t pos = 0;
     while (pos < bytes)
@@ -366,7 +368,8 @@ void Vif1Compactor::feed(const uint8_t *data, uint32_t bytes)
         if (m_copy != 0u)
         {
             const uint32_t n = std::min(m_copy, bytes - pos);
-            append(data + pos, n);
+            if constexpr (Observe) appendObserved(data + pos,n,source.plus(pos));
+            else append(data + pos,n);
             m_copy -= n;
             pos += n;
             continue;
@@ -374,7 +377,8 @@ void Vif1Compactor::feed(const uint8_t *data, uint32_t bytes)
         if (m_gif != 0u)
         {
             const uint32_t n = std::min(m_gif, bytes - pos);
-            m_direct.feed(data + pos, n);
+            if constexpr (Observe) m_direct.feedObserved(data + pos,n,source.plus(pos));
+            else m_direct.feed(data + pos,n);
             m_gif -= n;
             pos += n;
             continue;
@@ -388,25 +392,33 @@ void Vif1Compactor::feed(const uint8_t *data, uint32_t bytes)
             continue;
         }
         if (pos + 4u > bytes)
+        {
+            if constexpr (Observe) { m_observationIncomplete=true; m_direct.gap(source.plus(pos),gs_provenance::Gap::Truncated); }
             break;
+        }
         uint32_t cmd;
         std::memcpy(&cmd, data + pos, 4);
         pos += 4u;
         const uint8_t opcode = (cmd >> 24) & 0x7Fu;
+        if constexpr (Observe) m_direct.observeVif(opcode,source.plus(pos-4u),true);
         const uint16_t imm = cmd & 0xFFFFu;
         const uint8_t num = (cmd >> 16) & 0xFFu;
         if ((opcode & 0x60u) == 0x60u || opcode == VIF_MPG || opcode == VIF_DIRECT || opcode == VIF_DIRECTHL)
         {
             const uint32_t nop = cmd & 0x80000000u; // NOP, the interrupt bit kept
             if (nop != 0u || m_out.empty())
-                append(&nop, 4u);
+            {
+                if constexpr (Observe) { auto at=source.plus(pos-4u); at.synthetic=true; appendObserved(&nop,4u,at); }
+                else append(&nop,4u);
+            }
             if (opcode == VIF_DIRECT || opcode == VIF_DIRECTHL)
                 m_gif = (imm == 0u ? 65536u : imm) * 16u;
             else
                 m_skip = opcode == VIF_MPG ? (num == 0u ? 256u : num) * 8u : unpackDataBytes(opcode, num, m_cycle);
             continue;
         }
-        append(data + pos - 4u, 4u);
+        if constexpr (Observe) appendObserved(data + pos-4u,4u,source.plus(pos-4u));
+        else append(data + pos-4u,4u);
         if (opcode == VIF_STCYCL)
             m_cycle = imm;
         else if (opcode == VIF_STMASK)
@@ -416,7 +428,9 @@ void Vif1Compactor::feed(const uint8_t *data, uint32_t bytes)
     }
 }
 
-void Vif1Walker::feed(const uint8_t *data, uint32_t bytes)
+void Vif1Walker::feed(const uint8_t *data, uint32_t bytes) { feedImpl<false>(data,bytes,{}); }
+void Vif1Walker::feedObserved(const uint8_t *data, uint32_t bytes, gs_provenance::Source source) { feedImpl<true>(data,bytes,source); }
+template<bool Observe> void Vif1Walker::feedImpl(const uint8_t *data, uint32_t bytes, gs_provenance::Source source)
 {
     m_bytes += bytes;
     VIFRegisters &r = m_regs;
@@ -433,7 +447,8 @@ void Vif1Walker::feed(const uint8_t *data, uint32_t bytes)
         if (m_gif != 0u)
         {
             const uint32_t n = std::min(m_gif, bytes - pos);
-            m_direct.feed(data + pos, n);
+            if constexpr (Observe) m_direct.feedObserved(data + pos,n,source.plus(pos));
+            else m_direct.feed(data + pos,n);
             m_gif -= n;
             pos += n;
             continue;
@@ -456,11 +471,15 @@ void Vif1Walker::feed(const uint8_t *data, uint32_t bytes)
             continue;
         }
         if (pos + 4u > bytes)
+        {
+            if constexpr (Observe) { m_observationIncomplete=true; m_direct.gap(source.plus(pos),gs_provenance::Gap::Truncated); }
             break;
+        }
         uint32_t cmd;
         std::memcpy(&cmd, data + pos, 4);
         pos += 4u;
         const uint8_t opcode = (cmd >> 24) & 0x7Fu;
+        if constexpr (Observe) m_direct.observeVif(opcode,source.plus(pos-4u),false);
         const uint16_t imm = cmd & 0xFFFFu;
         const uint8_t num = (cmd >> 16) & 0xFFu;
         r.code = cmd;

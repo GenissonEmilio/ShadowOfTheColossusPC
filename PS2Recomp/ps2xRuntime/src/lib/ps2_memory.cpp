@@ -556,6 +556,8 @@ bool PS2Memory::initialize(size_t ramSize)
         // Initialize DMA registers
         memset(dma_regs, 0, sizeof(dma_regs));
 
+        ++m_gsProvenanceEpoch;
+        if(m_gsProvenanceObserver) m_gsProvenanceObserver->reset(m_gsProvenanceEpoch);
         return true;
     }
     catch (const std::exception &e)
@@ -1296,6 +1298,7 @@ void PS2Memory::write128(uint32_t address, __m128i value)
     if (!scratch && physAddr == 0x10005000u) // VIF1_FIFO
     {
         syncVu1();
+        gsProvenanceGap(gs_provenance::Gap::UnobservedPath);
         alignas(16) uint8_t fifoData[16];
         _mm_storeu_si128(reinterpret_cast<__m128i *>(fifoData), value);
         processVIF1Data(fifoData, sizeof(fifoData));
@@ -1398,6 +1401,23 @@ namespace
     {
         static const bool run = std::getenv("PS2X_VU1_RUN") && std::atoi(std::getenv("PS2X_VU1_RUN")) != 0;
         return run;
+    }
+}
+
+bool PS2Memory::gsProvenanceQuiescent() const
+{
+    return m_mtvuOutstanding.load(std::memory_order_acquire)==0u &&
+           (!m_gifArbiter || m_gifArbiter->empty()) && !m_path3Masked &&
+           m_path3MaskedFifo.empty() && m_pendingGifTransfers.empty() && m_pendingVif1Transfers.empty();
+}
+
+void PS2Memory::gsProvenanceGap(gs_provenance::Gap reason)
+{
+    if(m_gsProvenanceObserver)
+    {
+        gs_provenance::Source source; source.token.epoch=m_gsProvenanceEpoch;
+        source.token.frame=ps2_stats::vif1Chains.load(std::memory_order_relaxed);
+        m_gsProvenanceObserver->gap(source,reason);
     }
 }
 
@@ -1535,6 +1555,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
         case 0x10003C10u:     // VIF1_FBRST
             if (value & 0x1u) // RST
             {
+                gsProvenanceGap(gs_provenance::Gap::StateReset);
                 const bool wasPath3Masked = m_path3Masked;
                 std::memset(&vif1_regs, 0, sizeof(vif1_regs));
                 m_vif1PendingPath2ImageQwc = 0u;
@@ -1640,9 +1661,17 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
                 uint32_t chcr = value;
                 uint32_t mode = (chcr >> 2) & 0x3;
+                gs_provenance::Submission provenanceInfo;
+                provenanceInfo.channel=channelBase; provenanceInfo.mode=mode;
+                provenanceInfo.address=mode==1 ? m_ioRegisters[channelBase+0x30] : madr;
+                provenanceInfo.frameBoundary=channelBase==0x10009000u && mode==1;
+                if(m_gsProvenanceObserver)
+                    provenanceInfo.token={m_gsProvenanceEpoch,++m_gsProvenanceSerial,ps2_stats::vif1Chains.load(std::memory_order_relaxed)};
+                gs_provenance::Session provenance(m_gsProvenanceObserver,provenanceInfo);
 
                 if (mode == 0 && qwc > 0 && channelBase == 0x1000A000u && GS::skipRaster() && m_gsEventWrite)
                 {
+                    provenance.begin(false,false);
                     GifEventScanner gifEvents(m_gsEventWrite);
                     const bool scratch = isScratchpad(madr);
                     const uint8_t *base = scratch ? m_scratchpad : m_rdram;
@@ -1664,7 +1693,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 {
                     // A normal-mode VIF1 transfer, walked in place likewise.
                     syncVu1();
-                    GifEventScanner gifEvents(m_gsEventWrite);
+                    provenance.begin(true,!m_gsProvenanceObserver || gsProvenanceQuiescent());
+                    GifEventScanner gifEvents(m_gsEventWrite,m_gsProvenanceObserver);
                     const Vif1Walker::Path3Mask path3Mask = [this](bool masked)
                     {
                         const bool was = m_path3Masked;
@@ -1683,11 +1713,14 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         if (src >= limit)
                             src = 0;
                         const uint32_t chunk = std::min(bytes, limit - src);
-                        walker.feed(base + src, chunk);
+                        if(m_gsProvenanceObserver)
+                            walker.feedObserved(base+src,chunk,provenance.source(scratch ? gs_provenance::Domain::Scratchpad : gs_provenance::Domain::Ram,src));
+                        else walker.feed(base + src,chunk);
                         bytes -= chunk;
                         src += chunk;
                     }
                     walker.finish();
+                    provenance.finish(walker.complete() && gifEvents.complete());
                     PendingTransfer pt;
                     pt.fromScratchpad = false;
                     pt.srcAddr = 0;
@@ -1696,6 +1729,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 }
                 else if (mode == 0 && qwc > 0)
                 {
+                    provenance.begin(false,false);
                     enqueueTransfer(madr, qwc);
                 }
                 else if (mode == 1)
@@ -1713,7 +1747,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     // VIF1 chain is gathered without the UNPACK/MPG data.
                     static const bool runVu1 = std::getenv("PS2X_VU1_RUN") && std::atoi(std::getenv("PS2X_VU1_RUN")) != 0;
                     const bool eventsOnly = GS::skipRaster() && m_gsEventWrite;
-                    GifEventScanner gifEvents(m_gsEventWrite);
+                    GifEventScanner gifEvents(m_gsEventWrite,
+                        channelBase==0x10009000u && !runVu1 && eventsOnly ? m_gsProvenanceObserver : nullptr);
                     std::optional<Vif1Compactor> compactor;
                     // By default the chain is not even gathered: its VIFcodes are
                     // walked where they lie (Vif1Walker), on this thread, with no
@@ -1724,7 +1759,10 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     if (channelBase == 0x10009000u && !runVu1 && eventsOnly)
                     {
                         if (vif1Full())
+                        {
+                            if(m_gsProvenanceObserver) syncVu1();
                             compactor.emplace(vif1_regs.cycle, chainBuf, gifEvents);
+                        }
                         else
                         {
                             syncVu1(); // the worker is done with vif1_regs
@@ -1738,6 +1776,14 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             walker.emplace(vif1_regs, gifEvents, path3Mask);
                         }
                     }
+                    const bool provenanceSynchronous=walker.has_value() || compactor.has_value();
+                    // FULL compacts DIRECT synchronously too; its optional
+                    // observation barrier precedes the CYCLE snapshot above.
+                    provenance.begin(provenanceSynchronous,
+                        provenanceSynchronous && (!m_gsProvenanceObserver || gsProvenanceQuiescent()));
+                    uint64_t provenanceTagVisit=0;
+                    bool provenanceTerminated=false;
+                    bool provenanceInterrupted=false;
                     // The GIF channel's chain, likewise: read for its events only.
                     const bool gifEventsOnly = channelBase == 0x1000A000u && eventsOnly;
                     if (gifEventsOnly)
@@ -1773,9 +1819,17 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             if (chunk == 0)
                                 break;
                             if (walker)
-                                walker->feed(base2 + src, chunk);
+                            {
+                                if(m_gsProvenanceObserver) walker->feedObserved(base2+src,chunk,
+                                    provenance.source(scratch ? gs_provenance::Domain::Scratchpad : gs_provenance::Domain::Ram,src,provenanceTagVisit));
+                                else walker->feed(base2+src,chunk);
+                            }
                             else if (compactor)
-                                compactor->feed(base2 + src, chunk);
+                            {
+                                if(m_gsProvenanceObserver) compactor->feedObserved(base2+src,chunk,
+                                    provenance.source(scratch ? gs_provenance::Domain::Scratchpad : gs_provenance::Domain::Ram,src,provenanceTagVisit));
+                                else compactor->feed(base2+src,chunk);
+                            }
                             else if (gifEventsOnly)
                                 gifEvents.feed(base2 + src, chunk);
                             else
@@ -1799,9 +1853,17 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         // CHCR.TTE sends the DMAtag's upper 64 bits to the channel before
                         // the tag payload. VIF chains use those bytes for two VIFcodes.
                         if (walker)
-                            walker->feed(localBase + tagPhys + 8u, 8u);
+                        {
+                            if(m_gsProvenanceObserver) walker->feedObserved(localBase+tagPhys+8u,8u,
+                                provenance.source(tagScratch ? gs_provenance::Domain::Scratchpad : gs_provenance::Domain::Ram,tagPhys+8u,provenanceTagVisit,true));
+                            else walker->feed(localBase+tagPhys+8u,8u);
+                        }
                         else if (compactor)
-                            compactor->feed(localBase + tagPhys + 8u, 8u);
+                        {
+                            if(m_gsProvenanceObserver) compactor->feedObserved(localBase+tagPhys+8u,8u,
+                                provenance.source(tagScratch ? gs_provenance::Domain::Scratchpad : gs_provenance::Domain::Ram,tagPhys+8u,provenanceTagVisit,true));
+                            else compactor->feed(localBase+tagPhys+8u,8u);
+                        }
                         else
                             chainBuf.insert(chainBuf.end(), localBase + tagPhys + 8u, localBase + tagPhys + 16u);
                     };
@@ -1849,6 +1911,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         uint32_t addr = static_cast<uint32_t>((tag >> 32) & 0x7FFFFFFF);
                         lastTagUpper = static_cast<uint32_t>((tag >> 16) & 0xFFFFu);
                         ++tagsProcessed;
+                        if(m_gsProvenanceObserver) ++provenanceTagVisit;
 
                         uint32_t dataAddr = 0;
                         bool hasPayload = (tagQwc > 0);
@@ -1924,11 +1987,24 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         if (hasPayload)
                             appendData(dataAddr, tagQwc);
                         if (irq && tieEnabled)
+                        {
+                            // An IRQ/TIE stop may leave a logical chain
+                            // continuation, even at a complete GIF boundary.
+                            provenanceInterrupted=true;
                             endChain = true;
+                        }
                         if (endChain)
+                        {
+                            provenanceTerminated=true;
                             break;
+                        }
                     }
 
+                    // Seal provenance BEFORE changing the native frame clock.
+                    // DMA completion/worker completion are different boundaries.
+                    if(m_gsProvenanceObserver)
+                        provenance.finish(provenanceSynchronous && provenanceTerminated && !provenanceInterrupted && gifEvents.complete() &&
+                            (!walker || walker->complete()) && (!compactor || compactor->complete()));
                     if (channelBase == 0x10009000u)
                     {
                         ps2_stats::vif1Chains.fetch_add(1, std::memory_order_relaxed);
@@ -2000,6 +2076,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 }
                 else if (qwc > 0)
                 {
+                    provenance.begin(false,false);
                     enqueueTransfer(madr, qwc);
                 }
 
@@ -2454,6 +2531,7 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
 void PS2Memory::processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount)
 {
     syncVu1();
+    gsProvenanceGap(gs_provenance::Gap::UnobservedPath);
     if (!m_rdram || qwCount == 0)
         return;
     const uint64_t bytes64 = static_cast<uint64_t>(qwCount) * 16ull;
@@ -2481,6 +2559,7 @@ void PS2Memory::processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount)
 void PS2Memory::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
     syncVu1();
+    gsProvenanceGap(gs_provenance::Gap::UnobservedPath);
     if (m_gifArbiter)
         submitGifPacket(GifPathId::Path3, data, sizeBytes);
     else if (m_gifPacketCallback && data && sizeBytes >= 16)
@@ -2660,6 +2739,7 @@ bool PS2Memory::tryProcessNativeGifImageUploadChain(GS &gs, uint32_t tadr, uint3
     m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
     m_seenGifCopy = true;
     m_gifCopyCount.fetch_add(1, std::memory_order_relaxed);
+    gsProvenanceGap(gs_provenance::Gap::UnobservedPath);
     gs.uploadImageNative(setupRegs[0], setupRegs[1], setupRegs[2], setupRegs[3], imageData, imageBytes);
 
     m_ioRegisters[GIF_CHANNEL + 0x30u] = finalTadr;
@@ -2737,6 +2817,7 @@ bool PS2Memory::tryProcessNativeGifPackedChain(GS &gs, uint32_t tadr, uint32_t c
     const uint8_t *payload = nullptr;
     if (!resolveContiguous(tadr + 16u, payloadBytes, payload))
         return false;
+    gsProvenanceGap(gs_provenance::Gap::UnobservedPath);
     if (!gs.processNativePackedGIFPacket(payload, payloadBytes))
         return false;
 
@@ -3291,5 +3372,7 @@ bool PS2Memory::restoreState(const std::vector<uint8_t> &data, std::string &erro
     { std::lock_guard<std::mutex> lock(m_completedDmacMutex); m_completedDmacCauses.swap(s.completed); }
     m_codeRegions.swap(code);
     ps2SetScratchpadHostPtr(m_scratchpad);
+    ++m_gsProvenanceEpoch;
+    if(m_gsProvenanceObserver) m_gsProvenanceObserver->reset(m_gsProvenanceEpoch);
     return true;
 }

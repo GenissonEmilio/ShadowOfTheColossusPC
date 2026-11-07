@@ -23,9 +23,17 @@ public:
     Vif1Compactor(uint32_t cycle, std::vector<uint8_t> &out, GifEventScanner &direct)
         : m_cycle(cycle), m_out(out), m_direct(direct) {}
     void feed(const uint8_t *data, uint32_t bytes);
+    void feedObserved(const uint8_t *data, uint32_t bytes, gs_provenance::Source source);
     [[nodiscard]] uint64_t skippedBytes() const { return m_skipped; }
 
+    bool complete() const { return !m_observationIncomplete && m_copy == 0u && m_skip == 0u && m_gif == 0u; }
 private:
+    template<bool Observe> void feedImpl(const uint8_t *, uint32_t, gs_provenance::Source);
+    void appendObserved(const void *data, uint32_t bytes, gs_provenance::Source source)
+    {
+        m_direct.compacted(source,static_cast<uint32_t>(m_out.size()),bytes);
+        append(data,bytes);
+    }
     void append(const void *data, uint32_t bytes)
     {
         if (bytes == 4u)
@@ -53,6 +61,7 @@ private:
     GifEventScanner &m_direct;
     uint32_t m_copy = 0, m_skip = 0, m_gif = 0;
     uint64_t m_skipped = 0;
+    bool m_observationIncomplete=false;
 };
 
 // The VIF1 stream walked where it lies, for when no VU1 program runs
@@ -70,10 +79,13 @@ public:
     Vif1Walker(VIFRegisters &regs, GifEventScanner &direct, const Path3Mask &mask)
         : m_regs(regs), m_direct(direct), m_mask(mask) {}
     void feed(const uint8_t *data, uint32_t bytes);
+    void feedObserved(const uint8_t *data, uint32_t bytes, gs_provenance::Source source);
     // Adds the counters (MSCAL / MSCNT, UNPACK, bytes) to ps2_stats once.
     void finish();
 
+    bool complete() const { return !m_observationIncomplete && m_skip == 0u && m_gif == 0u && m_want == 0u; }
 private:
+    template<bool Observe> void feedImpl(const uint8_t *, uint32_t, gs_provenance::Source);
     VIFRegisters &m_regs;
     GifEventScanner &m_direct;
     const Path3Mask &m_mask;
@@ -84,4 +96,5 @@ private:
     uint8_t m_data[16]{};
     uint32_t m_mscal = 0, m_mscnt = 0, m_unpack = 0;
     uint64_t m_bytes = 0;
+    bool m_observationIncomplete=false;
 };

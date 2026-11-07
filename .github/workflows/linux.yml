@@ -27,6 +27,12 @@ jobs:
         run: |
           LD_LIBRARY_PATH="$PWD/artifacts/compiler/lib" artifacts/compiler/bin/ps2_recomp --help
           test -f artifacts/compiler/manifest.json
+      - name: GS provenance and DMA frame seals (synthetic data, no ROM)
+        run: |
+          docker run --rm --init --cpus=2 --memory=1600m --memory-swap=1600m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_gs_provenance.sh \
+            --inside-container build/cmake/ps2xRuntime/libps2_runtime.a artifacts/compiler
       - name: Execute generated EE signed branches (synthetic instructions, no ROM)
         run: |
           # Test/analyzer setup fetches its pinned JSON dependency; execution is offline.

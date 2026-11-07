@@ -18,6 +18,7 @@
 #include <string>
 
 #include "gs/ps2_gif_arbiter.h"
+#include "gs/gs_provenance.h"
 #if defined(_MSC_VER)
 #include <intrin.h>
 #elif defined(USE_SSE2NEON)
@@ -391,6 +392,18 @@ public:
     // in GIF data while the GS rasterizes nothing (GS::skipRaster).
     void setGsEventWriter(std::function<void(uint8_t, uint64_t)> write) { m_gsEventWrite = std::move(write); }
 
+    // Install/remove only on the stopped EE/submission thread. The observer
+    // is caller-owned and receives no worker-thread callbacks. Installing and
+    // restoring a machine state change epoch; pending frontend joins must use it.
+    void setGsProvenanceObserver(gs_provenance::Observer *observer)
+    {
+        syncVu1();
+        m_gsProvenanceObserver=observer;
+        ++m_gsProvenanceEpoch;
+        if(observer) observer->reset(m_gsProvenanceEpoch);
+    }
+    uint64_t gsProvenanceEpoch() const { return m_gsProvenanceEpoch; }
+
     using Vu1MscalCallback = std::function<void(uint32_t startPC, uint32_t top, uint32_t itop)>;
     void setVu1MscalCallback(Vu1MscalCallback cb) { m_vu1MscalCallback = std::move(cb); }
     using Vu1MscntCallback = std::function<void(uint32_t top, uint32_t itop)>;
@@ -500,6 +513,11 @@ public:
     uint32_t m_vif1PendingPath2ImageQwc = 0u;
     bool m_vif1PendingPath2DirectHl = false;
     std::vector<std::vector<uint8_t>> m_path3MaskedFifo;
+
+    gs_provenance::Observer *m_gsProvenanceObserver=nullptr;
+    uint64_t m_gsProvenanceEpoch=1, m_gsProvenanceSerial=0;
+    bool gsProvenanceQuiescent() const;
+    void gsProvenanceGap(gs_provenance::Gap);
 
     struct PendingTransfer
     {
