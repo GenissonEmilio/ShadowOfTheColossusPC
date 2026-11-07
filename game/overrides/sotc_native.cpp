@@ -964,6 +964,49 @@ namespace sotc_native
         return object ? texture(word(object + 0x20u)) : 0;
     }
 
+    // texTransResolve builds TEST_1/2 from the selected NTO2 +0x80..8c.
+    // Support only the demonstrated GEQUAL/FB_ONLY, DATE-off, Z-GEQUAL
+    // contract. Invalid metadata and overridden materials retain legacy state.
+    void surfaceAlphaTest(uint32_t header, uint32_t surface, native_renderer::DrawState &state, uint32_t field = 0x2Cu)
+    {
+        state.framebufferOnlyAlphaFail = false;
+        state.alphaReference = 0;
+        const auto range = [](uint32_t address, uint32_t bytes)
+        {
+            const uint32_t physical = address & 0x1FFFFFFFu;
+            return address != 0u && (address & 3u) == 0u && physical <= 0x2000000u - bytes;
+        };
+        if (!g_ram || !range(header, 0x64u) || (field != 0x2Cu && field != 0x3Cu) || surface >= word(header + 0x54u))
+            return;
+        const uint32_t surfaceBase = word(header + 0x50u);
+        const uint64_t surfaceAt = static_cast<uint64_t>(surfaceBase & 0x1FFFFFFFu) + static_cast<uint64_t>(surface) * 0x120u;
+        if (!range(surfaceBase, 0x120u) || surfaceAt > 0x2000000u - 0x120u)
+            return;
+        const uint32_t material = static_cast<uint32_t>(surfaceAt), mode = word(material + 0x1Cu);
+        // Bit 17 replaces TEST through setBossEffectTexture; its NTO2 is a
+        // placeholder even when the diagnostic boss-mask override is disabled.
+        if ((word(material + 0x18u) & (1u << 17)) || (mode != 1u && mode != 2u) || (field == 0x3Cu && mode != 2u))
+            return;
+        const uint32_t index = word(material + field), table = word(header + 0x40u);
+        const uint64_t entry = static_cast<uint64_t>(table & 0x1FFFFFFFu) + static_cast<uint64_t>(index) * 0x20u;
+        if (index >= word(header + 0x44u) || !range(table, 0x20u) || entry > 0x2000000u - 0x20u)
+            return;
+        const uint32_t object = word(static_cast<uint32_t>(entry) + 0x10u);
+        if (!range(object, 0x24u))
+            return;
+        const uint32_t nto2 = word(object + 0x20u);
+        if (!range(nto2, 0x90u) || word(nto2) != 0x324F544Eu)
+            return;
+        const uint32_t atst = word(nto2 + 0x80u), reference = word(nto2 + 0x84u);
+        const uint32_t afail = word(nto2 + 0x88u), forceAlways = word(nto2 + 0x8Cu);
+        // Requiring the complete raw fields also excludes malformed values
+        // that would leak bits into DATE/DATM or neighboring TEST fields.
+        if (atst != 5u || reference > 255u || afail != 1u || forceAlways != 0u)
+            return;
+        state.framebufferOnlyAlphaFail = true;
+        state.alphaReference = static_cast<uint8_t>(reference);
+    }
+
     // modelGetDlLayer (0x1096a80): the display list layer of a surface; the
     // layers go to the GS in increasing order, so it is the draw order.
     uint32_t surfaceLayer(uint32_t header, uint32_t s, bool fading)
@@ -4111,6 +4154,8 @@ namespace sotc_native
             const bool twoTextures = twoPasses && !state.debugColour;
             if (twoTextures)
                 state.writeDepth = true;
+            if (!bossMask && !state.debugColour && state.texture)
+                surfaceAlphaTest(header, surface, state);
             native_renderer::draw(mesh, transform, state);
             ++g_frameDraws;
             ++g_modelDraws;
@@ -4120,6 +4165,12 @@ namespace sotc_native
                 // and coordinates, blended by ALPHA_2 (context 2).
                 native_renderer::DrawState second = state;
                 second.texture = surfaceTexture(header, surface, 0x3Cu);
+                // Context 2 has its own NTO2 TEST; never inherit context 1's
+                // threshold, including when the second metadata is invalid.
+                second.framebufferOnlyAlphaFail = false;
+                second.alphaReference = 0;
+                if (!bossMask && !second.debugColour && second.texture)
+                    surfaceAlphaTest(header, surface, second, 0x3Cu);
                 second.uvOffset[0] = second.uvOffset[1] = 0.0f; // the second pair takes ROW z / w (0)
                 second.maxLod = 0.0f;
                 if (!noMips)
@@ -4152,6 +4203,10 @@ namespace sotc_native
                 const uint32_t rec = word(word(header + 0x14u) + 4u) + surface * 0x40u + 0x20u;
                 const uint32_t data = word(rec + 4u); // CALL target: its VU constants
                 native_renderer::DrawState refl = state;
+                // These extra passes sample a rendered target with their own
+                // microcode/TEST contract, rather than the NTO2 material.
+                refl.framebufferOnlyAlphaFail = false;
+                refl.alphaReference = 0;
                 refl.reflectionSource = false;
                 refl.reflectionSample = true;
                 refl.overlay = true;

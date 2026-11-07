@@ -42,6 +42,7 @@ extern "C" unsigned int _newlib_heap_size_user;      // ps2_vita_runtime.cpp
 #include "ThreadNaming.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -152,6 +153,7 @@ uniform vec4 uFogA;      // start, width, steps, fogged
 uniform vec4 uFogC;      // scale, lod K, lod scale, max lod
 uniform vec4 uFogColour; // rgb, textured mode
 uniform vec4 uDebug;
+uniform vec4 uAlphaTest; // FB_ONLY enabled, GS byte reference, depth-only phase
 out vec4 oColor;
 void main()
 {
@@ -194,7 +196,12 @@ void main()
     float lod = uFogC.w > 0.0 ? clamp(log2(max(depth, 1e-3)) * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
     vec4 t = textured > 0.5 ? textureLod(uTex, vUV.xy, lod) : vec4(vec3(128.0 / 255.0), 1.0); // GS untextured RGB uses vertex / 255
     float alpha = clamp(t.a * (textured > 0.5 ? 2.0 : 1.0) * vColor.a, 0.0, 1.0);
-    if (alpha < 0.02)
+    // Alpha TEST precedes the GS's blend-alpha saturation at 0x80. AFAIL
+    // FB_ONLY keeps even a low-alpha colour fragment, but not its Z.
+    float gsAlpha = clamp((textured > 0.5 ? t.a * 255.0 : 128.0) * vColor.a, 0.0, 255.0);
+    if (uAlphaTest.x > 0.5 && uAlphaTest.z > 0.5 && gsAlpha < uAlphaTest.y)
+        discard;
+    if (uAlphaTest.x < 0.5 && alpha < 0.02)
         discard;
     if (uDebug.w > 0.0)
     {
@@ -562,6 +569,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         uint64_t frame = 0;   // the arena it went into (debugging)
         uint64_t used = 0;    // the last frame that drew it (eviction)
         uint64_t bytes = 0;
+        uint8_t alphaMin = 0, alphaMax = 255;
+        std::vector<std::array<uint8_t, 2>> triangleAlpha;
     };
 
     struct Texture
@@ -573,7 +582,31 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         uint64_t used = 0;
         uint64_t bytes = 0;
         bool inHeap = false; // vitaGL put it in the newlib heap (its pools were full)
+        uint8_t alphaMin = 0, alphaMax = 255; // bounds over every uploaded mip
     };
+
+    template <typename GetAlpha>
+    void meshAlphaBounds(Mesh &mesh, uint32_t count, GetAlpha getAlpha)
+    {
+        mesh.alphaMin = 255;
+        mesh.alphaMax = 0;
+        mesh.triangleAlpha.resize(count / 3u);
+        for (uint32_t i = 0; i < count / 3u; ++i)
+        {
+            auto &range = mesh.triangleAlpha[i];
+            range = {255, 0};
+            for (uint32_t j = 0; j < 3u; ++j)
+            {
+                const auto alpha = getAlpha(i * 3u + j);
+                range[0] = std::min(range[0], alpha[0]);
+                range[1] = std::max(range[1], alpha[1]);
+            }
+            mesh.alphaMin = std::min(mesh.alphaMin, range[0]);
+            mesh.alphaMax = std::max(mesh.alphaMax, range[1]);
+        }
+        if (mesh.alphaMin == mesh.alphaMax)
+            std::vector<std::array<uint8_t, 2>>().swap(mesh.triangleAlpha);
+    }
 
     struct Draw
     {
@@ -788,7 +821,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // last values sent (kept across frames: nothing else sets them).
         enum MainUniform
         {
-            uClip, uDirections, uColours, uMisc, uFogA, uFogB, uFogC, uFogColour, uDebug, kMainUniforms
+            uClip, uDirections, uColours, uMisc, uFogA, uFogB, uFogC, uFogColour, uDebug, uAlphaTest, kMainUniforms
         };
         // [0] mainProgram, [1] skinProgram (the same uniforms, kept apart).
         GLint mainLocation[2][kMainUniforms] = {};
@@ -1096,7 +1129,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 if (!p)
                     continue;
                 glUseProgram(p);
-                const char *names[kMainUniforms] = {"uClip", "uDirections", "uColours", "uMisc", "uFogA", "uFogB", "uFogC", "uFogColour", "uDebug"};
+                const char *names[kMainUniforms] = {"uClip", "uDirections", "uColours", "uMisc", "uFogA", "uFogB", "uFogC", "uFogColour", "uDebug", "uAlphaTest"};
                 for (int i = 0; i < kMainUniforms; ++i)
                     mainLocation[slot][i] = glGetUniformLocation(p, names[i]);
                 glUniform1i(glGetUniformLocation(p, "uTex"), 0);
@@ -1625,14 +1658,19 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // vertices: the indices count from the start of the arena).
         void drawMesh(const Mesh &mesh, GLint firstVertex)
         {
+            drawMeshRange(mesh, firstVertex, 0u, mesh.count);
+        }
+
+        void drawMeshRange(const Mesh &mesh, GLint firstVertex, uint32_t from, uint32_t count)
+        {
             if (!mesh.indexed)
             {
-                glDrawArrays(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(mesh.count));
+                glDrawArrays(GL_TRIANGLES, firstVertex + static_cast<GLint>(from), static_cast<GLsizei>(count));
                 return;
             }
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.dynamic ? indexBuffers[arenaIndex] : mesh.indexBuffer);
-            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh.count), GL_UNSIGNED_INT,
-                           reinterpret_cast<const void *>(static_cast<uintptr_t>(mesh.dynamic ? mesh.firstIndex : 0u) * sizeof(uint32_t)));
+            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(count), GL_UNSIGNED_INT,
+                           reinterpret_cast<const void *>(static_cast<uintptr_t>((mesh.dynamic ? mesh.firstIndex : 0u) + from) * sizeof(uint32_t)));
         }
     };
 
@@ -1704,7 +1742,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         glBindBuffer(GL_ARRAY_BUFFER, mesh.buffer);
         glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(count * sizeof(native_renderer::Vertex)), vertices, GL_STATIC_DRAW);
         mesh.count = count;
-        mesh.bytes = static_cast<uint64_t>(count) * sizeof(native_renderer::Vertex);
+        meshAlphaBounds(mesh, count, [&](uint32_t i) {
+            return std::array<uint8_t, 2>{vertices[i].a, vertices[i].a};
+        });
+        mesh.bytes = static_cast<uint64_t>(count) * sizeof(native_renderer::Vertex)
+                   + mesh.triangleAlpha.capacity() * sizeof(mesh.triangleAlpha[0]);
         meshBytes += mesh.bytes;
         cache.buffer = ~0u;
     }
@@ -1726,7 +1768,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.indexBuffer);
         glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(indexCount * sizeof(uint32_t)), indices, GL_STATIC_DRAW);
         mesh.count = indexCount;
-        mesh.bytes = static_cast<uint64_t>(count) * sizeof(native_renderer::SkinVertex) + static_cast<uint64_t>(indexCount) * 4u;
+        meshAlphaBounds(mesh, indexCount, [&](uint32_t i) {
+            const uint32_t v = indices[i];
+            return v < count ? std::array<uint8_t, 2>{vertices[v].a, vertices[v].a}
+                             : std::array<uint8_t, 2>{0, 255};
+        });
+        mesh.bytes = static_cast<uint64_t>(count) * sizeof(native_renderer::SkinVertex) + static_cast<uint64_t>(indexCount) * 4u
+                   + mesh.triangleAlpha.capacity() * sizeof(mesh.triangleAlpha[0]);
         meshBytes += mesh.bytes;
         skinnedBytes += mesh.bytes;
         cache.buffer = ~0u;
@@ -1742,9 +1790,16 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         t.bytes = static_cast<uint64_t>(width) * height * 4u * (levels > 1u ? 4u : 3u) / 3u;
         if (!t.name)
             glGenTextures(1, &t.name);
+        t.alphaMin = 255;
+        t.alphaMax = 0;
         glBindTexture(GL_TEXTURE_2D, t.name);
         for (uint32_t level = 0, w = width, h = height; level < levels; ++level)
         {
+            for (size_t i = 3u, n = static_cast<size_t>(w) * h * 4u; i < n; i += 4u)
+            {
+                t.alphaMin = std::min(t.alphaMin, rgba[i]);
+                t.alphaMax = std::max(t.alphaMax, rgba[i]);
+            }
             glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(level), GL_RGBA, static_cast<GLsizei>(w), static_cast<GLsizei>(h), 0, GL_RGBA,
                          GL_UNSIGNED_BYTE, rgba);
             if (const GLenum e = glGetError(); e != GL_NO_ERROR)
@@ -1819,6 +1874,19 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             mesh.indexed = f.indexed;
             mesh.firstIndex = f.firstIndex;
             mesh.count = f.count;
+            const uint64_t oldAlphaBytes = mesh.triangleAlpha.capacity() * sizeof(mesh.triangleAlpha[0]);
+            meshBytes -= oldAlphaBytes;
+            mesh.bytes -= oldAlphaBytes;
+            meshAlphaBounds(mesh, f.count, [&](uint32_t i) {
+                const size_t offset = static_cast<size_t>(f.firstIndex) + i;
+                const size_t vertex = f.indexed ? (offset < indexArena.size() ? indexArena.data()[offset] : arena.size())
+                                               : static_cast<size_t>(f.first) + i;
+                return vertex < arena.size() ? std::array<uint8_t, 2>{arena.data()[vertex].a, arena.data()[vertex].a}
+                                             : std::array<uint8_t, 2>{0, 255};
+            });
+            const uint64_t alphaBytes = mesh.triangleAlpha.capacity() * sizeof(mesh.triangleAlpha[0]);
+            meshBytes += alphaBytes;
+            mesh.bytes += alphaBytes;
         }
         frameMeshes.clear();
     }
@@ -1826,6 +1894,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     void Renderer::render(uint32_t w, uint32_t h)
     {
         ensureTargets(w, h);
+        uint32_t alphaSplitTriangles = 0, alphaRangeDraws = 0;
         boundFbo = boundProgram = ~0u;
 #if defined(__linux__) && !defined(__ANDROID__)
         static const bool waterCopyTrace = std::getenv("SOTC_WATER_COPY_TRACE") != nullptr;
@@ -1987,6 +2056,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 if (skinned && (!skinProgram || !d.state.skinPalette))
                     continue;
                 useProgram(skinned ? skinProgram : mainProgram);
+#if !defined(PS2X_NATIVE_VITA)
+                const float noAlphaTest[4] = {};
+                uniform4(uAlphaTest, noAlphaTest, 1);
+#endif
                 if (skinned)
                 {
                     // The draw's palette (skinProgram keeps the last one sent).
@@ -2253,7 +2326,67 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                                      conservativeSamples, glGetError());
                 }
 #endif
-                drawMesh(mesh->second, firstVertex);
+#if !defined(PS2X_NATIVE_VITA)
+                if (
+#if defined(SOTC_ALPHA_LEGACY_TEST)
+                    false && // ROM-free negative control: the old unconditional Z path
+#endif
+                    d.state.framebufferOnlyAlphaFail && !backdrop && !d.state.fresnel && textured <= 1 && !d.state.debugColour)
+                {
+                    float alphaTest[4] = {1.0f, static_cast<float>(d.state.alphaReference), 0.0f, 0.0f};
+                    uniform4(uAlphaTest, alphaTest, 1);
+                    const Mesh &m = mesh->second;
+                    if (!depthMask)
+                        drawMesh(m, firstVertex); // ZMSK/overlay: every alpha writes only colour
+                    else
+                    {
+                        const float texMin = tex != textures.end() ? tex->second.alphaMin : 128.0f;
+                        const float texMax = tex != textures.end() ? tex->second.alphaMax : 128.0f;
+                        const auto classify = [&](uint32_t triangle) {
+                            if (!d.state.alphaReference) return 1;
+                            if (!std::isfinite(d.state.opacity) || d.state.opacity < 0.0f || d.state.opacity > 2.0f) return 0;
+                            const auto range = m.triangleAlpha.empty() ? std::array<uint8_t, 2>{m.alphaMin, m.alphaMax}
+                                                                     : m.triangleAlpha[triangle];
+                            // Texture filtering and vertex interpolation stay inside these
+                            // bounds. Keep a margin for floating-point interpolation at AREF.
+                            const float lo = texMin * (static_cast<float>(range[0]) / 128.0f) * d.state.opacity;
+                            const float hi = texMax * (static_cast<float>(range[1]) / 128.0f) * d.state.opacity;
+                            if (lo >= d.state.alphaReference + 0.01f) return 1;
+                            if (hi < d.state.alphaReference - 0.01f) return -1;
+                            return 0;
+                        };
+                        for (uint32_t i = 0; i < m.count / 3u;)
+                        {
+                            const int kind = classify(i);
+                            uint32_t end = i + 1u;
+                            if (kind) // only proven all-pass/all-fail runs can share a draw
+                                while (end < m.count / 3u && classify(end) == kind) ++end;
+                            glDepthMask(kind > 0 ? GL_TRUE : GL_FALSE);
+                            drawMeshRange(m, firstVertex, i * 3u, (end - i) * 3u);
+                            ++alphaRangeDraws;
+                            if (!kind)
+                            {
+                                ++alphaSplitTriangles;
+                                // Do not reorder overlapping primitives: finish this
+                                // triangle's conditional Z before the next triangle's colour.
+                                glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+                                glDepthMask(GL_TRUE);
+                                alphaTest[2] = 1.0f;
+                                uniform4(uAlphaTest, alphaTest, 1);
+                                drawMeshRange(m, firstVertex, i * 3u, 3u);
+                                glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+                                alphaTest[2] = 0.0f;
+                                uniform4(uAlphaTest, alphaTest, 1);
+                            }
+                            i = end;
+                        }
+                        glDepthMask(GL_TRUE);
+                        cache.depthMask = 1;
+                    }
+                }
+                else
+#endif
+                    drawMesh(mesh->second, firstVertex);
 #if defined(__linux__) && !defined(__ANDROID__)
                 if (traceHaze) {
                     if (traceQueryStarted) {
@@ -2734,8 +2867,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             bloomHistory = true;
         }
         copy(colorPlain, previous);
-
-
+        static const bool alphaTrace = std::getenv("SOTC_ALPHA_DEPTH_TRACE") != nullptr;
+        static uint32_t alphaTraceRows = 0;
+        if (alphaTrace && arenaFrame % 60u == 0u && alphaTraceRows++ < 120u)
+            std::fprintf(stderr, "[alpha-depth] frame=%llu mixed_triangles=%u range_draws=%u extra_depth_draws=%u\n",
+                         static_cast<unsigned long long>(arenaFrame), alphaSplitTriangles, alphaRangeDraws, alphaSplitTriangles);
         if (const auto &hook = native_renderer::detail::presentHook())
         {
             // The host shows a copy of its own: the next frame starts drawing

@@ -84,6 +84,11 @@ jobs:
           docker run --rm --init --cpus=2 --memory=1600m --memory-swap=1600m --network=none \
             -u "$(id -u):$(id -g)" -v "$PWD:/src:z" \
             sotc-linux-builder bash tools/linux/test_skinned_multipass.sh
+      - name: GS alpha failure preserves colour and primitive depth order (no ROM)
+        run: |
+          docker run --rm --init --cpus=2 --memory=1600m --memory-swap=1600m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -e LP_NUM_THREADS=2 -e SOTC_ALPHA_BASELINE=1 -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_alpha_depth.sh
       - name: GS screen depth ordering against near geometry (no ROM)
         run: |
           docker run --rm --init --cpus=1 --memory=1100m --memory-swap=1100m --network=none \

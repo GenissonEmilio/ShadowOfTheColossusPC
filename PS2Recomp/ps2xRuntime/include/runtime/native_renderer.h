@@ -233,6 +233,11 @@ namespace native_renderer
         bool background = false; // also drawn into the background image (what distance fades to)
         bool fogged = false;     // fades to the background image with distance (setFog)
         bool writeDepth = false; // write depth even when additive (a second pass follows)
+        // GS TEST: GEQUAL alpha with AFAIL FB_ONLY, DATE off. The GL backend
+        // keeps colour for failing fragments but updates Z only for passing
+        // fragments, in primitive order. Reference is in GS alpha byte units.
+        bool framebufferOnlyAlphaFail = false;
+        uint8_t alphaReference = 0;
         // No depth write at all: the GS's TEST AFAIL FB_ONLY with every pixel
         // under AREF (SotC's water: vertex alpha 0x20 < 0x40), so what is drawn
         // after it on or just under the surface (the rings) is not hidden.

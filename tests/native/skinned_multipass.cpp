@@ -38,6 +38,7 @@ namespace {
     constexpr uint32_t instance=0x1000, object=0x2000, header=0x3000;
     constexpr uint32_t surface=0x4000, packets=0x5000, data=0x6000;
     constexpr uint32_t own=0x8000, ret=0x9000, camera=0xa000, matrix=0xb000;
+    constexpr uint32_t textureTable=0xc000, textureObjects=0xc100, textureHeaders=0xd000;
     const std::array<float,16> identity={1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     const std::array<float,16> bone={2,0,0,0, 0,3,0,0, 0,0,4,0, 10,20,30,1};
     // All coordinates and weights below are deliberately invented.
@@ -92,7 +93,17 @@ namespace {
         auto &t=native_renderer::tuning();t.fastHooks=fast;t.gpuSkinning=gpu;t.asyncBuilds=false;
         t.ps2Lists=true;t.modelDetail=0;t.packetQuickCheck=false;
         put(instance,object);put(instance+12,own);put(object+32,header);
-        put(header+0x18,1u);put(header+0x1c,1u);put(header+0x50,surface);put(header+0x60,packets);
+        put(header+0x18,1u);put(header+0x1c,1u);put(header+0x50,surface);put(header+0x54,1u);put(header+0x60,packets);
+        put(header+0x40,textureTable);put(header+0x44,2u);
+        for(unsigned i=0;i<2;++i) {
+            const uint32_t obj=textureObjects+i*0x40,nto=textureHeaders+i*0x200;
+            put(textureTable+i*0x20+0x10,obj);put(obj+0x20,nto);
+            put(nto,0x324f544eu);put(nto+0x14,0x100u);put(nto+0x1c,0x1000u); // one 1x1 RGBA level
+            put(nto+0x100,0x80808080u);
+            put(nto+0x80,5u);put(nto+0x84,i?193u:37u);put(nto+0x88,1u);put(nto+0x8c,0u);
+        }
+        put(surface+0x2c,0u);put(surface+0x3c,1u);
+        for(auto &memo:g_textureMemo)memo={};
         put(surface+0x1c,two ? 2u:1u);
         // Different pass states make a duplicated first-pass draw fail.
         put(surface+0x60,0x48u);put(surface+0x68,0x42u); // ALPHA_1 additive
@@ -105,8 +116,9 @@ namespace {
         put(ret+12,bone);put(ret+12+64,bone);
         put(packets,packet(skin,!two));put(packets+12,0xffffffffu);put(packets+16,data);
     }
-    void verifyCase(const char *label,bool skin,bool two,bool fast,bool gpu) {
+    void verifyCase(const char *label,bool skin,bool two,bool fast,bool gpu,float opacity=1.0f) {
         setup(skin,two,fast,gpu);
+        put(instance+0x244,1.0f-opacity);
         std::vector<sotc_native::Strip> decoded;
         sotc_native::readBatches(data,sotc_native::word(packets),decoded);
         check(decoded.size()==1 && decoded.front().size()==3,"one synthetic VIF strip decoded");
@@ -119,8 +131,12 @@ namespace {
         if(draws.size()!=(two?2u:1u)) {
             std::fprintf(stderr,"CASE: %s, draws=%zu\n",label,draws.size());return;
         }
+        check(draws[0].state.framebufferOnlyAlphaFail && draws[0].state.alphaReference==37,"first texture forwards its dynamic GS alpha reference");
+        check(near(draws[0].state.opacity,opacity),"first pass retains instance opacity");
         check(draws[0].state.blend==native_renderer::Blend::Additive && draws[0].state.clamp==3,"first pass preserves its blend and clamp");
         if(two) {
+            check(draws[1].state.framebufferOnlyAlphaFail && draws[1].state.alphaReference==193,"second texture keeps its independent GS alpha reference");
+            check(near(draws[1].state.opacity,opacity),"second pass retains instance opacity");
             check(draws[1].state.blend==native_renderer::Blend::Subtract && draws[1].state.clamp==1,"second pass uses its own blend and clamp");
             check(draws[0].state.writeDepth && !draws[1].state.writeDepth && draws[1].state.overlay,"second pass overlays the first without writing depth");
             check(draws[0].transform==draws[1].transform,"both passes use the same transform");
@@ -145,6 +161,47 @@ namespace {
                 check(draw.state.skinPalette==0,"CPU and rigid draws do not request a GPU palette");
             }
         }
+    }
+    void verifyAlphaMetadata() {
+        setup(true,true,true,true);
+        native_renderer::DrawState state;
+        auto resolve=[&](uint32_t field=0x2cu) {
+            state.framebufferOnlyAlphaFail=true;state.alphaReference=123;
+            sotc_native::surfaceAlphaTest(header,0,state,field);
+        };
+        for(uint32_t reference:{0u,1u,64u,128u,255u}) {
+            put(textureHeaders+0x84,reference);resolve();
+            check(state.framebufferOnlyAlphaFail && state.alphaReference==reference,"all valid GS references survive without a fixed threshold");
+        }
+        const auto invalid=[&](uint32_t offset,uint32_t value,const char *message) {
+            const uint32_t old=sotc_native::word(textureHeaders+offset);
+            put(textureHeaders+offset,value);resolve();
+            check(!state.framebufferOnlyAlphaFail && state.alphaReference==0,message);
+            put(textureHeaders+offset,old);
+        };
+        invalid(0x80,4,"different alpha comparison retains legacy behavior");
+        invalid(0x84,256,"out-of-range AREF cannot leak into AFAIL");
+        invalid(0x88,0,"AFAIL KEEP is not treated as FB_ONLY");
+        invalid(0x88,5,"raw AFAIL bits that enable DATE are rejected");
+        invalid(0x8c,1,"Z ALWAYS override is not treated as GEQUAL");
+        invalid(0,0,"invalid NTO2 signature retains legacy behavior");
+        put(surface+0x18,1u<<17);resolve();
+        check(!state.framebufferOnlyAlphaFail,"boss-mask TEST override cannot inherit placeholder NTO2 TEST");
+        put(surface+0x18,0u);put(surface+0x2c,2u);resolve();
+        check(!state.framebufferOnlyAlphaFail,"out-of-range texture index retains legacy behavior");
+        put(surface+0x2c,0u);put(textureObjects+0x20,0x1fffffcu);resolve();
+        check(!state.framebufferOnlyAlphaFail,"truncated NTO2 cannot wrap into RAM");
+        put(textureObjects+0x20,textureHeaders);put(surface+0x1c,1u);resolve(0x3c);
+        check(!state.framebufferOnlyAlphaFail,"single-texture mode has no second TEST");
+        // Real modelDisp integration: a bad context-2 configuration must clear
+        // the copied context-1 metadata, without losing either draw.
+        setup(true,true,true,true);put(textureHeaders+0x200+0x84,256u);
+        R5900Context ctx{};SET_GPR_U32(&ctx,4,instance);SET_GPR_U32(&ctx,5,matrix);
+        sotc_native::modelDispHook(ram.data(),&ctx,nullptr);
+        check(draws.size()==2 && draws[0].state.framebufferOnlyAlphaFail && !draws[1].state.framebufferOnlyAlphaFail && draws[1].state.alphaReference==0,"invalid second TEST cannot inherit the first pass threshold");
+        setup(true,true,true,true);put(textureHeaders+0x88,0u);
+        sotc_native::modelDispHook(ram.data(),&ctx,nullptr);
+        check(draws.size()==2 && !draws[0].state.framebufferOnlyAlphaFail && draws[1].state.framebufferOnlyAlphaFail && draws[1].state.alphaReference==193,"valid second TEST is resolved independently of invalid first TEST");
     }
 }
 
@@ -174,6 +231,10 @@ int main(){
     verifyCase("CPU slow single texture",true,false,false,false);
     verifyCase("rigid two textures",false,true,false,false);
     verifyCase("rigid single texture",false,false,false,false);
+    verifyCase("GPU dual opacity",true,true,true,true,0.5f);
+    verifyCase("CPU dual opacity",true,true,true,false,0.75f);
+    verifyCase("single opacity",true,false,true,true,0.25f);
+    verifyAlphaMetadata();
     std::printf("%s: %u checks; %u failures (synthetic skinned/rigid materials, no GPU)\n",failures?"FAIL":"PASS",checks,failures);
     return failures?1:0;
 }
