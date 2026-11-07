@@ -49,6 +49,17 @@ failure rather than treating a compiler or driver error as a regression test.
 Game performance and the final appearance still require observation before
 this candidate becomes the principal release.
 
+The indexed mesh buffer is bound once per mesh submission, before the ordered
+alpha phases, instead of rebinding the same buffer before every range. All
+range callers establish that binding; static and frame-arena index offsets
+remain unchanged. After this change the 84 GPU checks passed again. A separate
+host benchmark of one frozen Hydrus model produced pixel-identical images at
+512×448 and 1024×896, with the same draw counts and 370 element-buffer binds
+per frame. The mixed-alpha path still requires 13,019 GL draws for that model;
+this change removes redundant bindings rather than reordering triangles.
+The benchmark omits glow and post-processing, and its timings varied with
+host scheduling. It does not establish campaign frame rate or final fidelity.
+
 This is a demonstrated local rendering defect, not a completed validation of
 Hydrus, Basaran, the electrical effects or the remaining campaign. The current
 installed principal release remains v0.3.3 until the candidate passes the

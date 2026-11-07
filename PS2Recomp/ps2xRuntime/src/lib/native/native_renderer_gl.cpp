@@ -1656,11 +1656,20 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // A mesh's triangles: the list as it is, or the indexed one's
         // indices (the frame's index buffer, bound with the frame's
         // vertices: the indices count from the start of the arena).
+        void bindMeshIndices(const Mesh &mesh)
+        {
+            if (mesh.indexed)
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.dynamic ? indexBuffers[arenaIndex] : mesh.indexBuffer);
+        }
+
         void drawMesh(const Mesh &mesh, GLint firstVertex)
         {
+            bindMeshIndices(mesh);
             drawMeshRange(mesh, firstVertex, 0u, mesh.count);
         }
 
+        // Caller binds this mesh's EBO once; range draws and alpha-phase
+        // uniforms/masks do not change that binding.
         void drawMeshRange(const Mesh &mesh, GLint firstVertex, uint32_t from, uint32_t count)
         {
             if (!mesh.indexed)
@@ -1668,7 +1677,6 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 glDrawArrays(GL_TRIANGLES, firstVertex + static_cast<GLint>(from), static_cast<GLsizei>(count));
                 return;
             }
-            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.dynamic ? indexBuffers[arenaIndex] : mesh.indexBuffer);
             glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(count), GL_UNSIGNED_INT,
                            reinterpret_cast<const void *>(static_cast<uintptr_t>((mesh.dynamic ? mesh.firstIndex : 0u) + from) * sizeof(uint32_t)));
         }
@@ -2355,6 +2363,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                             if (hi < d.state.alphaReference - 0.01f) return -1;
                             return 0;
                         };
+                        if (m.count >= 3u)
+                            bindMeshIndices(m);
                         for (uint32_t i = 0; i < m.count / 3u;)
                         {
                             const int kind = classify(i);
