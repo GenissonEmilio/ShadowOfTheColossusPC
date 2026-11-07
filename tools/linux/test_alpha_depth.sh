@@ -12,6 +12,7 @@ for source in PS2Recomp/ps2xRuntime/include/runtime/native_renderer.h PS2Recomp/
 done
 common=(-std=c++20 -O1 -msse4.1 -ffunction-sections -fdata-sections
   -IPS2Recomp/ps2xRuntime/include -IPS2Recomp/ps2xRuntime/src/lib/native
+  -IPS2Recomp/ps2xIOP/include
   -I"$kit/source/raylib" -Ibuild/cmake/_deps/raylib-src/src/external/glfw/include)
 # Define createGlBackend directly so the archive's GL object is not selected.
 # The public API implementation and all remaining dependencies use a fresh kit.

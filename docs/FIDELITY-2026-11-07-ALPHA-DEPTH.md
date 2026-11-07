@@ -36,8 +36,18 @@ the glow strength nor its depth test is replaced to hide this defect.
 `test_alpha_depth.sh` exercises real OpenGL pixels with synthetic inputs. Its
 negative control disables only this conditional-depth path. The frontend
 fixture separately covers texture lookup, references, invalid configurations,
-single/dual materials and opacity. Test results and performance measurements
-must be recorded before this candidate becomes the principal release.
+single/dual materials and opacity.
+
+The protected local run passed **219 frontend checks and 84 GPU checks** with
+no failures. The GPU cases include static meshes, indexed frame-arena meshes
+with nonzero offsets, and actual GPU skinning; overlapping primitives in both
+orders; alpha 63/64/65, reference 193 before blend saturation, very low alpha,
+masked depth writes, mip changes and opacity. The compiled negative control
+completed the same 84 GPU checks and failed 18, including the fur/scar/glow
+colour and depth probes in all three mesh paths. This demonstrates the old
+failure rather than treating a compiler or driver error as a regression test.
+Game performance and the final appearance still require observation before
+this candidate becomes the principal release.
 
 This is a demonstrated local rendering defect, not a completed validation of
 Hydrus, Basaran, the electrical effects or the remaining campaign. The current
