@@ -3,10 +3,13 @@
 from pathlib import Path
 import hashlib
 import shutil
+import sys
 import tarfile
 ROOT=Path(__file__).resolve().parents[3]
 NAME='ShadowOfTheColossusPC'
-VERSION='0.3.3'
+# The archive, frozen UI and CI must identify the same release.
+sys.path.insert(0, str(ROOT / 'tools' / 'desktop'))
+from model import VERSION
 OUT=ROOT / 'dist' / NAME
 if OUT.exists():shutil.rmtree(OUT)
 shutil.copytree(ROOT / 'artifacts/frozen' / NAME,OUT)
