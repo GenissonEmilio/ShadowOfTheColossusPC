@@ -48,12 +48,29 @@ import argparse, ctypes, json, sys, time
 from pathlib import Path
 import gi
 gi.require_version('Gtk','3.0')
-from gi.repository import Gtk
+from gi.repository import Gtk, GLib
 from gamepad import Gamepad
 from main import Launcher
 out = Path(sys.argv[1])
 args = argparse.Namespace(data_dir=out/'synthetic-home',page='home',rom=None,test_game=False,screenshot=None)
 launcher = Launcher(args)
+def settle(predicate, description):
+    deadline=time.monotonic()+2
+    context=GLib.MainContext.default()
+    while time.monotonic()<deadline:
+        while context.pending():
+            context.iteration(False)
+        if predicate():
+            return
+        time.sleep(.01)
+    assert predicate(), description
+# show_all creates widgets but the X focus events have not reached GTK yet.
+# Button.child_focus on an inactive toplevel grabs the same button again;
+# test real Dpad traversal only after the isolated Xvfb window has focus.
+launcher.window.present()
+launcher.focus_gamepad_page()
+settle(lambda: launcher.window.is_active() and launcher.choose_button.has_focus(),
+       'launcher did not acquire actual GTK focus in isolated Xvfb')
 pad = launcher.gamepad
 assert pad.sdl, 'SDL2 not loaded'
 bundled = Path(sys.executable).resolve().parent/'_internal/libSDL2-2.0.so.0'
@@ -91,6 +108,8 @@ pad.poll(True);assert not pad.connected
 launcher.focus_gamepad_page();assert launcher.window.get_focus() == launcher.choose_button
 launcher.gamepad_action(launcher.window,'down')
 assert launcher.window.get_focus() is not None and launcher.window.get_focus() != launcher.choose_button
+launcher.gamepad_action(launcher.window,'up')
+assert launcher.window.get_focus() == launcher.choose_button and launcher.choose_button.has_focus()
 launcher.gamepad_action(launcher.window,'next')
 assert launcher.stack.get_visible_child_name()=='graphics'
 launcher.fullscreen.grab_focus();launcher.fullscreen.set_active(0)

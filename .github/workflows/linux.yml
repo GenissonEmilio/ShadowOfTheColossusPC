@@ -204,9 +204,13 @@ jobs:
           cd dist
           sha256sum -c "${package_archive}.sha256"
       - uses: actions/upload-artifact@v4
+        # Keep the exact candidate available for diagnosing a later test failure.
+        # Publication still requires a completely successful workflow.
+        if: always()
         with:
           name: ShadowOfTheColossusPC-linux-x86_64
+          retention-days: 7
           path: |
             dist/*.tar.gz
             dist/*.sha256
-          if-no-files-found: error
+          if-no-files-found: ignore
