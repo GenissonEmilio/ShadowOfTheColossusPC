@@ -41,6 +41,9 @@ Estados exigem o mesmo runtime e disco. Aguarde o fim de vídeos/carregamentos.
 Continuar salvando nos altares permite transferir progresso entre versões.
 Carregar estado não substitui o cartão real; cartão alterado bloqueia o load.
 Controle USB/Bluetooth também funciona junto com teclado e mouse.
+No launcher: direcional/analógico navega, A/X confirma, B/Círculo volta,
+LB/RB trocam de página e Start inicia o jogo preparado. Esquerda/direita ajusta.
+Os sigilos dos colossos brilham com a espada equipada.
 F11: alterna tela cheia na resolução do monitor e janela.
 Na aba Controles, "Configurar meu controle" associa botoes e analogicos de
 controles sem perfil automatico. O perfil e salvo e usado tambem no menu F1.

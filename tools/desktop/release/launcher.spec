@@ -10,9 +10,11 @@ a = Analysis(
     [str(root / "tools/desktop/main.py")],
     pathex=[str(root / "tools/desktop")],
     # GI loads GDK dynamically; explicitly retain Wayland dependencies that
-    # PyInstaller otherwise excludes as optional desktop libraries.
+    # PyInstaller otherwise excludes as optional desktop libraries. SDL2 also
+    # reaches wayland-server through libgbm, even on an X11-only test host.
     binaries=[(sdl2, "."),("/opt/libarchive/lib/libarchive.so.13", "."),
               ("/usr/lib/x86_64-linux-gnu/libwayland-client.so.0", "."),
+              ("/usr/lib/x86_64-linux-gnu/libwayland-server.so.0", "."),
               ("/usr/lib/x86_64-linux-gnu/libwayland-cursor.so.0", "."),
               ("/usr/lib/x86_64-linux-gnu/libwayland-egl.so.1", ".")],
     datas=[(str(root / "PS2Recomp/ps2xRuntime/third_party/gamecontrollerdb/gamecontrollerdb.txt"), "assets"),

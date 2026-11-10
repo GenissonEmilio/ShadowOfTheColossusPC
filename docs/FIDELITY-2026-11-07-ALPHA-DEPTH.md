@@ -1,4 +1,4 @@
-# Conditional depth writes for translucent model materials — candidate
+# Conditional depth writes for translucent model materials — Linux v0.3.4
 
 A complete native OpenGL worker-frame capture of Hydrus contained 1,542
 draws. At one inspected head pixel, the glow shader produced a nonzero colour,
@@ -54,8 +54,7 @@ masked depth writes, mip changes and opacity. The compiled negative control
 completed the same 84 GPU checks and failed 18, including the fur/scar/glow
 colour and depth probes in all three mesh paths. This demonstrates the old
 failure rather than treating a compiler or driver error as a regression test.
-Game performance and the final appearance still require observation before
-this candidate becomes the principal release.
+Those synthetic checks are separate from the gameplay observation below.
 
 The indexed mesh buffer is bound once per mesh submission, before the ordered
 alpha phases, instead of rebinding the same buffer before every range. All
@@ -68,7 +67,13 @@ this change removes redundant bindings rather than reordering triangles.
 The benchmark omits glow and post-processing, and its timings varied with
 host scheduling. It does not establish campaign frame rate or final fidelity.
 
-This is a demonstrated local rendering defect, not a completed validation of
-Hydrus, Basaran, the electrical effects or the remaining campaign. The current
-installed principal release remains v0.3.3 until the candidate passes the
-required checks and is explicitly published.
+On 10 November, the same compiled runtime completed Basaran with normal
+inputs. A clean, undamaged head showed the complete luminous sigil with the
+sword equipped; the native effect intensity was 1. Charged attacks, the
+strength indicator, darkening corpse, tendrils, normal ninth-clear save and
+fresh-process original-menu reload were observed. See the precise scope and
+performance limits in [campaign validation](CAMPAIGN-VALIDATION.md).
+
+The material correction applies across the shared renderer. This does not
+complete the visual validation of Hydrus, the other electrical effects or the
+remaining campaign. Portability and launcher tests also gate publication.

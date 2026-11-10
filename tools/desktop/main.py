@@ -366,6 +366,7 @@ class Launcher:
         self.controller_button = style(Gtk.Button(label="Configurar meu controle…"), "secondary")
         self.controller_button.connect("clicked", self.configure_controller)
         page.pack_start(self.controller_button, False, False, 0)
+        page.pack_start(label("Dica: os sigilos dos colossos brilham com a espada equipada.", "small", wrap=True),False,False,0)
         page.pack_start(Gtk.Box(),True,True,0)
         return page
 

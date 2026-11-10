@@ -25,16 +25,18 @@ nos restos do colosso, sem alterar flags ou memória do jogo.
 
 ## Progresso
 
-**1/16 etapas validadas:** Valus no nativo `cb15`; os outros quinze colossos e
-o encerramento permanecem pendentes. Em 6 de novembro, a versão principal
-publicada e instalada é a [v0.3.3](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.3),
-com o pacote conferido pelo digest do GitHub. O launcher instalado seleciona
-o runtime `7fe91f38ffee26ff8a553bdd`, que conserva a captura de água corrigida e
-[verificada em 240 quadros de Hydrus](FIDELITY-2026-11-05-COPY-LAYERS.md).
-O executável corrigido também concluiu a revanche de Hydrus e restaurou o
-progresso original, mas o brilho inequívoco do sigilo e a aprovação visual
-integral continuam pendentes. Hydrus ainda não é contabilizado como etapa
-completamente validada.
+**2/16 etapas validadas:** Valus no nativo `cb15` e Basaran no `0281`.
+Os outros quatorze colossos e o encerramento permanecem pendentes. Basaran
+foi concluído em 10 de novembro de 2026 com a correção comum de
+[transparência e profundidade](FIDELITY-2026-11-07-ALPHA-DEPTH.md), destinada
+à v0.3.4 junto da navegação por controle no launcher. A publicação exige
+também a aprovação do pacote portátil; veja as versões disponíveis em
+[Releases](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases).
+
+A captura de água foi [verificada em 240 quadros de Hydrus](FIDELITY-2026-11-05-COPY-LAYERS.md).
+A revanche de Hydrus foi concluída no runtime anterior, mas sua aprovação
+visual integral continua pendente. A correção compartilhada de transparência
+não transforma os demais colossos em batalhas validadas automaticamente.
 
 | # | Colosso | Situação | Release |
 | --- | --- | --- | --- |
@@ -46,7 +48,7 @@ completamente validada.
 | 6 | Barba | Pendente | — |
 | 7 | Hydrus | Revanche concluída: três espinhos, cabeça, derrota, retorno e F5/F8; brilho inequívoco do sigilo e aprovação visual integral ainda pendentes | [v0.3.3, correção de materiais](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.3) |
 | 8 | Kuromori | Pendente | — |
-| 9 | Basaran | Pendente | — |
+| 9 | Basaran | Validado por etapas no mesmo nativo 0281: tornozelos, tombamento, escalada, sigilo com espada, carga, sete estocadas, derrota/sombras, salvamento normal e recarga em processo novo | v0.3.4 |
 | 10 | Dirge | Pendente | — |
 | 11 | Celosia | Pendente | — |
 | 12 | Pelagia | Pendente | — |
@@ -54,6 +56,36 @@ completamente validada.
 | 14 | Cenobia | Pendente | — |
 | 15 | Argus | Pendente | — |
 | 16 | Malus e encerramento | Pendente | — |
+
+## Basaran — 10 de novembro de 2026
+
+O checkpoint privado foi retomado no executável de SHA-256
+`b235334eb8ca239219882ae4fdd00edb8d6e1018edcb087a30ef95767e428876`.
+As duas flechas efetivas e o tombamento já estavam registrados nesse mesmo
+executável; a continuação percorreu o pelo, a borda, o casco e a cabeça com
+entradas normais. Não houve escrita em RAM, teleporte, dano forçado ou
+alteração de tempo da simulação.
+
+O sigilo foi capturado inteiro e luminoso antes de qualquer dano na cabeça,
+com a espada equipada e a intensidade original em 1. O círculo de força foi
+observado durante a preparação da estocada. Sete golpes reais levaram os
+239,256 pontos de vida restantes a zero. O corpo escureceu, as sombras ficaram
+visíveis e a absorção prosseguiu até o retorno ao templo. Uma captura teve
+oclusão breve da câmera pelo corpo durante a queda; não se atribuiu esse
+instante a uma divergência comprovada da versão original.
+
+O jogo criou o slot 4 da cópia de QA: `Shrine of Worship — 9 Defeated`.
+Os três slots importados anteriores foram preservados. Uma execução nova
+carregou esse slot pela tela original, sem F8, e retornou ao templo com nove
+derrotados, Basaran registrado e Dirge como próximo colosso. Os oito derrotados
+importados não contam como oito lutas testadas. Cartões e configurações pessoais
+não foram usados para gravar esse progresso.
+
+Nos 62 intervalos ativos de um segundo amostrados na cabeça, o contador usado
+pelo HUD variou de 55,47 a 60,56, com mediana 59,49. Isso mede listas de desenho
+por segundo; não é uma medição de tempo de GPU nem uma garantia de desempenho
+em toda a campanha. As pausas, restaurações e lacunas de observação foram
+excluídas. Evidências privadas: `artifacts/hydrus-2026-11-05/`.
 
 ## Checkpoint inicial e candidato
 
