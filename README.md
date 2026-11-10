@@ -87,6 +87,14 @@ diretamente. Veja [o formato e exemplos](docs/SHADERS.md).
 
 ## Controles
 
+O launcher também aceita controle: direcional ou analógico navega, **A/✕**
+confirma, **B/○** volta e **LB/RB** alternam as páginas. **Start** inicia o
+jogo já preparado; **←/→** ajustam a opção selecionada. Controles reconhecidos
+pelo SDL2 usam a base de mapeamentos incluída e o perfil salvo em
+**Configurar meu controle…**. A interface mostra os atalhos quando o controle
+é conectado. A navegação funciona com a janela do launcher em foco e libera
+o dispositivo enquanto o jogo ou a calibração estão abertos.
+
 | Teclado | Controle PS2 |
 | --- | --- |
 | WASD | movimentar |

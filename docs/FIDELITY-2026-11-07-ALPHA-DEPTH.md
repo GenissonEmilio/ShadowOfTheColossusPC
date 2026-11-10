@@ -33,6 +33,14 @@ saturation; references above 128 are therefore meaningful.
 The original glow composition uses texture alpha and normal blending. Neither
 the glow strength nor its depth test is replaced to hide this defect.
 
+The correction belongs to the shared model renderer: it does not select a
+colossus, a weak-point texture name or a campaign flag. An offline audit of the
+preserved original material tables found the supported TEST contract in all
+56 Hydrus surfaces and all 45 Basaran surfaces (57 texture contexts per model).
+Other colossi using that contract receive the same correction automatically.
+This establishes the scope of the implementation, not the appearance or
+completion of their battles; those still need separate gameplay validation.
+
 `test_alpha_depth.sh` exercises real OpenGL pixels with synthetic inputs. Its
 negative control disables only this conditional-depth path. The frontend
 fixture separately covers texture lookup, references, invalid configurations,

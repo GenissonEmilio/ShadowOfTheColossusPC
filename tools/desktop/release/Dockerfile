@@ -3,7 +3,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-dev python3-pip python3-gi python3-gi-cairo gir1.2-gtk-3.0 \
     libarchive13 python3-pil binutils gcc libglib2.0-bin fonts-dejavu-core \
-    libgl1 xvfb xauth patchelf ca-certificates \
+    libgl1 libsdl2-2.0-0 xvfb xauth patchelf ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 RUN python3 -m pip install --no-cache-dir pyinstaller==6.22.0
 RUN apt-get update && apt-get install -y --no-install-recommends \

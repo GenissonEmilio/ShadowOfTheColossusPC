@@ -14,6 +14,7 @@ import threading
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from model import Library, VERSION, assets_directory, program_directory
 from graphics import Graphics
+from gamepad import Gamepad
 
 if len(sys.argv) > 1 and sys.argv[1] == "--pipeline-helper":
     from pipeline import helper
@@ -170,6 +171,8 @@ class Launcher:
         self.stack.add_named(self.about(),"about")
         footer = box(Gtk.Orientation.HORIZONTAL,spacing=15,classes=("footer",)); footer.set_margin_top(2)
         text = label("Atravesse as Terras Proibidas.","small")
+        self.gamepad_hint = text
+        text.set_line_wrap(True)
         footer.pack_start(text,True,True,0)
         saves = style(Gtk.Button(label="Meus saves ↗"),"link"); saves.connect("clicked",self.open_saves)
         footer.pack_end(saves,False,False,0); body.pack_end(footer,False,False,0)
@@ -183,12 +186,111 @@ class Launcher:
         target = Gtk.TargetEntry.new("text/uri-list",0,0)
         self.drop.drag_dest_set(Gtk.DestDefaults.ALL,[target],Gdk.DragAction.COPY)
         self.drop.connect("drag-data-received", self.dropped)
+        self.gamepad = Gamepad(self.library.program, self.library.directory / "controllers/gamecontrollerdb.txt")
+        self.gamepad_timer = GLib.timeout_add(33, self.poll_gamepad)
         if args.rom:
             GLib.timeout_add(300,lambda: self.prepare(args.rom) or False)
         elif args.test_game:
             GLib.timeout_add(300,self.play)
         elif args.screenshot:
             GLib.timeout_add(700,self.capture_and_exit)
+
+    def gamepad_window(self):
+        # Dialogs must belong to this launcher. Never target another application's
+        # window, and never present/raise a window in response to controller input.
+        for window in Gtk.Window.list_toplevels():
+            if not window.is_active() or not window.get_visible():
+                continue
+            parent = window
+            while parent and parent != self.window:
+                parent = parent.get_transient_for()
+            if parent == self.window:
+                return window
+        return None
+
+    def poll_gamepad(self):
+        target = self.gamepad_window()
+        active = bool(target and not self.busy and not self.process and not self.controller_process)
+        was_connected = self.gamepad.connected
+        actions = self.gamepad.poll(active)
+        if self.gamepad.connected and not was_connected and target == self.window:
+            self.focus_gamepad_page()
+        self.gamepad_hint.set_text(
+            "Controle: direcional/analógico · A/✕ confirmar · B/○ voltar\n"
+            "LB/RB páginas · Start jogar/aceitar · ←/→ ajustar" if self.gamepad.connected
+            else "Atravesse as Terras Proibidas.")
+        for action in actions:
+            # A click can synchronously enter a nested GTK dialog loop or start
+            # the game. Recheck ownership before dispatching another action.
+            if self.busy or self.process or self.controller_process:
+                break
+            self.gamepad_action(self.gamepad_window(), action)
+        return True
+
+    def gamepad_action(self, target, action):
+        if target is None:
+            return
+        focus = target.get_focus()
+        if target == self.window:
+            if action in ("previous", "next"):
+                pages = list(self.nav)
+                index = pages.index(self.stack.get_visible_child_name())
+                page = pages[(index + (1 if action == "next" else -1)) % len(pages)]
+                self.navigate(page)
+                self.focus_gamepad_page()
+                return
+            if action == "back":
+                self.navigate("home")
+                self.focus_gamepad_page()
+                return
+            if action == "play":
+                if self.play_button.get_sensitive():
+                    self.play_button.clicked()
+                return
+        elif action == "back":
+            if isinstance(target, Gtk.Dialog):
+                target.response(Gtk.ResponseType.CANCEL)
+            return
+        elif action == "play":
+            target.activate_default()
+            return
+        if focus is None:
+            if target == self.window:
+                self.focus_gamepad_page()
+            else:
+                target.child_focus(Gtk.DirectionType.TAB_FORWARD)
+            return
+        setting = focus
+        while setting != target and not isinstance(setting, (Gtk.ComboBox, Gtk.Range)):
+            setting = setting.get_parent()
+            if setting is None:
+                break
+        if action == "confirm":
+            if isinstance(setting, Gtk.ComboBox):
+                setting.set_active((setting.get_active() + 1) % len(setting.get_model()))
+            elif isinstance(focus, Gtk.Button):
+                focus.clicked()
+            else:
+                Gtk.bindings_activate(focus, Gdk.KEY_Return, Gdk.ModifierType(0))
+        elif action in ("left", "right") and isinstance(setting, Gtk.ComboBox):
+            count = len(setting.get_model())
+            setting.set_active(max(0, min(count - 1, setting.get_active() + (1 if action == "right" else -1))))
+        elif action in ("left", "right") and isinstance(setting, Gtk.Range):
+            adjustment = setting.get_adjustment()
+            delta = adjustment.get_step_increment() * (1 if action == "right" else -1)
+            setting.set_value(setting.get_value() + delta)
+        elif target != self.window and action in ("up", "down", "left", "right") and isinstance(focus, (Gtk.TreeView, Gtk.IconView)):
+            Gtk.bindings_activate(focus, {"up": Gdk.KEY_Up, "down": Gdk.KEY_Down,
+                "left": Gdk.KEY_Left, "right": Gdk.KEY_Right}[action], Gdk.ModifierType(0))
+        elif action in ("up", "down", "left", "right", "previous", "next"):
+            direction = Gtk.DirectionType.TAB_BACKWARD if action in ("up", "left", "previous") else Gtk.DirectionType.TAB_FORWARD
+            target.child_focus(direction)
+
+    def focus_gamepad_page(self):
+        if self.stack.get_visible_child_name() == "home":
+            (self.play_button if self.play_button.get_sensitive() else self.choose_button).grab_focus()
+        else:
+            self.stack.get_visible_child().child_focus(Gtk.DirectionType.TAB_FORWARD)
 
     def home(self):
         page = box(spacing=22)
@@ -301,6 +403,7 @@ class Launcher:
             return
         profile = self.library.directory / "controllers/gamecontrollerdb.txt"
         profile.parent.mkdir(parents=True, exist_ok=True)
+        self.gamepad.suspend()
         try:
             with (self.library.directory / "last-controller.log").open("w") as log:
                 self.controller_process = subprocess.Popen([str(tool), "--output", str(profile)],
@@ -389,6 +492,7 @@ class Launcher:
         if self.busy or self.process: return
         dialog=Gtk.FileChooserDialog(title="Importar shader GLSL 330",parent=self.window,action=Gtk.FileChooserAction.OPEN)
         dialog.add_buttons("Cancelar",Gtk.ResponseType.CANCEL,"Validar e importar",Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
         selected=Gtk.FileFilter(); selected.set_name("Fragment shaders GLSL 330")
         for extension in ("frag","fs","glsl"):
             selected.add_pattern("*."+extension); selected.add_pattern("*."+extension.upper())
@@ -454,6 +558,7 @@ class Launcher:
         dialog=Gtk.FileChooserDialog(title="Escolha sua ROM de Shadow of the Colossus",parent=self.window,
                                      action=Gtk.FileChooserAction.OPEN)
         dialog.add_buttons("Cancelar",Gtk.ResponseType.CANCEL,"Selecionar ROM",Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
         selected=Gtk.FileFilter(); selected.set_name("Shadow of the Colossus · ISO, RAR, ZIP e 7Z")
         for extension in ("iso","rar","zip","7z"):
             selected.add_pattern("*."+extension); selected.add_pattern("*."+extension.upper())
@@ -526,6 +631,7 @@ class Launcher:
 
     def play(self,*_):
         if self.busy or self.process or self.controller_process: return False
+        self.gamepad.suspend()
         self.busy=True; self.play_button.set_sensitive(False); self.choose_button.set_sensitive(False)
         self.update_status("Abrindo sua próxima aventura…")
         self.progress.show(); GLib.timeout_add(80,self.pulse)
@@ -636,6 +742,7 @@ class Launcher:
                 chooser = Gtk.FileChooserDialog(title="Importar cartão PS2" if importing else "Exportar cartão PS2",
                     transient_for=dialog, action=Gtk.FileChooserAction.OPEN if importing else Gtk.FileChooserAction.SAVE)
                 chooser.add_buttons("Cancelar", Gtk.ResponseType.CANCEL, "Importar" if importing else "Exportar", Gtk.ResponseType.OK)
+                chooser.set_default_response(Gtk.ResponseType.OK)
                 if importing:
                     pattern = Gtk.FileFilter(); pattern.set_name("Cartão PS2 (.ps2)")
                     pattern.add_pattern("*.ps2"); pattern.add_pattern("*.PS2"); chooser.add_filter(pattern)
@@ -713,7 +820,12 @@ def main():
         print(Library(args.data_dir).install_desktop_entry()); return 0
     if args.test_game and not args.rom and not Library(args.data_dir).disc:
         parser.error("--test-game requires an imported disc or --rom")
-    launcher=Launcher(args); Gtk.main()
+    launcher=Launcher(args)
+    try:
+        Gtk.main()
+    finally:
+        GLib.source_remove(launcher.gamepad_timer)
+        launcher.gamepad.suspend()
     return int(launcher.failed)
 
 

@@ -1,4 +1,9 @@
 from pathlib import Path
+from PyInstaller.depend.bindepend import resolve_library_path
+
+sdl2 = resolve_library_path("libSDL2-2.0.so.0")
+if not sdl2:
+    raise RuntimeError("SDL2 runtime is required for launcher controller support")
 
 root = Path(SPECPATH).resolve().parents[2]
 a = Analysis(
@@ -6,14 +11,16 @@ a = Analysis(
     pathex=[str(root / "tools/desktop")],
     # GI loads GDK dynamically; explicitly retain Wayland dependencies that
     # PyInstaller otherwise excludes as optional desktop libraries.
-    binaries=[("/opt/libarchive/lib/libarchive.so.13", "."),
+    binaries=[(sdl2, "."),("/opt/libarchive/lib/libarchive.so.13", "."),
               ("/usr/lib/x86_64-linux-gnu/libwayland-client.so.0", "."),
               ("/usr/lib/x86_64-linux-gnu/libwayland-cursor.so.0", "."),
               ("/usr/lib/x86_64-linux-gnu/libwayland-egl.so.1", ".")],
-    datas=[(str(root / "tools/desktop/assets"), "assets"),
+    datas=[(str(root / "PS2Recomp/ps2xRuntime/third_party/gamecontrollerdb/gamecontrollerdb.txt"), "assets"),
+           (str(root / "PS2Recomp/ps2xRuntime/third_party/gamecontrollerdb/LICENSE"), "assets/SDL_GameControllerDB"),
+           ("/usr/share/doc/libsdl2-2.0-0/copyright", "assets/SDL2"),(str(root / "tools/desktop/assets"), "assets"),
            ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "assets/fonts"),
            ("/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf", "assets/fonts")],
-    hiddenimports=["gi._gi_cairo", "cairo"],
+    hiddenimports=["gi._gi_cairo", "cairo", "main"],
     excludes=["tkinter", "PIL", "pytest", "numpy"],
     hooksconfig={"gi": {"icons": ["Adwaita"], "themes": ["Adwaita"],
                          "languages": ["pt_BR", "en"], "module-versions": {"Gtk": "3.0", "Gdk": "3.0"}}},

@@ -20,6 +20,7 @@ jobs:
         run: |
           # Discovery includes test_shortcut.py (canonical updates and portable fallback).
           python3 -m unittest discover -s tests/linux -v
+          python3 tools/linux/test_launcher_gamepad.py
           python3 -m compileall -q tools/desktop tools/linux
       - name: Build ROM-free compiler and desktop package
         run: tools/linux/build.sh
@@ -63,6 +64,13 @@ jobs:
             sotc-linux-builder xvfb-run -a -s '-screen 0 1280x800x24' \
             python3 tools/linux/test_desktop_controls.py \
             --program dist/ShadowOfTheColossusPC/ShadowOfTheColossusPC --out artifacts/desktop-controls-ci
+      - name: Launcher controller navigation (frozen GTK and virtual SDL pad, no ROM)
+        run: |
+          docker run --rm --init --cpus=1 --memory=700m --memory-swap=700m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-desktop-builder xvfb-run -a -s '-screen 0 1280x800x24' \
+            python3 tools/linux/test_launcher_gamepad.py \
+            --program dist/ShadowOfTheColossusPC/ShadowOfTheColossusPC --out artifacts/launcher-gamepad-ci
       - name: GPU sampler transitions and dynamic palette uploads (no ROM)
         run: |
           docker run --rm --init --cpus=2 --memory=1000m --memory-swap=1000m --network=none \
