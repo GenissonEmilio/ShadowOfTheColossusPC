@@ -34,6 +34,29 @@ class NavigationTest(unittest.TestCase):
         self.assertEqual(nav.update({'down'}, 10), ['down'])
         self.assertEqual(nav.update({'right'}, 10.01), ['right'])
 
+    def test_hotplug_waits_for_next_scheduled_scan(self):
+        from unittest.mock import Mock
+        now = [10.0]
+        pad = Gamepad.__new__(Gamepad)
+        pad.clock = lambda: now[0]
+        pad.sdl = Mock()
+        pad.controller = None
+        pad.running = True
+        pad.next_scan = 11.0
+        pad.navigation = Navigation()
+        pad.sdl.SDL_NumJoysticks.return_value = 1
+        pad.sdl.SDL_IsGameController.return_value = 1
+        pad.sdl.SDL_GameControllerOpen.return_value = 123
+        pad.sdl.SDL_GameControllerGetButton.return_value = 0
+        pad.sdl.SDL_GameControllerGetAxis.return_value = 0
+        self.assertEqual(pad.poll(True), [])
+        self.assertFalse(pad.connected)
+        pad.sdl.SDL_NumJoysticks.assert_not_called()
+        now[0] = 11.0
+        self.assertEqual(pad.poll(True), [])
+        self.assertTrue(pad.connected)
+        pad.sdl.SDL_GameControllerOpen.assert_called_once_with(0)
+
     def test_absent_runtime_is_optional_and_suspend_safe(self):
         from unittest.mock import patch
         with patch('gamepad.ctypes.CDLL', side_effect=OSError):
@@ -63,7 +86,7 @@ def settle(predicate, description):
         if predicate():
             return
         time.sleep(.01)
-    assert predicate(), description
+    assert predicate(), description() if callable(description) else description
 # show_all creates widgets but the X focus events have not reached GTK yet.
 # Button.child_focus on an inactive toplevel grabs the same button again;
 # test real Dpad traversal only after the isolated Xvfb window has focus.
@@ -91,7 +114,19 @@ stick=sdl.SDL_JoystickOpen(index)
 is_controller=sdl.SDL_IsGameController
 sdl.SDL_IsGameController=lambda candidate: candidate == index and is_controller(candidate)
 assert stick
-pad.poll(True); assert pad.connected
+sdl.SDL_GetError.argtypes=[];sdl.SDL_GetError.restype=ctypes.c_char_p
+def connected():
+    pad.poll(True)
+    return pad.connected
+def controller_diagnostic():
+    return {'error':'virtual controller did not connect within two seconds',
+            'sdl_error':sdl.SDL_GetError().decode('utf-8',errors='replace'),
+            'joysticks':sdl.SDL_NumJoysticks(),
+            'virtual_index':index,'is_game_controller':bool(is_controller(index)),
+            'next_scan':pad.next_scan,'now':time.monotonic(),'running':pad.running}
+# GTK focus settling can run the launcher's first (empty) scan before attach.
+# Respect the same one-second hotplug scan interval as the real launcher.
+settle(connected,controller_diagnostic)
 sdl.SDL_JoystickSetVirtualButton(stick,0,1)
 assert pad.poll(True)==['confirm']
 assert pad.poll(True)==[]
