@@ -72,6 +72,9 @@ monitor atual por inteiro. **Original 4:3** preserva a proporção e deixa faixa
 nas laterais de telas largas; **Esticar** preenche toda a tela. F11 alterna entre
 tela cheia e janela e salva a preferência. O menu F1 também ajusta a proporção.
 
+No Linux, **F1 → Vídeo → VSync** sincroniza a apresentação com o monitor
+para reduzir tearing. A opção vem ligada e pode ser alterada durante o jogo.
+
 **Importar shader…** copia e compila no seu driver um fragment shader de
 pós-processamento **GLSL 330**, em `.frag`, `.fs` ou `.glsl`. A seleção anterior
 é preservada quando a validação falha. **Usar Nitidez HD** ativa o filtro incluído;

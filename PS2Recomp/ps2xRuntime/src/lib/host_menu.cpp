@@ -105,6 +105,8 @@ namespace
             {"Exact transparency", "Transparências precisas"},
             {"Show FPS", "Mostrar FPS"},
             {"Screen", "Tela"},
+            {"Synchronizes frame presentation with the monitor to reduce tearing.",
+             "Sincroniza a apresentação dos quadros com o monitor para reduzir cortes na imagem."},
             {"Volume", "Volume"},
             {"Language", "Idioma"},
             {"Return to launcher", "Voltar ao launcher"},
@@ -150,6 +152,9 @@ namespace
         kExactAlpha,
         kShowFps,
         kScreen,
+#if defined(__linux__) && !defined(__ANDROID__)
+        kVSync,
+#endif
         kVolume,
         kLanguage,
         kQuit,
@@ -177,6 +182,9 @@ namespace
         {kScreen, "Screen",
          "Fit keeps the original 4:3 picture with bars on the sides. Stretch fills the screen. "
          "Sharp uses the largest whole multiple of the original size, so every pixel has the same size."},
+#if defined(__linux__) && !defined(__ANDROID__)
+        {kVSync, "VSync", "Synchronizes frame presentation with the monitor to reduce tearing."},
+#endif
     };
     const Item kSoundItems[] = {
         {kVolume, "Volume", "Volume of the game's sound and music."},
@@ -191,7 +199,7 @@ namespace
     // all, the layers; Renderer the rest.
     constexpr int kQualityTab = 1, kRendererTab = 2, kDebugTab = 3, kStatesTab = 6;
     const Tab kTabs[] = {
-        {"Video", kVideoItems, 3},
+        {"Video", kVideoItems, static_cast<int>(sizeof(kVideoItems) / sizeof(kVideoItems[0]))},
         {"Quality", nullptr, -1},
         {"Renderer", nullptr, -1},
         {"Debug", nullptr, -1},
@@ -309,6 +317,9 @@ namespace
         {
         case kExactAlpha: return T(g_settings.exactAlpha ? "On" : "Off");
         case kShowFps: return T(g_settings.showFps ? "On" : "Off");
+#if defined(__linux__) && !defined(__ANDROID__)
+        case kVSync: return T(g_settings.vsync ? "On" : "Off");
+#endif
         case kScreen:
         {
             static const char *modes[] = {"Fit (4:3)", "Stretch", "Sharp (whole scale)"};
@@ -339,6 +350,9 @@ namespace
         std::fprintf(f, "exact_alpha=%d\nshow_fps=%d\nscreen=%d\nfullscreen=%d\nvolume=%d\nlanguage=%d\n", g_settings.exactAlpha ? 1 : 0,
                      g_settings.showFps ? 1 : 0, g_settings.screenMode.load(), g_settings.fullscreen ? 1 : 0,
                      g_settings.volume.load(), g_settings.language.load());
+#if defined(__linux__) && !defined(__ANDROID__)
+        std::fprintf(f, "vsync=%d\n", g_settings.vsync ? 1 : 0);
+#endif
         const native_renderer::Tuning &t = native_renderer::tuning();
         for (const native_renderer::TuningItem &item : native_renderer::tuningItems())
         {
@@ -361,6 +375,9 @@ namespace
         {
         case kExactAlpha: g_settings.exactAlpha = !g_settings.exactAlpha; break;
         case kShowFps: g_settings.showFps = !g_settings.showFps; break;
+#if defined(__linux__) && !defined(__ANDROID__)
+        case kVSync: g_settings.vsync = !g_settings.vsync; break;
+#endif
         case kScreen: g_settings.screenMode = (g_settings.screenMode + 3 + dir) % 3; break;
         case kVolume: g_settings.volume = std::clamp(g_settings.volume + dir, 0, 10); break;
         case kLanguage: g_settings.language = (g_settings.language + 3 + dir) % 3; break;
@@ -602,6 +619,9 @@ void load()
         else if (!std::strcmp(key, "show_fps")) g_settings.showFps = value != 0;
         else if (!std::strcmp(key, "screen")) g_settings.screenMode = std::clamp(value, 0, 2);
         else if (!std::strcmp(key, "fullscreen")) g_settings.fullscreen = value != 0;
+#if defined(__linux__) && !defined(__ANDROID__)
+        else if (!std::strcmp(key, "vsync")) g_settings.vsync = value != 0;
+#endif
         else if (!std::strcmp(key, "volume")) g_settings.volume = std::clamp(value, 0, 10);
         else if (!std::strcmp(key, "language")) g_settings.language = std::clamp(value, 0, 2);
     }

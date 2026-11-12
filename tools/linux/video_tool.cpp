@@ -74,6 +74,7 @@ int main(int argc, char **argv)
             }
             const Rectangle r = desktop_video::destination(GetScreenWidth(), GetScreenHeight(), 320, 240, mode);
             report << "{\"name\":" << quoted(name) << ",\"fullscreen\":" << (IsWindowFullscreen() ? "true" : "false")
+                   << ",\"vsync\":" << (IsWindowState(FLAG_VSYNC_HINT) ? "true" : "false")
                    << ",\"width\":" << GetRenderWidth() << ",\"height\":" << GetRenderHeight()
                    << ",\"x\":" << r.x << ",\"y\":" << r.y << ",\"picture_width\":" << r.width
                    << ",\"picture_height\":" << r.height
@@ -81,7 +82,9 @@ int main(int argc, char **argv)
                    << ",\"body\":[" << int(body.r) << ',' << int(body.g) << ',' << int(body.b) << "]}";
         };
         capture("window-fit", 0); report << ',';
+        desktop_video::updatePresentation(true, false);
         desktop_video::setFullscreen(true);
+        desktop_video::updatePresentation(true, false);
         capture("fullscreen-fit", 0); report << ',';
         capture("fullscreen-stretch", 1); report << ',';
         const auto invert = out / "invert.frag";
@@ -97,6 +100,7 @@ int main(int argc, char **argv)
         desktop_video::loadShader(nullptr, error);
         capture("shader-disabled", 1); report << ',';
         desktop_video::setFullscreen(false);
+        desktop_video::updatePresentation(false, false);
         capture("window-restored", 0);
         report << "],\"valid_shader\":" << (valid ? "true" : "false")
                << ",\"invalid_rejected\":" << (rejected ? "true" : "false")

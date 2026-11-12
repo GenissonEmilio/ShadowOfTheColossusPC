@@ -15,6 +15,9 @@ namespace
     int windowWidth = 1024, windowHeight = 720;
     Vector2 windowPosition{};
     int restoreFrames = 0;
+    int frameLimit = 0;
+    int refreshRate = 60;
+    double nextRefreshCheck = 0.0;
 }
 
 Rectangle destination(int width, int height, int sourceWidth, int sourceHeight, int mode)
@@ -42,6 +45,7 @@ Rectangle destination(int width, int height, int sourceWidth, int sourceHeight, 
 void setFullscreen(bool enabled)
 {
     if (enabled == IsWindowFullscreen()) return;
+    nextRefreshCheck = 0.0;
     if (enabled)
     {
         restoreFrames = 0;
@@ -63,6 +67,34 @@ void setFullscreen(bool enabled)
         // X11 window managers may apply their decorations after this resize.
         // Reapply the content size once those asynchronous events have arrived.
         restoreFrames = 3;
+    }
+}
+
+void updatePresentation(bool vsync, bool cap30)
+{
+    // Set the swap interval on the presentation context, not the renderer's
+    // worker context. raylib reapplies it when changing fullscreen mode.
+    if (vsync != IsWindowState(FLAG_VSYNC_HINT))
+    {
+        if (vsync) SetWindowState(FLAG_VSYNC_HINT);
+        else ClearWindowState(FLAG_VSYNC_HINT);
+    }
+
+    const double now = GetTime();
+    if (vsync && now >= nextRefreshCheck)
+    {
+        refreshRate = GetMonitorRefreshRate(GetCurrentMonitor());
+        if (refreshRate <= 0) refreshRate = 60;
+        nextRefreshCheck = now + 1.0;
+    }
+    // Leave headroom above the monitor clock to avoid a second limiter
+    // making synchronized swaps miss refreshes. Bound the frame rate even
+    // when a driver or virtual display ignores the requested swap interval.
+    const int limit = cap30 ? 30 : (vsync ? refreshRate + std::max(5, refreshRate / 10) : 60);
+    if (limit != frameLimit)
+    {
+        frameLimit = limit;
+        SetTargetFPS(limit);
     }
 }
 

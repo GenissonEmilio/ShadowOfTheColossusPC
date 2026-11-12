@@ -8,6 +8,7 @@ report = json.loads((Path(sys.argv[1]) / "report.json").read_text())
 cases = {item["name"]: item for item in report["cases"]}
 assert report["valid_shader"] and report["invalid_rejected"] and report["active_preserved"]
 for name, item in cases.items():
+    assert item["vsync"] == (name not in ("window-fit", "window-restored")), item
     if name.startswith("fullscreen"):
         assert item["fullscreen"], item
         assert (item["width"], item["height"]) == (report["monitor_width"], report["monitor_height"]), item
@@ -24,4 +25,4 @@ for name, item in cases.items():
     assert all(abs(a-b) <= 2 for a,b in zip(item["body"], expected)), item
 assert not cases["window-restored"]["fullscreen"]
 assert (cases["window-restored"]["width"],cases["window-restored"]["height"]) == (960,540)
-print("PASS: native fullscreen, fit/stretch pixels, valid/invalid shader, disable and window restoration")
+print("PASS: VSync toggling, native fullscreen, fit/stretch pixels, shader handling and window restoration")

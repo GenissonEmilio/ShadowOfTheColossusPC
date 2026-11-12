@@ -3039,6 +3039,11 @@ void PS2Runtime::run()
     uint64_t tick = 0;
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
     {
+#if defined(__linux__) && !defined(__ANDROID__)
+        const bool visible = !IsWindowHidden() && !IsWindowMinimized();
+        desktop_video::updatePresentation(visible && hostmenu::settings().vsync,
+                                          native_renderer::tuning().frameCap30);
+#else
         {
             // Renderer setting 'Cap at 30 fps': the picture shown every other
             // vblank at most (the Vita: vsync interval 2), so a game frame
@@ -3051,6 +3056,7 @@ void PS2Runtime::run()
                 SetTargetFPS(wantFps);
             }
         }
+#endif
         PS2_IF_AGRESSIVE_LOGS({
             tick++;
             if ((tick % 120) == 0)
