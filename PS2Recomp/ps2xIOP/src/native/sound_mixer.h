@@ -95,6 +95,11 @@ namespace ps2x::iop::detail
 
     private:
         friend class Sg2Driver;
+        [[nodiscard]] bool awaitingAttackTick(int voice) const
+        {
+            const Voice &v = m_voices[voice];
+            return v.phase == Phase::Attack && v.level == 0 && v.envCounter == 0;
+        }
         bool captureStateLocked(std::vector<uint8_t> &out, std::string &error) const;
         bool decodeStateLocked(const std::vector<uint8_t> &blob, bool apply, std::string &error);
         enum class Phase : uint8_t

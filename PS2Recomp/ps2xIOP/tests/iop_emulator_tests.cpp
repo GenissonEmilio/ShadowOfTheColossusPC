@@ -1,10 +1,14 @@
 #include "ps2x/iop/iop_subsystem.h"
+#include "emulator/core/iop_memory.h"
+#include "emulator/services/iop_sg2.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <initializer_list>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -889,10 +893,57 @@ namespace
             std::cerr << "FAIL: " << message << '\n';
         return value;
     }
+
+    bool testSg2VoiceStatusBeforeMix()
+    {
+        TestHost host;
+        detail::IopMemory memory;
+        detail::Sg2Driver driver(host, memory);
+        detail::SoundMixer &mixer = driver.mixer();
+        constexpr int voice = 27;
+        constexpr uint32_t mask = 1u << (voice - 24);
+        std::array<uint32_t, 100> status{};
+        auto rpc = [&](std::initializer_list<uint32_t> commands)
+        {
+            const auto commandBytes = static_cast<uint32_t>(commands.size() * sizeof(uint32_t));
+            RpcRequest request{};
+            request.sid = detail::Sg2Driver::Sid;
+            request.send = {0x10u, commandBytes};
+            request.receive = {0x100u, sizeof(status)};
+            return host.writeGuest(request.send.address, commands.begin(), commandBytes) &&
+                driver.handleRpc(request).handled &&
+                host.readGuest(request.receive.address, status.data(), sizeof(status));
+        };
+
+        if (!expect(rpc({0x02u, voice, 0x80FFu, 0x5FCFu, 0x07u, 0u, 0u, mask}), "SG2 key-on RPC failed"))
+            return false;
+        for (int tick = 0; tick < 3; ++tick)
+            if (!expect(status[voice] >= 2u && status[voice - 1] == 0u && mixer.envelope(voice) == 0u,
+                        "An unmixed SG2 attack must retain its slot without changing its envelope") ||
+                !expect(rpc({}), "SG2 status RPC failed"))
+                return false;
+
+        if (detail::SoundMixer::pullMode())
+        {
+            std::array<int16_t, 2> sample{};
+            (void)mixer.readOutput(sample.data(), 1u);
+        }
+        else
+        {
+            mixer.advanceTo(0u);
+            mixer.advanceTo(detail::SoundMixer::CyclesPerSample);
+        }
+        return expect(rpc({}) && status[voice] > 2u && status[voice] == mixer.envelope(voice),
+                      "SG2 must report the actual envelope once mixing starts") &&
+            expect(rpc({0x07u, 0u, 0u, mask, 0x08u, 0u, 0u, mask}) && status[voice] == 0u,
+                   "An SG2 voice released before mixing must report silence");
+    }
 }
 
 int main()
 {
+    if (!testSg2VoiceStatusBeforeMix()) return 1;
+
     TestHost host(0x20000u);
     IopSubsystem iop(host);
 

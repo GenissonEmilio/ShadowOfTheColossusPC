@@ -650,7 +650,12 @@ namespace ps2x::iop::detail
         const uint32_t core = param & 1u, reg = (param >> 8u) & 0xFu, v = (param >> 1u) & 0x1Fu;
         if (v >= 24u || reg != 5u) // only ENVX is read
             return 0;
-        return m_mixer.envelope(static_cast<int>(core * 24u + v));
+        const int voice = static_cast<int>(core * 24u + v);
+        // A host audio callback can start after the EE has polled ENVX for
+        // a new voice. Sg2SlotTickProc frees the slot below 2 on its third
+        // tick, which leaves the sample playing without an owner to stop it.
+        // Report the slot as occupied until the first attack tick is mixed.
+        return m_mixer.awaitingAttackTick(voice) ? 2u : m_mixer.envelope(voice);
     }
 
     void Sg2Driver::setSwitch(uint32_t entry, uint32_t mask)

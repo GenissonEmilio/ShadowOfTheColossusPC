@@ -28,17 +28,20 @@ jobs:
         run: |
           LD_LIBRARY_PATH="$PWD/artifacts/compiler/lib" artifacts/compiler/bin/ps2_recomp --help
           test -f artifacts/compiler/manifest.json
-      - name: Execute generated EE signed branches (synthetic instructions, no ROM)
+      - name: Execute EE branch and IOP audio checks (no ROM)
         run: |
           # Test/analyzer setup fetches its pinned JSON dependency; execution is offline.
           docker run --rm --init --cpus=2 --memory=1600m --memory-swap=1600m \
             -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
             sotc-linux-builder cmake -S PS2Recomp -B build/cmake \
-            -DPS2X_BUILD_TEST=ON -DPS2X_BUILD_ANALYZER=ON -DFETCHCONTENT_FULLY_DISCONNECTED=OFF
+            -DPS2X_BUILD_TEST=ON -DPS2X_BUILD_ANALYZER=ON -DPS2X_IOP_BUILD_TESTS=ON -DFETCHCONTENT_FULLY_DISCONNECTED=OFF
           docker run --rm --init --cpus=2 --memory=1600m --memory-swap=1600m --network=none \
             -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
-            sotc-linux-builder bash -c \
-            'cmake --build build/cmake --target ps2x_tests -j2 && ctest --test-dir build/cmake/ps2xTest -R "^signed_branch_codegen_execution$" --output-on-failure --no-tests=error'
+            sotc-linux-builder bash -euc '
+              cmake --build build/cmake --target ps2x_tests ps2_iop_emulator_tests -j2
+              ctest --test-dir build/cmake/ps2xTest -R "^signed_branch_codegen_execution$" --output-on-failure --no-tests=error
+              PS2X_AUDIO_PULL=1 ctest --test-dir build/cmake/ps2xIOP -R "^ps2_iop_emulator_tests$" --output-on-failure --no-tests=error
+            '
       - name: Native fidelity, vector contexts and callback stacks (no ROM)
         run: |
           docker run --rm --init --cpus=2 --memory=1600m --memory-swap=1600m --network=none \
