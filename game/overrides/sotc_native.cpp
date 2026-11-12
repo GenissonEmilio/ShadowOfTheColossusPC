@@ -965,8 +965,8 @@ namespace sotc_native
     }
 
     // texTransResolve builds TEST_1/2 from the selected NTO2 +0x80..8c.
-    // Support only the demonstrated GEQUAL/FB_ONLY, DATE-off, Z-GEQUAL
-    // contract. Invalid metadata and overridden materials retain legacy state.
+    // With AFAIL FB_ONLY, DATE off, and Z GEQUAL, an alpha comparison of
+    // NEVER disables depth writes and GEQUAL makes them conditional.
     void surfaceAlphaTest(uint32_t header, uint32_t surface, native_renderer::DrawState &state, uint32_t field = 0x2Cu)
     {
         state.framebufferOnlyAlphaFail = false;
@@ -1001,7 +1001,17 @@ namespace sotc_native
         const uint32_t afail = word(nto2 + 0x88u), forceAlways = word(nto2 + 0x8Cu);
         // Requiring the complete raw fields also excludes malformed values
         // that would leak bits into DATE/DATM or neighboring TEST fields.
-        if (atst != 5u || reference > 255u || afail != 1u || forceAlways != 0u)
+        if (reference > 255u || afail != 1u || forceAlways != 0u)
+            return;
+        if (atst == 0u)
+        {
+            // The FB_ONLY colour path also preserves fragments below the
+            // legacy alpha cutoff. With Z masked, AREF is unused.
+            state.framebufferOnlyAlphaFail = true;
+            state.noDepthWrite = true;
+            return;
+        }
+        if (atst != 5u)
             return;
         state.framebufferOnlyAlphaFail = true;
         state.alphaReference = static_cast<uint8_t>(reference);
@@ -4151,6 +4161,7 @@ namespace sotc_native
             // being 0x20; the splash rings drawn after on the surface stay visible.
             if ((word(s + 0x18u) & 0x2200u) == 0x2200u)
                 state.noDepthWrite = true;
+            const bool surfaceDepthMask = state.noDepthWrite;
             const bool twoTextures = twoPasses && !state.debugColour;
             if (twoTextures)
                 state.writeDepth = true;
@@ -4165,8 +4176,8 @@ namespace sotc_native
                 // and coordinates, blended by ALPHA_2 (context 2).
                 native_renderer::DrawState second = state;
                 second.texture = surfaceTexture(header, surface, 0x3Cu);
-                // Context 2 has its own NTO2 TEST; never inherit context 1's
-                // threshold, including when the second metadata is invalid.
+                // Context 2 has its own NTO2 TEST and keeps the surface mask.
+                second.noDepthWrite = surfaceDepthMask;
                 second.framebufferOnlyAlphaFail = false;
                 second.alphaReference = 0;
                 if (!bossMask && !second.debugColour && second.texture)
@@ -4205,6 +4216,7 @@ namespace sotc_native
                 native_renderer::DrawState refl = state;
                 // These extra passes sample a rendered target with their own
                 // microcode/TEST contract, rather than the NTO2 material.
+                refl.noDepthWrite = surfaceDepthMask;
                 refl.framebufferOnlyAlphaFail = false;
                 refl.alphaReference = 0;
                 refl.reflectionSource = false;

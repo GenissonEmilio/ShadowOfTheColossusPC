@@ -1,4 +1,4 @@
-// ROM-free GPU/CPU contract for TEST GEQUAL + AFAIL FB_ONLY, DATE off.
+// ROM-free GPU/CPU contract for TEST GEQUAL/NEVER + AFAIL FB_ONLY, DATE off.
 // CPU reference processes each primitive in submission order. No game assets.
 #define GL_GLEXT_PROTOTYPES 1
 #define GLFW_INCLUDE_NONE
@@ -162,6 +162,14 @@ int main() {
         Layer fur=one(Triangle{2,{128,128,128},28,1,128});
         Layer glow=one(Triangle{3,{0,128,0},128,1,128},0,B::Additive);
         run("fur-scar-glow",{scar,fur,glow});
+        // Dormin's fur writes colour with both low and high alpha, while
+        // even the high-alpha primitive leaves Z available to the body.
+        Layer neverFur=one(Triangle{2,{128,0,0},28,1,200},2,B::Normal,0,1,true);
+        Layer body=one(Triangle{3,{0,128,0},128,1,128},0,B::Normal,127);
+        run("never-fb-only-fur",{neverFur});
+        neverFur.triangles[0].alpha=128;
+        run("never-fb-only-fur-body",{neverFur,body});
+        run("never-fb-only-low-alpha",{one(Triangle{2,{128,0,0},1,1,128},0,B::Opaque,0,1,true)});
         for(uint8_t alpha:{63,64,65})run((std::string("reference-64-alpha-")+std::to_string(alpha)).c_str(),{one(Triangle{2,{128,0,0},alpha,1,128},1)});
         run("reference193-pass200",{one(Triangle{2,{128,0,0},128,1,200},2,B::Normal,193)});
         run("reference193-mixed-pass200",{one(Triangle{2,{128,0,0},128,1,200},6,B::Normal,193)});

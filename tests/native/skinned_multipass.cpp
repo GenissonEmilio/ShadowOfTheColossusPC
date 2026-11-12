@@ -176,7 +176,7 @@ namespace {
         const auto invalid=[&](uint32_t offset,uint32_t value,const char *message) {
             const uint32_t old=sotc_native::word(textureHeaders+offset);
             put(textureHeaders+offset,value);resolve();
-            check(!state.framebufferOnlyAlphaFail && state.alphaReference==0,message);
+            check(!state.noDepthWrite && !state.framebufferOnlyAlphaFail && state.alphaReference==0,message);
             put(textureHeaders+offset,old);
         };
         invalid(0x80,4,"different alpha comparison retains legacy behavior");
@@ -185,6 +185,15 @@ namespace {
         invalid(0x88,5,"raw AFAIL bits that enable DATE are rejected");
         invalid(0x8c,1,"Z ALWAYS override is not treated as GEQUAL");
         invalid(0,0,"invalid NTO2 signature retains legacy behavior");
+        put(textureHeaders+0x80,0u);put(textureHeaders+0x84,127u);
+        invalid(0x84,256,"NEVER with out-of-range AREF retains legacy behavior");
+        invalid(0x88,0,"NEVER with AFAIL KEEP is not treated as FB_ONLY");
+        invalid(0x8c,1,"NEVER with Z ALWAYS retains legacy behavior");
+        resolve();
+        check(state.noDepthWrite && state.framebufferOnlyAlphaFail && state.alphaReference==0,"NEVER FB_ONLY keeps colour and masks all depth writes");
+        put(textureHeaders+0x80,5u);resolve();
+        check(state.noDepthWrite && state.framebufferOnlyAlphaFail,"resolving GEQUAL preserves an existing depth mask");
+        state.noDepthWrite=false;
         put(surface+0x18,1u<<17);resolve();
         check(!state.framebufferOnlyAlphaFail,"boss-mask TEST override cannot inherit placeholder NTO2 TEST");
         put(surface+0x18,0u);put(surface+0x2c,2u);resolve();
@@ -202,6 +211,12 @@ namespace {
         setup(true,true,true,true);put(textureHeaders+0x88,0u);
         sotc_native::modelDispHook(ram.data(),&ctx,nullptr);
         check(draws.size()==2 && !draws[0].state.framebufferOnlyAlphaFail && draws[1].state.framebufferOnlyAlphaFail && draws[1].state.alphaReference==193,"valid second TEST is resolved independently of invalid first TEST");
+        setup(true,true,true,true);put(textureHeaders+0x80,0u);
+        sotc_native::modelDispHook(ram.data(),&ctx,nullptr);
+        check(draws.size()==2 && draws[0].state.noDepthWrite && draws[0].state.framebufferOnlyAlphaFail && draws[0].state.alphaReference==0 && !draws[1].state.noDepthWrite && draws[1].state.overlay && draws[1].state.framebufferOnlyAlphaFail,"context 1 NEVER depth mask is local to its own pass");
+        setup(true,true,true,true);put(textureHeaders+0x200+0x80,0u);
+        sotc_native::modelDispHook(ram.data(),&ctx,nullptr);
+        check(draws.size()==2 && !draws[0].state.noDepthWrite && draws[0].state.framebufferOnlyAlphaFail && draws[1].state.noDepthWrite && draws[1].state.framebufferOnlyAlphaFail && draws[1].state.alphaReference==0,"context 2 NEVER keeps its own depth mask");
     }
 }
 
