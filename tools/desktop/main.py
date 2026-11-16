@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Shadow of the Colossus PC — standalone, offline GTK desktop launcher."""
+"""Shadow of the Colossus PC desktop launcher."""
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import math
 import os
@@ -12,28 +13,36 @@ import sys
 import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from model import Library, VERSION, assets_directory, program_directory
-from graphics import Graphics
+from model import Library, VERSION, assets_directory, atomic_json, program_directory
+from graphics import Graphics, WINDOW_RESOLUTIONS
 from gamepad import Gamepad
+from language import LANGUAGES, PREFERENCES, PROMPTS, activate, preferences, translate as tr
+from updates import check_for_update, confirm_startup, restart_with_update, stage_update
 
 if len(sys.argv) > 1 and sys.argv[1] == "--pipeline-helper":
     from pipeline import helper
     helper(sys.argv[2], sys.argv[3], sys.argv[4:])
     raise SystemExit(0)
 
-if getattr(sys,"frozen",False):
-    os.environ.pop("GTK_MODULES",None)
-    os.environ["FONTCONFIG_FILE"]=str(assets_directory() / "fonts.conf")
+if sys.platform.startswith("linux"):
+    if getattr(sys, "frozen", False):
+        os.environ.pop("GTK_MODULES", None)
+        os.environ["FONTCONFIG_FILE"] = str(assets_directory() / "fonts.conf")
     # Register the shipped fonts by absolute path. Older fontconfig resolves
     # relative font directories differently on newer Linux desktops.
-    import ctypes
     fontconfig = ctypes.CDLL("libfontconfig.so.1")
     fontconfig.FcConfigGetCurrent.restype = ctypes.c_void_p
     fontconfig.FcConfigAppFontAddFile.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
     fontconfig.FcConfigAppFontAddFile.restype = ctypes.c_int
-    for font_file in sorted((assets_directory() / "fonts").glob("*.ttf")):
+    for font_file in sorted((assets_directory() / "fonts").iterdir()):
+        if font_file.suffix not in (".ttf", ".otf"):
+            continue
         if not fontconfig.FcConfigAppFontAddFile(fontconfig.FcConfigGetCurrent(), os.fsencode(font_file)):
             print("Could not register bundled font", file=sys.stderr)
+elif sys.platform == "win32":
+    register_font = ctypes.windll.gdi32.AddFontResourceExW
+    register_font.argtypes = [ctypes.c_wchar_p, ctypes.c_uint, ctypes.c_void_p]
+    register_font(str(assets_directory() / "fonts/SotCLauncherJapanese-Regular.otf"), 0x10, None)
 
 import gi
 gi.require_version("Gtk", "3.0")
@@ -64,7 +73,7 @@ def box(orientation=Gtk.Orientation.VERTICAL, spacing=0, margin=0, classes=()):
 
 
 class Artwork(Gtk.DrawingArea):
-    """Responsive illustration, with actual transparent artwork for the brand."""
+    """Responsive illustration with transparent artwork for the brand."""
     _images = {}
 
     def __init__(self, small=False):
@@ -78,7 +87,7 @@ class Artwork(Gtk.DrawingArea):
         self.picture = self._images[name]
         self.connect("draw", self.draw)
         self.get_accessible().set_name(
-            "Wander erguendo a espada sobre um colosso de olhos azuis")
+            tr("Wander erguendo a espada sobre um colosso de olhos azuis"))
 
     def draw(self, widget, cr):
         w, h = self.get_allocated_width(), self.get_allocated_height()
@@ -123,9 +132,17 @@ class Launcher:
     def __init__(self, args):
         self.args = args
         self.library = Library(args.data_dir)
+        self.preferences = preferences(self.library.directory)
+        activate(self.preferences["language"])
         self.graphics = Graphics(self.library)
         self.busy = False; self.process = None; self.closing = False; self.failed = False
+        self.disposed = False
         self.controller_process = None
+        self.update = None
+        self.checking = False
+        self.updating = False
+        self.restart_language = False
+        self.update_timer = None
         provider = Gtk.CssProvider(); provider.load_from_path(str(assets_directory() / "style.css"))
         Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         settings = Gtk.Settings.get_default()
@@ -148,41 +165,44 @@ class Launcher:
         brand_text.pack_start(label("SHADOW\nOF THE COLOSSUS", "brand"), False,False,0)
         brand_text.pack_start(label("P C   E D I T I O N", "small"),False,False,0)
         brand.pack_start(brand_text,False,False,0); sidebar.pack_start(brand,False,False,0)
-        sidebar.pack_start(label("SUA BIBLIOTECA", "eyebrow"),False,False,8)
+        sidebar.pack_start(label(tr("SUA BIBLIOTECA"), "eyebrow"),False,False,8)
         self.nav = {}
         self.stack = Gtk.Stack(); self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
         self.stack.set_hhomogeneous(False); self.stack.set_vhomogeneous(False)
-        for key, title in [("home","◈   Início"),("graphics","▧   Gráficos"),("controls","⌘   Controles"),("about","◇   Sobre o port")]:
+        for key, title in [("home",tr("◈   Início")),("graphics",tr("▧   Gráficos")),
+                           ("controls",tr("⌘   Controles")),("settings",tr("⚙   Configurações")),("about",tr("◇   Sobre o port"))]:
             button = style(Gtk.Button(label=title),"nav")
             button.get_child().set_xalign(0)
             button.connect("clicked", lambda _, name=key: self.navigate(name))
             sidebar.pack_start(button,False,False,0); self.nav[key] = button
         sidebar.pack_start(Gtk.Box(),True,True,0)
-        sidebar.pack_start(label("●  Tudo no seu computador", "small"),False,False,0)
-        sidebar.pack_start(label(f"v{VERSION}   •   Linux", "small"),False,False,0)
+        system = "Windows" if sys.platform == "win32" else "Linux"
+        sidebar.pack_start(label(f"v{VERSION}   •   {system}", "small"),False,False,0)
         body = box(spacing=20,margin=30,classes=("main-content",))
         scroller = Gtk.ScrolledWindow(); scroller.set_policy(Gtk.PolicyType.NEVER,Gtk.PolicyType.AUTOMATIC)
         scroller.add(body); root.pack_start(scroller,True,True,0)
-        body.pack_start(label("BIBLIOTECA    /    SHADOW OF THE COLOSSUS", "breadcrumb"),False,False,0)
+        body.pack_start(label(tr("BIBLIOTECA    /    SHADOW OF THE COLOSSUS"), "breadcrumb"),False,False,0)
         body.pack_start(self.stack,True,True,0)
         self.stack.add_named(self.home(),"home")
         self.stack.add_named(self.graphics_page(),"graphics")
         self.stack.add_named(self.controls(),"controls")
+        self.stack.add_named(self.settings_page(),"settings")
         self.stack.add_named(self.about(),"about")
         footer = box(Gtk.Orientation.HORIZONTAL,spacing=15,classes=("footer",)); footer.set_margin_top(2)
-        text = label("Atravesse as Terras Proibidas.","small")
+        text = label(tr("F1 abre os ajustes durante o jogo."),"small")
         self.gamepad_hint = text
         text.set_line_wrap(True)
         footer.pack_start(text,True,True,0)
-        saves = style(Gtk.Button(label="Meus saves ↗"),"link"); saves.connect("clicked",self.open_saves)
+        saves = style(Gtk.Button(label=tr("Meus saves ↗")),"link"); saves.connect("clicked",self.open_saves)
         footer.pack_end(saves,False,False,0); body.pack_end(footer,False,False,0)
         self.window.show_all(); self.navigate(args.page)
         self.progress.hide()
+        self.update_home.hide()
         if self.library.disc:
             self.set_ready()
         else:
             self.play_button.set_sensitive(False)
-            self.status.set_text("Escolha sua ROM para começar.")
+            self.status.set_text(tr("Escolha sua ROM para começar."))
         target = Gtk.TargetEntry.new("text/uri-list",0,0)
         self.drop.drag_dest_set(Gtk.DestDefaults.ALL,[target],Gdk.DragAction.COPY)
         self.drop.connect("drag-data-received", self.dropped)
@@ -194,6 +214,15 @@ class Launcher:
             GLib.timeout_add(300,self.play)
         elif args.screenshot:
             GLib.timeout_add(700,self.capture_and_exit)
+        if (not (args.test_game or args.screenshot or getattr(args, "no_update_check", False))
+                and (self.library.program / "release.json").is_file()):
+            GLib.idle_add(self.check_updates)
+            self.update_timer = GLib.timeout_add_seconds(30 * 60, self.periodic_check)
+        error_file = self.library.directory / "launcher-update-error.txt"
+        if error_file.is_file():
+            detail = error_file.read_text(encoding="utf-8-sig", errors="replace")
+            error_file.unlink()
+            GLib.idle_add(self.error, tr("A atualização falhou"), detail)
 
     def gamepad_window(self):
         # Dialogs must belong to this launcher. Never target another application's
@@ -216,9 +245,9 @@ class Launcher:
         if self.gamepad.connected and not was_connected and target == self.window:
             self.focus_gamepad_page()
         self.gamepad_hint.set_text(
-            "Controle: direcional/analógico · A/✕ confirmar · B/○ voltar\n"
-            "LB/RB páginas · Start jogar/aceitar · ←/→ ajustar" if self.gamepad.connected
-            else "Atravesse as Terras Proibidas.")
+            tr("Controle: direcional/analógico · A/✕ confirmar · B/○ voltar\n"
+            "LB/RB páginas · Start jogar/aceitar · ←/→ ajustar") if self.gamepad.connected
+            else tr("F1 abre os ajustes durante o jogo."))
         for action in actions:
             # A click can synchronously enter a nested GTK dialog loop or start
             # the game. Recheck ownership before dispatching another action.
@@ -302,71 +331,69 @@ class Launcher:
         hero = box(Gtk.Orientation.HORIZONTAL, margin=24)
         hero_outer.add_overlay(hero)
         copy = box(spacing=12)
-        copy.pack_start(label("DAS TERRAS PROIBIDAS AO SEU PC", "eyebrow"),False,False,0)
         copy.pack_start(label("Shadow of the\nColossus", "hero-title",wrap=True),False,False,0)
-        copy.pack_start(label("Uma jornada além do impossível.\nSeu disco. Sua aventura.","hero-subtitle"),False,False,0)
-        pills = box(Gtk.Orientation.HORIZONTAL,8)
-        for text in ("PORT NATIVO","JOGO ORIGINAL","OFFLINE"):
-            pills.pack_start(label(text,"pill"),False,False,0)
-        copy.pack_start(pills,False,False,4)
         hero.pack_start(copy, True, True, 0)
         page.pack_start(hero_outer,False,False,0)
         panel_outer = style(Gtk.Box(orientation=Gtk.Orientation.VERTICAL),"panel")
         panel = box(spacing=17,margin=22); panel_outer.pack_start(panel,True,True,0)
         heading = box(Gtk.Orientation.HORIZONTAL,12)
-        heading.pack_start(label("Seu jogo", "panel-title"),True,True,0)
-        heading.pack_end(label("01  /  ESCOLHA · PREPARE · JOGUE", "eyebrow"),False,False,0)
+        heading.pack_start(label(tr("Seu jogo"), "panel-title"),True,True,0)
         panel.pack_start(heading,False,False,0)
         self.drop = style(Gtk.EventBox(),"drop-zone")
         inner = box(Gtk.Orientation.HORIZONTAL,16,18)
         icon = label("▣","section-title"); inner.pack_start(icon,False,False,5)
         info = box(spacing=6)
-        self.file_title = label("Selecione sua ROM", "file-title")
+        self.file_title = label(tr("Selecione sua ROM"), "file-title")
         self.file_title.set_ellipsize(Pango.EllipsizeMode.MIDDLE); self.file_title.set_max_width_chars(38)
         info.pack_start(self.file_title,False,False,0)
-        self.file_subtitle = label("ISO, RAR, ZIP ou 7Z · edição americana", "muted")
+        self.file_subtitle = label(tr("ISO, RAR, ZIP ou 7Z · edição americana"), "muted")
         info.pack_start(self.file_subtitle,False,False,0)
         inner.pack_start(info,True,True,0)
-        self.choose_button = style(Gtk.Button(label="Escolher arquivo…"),"secondary")
+        self.choose_button = style(Gtk.Button(label=tr("Escolher arquivo…")),"secondary")
         self.choose_button.connect("clicked",self.choose)
         inner.pack_end(self.choose_button,False,False,0); self.drop.add(inner)
         panel.pack_start(self.drop,False,False,0)
         self.progress = Gtk.ProgressBar(); panel.pack_start(self.progress,False,False,0)
+        self.update_home = style(Gtk.Button(), "secondary")
+        self.update_home.set_halign(Gtk.Align.START)
+        self.update_home.set_no_show_all(True)
+        self.update_home.connect("clicked", self.install_update)
+        panel.pack_start(self.update_home, False, False, 0)
         actions = box(Gtk.Orientation.HORIZONTAL,20)
         state = box(spacing=5)
-        self.status = label("Escolha sua ROM para começar.","status"); self.status.set_line_wrap(True)
+        self.status = label(tr("Escolha sua ROM para começar."),"status"); self.status.set_line_wrap(True)
         state.pack_start(self.status,False,False,0)
-        state.pack_start(label("Seu arquivo fica apenas neste computador.","muted"),False,False,0)
+        state.pack_start(label(tr("Seu arquivo fica apenas neste computador."),"muted"),False,False,0)
         actions.pack_start(state,True,True,0)
-        self.play_button = style(Gtk.Button(label="▶   Iniciar jogo"),"play")
-        self.play_button.set_tooltip_text("Abrir Shadow of the Colossus nativamente no PC")
+        self.play_button = style(Gtk.Button(label=tr("▶   Iniciar jogo")),"play")
+        self.play_button.set_tooltip_text(tr("Abrir Shadow of the Colossus nativamente no PC"))
         self.play_button.connect("clicked",self.play)
         actions.pack_end(self.play_button,False,False,0); panel.pack_start(actions,False,False,0)
         page.pack_start(panel_outer,False,False,0)
-        note = label("Dica: você também pode arrastar o arquivo para a área acima.","muted")
+        note = label(tr("Dica: você também pode arrastar o arquivo para a área acima."),"muted")
         page.pack_start(note,False,False,0)
-        page.pack_start(label("Durante o jogo: F5 salva rápido · F8 carrega · F1 gerencia estados.", "small", wrap=True),False,False,0)
+        page.pack_start(label(tr("Durante o jogo: F5 salva rápido · F8 carrega · F1 gerencia estados."), "small", wrap=True),False,False,0)
         page.pack_start(Gtk.Box(),True,True,0)
         return page
 
     def controls(self):
         page=box(spacing=18)
-        page.pack_start(label("Sua maneira de jogar", "section-title"),False,False,0)
-        page.pack_start(label("Teclado e mouse ou controle USB/Bluetooth.\nF1 abre o menu, libera o cursor e oferece Voltar ao launcher. Esc pausa o jogo.","muted",wrap=True),False,False,0)
-        edit=style(Gtk.Button(label="Personalizar teclado e mouse…"),"secondary")
+        page.pack_start(label("Controles", "section-title"),False,False,0)
+        page.pack_start(label(tr("Teclado e mouse ou controle USB/Bluetooth.\nF1 abre o menu, libera o cursor e oferece Voltar ao launcher. Esc pausa o jogo."),"muted",wrap=True),False,False,0)
+        edit=style(Gtk.Button(label=tr("Personalizar teclado e mouse…")),"secondary")
         edit.connect("clicked", self.configure_desktop_input)
         page.pack_start(edit,False,False,0)
         self.keyboard_summary = label("", "muted", wrap=True)
         page.pack_start(self.keyboard_summary,False,False,0)
         self.refresh_keyboard_summary()
-        page.pack_start(label("F5 · Salvar estado rápido    /    F8 · Carregar estado rápido\nF1 · Gerenciar estados, configurações e sair    /    F11 · Tela cheia", "small", wrap=True),False,False,0)
-        page.pack_start(label("Controle USB / Bluetooth", "panel-title"),False,False,8)
-        self.controller_status = label("Perfis automáticos para Xbox, PlayStation e genéricos.\nSe os botões não responderem ou estiverem trocados, configure seu controle.", "muted", wrap=True)
+        page.pack_start(label(tr("F5 · Salvar estado rápido    /    F8 · Carregar estado rápido\nF1 · Gerenciar estados, configurações e sair    /    F11 · Tela cheia"), "small", wrap=True),False,False,0)
+        page.pack_start(label(tr("Controle USB / Bluetooth"), "panel-title"),False,False,8)
+        self.controller_status = label(tr("Perfis automáticos para Xbox, PlayStation e genéricos.\nSe os botões não responderem ou estiverem trocados, configure seu controle."), "muted", wrap=True)
         page.pack_start(self.controller_status, False, False, 0)
-        self.controller_button = style(Gtk.Button(label="Configurar meu controle…"), "secondary")
+        self.controller_button = style(Gtk.Button(label=tr("Configurar meu controle…")), "secondary")
         self.controller_button.connect("clicked", self.configure_controller)
         page.pack_start(self.controller_button, False, False, 0)
-        page.pack_start(label("Dica: os sigilos dos colossos brilham com a espada equipada.", "small", wrap=True),False,False,0)
+        page.pack_start(label(tr("Dica: os sigilos dos colossos brilham com a espada equipada."), "small", wrap=True),False,False,0)
         page.pack_start(Gtk.Box(),True,True,0)
         return page
 
@@ -375,19 +402,24 @@ class Launcher:
         values = Controls(self.library).load()
         def keys(*names):
             return " / ".join(binding_label(values[name]) for name in names)
-        self.keyboard_summary.set_text(
-            f"{keys('move_up','move_left','move_down','move_right')}  ·  Movimentar\n"
-            f"{keys('jump')}  ·  Pular    |    {keys('attack')}  ·  Atacar\n"
-            f"{keys('grab')}  ·  Agarrar    |    {keys('action')}  ·  Ação / luz da espada\n"
-            f"{keys('weapon_left','weapon_right')}  ·  Trocar arma    |    {keys('horse')}  ·  Agro\n"
-            f"{keys('look','camera_reset')}  ·  L1 / L2    |    {keys('crouch')}  ·  R2\n"
-            f"{keys('start','select')}  ·  Start / Select\n"
-            f"{keys('confirm','cancel')}  ·  Confirmar / voltar nos menus\n"
-            + ("Mouse  ·  Câmera" if values['mouse_camera'] else "Câmera pelo mouse desativada"))
+        rows = (
+            (("move_up", "move_left", "move_down", "move_right"), tr("Movimentar")),
+            (("jump",), tr("Pular")), (("attack",), tr("Atacar")), (("grab",), tr("Agarrar")),
+            (("action",), tr("Ação / luz da espada")), (("weapon_left", "weapon_right"), tr("Trocar arma")),
+            (("horse",), "Agro"), (("look", "camera_reset"), "L1 / L2"), (("crouch",), "R2"),
+            (("start", "select"), "Start / Select"),
+            (("confirm", "cancel"), tr("Confirmar / voltar nos menus")),
+        )
+        summary = [f"{keys(*names)}  ·  {action}" for names, action in rows]
+        self.keyboard_summary.set_text("\n".join((
+            summary[0], "    |    ".join(summary[1:4]), "    |    ".join(summary[4:7]),
+            "    |    ".join(summary[7:10]), summary[10],
+            tr("Mouse  ·  Câmera") if values["mouse_camera"] else tr("Câmera pelo mouse desativada"),
+        )))
 
     def configure_desktop_input(self, *_):
         if self.busy or self.process:
-            self.error("Feche o jogo", "O perfil será aplicado na próxima abertura do jogo.")
+            self.error(tr("Feche o jogo"), tr("O perfil será aplicado na próxima abertura do jogo."))
             return
         from controls_dialog import ControlsDialog
         dialog = ControlsDialog(self.window, self.library)
@@ -396,11 +428,12 @@ class Launcher:
 
     def configure_controller(self, *_):
         if self.busy or self.process or self.controller_process:
-            self.controller_status.set_text("Feche o jogo antes de configurar o controle.")
+            self.controller_status.set_text(tr("Feche o jogo antes de configurar o controle."))
             return
-        tool = self.library.program / "compiler/bin/sotc-input-tool"
+        from pipeline import compiler_tool
+        tool = compiler_tool(self.library.program, "sotc-input-tool")
         if not tool.is_file():
-            self.error("Atualize o pacote", "A ferramenta de configuração não está neste pacote.")
+            self.error(tr("Atualize o pacote"), tr("A ferramenta de configuração não está neste pacote."))
             return
         profile = self.library.directory / "controllers/gamecontrollerdb.txt"
         profile.parent.mkdir(parents=True, exist_ok=True)
@@ -410,10 +443,10 @@ class Launcher:
                 self.controller_process = subprocess.Popen([str(tool), "--output", str(profile)],
                     env=self.library.game_environment(), stdout=log, stderr=subprocess.STDOUT)
         except OSError as exc:
-            self.error("Não foi possível configurar o controle", str(exc))
+            self.error(tr("Não foi possível configurar o controle"), str(exc))
             return
         self.controller_button.set_sensitive(False)
-        self.controller_status.set_text("Siga as instruções na janela de configuração.")
+        self.controller_status.set_text(tr("Siga as instruções na janela de configuração."))
         GLib.timeout_add(250, self.watch_controller)
 
     def watch_controller(self):
@@ -422,77 +455,246 @@ class Launcher:
             return True
         self.controller_process = None
         self.controller_button.set_sensitive(True)
-        self.controller_status.set_text("Perfil salvo. Ele será usado na próxima abertura do jogo." if code == 0
-            else "Configuração não concluída. Os perfis anteriores foram preservados.")
+        self.controller_status.set_text(tr("Perfil salvo. Ele será usado na próxima abertura do jogo.") if code == 0
+            else tr("Configuração não concluída. Os perfis anteriores foram preservados."))
         return False
 
     def graphics_page(self):
         page = box(spacing=20)
-        page.pack_start(label("Seu monitor. Sua imagem.", "section-title"),False,False,0)
-        page.pack_start(label("Escolha como jogar. As mudanças serão usadas na próxima abertura do jogo.","muted",wrap=True),False,False,0)
+        page.pack_start(label(tr("Gráficos"), "section-title"),False,False,0)
+        page.pack_start(label(tr("Escolha como jogar. As mudanças serão usadas na próxima abertura do jogo."),"muted",wrap=True),False,False,0)
         panel = box(spacing=16,classes=("panel","graphics-panel"))
-        panel.pack_start(label("Tela e proporção", "panel-title"),False,False,0)
+        panel.pack_start(label(tr("Tela e proporção"), "panel-title"),False,False,0)
         fullscreen, mode = self.graphics.display()
         self.fullscreen = style(Gtk.ComboBoxText(),"graphics-select")
-        for text in ("Janela redimensionável", "Tela cheia · resolução do monitor"):
+        for text in (tr("Janela redimensionável"), tr("Tela cheia · resolução do monitor")):
             self.fullscreen.append_text(text)
         self.fullscreen.set_active(int(fullscreen))
         panel.pack_start(self.fullscreen,False,False,0)
         self.aspect = style(Gtk.ComboBoxText(),"graphics-select")
-        for text in ("Original 4:3 · preservar proporção", "Esticar · preencher a tela", "Pixels · escala inteira"):
+        for text in (tr("Original 4:3 · preservar proporção"), tr("Esticar · preencher a tela"), tr("Pixels · escala inteira")):
             self.aspect.append_text(text)
         self.aspect.set_active(mode)
         panel.pack_start(self.aspect,False,False,0)
+        window, fsr = self.graphics.upscaling()
+        panel.pack_start(label(tr("Resolução da janela"), "muted"), False, False, 0)
+        self.window_resolution = style(Gtk.ComboBoxText(), "graphics-select")
+        self.window_resolution.append_text(tr("Automática"))
+        for width, height in WINDOW_RESOLUTIONS:
+            self.window_resolution.append_text(f"{width} × {height}")
+        self.window_resolution.set_active(window)
+        panel.pack_start(self.window_resolution, False, False, 0)
+        self.fsr = Gtk.CheckButton(label=tr("Ativar upscaling AMD FSR 1"))
+        self.fsr.set_active(fsr)
+        panel.pack_start(self.fsr, False, False, 0)
+        panel.pack_start(label(tr("Ajuste a resolução interna no jogo em F1 → Qualidade → Resolução."),
+                               "muted", wrap=True), False, False, 0)
+        self.display_panel = panel
+        self.window_resolution.connect("changed", self.save_graphics)
+        self.fsr.connect("toggled", self.save_graphics)
         self.fullscreen.connect("changed", self.save_graphics)
         self.aspect.connect("changed", self.save_graphics)
-        panel.pack_start(label("F11 alterna entre janela e tela cheia durante o jogo.\nOriginal mantém faixas laterais em monitores largos. Esticar ocupa toda a tela.","muted",wrap=True),False,False,0)
+        panel.pack_start(label(tr("F11 alterna entre janela e tela cheia durante o jogo.\nOriginal mantém faixas laterais em monitores largos. Esticar ocupa toda a tela."),"muted",wrap=True),False,False,0)
         page.pack_start(panel,False,False,0)
         panel = box(spacing=15,classes=("panel","graphics-panel"))
-        panel.pack_start(label("Shaders e filtros", "panel-title"),False,False,0)
-        panel.pack_start(label("Importe um fragment shader GLSL 330 (.frag, .fs ou .glsl).\nO filtro atua sobre a imagem final; não substitui as texturas do jogo por texturas HD.","muted",wrap=True),False,False,0)
+        panel.pack_start(label(tr("Shaders e filtros"), "panel-title"),False,False,0)
+        panel.pack_start(label(tr("Importe um fragment shader GLSL 330 (.frag, .fs ou .glsl).\nO filtro atua sobre a imagem final."),"muted",wrap=True),False,False,0)
         self.shader_status = label("", "status",wrap=True)
         panel.pack_start(self.shader_status,False,False,0)
         actions = box(Gtk.Orientation.HORIZONTAL,10)
-        self.shader_import = style(Gtk.Button(label="Importar shader…"),"secondary")
+        self.shader_import = style(Gtk.Button(label=tr("Importar shader…")),"secondary")
         self.shader_import.connect("clicked",self.choose_shader)
         actions.pack_start(self.shader_import,False,False,0)
-        self.shader_hd = style(Gtk.Button(label="Usar Nitidez HD"),"secondary")
+        self.shader_hd = style(Gtk.Button(label=tr("Usar Nitidez HD")),"secondary")
         self.shader_hd.connect("clicked",lambda *_: self.import_shader(assets_directory()/"shaders/nitidez-hd.frag"))
         actions.pack_start(self.shader_hd,False,False,0)
-        self.shader_clear = style(Gtk.Button(label="Desativar"),"secondary")
+        self.shader_clear = style(Gtk.Button(label=tr("Desativar")),"secondary")
         self.shader_clear.connect("clicked",self.clear_shader)
         actions.pack_start(self.shader_clear,False,False,0)
         panel.pack_start(actions,False,False,0)
-        template = style(Gtk.Button(label="Abrir modelo de shader ↗"),"link")
+        template = style(Gtk.Button(label=tr("Abrir modelo de shader ↗")),"link")
         template.set_halign(Gtk.Align.START); template.connect("clicked",self.open_shader_template)
         panel.pack_start(template,False,False,0)
         self.video_panel = panel
         self.refresh_shader()
         page.pack_start(panel,False,False,0)
-        page.pack_start(label("Shaders são copiados para a biblioteca e validados no seu driver.\nDepois da importação, você pode mover o arquivo original.","muted",wrap=True),False,False,0)
+        page.pack_start(label(tr("Shaders são copiados para a biblioteca e validados no seu driver.\nDepois da importação, você pode mover o arquivo original."),"muted",wrap=True),False,False,0)
         return page
 
     def save_graphics(self,*_):
+        if self.busy or self.process or getattr(self, "syncing_display", False):
+            return
         try:
-            self.graphics.save_display(self.fullscreen.get_active()==1,self.aspect.get_active())
+            self.graphics.save_display(self.fullscreen.get_active() == 1, self.aspect.get_active(),
+                                       window=self.window_resolution.get_active(), fsr=self.fsr.get_active())
         except OSError as exc:
-            self.error("Não foi possível salvar a imagem",str(exc))
+            self.error(tr("Não foi possível salvar a imagem"),str(exc))
 
     def refresh_shader(self):
         shader = self.graphics.selected()
-        self.shader_status.set_text("●  " + ("Ativo: " + shader.stem.rsplit("-",1)[0] if shader else "Imagem original · sem shader"))
+        self.shader_status.set_text("●  " + (tr("Ativo: {name}").format(name=shader.stem.rsplit("-",1)[0]) if shader else tr("Imagem original · sem shader")))
         self.shader_clear.set_sensitive(bool(shader))
 
     def clear_shader(self,*_):
         try:
             self.graphics.clear(); self.refresh_shader()
         except OSError as exc:
-            self.error("Não foi possível desativar o shader",str(exc))
+            self.error(tr("Não foi possível desativar o shader"),str(exc))
+
+    def settings_page(self):
+        page = box(spacing=18)
+        page.pack_start(label(tr("Configurações do launcher"), "section-title"), False, False, 0)
+        preferences_panel = box(spacing=12, classes=("panel", "graphics-panel"))
+        preferences_panel.pack_start(label(tr("Idioma do launcher"), "panel-title"), False, False, 0)
+        self.language_choice = style(Gtk.ComboBoxText(), "graphics-select")
+        for code, name in LANGUAGES.items():
+            self.language_choice.append(code, name)
+        self.language_choice.set_active_id(self.preferences["language"])
+        preferences_panel.pack_start(self.language_choice, False, False, 0)
+        preferences_panel.pack_start(label(tr("Ícones dos botões no jogo"), "panel-title"), False, False, 0)
+        self.prompts_choice = style(Gtk.ComboBoxText(), "graphics-select")
+        self.prompts_choice.append(PROMPTS[0], "PlayStation  ✕ ○ □ △")
+        self.prompts_choice.append(PROMPTS[1], "Xbox  A B X Y")
+        self.prompts_choice.set_active_id(self.preferences["button_prompts"])
+        preferences_panel.pack_start(self.prompts_choice, False, False, 0)
+        preferences_panel.pack_start(label(tr("Os ícones mudam na próxima abertura do jogo."), "muted", wrap=True), False, False, 0)
+        apply = style(Gtk.Button(label=tr("Aplicar")), "secondary")
+        apply.set_halign(Gtk.Align.START)
+        apply.connect("clicked", self.apply_preferences)
+        preferences_panel.pack_start(apply, False, False, 0)
+        self.preferences_status = label("", "status", wrap=True)
+        preferences_panel.pack_start(self.preferences_status, False, False, 0)
+        page.pack_start(preferences_panel, False, False, 0)
+        updates_panel = box(spacing=12, classes=("panel", "graphics-panel"))
+        updates_panel.pack_start(label(tr("Atualizações"), "panel-title"), False, False, 0)
+        self.update_status_label = label(tr("Versão instalada {version}").format(version=VERSION), "muted", wrap=True)
+        updates_panel.pack_start(self.update_status_label, False, False, 0)
+        self.update_progress = Gtk.ProgressBar()
+        self.update_progress.set_no_show_all(True)
+        updates_panel.pack_start(self.update_progress, False, False, 0)
+        row = box(Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.check_button = style(Gtk.Button(label=tr("Verificar agora")), "secondary")
+        self.check_button.connect("clicked", self.check_updates)
+        row.pack_start(self.check_button, False, False, 0)
+        self.update_button = style(Gtk.Button(label=tr("Atualizar")), "play")
+        self.update_button.set_no_show_all(True)
+        self.update_button.connect("clicked", self.install_update)
+        row.pack_start(self.update_button, False, False, 0)
+        updates_panel.pack_start(row, False, False, 0)
+        page.pack_start(updates_panel, False, False, 0)
+        return page
+
+    def apply_preferences(self, *_):
+        if self.busy or self.process or self.controller_process:
+            self.error(tr("Feche o jogo"), tr("Feche o jogo ou termine a preparação antes de aplicar."))
+            return
+        values = {"language": self.language_choice.get_active_id(),
+                  "button_prompts": self.prompts_choice.get_active_id()}
+        try:
+            atomic_json(self.library.directory / PREFERENCES, values)
+        except OSError as exc:
+            self.error(tr("Não foi possível salvar as configurações"), str(exc))
+            return
+        self.restart_language = values["language"] != self.preferences["language"]
+        self.preferences = values
+        if self.restart_language:
+            Gtk.main_quit()
+        else:
+            self.preferences_status.set_text(tr("Configurações salvas."))
+
+    def periodic_check(self):
+        self.check_updates()
+        return True
+
+    def check_updates(self, *_):
+        if self.checking or self.updating:
+            return False
+        self.checking = True
+        self.check_button.set_sensitive(False)
+        self.update_status_label.set_text(tr("Consultando o GitHub…"))
+
+        def worker():
+            try:
+                result = check_for_update(VERSION)
+            except Exception as exc:
+                GLib.idle_add(self.update_checked, None, str(exc))
+            else:
+                GLib.idle_add(self.update_checked, result, None)
+        threading.Thread(target=worker, daemon=True).start()
+        return False
+
+    def update_checked(self, result, error):
+        if self.disposed:
+            return False
+        self.checking = False
+        self.check_button.set_sensitive(True)
+        if error:
+            self.update_status_label.set_text(tr("Não foi possível consultar o GitHub. Tente novamente."))
+            return False
+        self.update = result
+        if result:
+            message = tr("Atualizar para {version}").format(version=result.version)
+            self.update_status_label.set_text(tr("Versão {version} disponível.").format(version=result.version))
+            for button in (self.update_button, self.update_home):
+                button.set_label(message)
+                button.show()
+        else:
+            self.update_status_label.set_text(tr("Nenhuma atualização para esta plataforma."))
+            self.update_button.hide()
+            self.update_home.hide()
+        return False
+
+    def install_update(self, *_):
+        if self.update is None or self.updating or self.checking:
+            return
+        if self.busy or self.process or self.controller_process:
+            self.error(tr("Feche o jogo"), tr("Feche o jogo ou termine a preparação antes de atualizar."))
+            return
+        update = self.update
+        self.busy = self.updating = True
+        self.navigate("settings")
+        for button in (self.update_home, self.update_button, self.check_button):
+            button.set_sensitive(False)
+        self.update_progress.set_fraction(0)
+        self.update_progress.show()
+        self.update_status_label.set_text(tr("Baixando a versão {version}…").format(version=update.version))
+
+        def worker():
+            try:
+                stage = stage_update(self.library.program, self.library.directory, VERSION, update,
+                                     lambda fraction: GLib.idle_add(self.update_downloaded, fraction))
+                restart_with_update(stage, self.library.program, self.library.directory,
+                                    VERSION, update.system, assets_directory())
+            except Exception as exc:
+                GLib.idle_add(self.update_finished, str(exc))
+            else:
+                GLib.idle_add(self.update_finished, None)
+        threading.Thread(target=worker, daemon=False).start()
+
+    def update_downloaded(self, fraction):
+        if fraction is None:
+            self.update_progress.set_fraction(1)
+            self.update_status_label.set_text(tr("Verificando e extraindo o pacote…"))
+        else:
+            self.update_progress.set_fraction(fraction)
+        return False
+
+    def update_finished(self, error):
+        self.busy = self.updating = False
+        for button in (self.update_home, self.update_button, self.check_button):
+            button.set_sensitive(True)
+        self.update_progress.hide()
+        if error is None or self.closing:
+            Gtk.main_quit()
+        else:
+            self.update_status_label.set_text(tr("A atualização falhou"))
+            self.error(tr("A atualização falhou"), error)
+        return False
 
     def choose_shader(self,*_):
         if self.busy or self.process: return
-        dialog=Gtk.FileChooserDialog(title="Importar shader GLSL 330",parent=self.window,action=Gtk.FileChooserAction.OPEN)
-        dialog.add_buttons("Cancelar",Gtk.ResponseType.CANCEL,"Validar e importar",Gtk.ResponseType.OK)
+        dialog=Gtk.FileChooserDialog(title=tr("Importar shader GLSL 330"),parent=self.window,action=Gtk.FileChooserAction.OPEN)
+        dialog.add_buttons(tr("Cancelar"),Gtk.ResponseType.CANCEL,tr("Validar e importar"),Gtk.ResponseType.OK)
         dialog.set_default_response(Gtk.ResponseType.OK)
         selected=Gtk.FileFilter(); selected.set_name("Fragment shaders GLSL 330")
         for extension in ("frag","fs","glsl"):
@@ -506,7 +708,7 @@ class Launcher:
         if self.busy or self.process: return
         self.busy=True; self.video_panel.set_sensitive(False)
         self.play_button.set_sensitive(False); self.choose_button.set_sensitive(False)
-        self.shader_status.set_text("Validando o shader no seu driver…")
+        self.shader_status.set_text(tr("Validando o shader no seu driver…"))
         def worker():
             error=None
             try: self.graphics.import_shader(path)
@@ -520,7 +722,7 @@ class Launcher:
         if self.closing: Gtk.main_quit(); return False
         if error:
             self.refresh_shader()
-            self.error("Esse shader não foi ativado",error)
+            self.error(tr("Esse shader não foi ativado"),error)
         else: self.refresh_shader()
         return False
 
@@ -531,20 +733,20 @@ class Launcher:
             if not path.exists(): shutil.copy2(assets_directory()/"shaders/modelo.frag",path)
             self.open_desktop_path(path)
         except (OSError,GLib.Error) as exc:
-            self.error("Não foi possível abrir o modelo",str(exc))
+            self.error(tr("Não foi possível abrir o modelo"),str(exc))
 
     def about(self):
         page=box(spacing=23)
-        page.pack_start(label("Uma nova forma de reviver\nShadow of the Colossus.","section-title"),False,False,0)
-        page.pack_start(label("O jogo original, rodando nativamente no Linux, com uma porta de entrada feita para o seu PC.\n\nEscolha seu disco uma vez. Nas próximas sessões, é só clicar em jogar.","hero-subtitle",wrap=True),False,False,0)
-        page.pack_start(label("SUA ROM", "eyebrow"),False,False,0)
-        page.pack_start(label("Compatível com a edição americana SCUS-97472. ISO e RAR/ZIP/7Z são preparados na pasta do aplicativo. A primeira preparação recompila seu disco localmente; depois o cache é reutilizado. Sua ROM original não é alterada.","muted",wrap=True),False,False,0)
-        page.pack_start(label("CRÉDITOS", "eyebrow"),False,False,0)
-        page.pack_start(label("Interface: GenissonEmilio, baseada no launcher de ForbiddenMemoriesPC.\nBase nativa: HenryKun55 / Celosia (GPL-3.0).\nRecompilador/runtime: ran-j / PS2Recomp e colaboradores.\nReferência PS2: Tenkaichi3Decomp; launcher: ForbiddenMemoriesPC / CrashBandicootPC.\nShadow of the Colossus pertence a seus respectivos titulares.","muted",wrap=True),False,False,0)
-        install=style(Gtk.Button(label="＋  Adicionar ao menu de aplicativos"),"secondary")
+        page.pack_start(label(tr("Sobre o port"),"section-title"),False,False,0)
+        page.pack_start(label(tr("Escolha seu disco uma vez. Nas próximas sessões, é só clicar em jogar."),"hero-subtitle",wrap=True),False,False,0)
+        page.pack_start(label(tr("SUA ROM"), "eyebrow"),False,False,0)
+        page.pack_start(label(tr("Compatível com a edição americana SCUS-97472. ISO e RAR/ZIP/7Z são preparados na pasta do aplicativo. A primeira preparação recompila seu disco localmente; depois o cache é reutilizado. Sua ROM original não é alterada."),"muted",wrap=True),False,False,0)
+        page.pack_start(label(tr("CRÉDITOS"), "eyebrow"),False,False,0)
+        page.pack_start(label(tr("Interface: GenissonEmilio, baseada no launcher de ForbiddenMemoriesPC.\nBase nativa: HenryKun55 / Celosia (GPL-3.0).\nRecompilador/runtime: ran-j / PS2Recomp e colaboradores.\nReferência PS2: Tenkaichi3Decomp; launcher: ForbiddenMemoriesPC / CrashBandicootPC.\nShadow of the Colossus pertence a seus respectivos titulares."),"muted",wrap=True),False,False,0)
+        install=style(Gtk.Button(label=tr("＋  Adicionar ao menu de aplicativos")),"secondary")
         install.set_halign(Gtk.Align.START); install.connect("clicked",self.install_menu)
         page.pack_start(install,False,False,0)
-        self.install_status=label("Depois disso, você pode abrir o jogo pelo menu do Linux.","muted",wrap=True)
+        self.install_status=label(tr("Abra o launcher pelo menu de aplicativos depois de criar o atalho."),"muted",wrap=True)
         page.pack_start(self.install_status,False,False,0)
         page.pack_start(Gtk.Box(),True,True,0)
         return page
@@ -556,11 +758,11 @@ class Launcher:
             (context.add_class if key==name else context.remove_class)("active")
 
     def choose(self,*_):
-        dialog=Gtk.FileChooserDialog(title="Escolha sua ROM de Shadow of the Colossus",parent=self.window,
+        dialog=Gtk.FileChooserDialog(title=tr("Escolha sua ROM de Shadow of the Colossus"),parent=self.window,
                                      action=Gtk.FileChooserAction.OPEN)
-        dialog.add_buttons("Cancelar",Gtk.ResponseType.CANCEL,"Selecionar ROM",Gtk.ResponseType.OK)
+        dialog.add_buttons(tr("Cancelar"),Gtk.ResponseType.CANCEL,tr("Selecionar ROM"),Gtk.ResponseType.OK)
         dialog.set_default_response(Gtk.ResponseType.OK)
-        selected=Gtk.FileFilter(); selected.set_name("Shadow of the Colossus · ISO, RAR, ZIP e 7Z")
+        selected=Gtk.FileFilter(); selected.set_name("Shadow of the Colossus · ISO / RAR / ZIP / 7Z")
         for extension in ("iso","rar","zip","7z"):
             selected.add_pattern("*."+extension); selected.add_pattern("*."+extension.upper())
         dialog.add_filter(selected)
@@ -575,10 +777,10 @@ class Launcher:
         if not self.busy and not self.process and len(uris)==1:
             try:
                 path,host=GLib.filename_from_uri(uris[0])
-                if host and host!="localhost": raise ValueError("Escolha um arquivo deste computador.")
+                if host and host!="localhost": raise ValueError(tr("Escolha um arquivo deste computador."))
                 self.prepare(path); accepted=True
             except (GLib.Error,ValueError) as exc:
-                self.error("Confira o arquivo escolhido",str(exc))
+                self.error(tr("Confira o arquivo escolhido"),str(exc))
         Gtk.drag_finish(context,accepted,False,time)
 
     def update_status(self,text,error=False):
@@ -590,11 +792,11 @@ class Launcher:
 
     def set_ready(self):
         self.file_title.set_text(self.library.state.get("name","Shadow of the Colossus"))
-        self.file_subtitle.set_text("SCUS-97472  ·  Edição americana validada")
-        self.status.set_text("●  Pronto para jogar")
+        self.file_subtitle.set_text(tr("SCUS-97472  ·  Edição americana validada"))
+        self.status.set_text(tr("●  Pronto para jogar"))
         self.status.get_style_context().add_class("ready")
         self.play_button.set_sensitive(True)
-        self.choose_button.set_label("Trocar ROM…")
+        self.choose_button.set_label(tr("Trocar ROM…"))
 
     def pulse(self):
         if not self.busy: return False
@@ -604,7 +806,7 @@ class Launcher:
         if self.busy or self.process: return False
         self.busy=True; self.failed=False
         self.choose_button.set_sensitive(False); self.play_button.set_sensitive(False)
-        self.progress.show(); self.update_status("Preparando seu jogo…")
+        self.progress.show(); self.update_status(tr("Preparando seu jogo…"))
         GLib.timeout_add(80,self.pulse)
         def worker():
             error=None
@@ -621,8 +823,8 @@ class Launcher:
         if self.closing: Gtk.main_quit(); return False
         if error:
             self.failed=True
-            self.update_status("Não foi possível preparar essa ROM.",True)
-            self.error("Confira o arquivo escolhido",error)
+            self.update_status(tr("Não foi possível preparar essa ROM."),True)
+            self.error(tr("Confira o arquivo escolhido"),error)
             self.play_button.set_sensitive(bool(self.library.disc))
         else:
             self.set_ready()
@@ -634,9 +836,9 @@ class Launcher:
         if self.busy or self.process or self.controller_process: return False
         self.gamepad.suspend()
         self.busy=True; self.play_button.set_sensitive(False); self.choose_button.set_sensitive(False)
-        self.update_status("Abrindo sua próxima aventura…")
+        self.update_status(tr("Abrindo o jogo…"))
         self.progress.show(); GLib.timeout_add(80,self.pulse)
-        self.fullscreen.set_sensitive(False); self.aspect.set_sensitive(False); self.video_panel.set_sensitive(False)
+        self.display_panel.set_sensitive(False); self.video_panel.set_sensitive(False)
         def worker():
             try:
                 process=self.library.launch(self.args.test_game,lambda text: GLib.idle_add(self.update_status,text))
@@ -652,11 +854,11 @@ class Launcher:
             Gtk.main_quit(); return False
         if error:
             self.failed=True; self.choose_button.set_sensitive(True); self.play_button.set_sensitive(True)
-            self.fullscreen.set_sensitive(True); self.aspect.set_sensitive(True); self.video_panel.set_sensitive(True)
-            self.update_status("Não foi possível abrir o jogo.",True); self.error("O jogo não abriu",error)
+            self.display_panel.set_sensitive(True); self.video_panel.set_sensitive(True)
+            self.update_status(tr("Não foi possível abrir o jogo."),True); self.error(tr("O jogo não abriu"),error)
         else:
-            self.process=process; self.play_button.set_label("Em jogo…")
-            self.update_status("●  Aventura em andamento. Divirta-se!")
+            self.process=process; self.play_button.set_label(tr("Em jogo…"))
+            self.update_status(tr("●  Jogo em execução"))
             GLib.timeout_add(300,self.watch_game)
         return False
 
@@ -664,14 +866,18 @@ class Launcher:
         code=self.process.poll()
         if code is None: return True
         self.process=None; self.choose_button.set_sensitive(True)
-        self.fullscreen.set_sensitive(True); self.aspect.set_sensitive(True); self.video_panel.set_sensitive(True)
-        self.play_button.set_label("▶   Iniciar jogo"); self.set_ready()
+        self.display_panel.set_sensitive(True); self.video_panel.set_sensitive(True)
+        self.play_button.set_label(tr("▶   Iniciar jogo")); self.set_ready()
         fullscreen, mode = self.graphics.display()
+        window, fsr = self.graphics.upscaling()
+        self.syncing_display = True
         self.fullscreen.set_active(int(fullscreen)); self.aspect.set_active(mode)
+        self.window_resolution.set_active(window); self.fsr.set_active(fsr)
+        self.syncing_display = False
         if code:
             self.failed=True
-            self.update_status("O jogo encerrou com um erro.",True)
-            self.error("O jogo foi encerrado",f"O jogo retornou o código {code}.\n\nOs detalhes estão em:\n{self.library.directory / 'last-game.log'}")
+            self.update_status(tr("O jogo encerrou com um erro."),True)
+            self.error(tr("O jogo foi encerrado"), tr("Código de saída {code}.\n\nDetalhes em {path}").format(code=code, path=self.library.directory / "last-game.log"))
         elif self.args.test_game:
             directory = self.library.directory / "game-test"
             captures = sorted(directory.glob("frame_*.png"))
@@ -692,60 +898,61 @@ class Launcher:
                 GLib.timeout_add(100,self.capture_and_exit)
             return
         dialog=Gtk.MessageDialog(transient_for=self.window,flags=0,message_type=Gtk.MessageType.ERROR,
-                                 buttons=Gtk.ButtonsType.CLOSE,text=title)
+                                 buttons=Gtk.ButtonsType.NONE,text=title)
+        dialog.add_button(tr("Fechar"), Gtk.ResponseType.CLOSE)
         dialog.format_secondary_text(text); dialog.run(); dialog.destroy()
 
     def open_saves(self,*_):
         from saves import SaveCards
         cards = SaveCards(self.library)
-        dialog = Gtk.Dialog(title="Meus saves", transient_for=self.window, modal=True)
+        dialog = Gtk.Dialog(title=tr("Meus saves"), transient_for=self.window, modal=True)
         dialog.set_default_size(620, 260)
-        dialog.add_button("Fechar", Gtk.ResponseType.CLOSE)
+        dialog.add_button(tr("Fechar"), Gtk.ResponseType.CLOSE)
         panel = box(spacing=16, margin=24)
-        panel.pack_start(label("Leve sua aventura para outro PC", "section-title"), False, False, 0)
-        panel.pack_start(label("Importe seu cartão ou exporte uma cópia para usar em outro computador.\n"
-                               "Depois, escolha Carregar jogo no menu do próprio jogo.", "muted", wrap=True), False, False, 0)
+        panel.pack_start(label(tr("Leve sua aventura para outro PC"), "section-title"), False, False, 0)
+        panel.pack_start(label(tr("Importe seu cartão ou exporte uma cópia para usar em outro computador.\n"
+                               "Depois, escolha Carregar jogo no menu do próprio jogo."), "muted", wrap=True), False, False, 0)
         location = label(str(cards.directory), "muted", wrap=True)
         location.set_selectable(True)
         panel.pack_start(location, False, False, 0)
-        panel.pack_start(label("Estados rápidos: F5 salva e F8 carrega durante o jogo.\n"
+        panel.pack_start(label(tr("Estados rápidos: F5 salva e F8 carrega durante o jogo.\n"
                                "No menu F1 → Estados, escolha o slot rápido ou um dos cinco slots manuais.\n"
-                               "Estados exigem a mesma versão do runtime e do disco. Continue salvando também nos altares.", "muted", wrap=True), False, False, 0)
-        states_folder = Gtk.Button(label="Abrir pasta dos estados ↗")
+                               "Estados exigem a mesma versão do runtime e do disco. Continue salvando também nos altares."), "muted", wrap=True), False, False, 0)
+        states_folder = Gtk.Button(label=tr("Abrir pasta dos estados ↗"))
         def open_states_folder(*_):
             try:
                 destination = self.library.player_directory / "savestates"
                 destination.mkdir(parents=True, exist_ok=True)
                 self.open_desktop_path(destination)
             except OSError as exc:
-                self.error("Não foi possível abrir a pasta", str(exc))
+                self.error(tr("Não foi possível abrir a pasta"), str(exc))
         states_folder.connect("clicked", open_states_folder)
         panel.pack_start(states_folder, False, False, 0)
-        status = label("Cartão 1 disponível." if cards.card.is_file() else "Nenhum cartão salvo neste computador.", wrap=True)
+        status = label(tr("Cartão 1 disponível.") if cards.card.is_file() else tr("Nenhum cartão salvo neste computador."), wrap=True)
         panel.pack_start(status, False, False, 0)
         row = box(Gtk.Orientation.HORIZONTAL, spacing=12)
-        folder = Gtk.Button(label="Abrir pasta ↗")
+        folder = Gtk.Button(label=tr("Abrir pasta ↗"))
         def open_folder(*_):
             try:
                 cards.directory.mkdir(parents=True, exist_ok=True)
                 self.open_desktop_path(cards.directory)
             except OSError as exc:
-                self.error("Não foi possível abrir a pasta", str(exc))
+                self.error(tr("Não foi possível abrir a pasta"), str(exc))
         folder.connect("clicked", open_folder)
         row.pack_start(folder, False, False, 0)
-        for importing, caption in ((True, "Importar cartão…"), (False, "Exportar cartão…")):
+        for importing, caption in ((True, tr("Importar cartão…")), (False, tr("Exportar cartão…"))):
             button = Gtk.Button(label=caption)
             button.set_sensitive(not self.busy and self.process is None)
             def transfer(_, importing=importing):
                 if self.busy or self.process is not None:
-                    status.set_text("Feche o jogo antes de importar ou exportar o cartão.")
+                    status.set_text(tr("Feche o jogo antes de importar ou exportar o cartão."))
                     return
-                chooser = Gtk.FileChooserDialog(title="Importar cartão PS2" if importing else "Exportar cartão PS2",
+                chooser = Gtk.FileChooserDialog(title=tr("Importar cartão PS2") if importing else tr("Exportar cartão PS2"),
                     transient_for=dialog, action=Gtk.FileChooserAction.OPEN if importing else Gtk.FileChooserAction.SAVE)
-                chooser.add_buttons("Cancelar", Gtk.ResponseType.CANCEL, "Importar" if importing else "Exportar", Gtk.ResponseType.OK)
+                chooser.add_buttons(tr("Cancelar"), Gtk.ResponseType.CANCEL, tr("Importar") if importing else tr("Exportar"), Gtk.ResponseType.OK)
                 chooser.set_default_response(Gtk.ResponseType.OK)
                 if importing:
-                    pattern = Gtk.FileFilter(); pattern.set_name("Cartão PS2 (.ps2)")
+                    pattern = Gtk.FileFilter(); pattern.set_name(tr("Cartão PS2 (.ps2)"))
                     pattern.add_pattern("*.ps2"); pattern.add_pattern("*.PS2"); chooser.add_filter(pattern)
                 else:
                     chooser.set_current_name("Mcd001.ps2"); chooser.set_do_overwrite_confirmation(True)
@@ -755,18 +962,18 @@ class Launcher:
                 try:
                     if importing:
                         backup = cards.import_card(selected)
-                        status.set_text("Cartão importado. Abra o jogo e escolha Carregar jogo." +
-                                        (f"\nCartão anterior preservado em {backup}" if backup else ""))
+                        status.set_text(tr("Cartão importado. Abra o jogo e escolha Carregar jogo.") +
+                                        ("\n" + tr("Cartão anterior preservado em {path}").format(path=backup) if backup else ""))
                     else:
                         cards.export_card(selected)
-                        status.set_text("Cópia exportada. No outro PC, use Meus saves → Importar cartão.")
+                        status.set_text(tr("Cópia exportada. No outro PC, use Meus saves → Importar cartão."))
                 except (OSError, ValueError) as exc:
-                    self.error("Não foi possível transferir o cartão", str(exc))
+                    self.error(tr("Não foi possível transferir o cartão"), str(exc))
             button.connect("clicked", transfer)
             row.pack_start(button, False, False, 0)
         panel.pack_start(row, False, False, 0)
         if self.busy or self.process is not None:
-            panel.pack_start(label("Feche o jogo para importar ou exportar com segurança.", "muted", wrap=True), False, False, 0)
+            panel.pack_start(label(tr("Feche o jogo para importar ou exportar com segurança."), "muted", wrap=True), False, False, 0)
         dialog.get_content_area().pack_start(panel, True, True, 0)
         dialog.show_all(); dialog.run(); dialog.destroy()
 
@@ -778,15 +985,15 @@ class Launcher:
             try:
                 open_path(path)
             except OSError as exc:
-                GLib.idle_add(self.error, "Não foi possível abrir o aplicativo padrão", str(exc))
+                GLib.idle_add(self.error, tr("Não foi possível abrir o aplicativo padrão"), str(exc))
         threading.Thread(target=worker, daemon=True).start()
 
     def install_menu(self,*_):
         try:
             self.library.install_desktop_entry()
-            self.install_status.set_text("✓  Atalho criado! Procure “Shadow of the Colossus PC” no menu de aplicativos.")
+            self.install_status.set_text(tr("✓  Atalho criado! Procure “Shadow of the Colossus PC” no menu de aplicativos."))
         except OSError as exc:
-            self.error("Não foi possível criar o atalho",str(exc))
+            self.error(tr("Não foi possível criar o atalho"),str(exc))
 
     def capture_and_exit(self):
         if self.args.screenshot:
@@ -811,23 +1018,32 @@ class Launcher:
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rom",type=Path,help=argparse.SUPPRESS)
-    parser.add_argument("--data-dir",type=Path,help=argparse.SUPPRESS)
+    parser.add_argument("--data-dir",type=Path,default=os.environ.get("SOTC_DATA_DIR"),help=argparse.SUPPRESS)
     parser.add_argument("--screenshot",type=Path,help=argparse.SUPPRESS)
     parser.add_argument("--test-game",action="store_true",help=argparse.SUPPRESS)
     parser.add_argument("--install-shortcut",action="store_true",help=argparse.SUPPRESS)
-    parser.add_argument("--page",choices=("home","graphics","controls","about"),default="home",help=argparse.SUPPRESS)
+    parser.add_argument("--no-update-check",action="store_true",help=argparse.SUPPRESS)
+    parser.add_argument("--page",choices=("home","graphics","controls","settings","about"),default="home",help=argparse.SUPPRESS)
     args=parser.parse_args()
     if args.install_shortcut:
         print(Library(args.data_dir).install_desktop_entry()); return 0
     if args.test_game and not args.rom and not Library(args.data_dir).disc:
         parser.error("--test-game requires an imported disc or --rom")
-    launcher=Launcher(args)
-    try:
-        Gtk.main()
-    finally:
-        GLib.source_remove(launcher.gamepad_timer)
-        launcher.gamepad.suspend()
-    return int(launcher.failed)
+    while True:
+        launcher=Launcher(args)
+        confirm_startup(launcher.library.program)
+        try:
+            Gtk.main()
+        finally:
+            launcher.disposed = True
+            GLib.source_remove(launcher.gamepad_timer)
+            if launcher.update_timer is not None:
+                GLib.source_remove(launcher.update_timer)
+            launcher.gamepad.suspend()
+            launcher.window.destroy()
+        if not launcher.restart_language:
+            return int(launcher.failed)
+        args.page = "settings"
 
 
 if __name__=="__main__":

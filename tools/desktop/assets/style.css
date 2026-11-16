@@ -1,4 +1,4 @@
-* { font-family: 'DejaVu Sans', sans-serif; font-size: 13px; }
+* { font-family: 'DejaVu Sans', 'SotC Launcher Japanese', sans-serif; font-size: 13px; }
 window { background: #121916; color: #f6f2e9; }
 headerbar { background: #121916; color: #d9d1bf; border: none; box-shadow: none; min-height: 36px; }
 headerbar button { background: transparent; color: #b9b4aa; border: none; box-shadow: none; }
@@ -33,7 +33,7 @@ headerbar button { background: transparent; color: #b9b4aa; border: none; box-sh
 .footer { border-top: 1px solid #262833; color: #797d8a; font-size: 10px; }
 .link { background: transparent; border: none; box-shadow: none; color: #b6a37d; padding: 5px 0; }
 .link:hover { color: #f4d78c; }
-.section-title { font-family: 'DejaVu Serif'; font-size: 30px; font-weight: bold; color: #f2deb2; }
+.section-title { font-family: 'DejaVu Serif', 'SotC Launcher Japanese', serif; font-size: 30px; font-weight: bold; color: #f2deb2; }
 .key { background: #282b37; border: 1px solid #444753; border-bottom-width: 3px; border-radius: 5px; padding: 8px 12px; color: #eee3cb; font-weight: bold; }
 progressbar trough { min-height: 4px; background: #282b36; border: none; border-radius: 2px; }
 progressbar progress { background: #d9b56c; border: none; border-radius: 2px; }

@@ -7,6 +7,7 @@ Unmapped joysticks remain available to the existing controller calibration tool.
 from __future__ import annotations
 
 import ctypes
+import os
 from pathlib import Path
 import time
 
@@ -62,6 +63,8 @@ class Gamepad:
         # use the system runtime; absence never prevents keyboard/mouse startup.
         candidates = (Path(program) / "_internal/libSDL2-2.0.so.0",
                       Path(program) / "compiler/lib/libSDL2-2.0.so.0", "libSDL2-2.0.so.0")
+        if os.name == "nt":
+            candidates = (Path(program) / "compiler/toolchain/bin/SDL2.dll", "SDL2.dll")
         for candidate in candidates:
             try:
                 self.sdl = ctypes.CDLL(str(candidate))

@@ -1,5 +1,7 @@
 #include "runtime/desktop_video.h"
-#if defined(__linux__) && !defined(__ANDROID__)
+#ifdef PS2X_DESKTOP_VIDEO
+#include "desktop_fsr.h"
+#include "runtime/host_menu.h"
 #include "rlgl.h"
 #include <algorithm>
 #include <cmath>
@@ -14,10 +16,69 @@ namespace
     int sourceLocation = -1, outputLocation = -1, timeLocation = -1;
     int windowWidth = 1024, windowHeight = 720;
     Vector2 windowPosition{};
+    int windowResolution = 0;
     int restoreFrames = 0;
     int frameLimit = 0;
     int refreshRate = 60;
     double nextRefreshCheck = 0.0;
+
+    Shader easuShader{}, rcasShader{};
+    int easuSourceLocation = -1;
+    bool fsrInitialized = false;
+    RenderTexture2D easuTarget{}, rcasTarget{};
+    int fsrWidth = 0, fsrHeight = 0;
+    bool fsrWithShader = false, fsrTargetsReady = false;
+
+    void releaseFsrTargets()
+    {
+        if (easuTarget.id) UnloadRenderTexture(easuTarget);
+        if (rcasTarget.id) UnloadRenderTexture(rcasTarget);
+        easuTarget = {};
+        rcasTarget = {};
+        fsrWidth = fsrHeight = 0;
+        fsrTargetsReady = false;
+    }
+
+    void initializeFsr()
+    {
+        fsrInitialized = true;
+        easuShader = LoadShaderFromMemory(nullptr, kEasuFragment);
+        rcasShader = LoadShaderFromMemory(nullptr, kRcasFragment);
+        const unsigned int fallback = rlGetShaderIdDefault();
+        if (easuShader.id == fallback) easuShader = {};
+        if (rcasShader.id == fallback) rcasShader = {};
+        if (!IsShaderValid(easuShader) || !IsShaderValid(rcasShader))
+        {
+            TraceLog(LOG_WARNING, "VIDEO: could not compile FSR 1 shaders");
+            return;
+        }
+        easuSourceLocation = GetShaderLocation(easuShader, "sourceSize");
+    }
+
+    bool prepareFsr(int width, int height)
+    {
+        if (!fsrInitialized) initializeFsr();
+        if (easuSourceLocation < 0) return false;
+        const bool withShader = shader.id != 0;
+        if (width != fsrWidth || height != fsrHeight || withShader != fsrWithShader)
+        {
+            releaseFsrTargets();
+            fsrWidth = width;
+            fsrHeight = height;
+            fsrWithShader = withShader;
+            easuTarget = LoadRenderTexture(width, height);
+            fsrTargetsReady = IsRenderTextureValid(easuTarget) && rlFramebufferComplete(easuTarget.id);
+            if (fsrTargetsReady && withShader)
+            {
+                rcasTarget = LoadRenderTexture(width, height);
+                fsrTargetsReady = IsRenderTextureValid(rcasTarget) && rlFramebufferComplete(rcasTarget.id);
+            }
+            if (!fsrTargetsReady)
+                TraceLog(LOG_WARNING, "VIDEO: could not allocate FSR 1 render targets (%dx%d)", width, height);
+        }
+        return fsrTargetsReady;
+    }
+
 }
 
 Rectangle destination(int width, int height, int sourceWidth, int sourceHeight, int mode)
@@ -25,12 +86,12 @@ Rectangle destination(int width, int height, int sourceWidth, int sourceHeight, 
     const float w = static_cast<float>(std::max(1, width));
     const float h = static_cast<float>(std::max(1, height));
     float dw = w, dh = h;
-    if (mode == 0)
+    if (mode == hostmenu::kScreenFit)
     {
         dw = std::min(w, h * (4.0f / 3.0f));
         dh = dw * 0.75f;
     }
-    else if (mode == 2)
+    else if (mode == hostmenu::kScreenInteger)
     {
         const float sw = static_cast<float>(std::max(1, sourceWidth));
         const float sh = static_cast<float>(std::max(1, sourceHeight));
@@ -40,6 +101,22 @@ Rectangle destination(int width, int height, int sourceWidth, int sourceHeight, 
         dw = sw * whole; dh = sh * whole;
     }
     return {std::max(0.0f, (w - dw) * 0.5f), std::max(0.0f, (h - dh) * 0.5f), dw, dh};
+}
+
+void setWindowResolution(int resolution)
+{
+    if (resolution == windowResolution) return;
+    windowResolution = resolution;
+    if (resolution <= 0 || resolution >= kWindowResolutionCount) return;
+
+    const auto size = kWindowResolutions[resolution];
+    windowWidth = size.width;
+    windowHeight = size.height;
+    if (!IsWindowFullscreen())
+    {
+        if (IsWindowMaximized()) RestoreWindow();
+        SetWindowSize(windowWidth, windowHeight);
+    }
 }
 
 void setFullscreen(bool enabled)
@@ -72,6 +149,11 @@ void setFullscreen(bool enabled)
 
 void updatePresentation(bool vsync, bool cap30)
 {
+    if (restoreFrames > 0 && --restoreFrames == 0)
+    {
+        SetWindowSize(windowWidth, windowHeight);
+        SetWindowPosition(static_cast<int>(windowPosition.x), static_cast<int>(windowPosition.y));
+    }
     // Set the swap interval on the presentation context, not the renderer's
     // worker context. raylib reapplies it when changing fullscreen mode.
     if (vsync != IsWindowState(FLAG_VSYNC_HINT))
@@ -138,20 +220,50 @@ bool loadShader(const char *path, std::string &error)
     return true;
 }
 
-void draw(Texture2D texture, int width, int height, bool flipY, int mode)
+void draw(Texture2D texture, int width, int height, bool flipY, int mode, bool upscaleFsr)
 {
-    if (restoreFrames > 0 && --restoreFrames == 0)
-    {
-        SetWindowSize(windowWidth, windowHeight);
-        SetWindowPosition(static_cast<int>(windowPosition.x), static_cast<int>(windowPosition.y));
-    }
     const Rectangle target = destination(GetScreenWidth(), GetScreenHeight(), width, height, mode);
-    const Rectangle source{0, 0, static_cast<float>(width), static_cast<float>(flipY ? -height : height)};
+    const float outputSize[]{target.width * GetRenderWidth() / std::max(1, GetScreenWidth()),
+                             target.height * GetRenderHeight() / std::max(1, GetScreenHeight())};
+    Rectangle source{0, 0, static_cast<float>(width), static_cast<float>(flipY ? -height : height)};
+    const int outputWidth = static_cast<int>(std::lround(outputSize[0]));
+    const int outputHeight = static_cast<int>(std::lround(outputSize[1]));
+    const bool needsUpscale = upscaleFsr && mode != hostmenu::kScreenInteger &&
+        outputWidth >= width && outputHeight >= height && (outputWidth > width || outputHeight > height);
+    if (!needsUpscale && fsrWidth != 0)
+        releaseFsrTargets();
+    if (needsUpscale && prepareFsr(outputWidth, outputHeight))
+    {
+        const Rectangle passTarget{0, 0, static_cast<float>(outputWidth), static_cast<float>(outputHeight)};
+        const int sourceSize[]{width, height};
+        BeginTextureMode(easuTarget);
+        SetShaderValue(easuShader, easuSourceLocation, sourceSize, SHADER_UNIFORM_IVEC2);
+        BeginShaderMode(easuShader);
+        DrawTexturePro(texture, source, passTarget, {0, 0}, 0, WHITE);
+        EndShaderMode();
+        EndTextureMode();
+
+        const Rectangle upscaledSource{0, 0, passTarget.width, -passTarget.height};
+        if (!shader.id)
+        {
+            BeginShaderMode(rcasShader);
+            DrawTexturePro(easuTarget.texture, upscaledSource, target, {0, 0}, 0, WHITE);
+            EndShaderMode();
+            return;
+        }
+
+        // Imported shaders still see the presented picture before the host UI.
+        BeginTextureMode(rcasTarget);
+        BeginShaderMode(rcasShader);
+        DrawTexturePro(easuTarget.texture, upscaledSource, passTarget, {0, 0}, 0, WHITE);
+        EndShaderMode();
+        EndTextureMode();
+        texture = rcasTarget.texture;
+        source = upscaledSource;
+    }
     if (shader.id)
     {
-        const float sourceSize[]{static_cast<float>(width), static_cast<float>(height)};
-        const float outputSize[]{target.width * GetRenderWidth() / std::max(1, GetScreenWidth()),
-                                 target.height * GetRenderHeight() / std::max(1, GetScreenHeight())};
+        const float sourceSize[]{source.width, std::abs(source.height)};
         const float seconds = static_cast<float>(GetTime());
         if (sourceLocation >= 0) SetShaderValue(shader, sourceLocation, sourceSize, SHADER_UNIFORM_VEC2);
         if (outputLocation >= 0) SetShaderValue(shader, outputLocation, outputSize, SHADER_UNIFORM_VEC2);
@@ -165,7 +277,17 @@ void draw(Texture2D texture, int width, int height, bool flipY, int mode)
 void shutdown()
 {
     if (shader.id) UnloadShader(shader);
+    if (easuShader.id) UnloadShader(easuShader);
+    if (rcasShader.id) UnloadShader(rcasShader);
     shader = {};
+    easuShader = {};
+    rcasShader = {};
+    easuSourceLocation = -1;
+    fsrInitialized = false;
+    releaseFsrTargets();
+    windowResolution = 0;
+    restoreFrames = frameLimit = 0;
+    nextRefreshCheck = 0.0;
 }
 }
 #endif

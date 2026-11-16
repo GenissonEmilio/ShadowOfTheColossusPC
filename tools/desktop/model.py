@@ -9,9 +9,10 @@ import subprocess
 import sys
 import tempfile
 from import_disc import import_disc, EXPECTED
-from pipeline import Pipeline
+from language import preferences, translate as tr
+from pipeline import Pipeline, PROCESS_FLAGS, WINDOWS, compiler_tool
 
-VERSION = "0.3.5"
+VERSION = "0.4.0"
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 APPLICATION_ID = "io.github.GenissonEmilio.ShadowOfTheColossusPC"
 
@@ -21,10 +22,15 @@ def assets_directory():
 
 
 def program_directory():
+    if WINDOWS and (directory := os.environ.get("SOTC_PROGRAM_DIR")):
+        return Path(directory).resolve()
     return Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else SOURCE_ROOT
 
 
 def data_directory():
+    if WINDOWS:
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local"))
+        return base / "ShadowOfTheColossusPC"
     base = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))).expanduser()
     if not base.is_absolute():
         base = Path.home() / ".local/share"
@@ -35,7 +41,7 @@ def atomic_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=".launcher-", dir=path.parent)
     try:
-        with os.fdopen(fd, "w") as stream:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(value, stream, ensure_ascii=False, indent=2)
             stream.write("\n")
         os.replace(temporary, path)
@@ -51,7 +57,7 @@ class Library:
         self.config = self.directory / "launcher.json"
         self.state = {}
         try:
-            state = json.loads(self.config.read_text())
+            state = json.loads(self.config.read_text(encoding="utf-8"))
             if isinstance(state, dict):
                 self.state = state
         except (OSError, ValueError):
@@ -81,11 +87,16 @@ class Library:
             environment["LD_LIBRARY_PATH"] = original_ld
         environment["SOTC_NATIVE"] = "1"
         environment["SOTC_NATIVE_GL"] = "1"
+        environment["SOTC_BUTTON_PROMPTS"] = preferences(self.directory)["button_prompts"]
         environment["PS2X_GS_THREADS"] = "2"
         environment["PS2X_MEMCARD_DIR"] = str(self.player_directory / "memcards")
         environment["PS2X_STATE_DIR"] = str(self.player_directory / "savestates")
-        environment["LD_LIBRARY_PATH"] = str(self.program / "compiler/lib") + (
-            os.pathsep + original_ld if original_ld else "")
+        if WINDOWS:
+            binary = self.program / "compiler/toolchain/bin"
+            environment["PATH"] = str(binary) + os.pathsep + environment.get("PATH", "")
+        else:
+            environment["LD_LIBRARY_PATH"] = str(self.program / "compiler/lib") + (
+                os.pathsep + original_ld if original_ld else "")
         environment.setdefault("LP_NUM_THREADS", "2")
         mapping = self.directory / "controllers/gamecontrollerdb.txt"
         if mapping.is_file():
@@ -102,12 +113,12 @@ class Library:
     def prepare(self, source, progress=lambda text: None):
         source = Path(source).expanduser().resolve()
         if not source.is_file():
-            raise ValueError("O arquivo escolhido não foi encontrado.")
+            raise ValueError(tr("O arquivo escolhido não foi encontrado."))
         stamp = f"{source}\0{source.stat().st_size}\0{source.stat().st_mtime_ns}"
         identifier = hashlib.sha256(stamp.encode()).hexdigest()[:20]
         destination = self.directory / "discs" / identifier
         boot = destination / "SCUS_974.72"
-        progress("Lendo e validando o disco…")
+        progress(tr("Lendo e validando o disco…"))
         if not self.valid_extracted(destination):
             if destination.exists():
                 shutil.rmtree(destination)
@@ -117,7 +128,7 @@ class Library:
         try:
             executable = Pipeline(self.program, self.directory, self.game_environment(), progress).prepare(destination)
         except subprocess.CalledProcessError as exc:
-            raise ValueError(f"A compilação não terminou. Consulte os detalhes em:\n{self.directory / 'last-prepare.log'}") from exc
+            raise ValueError(tr("A compilação não terminou. Consulte {path}").format(path=self.directory / "last-prepare.log")) from exc
         state = {"disc": str(boot.relative_to(self.directory)), "name": source.name, "serial": "SCUS-97472", "executable": str(executable)}
         atomic_json(self.config, state)
         self.state = state
@@ -136,7 +147,7 @@ class Library:
     def verify(self):
         boot = self.disc
         if not boot or not self.valid_extracted(boot.parent):
-            raise ValueError("Escolha sua ROM para continuar. Os arquivos locais estão ausentes ou incompletos.")
+            raise ValueError(tr("Escolha sua ROM para continuar. Os arquivos locais estão ausentes ou incompletos."))
         return boot
 
     def launch(self, test=False, progress=lambda text: None):
@@ -155,9 +166,29 @@ class Library:
         with (self.directory / "last-game.log").open("w") as output:
             return subprocess.Popen([str(executable), str(boot)], cwd=self.player_directory,
                                     env=environment, stdout=output, stderr=subprocess.STDOUT,
-                                    start_new_session=True)
+                                    start_new_session=not WINDOWS, creationflags=PROCESS_FLAGS)
 
     def install_desktop_entry(self, applications=None):
+        if WINDOWS:
+            destination = Path(applications) if applications else (
+                Path(os.environ["APPDATA"]) / "Microsoft/Windows/Start Menu/Programs")
+            destination.mkdir(parents=True, exist_ok=True)
+            link = destination / "Shadow of the Colossus PC.lnk"
+            executable = self.program / "ShadowOfTheColossusPC.exe"
+            if not executable.is_file():
+                raise FileNotFoundError("ShadowOfTheColossusPC.exe")
+            script = ("$shell = New-Object -ComObject WScript.Shell;"
+                      "$link = $shell.CreateShortcut($env:SOTC_SHORTCUT);"
+                      "$link.TargetPath = $env:SOTC_TARGET;"
+                      "$link.WorkingDirectory = $env:LOCALAPPDATA;"
+                      "$link.Save()")
+            try:
+                subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                               env=dict(os.environ, SOTC_SHORTCUT=str(link), SOTC_TARGET=str(executable)),
+                               creationflags=PROCESS_FLAGS, check=True, timeout=15)
+            except subprocess.SubprocessError as exc:
+                raise OSError("Não foi possível criar o atalho no menu Iniciar.") from exc
+            return link
         destination = Path(applications) if applications else Path(
             os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))) / "applications"
         destination.mkdir(parents=True, exist_ok=True)

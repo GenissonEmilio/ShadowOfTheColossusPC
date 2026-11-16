@@ -1,5 +1,5 @@
 #include "runtime/desktop_input.h"
-#if defined(__linux__) && !defined(__ANDROID__)
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
 #include "raylib.h"
 #include <algorithm>
 #include <atomic>

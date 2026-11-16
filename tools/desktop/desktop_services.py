@@ -1,5 +1,6 @@
 """Launch host desktop applications without PyInstaller's private libraries."""
 from __future__ import annotations
+from language import translate as tr
 
 import os
 from pathlib import Path
@@ -30,6 +31,9 @@ def host_environment():
 def open_path(path):
     """Try both desktop standards; propagate failures instead of a silent click."""
     path = Path(path).resolve(strict=True)
+    if os.name == "nt":
+        os.startfile(path)
+        return
     env = host_environment()
     errors = []
     for program, arguments in (("xdg-open", [str(path)]), ("gio", ["open", path.as_uri()])):
@@ -46,5 +50,4 @@ def open_path(path):
         except (OSError, subprocess.TimeoutExpired) as exc:
             errors.append(str(exc))
     detail = "\n".join(filter(None, errors))
-    raise OSError("Não foi possível abrir o aplicativo padrão deste computador.\n"
-                  f"O arquivo continua disponível em:\n{path}" + ("\n\n" + detail if detail else ""))
+    raise OSError(tr("Não foi possível abrir o aplicativo padrão deste computador.\nO arquivo continua disponível em:\n{path}").format(path=path) + ("\n\n" + detail if detail else ""))

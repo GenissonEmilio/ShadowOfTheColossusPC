@@ -1,0 +1,20 @@
+Shadow of the Colossus PC — Windows x86_64
+
+Extraia a pasta inteira e abra ShadowOfTheColossusPC.exe.
+Escolha a imagem ISO, ZIP, RAR ou 7Z do seu disco USA SCUS-97472.
+A preparação compila o jogo no seu computador e salva o executável para
+as próximas sessões. O pacote já contém o compilador e as bibliotecas.
+
+Requisitos: Windows 10 (1903 ou mais recente) ou Windows 11, CPU x86_64
+com SSE4.1, GPU com OpenGL 3.3, 8 GB de RAM e 15 GB livres.
+
+Os dados locais ficam em %LOCALAPPDATA%\ShadowOfTheColossusPC.
+Use Meus saves para copiar seu cartão de memória e salve nos altares.
+Os save states de F5/F8 estão disponíveis na edição Linux.
+Sobre cria um atalho no menu Iniciar.
+
+O código correspondente do port está em compiler/source e as dependências
+compiladas a partir de código-fonte em compiler/upstream. Consulte os avisos
+em compiler/licenses e as versões e páginas de fonte em compiler/packages.txt.
+Este projeto independente usa Celosia de HenryKun55 e PS2Recomp de ran-j.
+Shadow of the Colossus pertence a Sony / Team Ico.

@@ -1,4 +1,5 @@
 #include "runtime/host_menu.h"
+#include "runtime/desktop_video.h"
 #include "runtime/native_tuning.h"
 #include "runtime/ps2_pad.h"
 #include "runtime/state_manager.h"
@@ -9,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <string>
 #include <vector>
 
@@ -24,6 +26,7 @@ namespace
     Settings g_settings;
     std::atomic<bool> g_open{false};
     bool g_help = false;
+    bool g_xboxPrompts = false;
     bool g_quit = false;
     bool g_quitArmed = false; // "Quit game" needs a second Cross
     std::atomic<bool> g_holdBlock{false}; // a button pressed in the menu is still held
@@ -105,6 +108,17 @@ namespace
             {"Exact transparency", "Transparências precisas"},
             {"Show FPS", "Mostrar FPS"},
             {"Screen", "Tela"},
+            {"Fullscreen", "Tela cheia"},
+            {"Window resolution", "Resolução da janela"},
+            {"FSR 1 upscaling", "Upscaling FSR 1"},
+            {"Uses the current monitor's resolution in fullscreen. F11 also toggles this.",
+             "Usa a resolução do monitor atual em tela cheia. F11 também alterna o modo."},
+            {"Selects the game window size. Automatic lets you resize it freely. Fullscreen uses the monitor resolution.",
+             "Escolhe o tamanho da janela do jogo. Automático permite redimensionar. A tela cheia usa a resolução do monitor."},
+            {"Uses AMD FSR 1 to upscale the game picture when it is smaller than the display area. "
+             "Lower the resolution in Quality to reduce rendering load. Sharp mode uses whole-pixel scaling.",
+             "Usa AMD FSR 1 para ampliar a imagem do jogo quando ela é menor que a área de exibição. "
+             "Reduza a resolução em Qualidade para aliviar a renderização. O modo Nítido usa escala inteira."},
             {"Synchronizes frame presentation with the monitor to reduce tearing.",
              "Sincroniza a apresentação dos quadros com o monitor para reduzir cortes na imagem."},
             {"Volume", "Volume"},
@@ -120,6 +134,12 @@ namespace
             {"L/R: tab   D-pad: choose   X: change   Triangle: help   O: close",
              "L/R: aba   Direcional: escolher   X: mudar   Triângulo: ajuda   O: fechar"},
             {"Triangle / O: back", "Triângulo / O: voltar"},
+            {"Tabs", "Abas"},
+            {"Choose", "Escolher"},
+            {"Change", "Mudar"},
+            {"Help", "Ajuda"},
+            {"Close", "Fechar"},
+            {"Back", "Voltar"},
             {"Draws the effects that use the alpha test exactly like the PS2 (clouds, mist, shadows). "
              "Turning it off gains a few frames per second; some mist and edges look harder.",
              "Desenha os efeitos que usam o teste de alfa exatamente como o PS2 (nuvens, névoa, sombras). "
@@ -152,8 +172,11 @@ namespace
         kExactAlpha,
         kShowFps,
         kScreen,
-#if defined(__linux__) && !defined(__ANDROID__)
+#ifdef PS2X_DESKTOP_VIDEO
         kVSync,
+        kFullscreen,
+        kWindowResolution,
+        kUpscaleFsr,
 #endif
         kVolume,
         kLanguage,
@@ -182,8 +205,14 @@ namespace
         {kScreen, "Screen",
          "Fit keeps the original 4:3 picture with bars on the sides. Stretch fills the screen. "
          "Sharp uses the largest whole multiple of the original size, so every pixel has the same size."},
-#if defined(__linux__) && !defined(__ANDROID__)
+#ifdef PS2X_DESKTOP_VIDEO
         {kVSync, "VSync", "Synchronizes frame presentation with the monitor to reduce tearing."},
+        {kFullscreen, "Fullscreen", "Uses the current monitor's resolution in fullscreen. F11 also toggles this."},
+        {kWindowResolution, "Window resolution",
+         "Selects the game window size. Automatic lets you resize it freely. Fullscreen uses the monitor resolution."},
+        {kUpscaleFsr, "FSR 1 upscaling",
+         "Uses AMD FSR 1 to upscale the game picture when it is smaller than the display area. "
+         "Lower the resolution in Quality to reduce rendering load. Sharp mode uses whole-pixel scaling."},
 #endif
     };
     const Item kSoundItems[] = {
@@ -317,8 +346,17 @@ namespace
         {
         case kExactAlpha: return T(g_settings.exactAlpha ? "On" : "Off");
         case kShowFps: return T(g_settings.showFps ? "On" : "Off");
-#if defined(__linux__) && !defined(__ANDROID__)
+#ifdef PS2X_DESKTOP_VIDEO
         case kVSync: return T(g_settings.vsync ? "On" : "Off");
+        case kFullscreen: return T(g_settings.fullscreen ? "On" : "Off");
+        case kUpscaleFsr: return T(g_settings.upscaleFsr ? "On" : "Off");
+        case kWindowResolution:
+        {
+            const int resolution = g_settings.windowResolution.load();
+            if (resolution == 0) return T("Automatic");
+            const auto size = desktop_video::kWindowResolutions[resolution];
+            return std::to_string(size.width) + " x " + std::to_string(size.height);
+        }
 #endif
         case kScreen:
         {
@@ -350,8 +388,9 @@ namespace
         std::fprintf(f, "exact_alpha=%d\nshow_fps=%d\nscreen=%d\nfullscreen=%d\nvolume=%d\nlanguage=%d\n", g_settings.exactAlpha ? 1 : 0,
                      g_settings.showFps ? 1 : 0, g_settings.screenMode.load(), g_settings.fullscreen ? 1 : 0,
                      g_settings.volume.load(), g_settings.language.load());
-#if defined(__linux__) && !defined(__ANDROID__)
-        std::fprintf(f, "vsync=%d\n", g_settings.vsync ? 1 : 0);
+#ifdef PS2X_DESKTOP_VIDEO
+        std::fprintf(f, "vsync=%d\nwindow_resolution=%d\nupscale_fsr=%d\n", g_settings.vsync ? 1 : 0,
+                     g_settings.windowResolution.load(), g_settings.upscaleFsr ? 1 : 0);
 #endif
         const native_renderer::Tuning &t = native_renderer::tuning();
         for (const native_renderer::TuningItem &item : native_renderer::tuningItems())
@@ -375,8 +414,14 @@ namespace
         {
         case kExactAlpha: g_settings.exactAlpha = !g_settings.exactAlpha; break;
         case kShowFps: g_settings.showFps = !g_settings.showFps; break;
-#if defined(__linux__) && !defined(__ANDROID__)
+#ifdef PS2X_DESKTOP_VIDEO
         case kVSync: g_settings.vsync = !g_settings.vsync; break;
+        case kFullscreen: g_settings.fullscreen = !g_settings.fullscreen; break;
+        case kWindowResolution:
+            g_settings.windowResolution = (g_settings.windowResolution + desktop_video::kWindowResolutionCount + dir)
+                % desktop_video::kWindowResolutionCount;
+            break;
+        case kUpscaleFsr: g_settings.upscaleFsr = !g_settings.upscaleFsr; break;
 #endif
         case kScreen: g_settings.screenMode = (g_settings.screenMode + 3 + dir) % 3; break;
         case kVolume: g_settings.volume = std::clamp(g_settings.volume + dir, 0, 10); break;
@@ -492,6 +537,52 @@ namespace
         return lines;
     }
 
+    enum class HintRow { Menu, States, Back };
+
+    void drawXboxHints(HintRow row, int x, int y, int width, int fontSize, Color color)
+    {
+        struct Hint { const char *button; const char *action; Color badge; };
+        const Color neutral{55, 67, 82, 255}, green{29, 111, 60, 255}, yellow{145, 99, 24, 255}, red{151, 47, 56, 255};
+        auto draw = [&](std::initializer_list<Hint> hints)
+        {
+            auto badgeWidth = [](const Hint &hint, int size)
+            {
+                return hint.button[1] == '\0' ? size + 4 : MeasureText(hint.button, size) + 8;
+            };
+            auto hintWidth = [&](const Hint &hint, int size)
+            {
+                return badgeWidth(hint, size) + (hint.action ? 4 + MeasureText(T(hint.action), size) : 0);
+            };
+            auto widthAt = [&](int size)
+            {
+                int required = 0;
+                for (const auto &hint : hints)
+                    required += hintWidth(hint, size) + size / 2;
+                return required - size / 2;
+            };
+            while (fontSize > 8 && widthAt(fontSize) > width)
+                --fontSize;
+            for (const auto &hint : hints)
+            {
+                const int badge = badgeWidth(hint, fontSize);
+                const int height = fontSize + 4;
+                if (hint.button[1] == '\0')
+                    DrawCircle(x + badge / 2, y + height / 2, height / 2.0f, hint.badge);
+                else
+                    DrawRectangleRounded({float(x), float(y), float(badge), float(height)}, 0.45f, 5, hint.badge);
+                DrawText(hint.button, x + (badge - MeasureText(hint.button, fontSize)) / 2, y + 2, fontSize, WHITE);
+                if (hint.action)
+                    DrawText(T(hint.action), x + badge + 4, y + 2, fontSize, color);
+                x += hintWidth(hint, fontSize) + fontSize / 2;
+            }
+        };
+        if (row == HintRow::Back)
+            draw({{"Y", nullptr, yellow}, {"B", "Back", red}});
+        else
+            draw({{"LB/RB", "Tabs", neutral}, {"D-pad", "Choose", neutral},
+                  {"A", row == HintRow::States ? "Confirm" : "Change", green}, {"Y", "Help", yellow}, {"B", "Close", red}});
+    }
+
     void drawStates(int boxX, int boxY, int boxW, int boxH, int listY, int size, int small)
     {
         const int pad = size;
@@ -503,7 +594,10 @@ namespace
                 ? "Estados retomam a sessão exatamente no ponto salvo e são compatíveis com a mesma versão do núcleo e do jogo. F5 salva no espaço rápido; F8 carrega esse espaço diretamente. Use os cinco espaços manuais para manter outros pontos. Carregar pelo menu, substituir e excluir pedem confirmação. O cartão de memória continua separado: se ele mudar, estados anteriores podem deixar de ser compatíveis."
                 : "States resume the session at its saved position and require the same core and game version. F5 saves the quick slot; F8 loads it directly. Keep other positions in the five manual slots. Menu loads, overwrites and deletions require confirmation. The memory card stays separate: changing it can make an older state incompatible.";
             drawWrapped(help, boxX + pad, listY + size * 2, boxW - 2 * pad, small, text, small / 3);
-            DrawText(T("Triangle / O: back"), boxX + pad, boxY + boxH - size * 3 / 2, small, dim);
+            if (g_xboxPrompts)
+                drawXboxHints(HintRow::Back, boxX + pad, boxY + boxH - size * 3 / 2, boxW - 2 * pad, small, dim);
+            else
+                DrawText(T("Triangle / O: back"), boxX + pad, boxY + boxH - size * 3 / 2, small, dim);
             return;
         }
         const auto slots = savestates::slots();
@@ -563,7 +657,10 @@ namespace
                                        : "Q/E: tabs  Arrows: slot/action  Enter/click: select  H: help  F1: close";
         int hintSize = small;
         while (hintSize > 8 && MeasureText(hint, hintSize) > boxW - 2 * pad) --hintSize;
-        DrawText(hint, boxX + pad, boxY + boxH - size, hintSize, dim);
+        if (g_xboxPrompts)
+            drawXboxHints(HintRow::States, boxX + pad, boxY + boxH - size, boxW - 2 * pad, hintSize, dim);
+        else
+            DrawText(hint, boxX + pad, boxY + boxH - size, hintSize, dim);
 
         if (g_stateConfirm)
         {
@@ -600,6 +697,8 @@ void saveSettings() { save(); }
 
 void load()
 {
+    if (const char *prompts = std::getenv("SOTC_BUTTON_PROMPTS"))
+        g_xboxPrompts = std::strcmp(prompts, "xbox") == 0;
     if (const char *open = std::getenv("PS2X_SETTINGS_OPEN")) // development: open at start on tab N
     {
         g_open = true;
@@ -619,8 +718,11 @@ void load()
         else if (!std::strcmp(key, "show_fps")) g_settings.showFps = value != 0;
         else if (!std::strcmp(key, "screen")) g_settings.screenMode = std::clamp(value, 0, 2);
         else if (!std::strcmp(key, "fullscreen")) g_settings.fullscreen = value != 0;
-#if defined(__linux__) && !defined(__ANDROID__)
+#ifdef PS2X_DESKTOP_VIDEO
         else if (!std::strcmp(key, "vsync")) g_settings.vsync = value != 0;
+        else if (!std::strcmp(key, "window_resolution"))
+            g_settings.windowResolution = std::clamp(value, 0, desktop_video::kWindowResolutionCount - 1);
+        else if (!std::strcmp(key, "upscale_fsr")) g_settings.upscaleFsr = value != 0;
 #endif
         else if (!std::strcmp(key, "volume")) g_settings.volume = std::clamp(value, 0, 10);
         else if (!std::strcmp(key, "language")) g_settings.language = std::clamp(value, 0, 2);
@@ -672,7 +774,7 @@ void update()
         bool activate = pressed(kCross);
         if (pressed(kLeft) || pressed(kRight) || pressed(kUp) || pressed(kDown))
             g_stateConfirmYes = !g_stateConfirmYes;
-#if defined(__linux__) && !defined(__ANDROID__)
+#ifdef PS2X_DESKTOP_VIDEO
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
         {
             const Vector2 pointer = GetMousePosition();
@@ -704,7 +806,7 @@ void update()
         return;
     }
     bool mouseActivate = false;
-#if defined(__linux__) && !defined(__ANDROID__)
+#ifdef PS2X_DESKTOP_VIDEO
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         const Vector2 pointer = GetMousePosition();
         for (int i = 0; i < kTabCount; ++i) {
@@ -850,7 +952,10 @@ void draw(int screenWidth, int screenHeight)
     {
         DrawText(renderer ? rendererLabel(g_item) : T(tab.items[g_item].label), boxX + pad, listY, size, accent);
         drawWrapped(renderer ? rendererHelp(g_item) : T(tab.items[g_item].help), boxX + pad, listY + size * 2, boxW - 2 * pad, small, text, small / 2);
-        DrawText(T("Triangle / O: back"), boxX + pad, boxY + boxH - size * 3 / 2, small, dim);
+        if (g_xboxPrompts)
+            drawXboxHints(HintRow::Back, boxX + pad, boxY + boxH - size * 3 / 2, boxW - 2 * pad, small, dim);
+        else
+            DrawText(T("Triangle / O: back"), boxX + pad, boxY + boxH - size * 3 / 2, small, dim);
         return;
     }
     if (itemCount(g_tab) == 0)
@@ -893,7 +998,12 @@ void draw(int screenWidth, int screenHeight)
             helpSize -= 2;
         drawWrapped(help, boxX + pad, helpY, boxW - 2 * pad, helpSize, dim, helpSize / 3);
     }
-#if defined(__linux__) && !defined(__ANDROID__)
+    if (g_xboxPrompts)
+    {
+        drawXboxHints(HintRow::Menu, boxX + pad, boxY + boxH - size * 3 / 2, boxW - 2 * pad, small, dim);
+        return;
+    }
+#ifdef PS2X_DESKTOP_VIDEO
     const char *hint = portuguese() ? "Q/E: abas  Setas: item  Enter/clique: mudar  H: ajuda  F1: fechar"
                                    : "Q/E: tabs  Arrows: item  Enter/click: change  H: help  F1: close";
     DrawText(hint, boxX + pad, boxY + boxH - size * 3 / 2, small, dim);

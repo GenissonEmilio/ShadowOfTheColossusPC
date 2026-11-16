@@ -52,9 +52,15 @@ namespace
 
         int64_t seek(int64_t offset, int whence) override
         {
+#if defined(_WIN32)
+            if (!m_file || _fseeki64(m_file, offset, whence) != 0)
+                return -1;
+            const auto position = _ftelli64(m_file);
+#else
             if (!m_file || offset < std::numeric_limits<long>::min() || offset > std::numeric_limits<long>::max() || std::fseek(m_file, static_cast<long>(offset), whence) != 0)
                 return -1;
             const long position = std::ftell(m_file);
+#endif
             return position < 0 ? -1 : static_cast<int64_t>(position);
         }
 

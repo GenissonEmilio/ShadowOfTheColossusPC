@@ -1,4 +1,5 @@
 """GTK editor for the persistent desktop input profile."""
+from language import translate as tr
 from gi.repository import Gdk, Gtk
 from controls import ACTIONS, DEFAULTS, Controls, binding_label, valid_binding
 
@@ -27,28 +28,28 @@ def key_code(event):
 
 class ControlsDialog(Gtk.Dialog):
     def __init__(self, parent, library):
-        super().__init__(title="Teclado e mouse", transient_for=parent, modal=True)
+        super().__init__(title=tr("Teclado e mouse"), transient_for=parent, modal=True)
         self.profile = Controls(library)
         self.values = self.profile.load()
         self.set_default_size(620, 660)
-        for title, response in (("Restaurar padrão", 10), ("Cancelar", Gtk.ResponseType.CANCEL),
-                                ("Salvar perfil", Gtk.ResponseType.OK)):
+        for title, response in ((tr("Restaurar padrão"), 10), (tr("Cancelar"), Gtk.ResponseType.CANCEL),
+                                (tr("Salvar perfil"), Gtk.ResponseType.OK)):
             self.add_button(title, response).get_style_context().add_class("secondary")
         self.connect("response", self.respond)
         content = self.get_content_area()
         content.set_spacing(12)
         content.set_border_width(18)
-        intro = Gtk.Label(label="Clique numa atribuição para trocar a tecla ou o botão do mouse.\n"
-                          "F5 salva um estado rápido; F8 carrega. F1 gerencia estados e libera o cursor. F11 alterna a tela cheia.", xalign=0)
+        intro = Gtk.Label(label=tr("Clique numa atribuição para trocar a tecla ou o botão do mouse.\n"
+                          "F5 salva um estado rápido; F8 carrega. F1 gerencia estados e libera o cursor. F11 alterna a tela cheia."), xalign=0)
         intro.set_line_wrap(True)
         content.pack_start(intro, False, False, 0)
-        self.mouse = Gtk.CheckButton(label="Mover a câmera com o mouse")
-        self.invert_x = Gtk.CheckButton(label="Inverter câmera horizontal")
-        self.invert_y = Gtk.CheckButton(label="Inverter câmera vertical")
+        self.mouse = Gtk.CheckButton(label=tr("Mover a câmera com o mouse"))
+        self.invert_x = Gtk.CheckButton(label=tr("Inverter câmera horizontal"))
+        self.invert_y = Gtk.CheckButton(label=tr("Inverter câmera vertical"))
         for widget in (self.mouse, self.invert_x, self.invert_y):
             content.pack_start(widget, False, False, 0)
         row = Gtk.Box(spacing=12)
-        row.pack_start(Gtk.Label(label="Sensibilidade do mouse", xalign=0), True, True, 0)
+        row.pack_start(Gtk.Label(label=tr("Sensibilidade do mouse"), xalign=0), True, True, 0)
         self.sensitivity = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, .1, 5., .1)
         self.sensitivity.set_digits(1)
         self.sensitivity.set_draw_value(True)
@@ -60,11 +61,11 @@ class ControlsDialog(Gtk.Dialog):
         grid = Gtk.Grid(column_spacing=22, row_spacing=7, margin=8)
         self.buttons = {}
         for index, (key, title, _) in enumerate(ACTIONS):
-            grid.attach(Gtk.Label(label=title, xalign=0), 0, index, 1, 1)
+            grid.attach(Gtk.Label(label=tr(title), xalign=0), 0, index, 1, 1)
             button = Gtk.Button()
             button.get_style_context().add_class("key")
             button.set_size_request(185, -1)
-            button.connect("clicked", self.capture, key, title)
+            button.connect("clicked", self.capture, key, tr(title))
             grid.attach(button, 1, index, 1, 1)
             self.buttons[key] = button
         scroller.add(grid)
@@ -84,11 +85,11 @@ class ControlsDialog(Gtk.Dialog):
 
     def capture(self, _, key, title):
         popup = Gtk.Dialog(title=title, transient_for=self, modal=True)
-        popup.add_button("Cancelar", Gtk.ResponseType.CANCEL)
+        popup.add_button(tr("Cancelar"), Gtk.ResponseType.CANCEL)
         area = Gtk.EventBox()
         area.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
-        text = Gtk.Label(label="Pressione uma tecla, ou clique nesta área com o botão desejado.\n"
-                        "Esc também pode ser atribuído. Delete remove a atribuição.")
+        text = Gtk.Label(label=tr("Pressione uma tecla, ou clique nesta área com o botão desejado.\n"
+                        "Esc também pode ser atribuído. Delete remove a atribuição."))
         text.set_line_wrap(True)
         text.set_margin_top(24); text.set_margin_bottom(24)
         text.set_margin_start(24); text.set_margin_end(24)
@@ -98,13 +99,12 @@ class ControlsDialog(Gtk.Dialog):
 
         def assign(code):
             if not valid_binding(code):
-                text.set_text("Tecla não suportada ou reservada (F1 / F5 / F8 / F9 / F11). Escolha outra ou cancele.")
+                text.set_text(tr("Tecla não suportada ou reservada (F1 / F5 / F8 / F9 / F11). Escolha outra ou cancele."))
                 return True
             previous = next((title for name, title, _ in ACTIONS
                              if name != key and code and self.values[name] == code), None)
             if previous:
-                text.set_text(f"{binding_label(code)} já está em ‘{previous}’.\n"
-                              "Remova a atribuição anterior ou escolha outro botão.")
+                text.set_text(tr("{button} já está em ‘{action}’.\nRemova a atribuição anterior ou escolha outro botão.").format(button=binding_label(code), action=tr(previous)))
                 return True
             self.values[key] = code
             self.buttons[key].set_label(binding_label(code))
@@ -128,7 +128,7 @@ class ControlsDialog(Gtk.Dialog):
         if response == 10:
             self.values = dict(DEFAULTS)
             self.refresh()
-            self.status.set_text("Padrão restaurado. Clique em Salvar perfil para aplicar.")
+            self.status.set_text(tr("Padrão restaurado. Clique em Salvar perfil para aplicar."))
         elif response == Gtk.ResponseType.OK:
             self.values.update(mouse_camera=int(self.mouse.get_active()),
                                invert_x=int(self.invert_x.get_active()),

@@ -377,7 +377,11 @@ namespace ps2_stubs
         }
         const std::time_t now = std::time(nullptr) + 9 * 3600;
         std::tm t{};
+#ifdef _WIN32
+        gmtime_s(&t, &now);
+#else
         gmtime_r(&now, &t);
+#endif
         out[0] = 0;
         out[1] = toBcd(t.tm_sec);
         out[2] = toBcd(t.tm_min);

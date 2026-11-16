@@ -307,7 +307,7 @@ option(PS2X_ENABLE_FFMPEG "Enable FFmpeg-backed MPEG video decoding" ${PS2X_ENAB
 if(NOT PS2X_ENABLE_FFMPEG)
     message(STATUS "FFmpeg disabled; MPEG video decode falls back to stub frames")
     add_library(ffmpeg INTERFACE)
-elseif(WIN32)
+elseif(WIN32 AND MSVC)
     include(ExternalProject)
 
     set(FFMPEG_PREBUILT_TAG "n7.1-241205")
@@ -460,10 +460,11 @@ add_library(ps2_runtime STATIC
 # Native renderer: the front picks Metal (macOS) or OpenGL (macOS with
 # SOTC_NATIVE_GL=1, the Vita through vitaGL).
 target_sources(ps2_runtime PRIVATE src/lib/native/native_renderer.cpp src/lib/native/native_renderer_gl.cpp)
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
+if(WIN32 OR (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID))
     find_package(OpenGL REQUIRED)
     target_link_libraries(ps2_runtime PUBLIC OpenGL::GL glfw)
-    target_include_directories(ps2_runtime PRIVATE "${raylib_SOURCE_DIR}/src/external/glfw/include")
+    target_include_directories(ps2_runtime PRIVATE "${raylib_SOURCE_DIR}/src"
+        "${raylib_SOURCE_DIR}/src/external/glfw/include")
 endif()
 
 # GPU GS rasterizer (Metal) on macOS, the default there (PS2X_GS_GPU=0 = CPU).
@@ -715,7 +716,7 @@ install(TARGETS ps2_runtime ps2EntryRunner
     ARCHIVE DESTINATION lib
 )
 
-if(WIN32 AND PS2X_ENABLE_FFMPEG)
+if(WIN32 AND MSVC AND PS2X_ENABLE_FFMPEG)
     install(DIRECTORY "${FFMPEG_BIN_DIR}/"
         DESTINATION bin
         FILES_MATCHING
@@ -726,3 +727,12 @@ endif()
 install(DIRECTORY include/
     DESTINATION include
 )
+
+option(PS2X_BUILD_WINDOWS_KIT "Build the native Windows desktop compilation kit" OFF)
+if(PS2X_BUILD_WINDOWS_KIT)
+    if(NOT MINGW)
+        message(FATAL_ERROR "The Windows desktop kit requires MinGW-w64")
+    endif()
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../tools/windows"
+                     "${CMAKE_BINARY_DIR}/desktop-windows")
+endif()

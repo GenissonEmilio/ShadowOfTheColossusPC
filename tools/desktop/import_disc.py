@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Import an owned SotC USA ISO or nested 7Z/RAR/ZIP, without executing archive contents."""
 from __future__ import annotations
+from language import translate as tr
 
 import argparse
 import ctypes
@@ -39,7 +40,7 @@ def safe_name(name: str) -> Path:
     path = PurePosixPath(name.replace("\\", "/"))
     if not name or path.is_absolute() or ".." in path.parts or any(":" in p for p in path.parts):
         raise ImportError_(f"Archive entry outside its folder: {name!r}")
-    if not path.parts or "\x00" in name:
+    if not path.parts or "\x00" in name or (os.name == "nt" and any(os.path.isreserved(p) for p in path.parts)):
         raise ImportError_(f"Invalid archive entry: {name!r}")
     return Path(*path.parts)
 
@@ -87,10 +88,13 @@ def extract_zip(source, destination, budget):
 def libarchive():
     bundled = Path(getattr(sys, "_MEIPASS", "")) / "libarchive.so.13"
     name = str(bundled) if getattr(sys, "frozen", False) and bundled.is_file() else ctypes.util.find_library("archive")
+    if os.name == "nt":
+        prefix = Path(sys.executable).parent
+        name = next(prefix.glob("libarchive-*.dll"), None)
     if not name:
         raise ImportError_("RAR import needs libarchive (Linux: libarchive; Ubuntu: libarchive13). "
                            "Alternatively unpack the RAR yourself and import its IMG/BIN file.")
-    lib = ctypes.CDLL(name)
+    lib = ctypes.CDLL(str(name))
     declarations = {
         "archive_read_new": (ctypes.c_void_p, []),
         "archive_read_support_filter_all": (ctypes.c_int, [ctypes.c_void_p]),
@@ -105,6 +109,9 @@ def libarchive():
         "archive_error_string": (ctypes.c_char_p, [ctypes.c_void_p]),
         "archive_read_free": (ctypes.c_int, [ctypes.c_void_p]),
     }
+    if os.name == "nt":
+        declarations["archive_read_open_filename_w"] = (ctypes.c_int, [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_size_t])
+        declarations["archive_entry_pathname_w"] = (ctypes.c_wchar_p, [ctypes.c_void_p])
     for name, (result, arguments) in declarations.items():
         function = getattr(lib, name)
         function.restype, function.argtypes = result, arguments
@@ -122,7 +129,11 @@ def extract_archive(source, destination, budget):
     try:
         lib.archive_read_support_filter_all(archive)
         lib.archive_read_support_format_all(archive)
-        if lib.archive_read_open_filename(archive, os.fsencode(source), 65536) != 0:
+        if os.name == "nt":
+            code = lib.archive_read_open_filename_w(archive, str(source), 65536)
+        else:
+            code = lib.archive_read_open_filename(archive, os.fsencode(source), 65536)
+        if code != 0:
             fail()
         entry = ctypes.c_void_p()
         buffer = ctypes.create_string_buffer(1024 * 1024)
@@ -133,7 +144,8 @@ def extract_archive(source, destination, budget):
                 break
             if code != 0:
                 fail()
-            name = lib.archive_entry_pathname(entry)
+            name = (lib.archive_entry_pathname_w(entry) if os.name == "nt"
+                    else lib.archive_entry_pathname(entry))
             if not name:
                 raise ImportError_("Archive entry has no name")
             relative = safe_name(os.fsdecode(name))
@@ -168,9 +180,9 @@ def candidates(source, work, budget, depth=0):
         yield source
         return
     if source.suffix.lower() not in (".zip", ".rar", ".7z"):
-        raise ImportError_("Escolha ISO, ZIP, RAR ou 7Z do Shadow of the Colossus USA.")
+        raise ImportError_(tr("Escolha ISO, ZIP, RAR ou 7Z do Shadow of the Colossus USA."))
     if depth >= MAX_DEPTH:
-        raise ImportError_("Há arquivos compactados demais dentro de outros arquivos.")
+        raise ImportError_(tr("Há arquivos compactados demais dentro de outros arquivos."))
     stage = Path(tempfile.mkdtemp(prefix="archive-", dir=work))
     (extract_zip if zipfile.is_zipfile(source) else extract_archive)(source, stage, budget)
     for path in sorted(stage.rglob("*")):
@@ -189,17 +201,17 @@ EXPECTED = {
 def inspect_disc(source):
     with DiscImage(source) as disc:
         if (disc.sector, disc.skip) != (2048, 0):
-            raise ImportError_("Escolha uma imagem DVD ISO com setores de 2048 bytes.")
+            raise ImportError_(tr("Escolha uma imagem DVD ISO com setores de 2048 bytes."))
         cnf = disc.find("SYSTEM.CNF")
         if not cnf or b"SCUS_974.72" not in disc.read(*cnf):
-            raise ImportError_("Edição incompatível. É necessário SCUS-97472 (USA).")
+            raise ImportError_(tr("Edição incompatível. É necessário SCUS-97472 (USA)."))
         for name, (size, digest) in EXPECTED.items():
             loc = disc.find(name)
             if not loc or loc[1] != size or hashlib.sha256(disc.read(*loc)).hexdigest() != digest:
-                raise ImportError_(f"{name}: edição incompatível ou arquivo modificado.")
+                raise ImportError_(tr("{name}: edição incompatível ou arquivo modificado.").format(name=name))
         data = disc.find("NICO.DAT")
         if not data or data[1] != 2667340678:
-            raise ImportError_("Os dados NICO.DAT estão ausentes ou incompatíveis.")
+            raise ImportError_(tr("Os dados NICO.DAT estão ausentes ou incompatíveis."))
         disc.read_sector(data[0] + (data[1]-1)//2048)
         return {"serial": "SCUS-97472"}
 
@@ -214,7 +226,7 @@ def extract_iso(image, destination):
         import struct
         def copy_directory(lba, size, folder, depth=0):
             if depth > 8:
-                raise ImportError_("Diretórios ISO profundos demais.")
+                raise ImportError_(tr("Diretórios ISO profundos demais."))
             for name, start, length, directory in disc._directory(lba, size):
                 if name in ("\x00", "\x01"):
                     continue
@@ -231,7 +243,7 @@ def extract_iso(image, destination):
                         while remaining:
                             chunk = disc.file.read(min(1024*1024, remaining))
                             if not chunk:
-                                raise ImportError_("ISO truncada.")
+                                raise ImportError_(tr("ISO truncada."))
                             budget.consume(len(chunk))
                             out.write(chunk)
                             remaining -= len(chunk)
@@ -245,10 +257,10 @@ def import_disc(source, destination):
         work = Path(temporary)
         images = list(candidates(source, work, Budget()))
         if len(images) != 1:
-            raise ImportError_(f"Esperado exatamente um disco; encontrados {len(images)}.")
+            raise ImportError_(tr("Esperado exatamente um disco; encontrados {count}.").format(count=len(images)))
         inspect_disc(images[0])
         extract_iso(images[0], work / "disc")
         if destination.exists():
-            raise ImportError_("A pasta de destino já existe. Os dados foram preservados.")
+            raise ImportError_(tr("A pasta de destino já existe. Os dados foram preservados."))
         os.replace(work / "disc", destination)
     return destination / "SCUS_974.72"

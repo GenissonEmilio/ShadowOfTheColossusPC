@@ -38,6 +38,8 @@ def deps(binary,directory,skip_system=True):
 stage_source(ROOT, BUILD, OUT)
 copy(ROOT / 'PS2Recomp/ps2xRuntime/third_party/gamecontrollerdb/LICENSE',
      OUT / 'licenses/SDL_GameControllerDB.LICENSE')
+copy(ROOT / 'PS2Recomp/ps2xRuntime/third_party/amd-fsr/LICENSE',
+     OUT / 'licenses/AMD_FidelityFX_Super_Resolution.LICENSE')
 copy(BUILD / '_deps/raylib-src/LICENSE',OUT / 'licenses/raylib.LICENSE')
 copy(BUILD / 'ps2xRecomp/ps2_recomp',OUT / 'bin/ps2_recomp')
 deps(OUT / 'bin/ps2_recomp',OUT / 'lib')

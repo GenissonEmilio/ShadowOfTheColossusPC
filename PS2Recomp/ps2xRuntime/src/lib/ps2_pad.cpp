@@ -17,8 +17,10 @@
 #include <fstream>
 #include <mutex>
 #include <array>
-#if defined(__linux__) && !defined(__ANDROID__)
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+#if defined(__linux__)
 #include "runtime/linux_gamepad_mappings.h"
+#endif
 // GLFW is linked by the desktop raylib backend. A present joystick may have
 // no mapping: raylib still reports it available, but returns no gamepad input.
 extern "C" int glfwJoystickIsGamepad(int jid);
@@ -48,14 +50,14 @@ namespace
 
     void loadGamepadMappings()
     {
-#if defined(__linux__) && !defined(__ANDROID__)
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
         if (!IsWindowReady())
             return;
-        // The Zikway HID / GameSir Nova Lite layout is exposed by SDL's HID
-        // backend, but is missing from GLFW's bundled Linux mapping database.
-        // Use GLFW's GUID (without SDL's name CRC) and its evdev axis order.
         static std::once_flag loaded;
         std::call_once(loaded, [] {
+#if defined(__linux__)
+            // Linux-specific community mappings and calibration.
+            // Use GLFW's GUID (without SDL's name CRC) and its evdev axis order.
             SetGamepadMappings(ps2pad::kLinuxMappings);
             SetGamepadMappings(
                 "03000000373500004110000011010000,Zikway HID gamepad,"
@@ -64,6 +66,7 @@ namespace
                 "dpup:h0.1,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,"
                 "leftx:a0,lefty:a1,rightx:a2,righty:a3,"
                 "lefttrigger:a5,righttrigger:a4,platform:Linux,");
+#endif
             // A caller can supply a mapping from a controller configurator without
             // Steam, or reuse SDL's standard environment setting. User mappings win.
             if (const char *path = std::getenv("PS2X_GAMEPAD_MAPPINGS")) {
@@ -95,7 +98,7 @@ void ps2pad::pollGamepads()
     std::array<GamepadState, 4> snapshot;
     for (int i = 0; i < 4; ++i) {
         if (!IsGamepadAvailable(i)) continue;
-#if defined(__linux__) && !defined(__ANDROID__)
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
         if (!glfwJoystickIsGamepad(i)) continue;
 #endif
         snapshot[i].index = i;
@@ -261,7 +264,7 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
         data[xIndex] = static_cast<uint8_t>(x < 0 ? 0x00 : (x > 0 ? 0xFF : kPadStickCenter));
         data[yIndex] = static_cast<uint8_t>(y < 0 ? 0x00 : (y > 0 ? 0xFF : kPadStickCenter));
     };
-#if defined(__linux__) && !defined(__ANDROID__)
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
     const auto desktop = desktop_input::read();
     btns &= ~desktop.buttons;
     if (desktop.lx != 128 || desktop.ly != 128) {

@@ -1,4 +1,5 @@
-#if defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__))
+#if defined(_WIN32) || defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__))
+#define GLFW_INCLUDE_NONE
 #include "GLFW/glfw3.h"
 #endif
 #include "runtime/gs/gs_hw_backend.h"
@@ -14,7 +15,7 @@
 #include "runtime/state_manager.h"
 #include "runtime/desktop_input.h"
 #include "runtime/desktop_video.h"
-#if defined(__linux__) && !defined(__ANDROID__)
+#ifdef PS2X_DESKTOP_VIDEO
 #include "rlgl.h"
 #endif
 #include "runtime/gs/gs_direct_frame.h"
@@ -75,7 +76,7 @@ static constexpr uint32_t DEFAULT_FB_ADDR = (PS2_RAM_SIZE - DEFAULT_FB_SIZE - 0x
 #if defined(PLATFORM_VITA)
 static constexpr int HOST_WINDOW_WIDTH = 960;
 static constexpr int HOST_WINDOW_HEIGHT = 544;
-#elif defined(__linux__) && !defined(__ANDROID__)
+#elif defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
 static constexpr int HOST_WINDOW_WIDTH = 1024;
 static constexpr int HOST_WINDOW_HEIGHT = 720;
 #else
@@ -414,7 +415,7 @@ static Texture2D g_directFrame{};
 
 static void waitDirectFrame(uint64_t fence)
 {
-#if defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__))
+#if defined(_WIN32) || defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__))
     // glWaitSync without pulling GL headers in here (GLFW owns them).
     using WaitSync = void (*)(void *, unsigned int, uint64_t);
     static WaitSync waitSync = reinterpret_cast<WaitSync>(glfwGetProcAddress("glWaitSync"));
@@ -984,7 +985,7 @@ bool PS2Runtime::initialize(const char *title)
 #else
         unsigned int windowFlags = FLAG_WINDOW_RESIZABLE |
             (std::getenv("PS2X_HIDDEN_WINDOW") ? FLAG_WINDOW_HIDDEN : 0);
-#if defined(__linux__) && !defined(__ANDROID__)
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
         // The EE and audio keep running on their own threads. Keep the host
         // event loop running too when iconified, so input/state requests do
         // not stall inside EndDrawing's minimized-window wait.
@@ -999,7 +1000,7 @@ bool PS2Runtime::initialize(const char *title)
         setenv("RESOURCE_NAME", "shadow-of-the-colossus-pc", 0);
 #endif
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
-#if defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__))
+#if defined(_WIN32) || defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__))
         if (std::getenv("PS2X_GS_HW"))
         {
             // The hardware GS renderer draws on the GS worker thread: give it a
@@ -1025,7 +1026,7 @@ bool PS2Runtime::initialize(const char *title)
                 std::cerr << "[gs:hw] could not create the GS GL context" << std::endl;
         }
         if (
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
             true
 #else
             std::getenv("SOTC_NATIVE_GL")
@@ -1058,7 +1059,8 @@ bool PS2Runtime::initialize(const char *title)
 #endif
         hostmenu::load();
         desktop_input::initialize();
-#if defined(__linux__) && !defined(__ANDROID__)
+#ifdef PS2X_DESKTOP_VIDEO
+        desktop_video::setWindowResolution(hostmenu::settings().windowResolution);
         if (!std::getenv("PS2X_HIDDEN_WINDOW"))
             desktop_video::setFullscreen(hostmenu::settings().fullscreen);
         std::string shaderError;
@@ -2843,9 +2845,9 @@ void PS2Runtime::run()
     {
             BeginDrawing();
             ClearBackground(BLACK);
-#if defined(__linux__) && !defined(__ANDROID__)
+#ifdef PS2X_DESKTOP_VIDEO
             desktop_video::draw(shown, std::max(1u, presentWidth), std::max(1u, presentHeight), hostFrameFlipY,
-                                hostmenu::settings().screenMode);
+                                hostmenu::settings().screenMode, hostmenu::settings().upscaleFsr);
 #else
             const float srcWidth = static_cast<float>(std::max<uint32_t>(1u, presentWidth));
             const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight));
@@ -2910,7 +2912,7 @@ void PS2Runtime::run()
                     DrawText(stateMessage.c_str(),28,26,size,Color{235,217,165,255});
                 }
             }
-#if defined(__linux__) && !defined(__ANDROID__)
+#ifdef PS2X_DESKTOP_VIDEO
             static bool presentationCaptured = false;
             if (!presentationCaptured && GetTime() >= 12.0)
                 if (const char *path = std::getenv("SOTC_PRESENT_SNAPSHOT"))
@@ -3039,7 +3041,9 @@ void PS2Runtime::run()
     uint64_t tick = 0;
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
     {
-#if defined(__linux__) && !defined(__ANDROID__)
+#ifdef PS2X_DESKTOP_VIDEO
+        desktop_video::setWindowResolution(hostmenu::settings().windowResolution);
+        if (!IsWindowHidden()) desktop_video::setFullscreen(hostmenu::settings().fullscreen);
         const bool visible = !IsWindowHidden() && !IsWindowMinimized();
         desktop_video::updatePresentation(visible && hostmenu::settings().vsync,
                                           native_renderer::tuning().frameCap30);
@@ -3505,11 +3509,10 @@ void PS2Runtime::run()
 #else
         drawHostFrame(shownTex, presentWidth, presentHeight);
 #endif
-#if defined(__linux__) && !defined(__ANDROID__)
+#ifdef PS2X_DESKTOP_VIDEO
         if (IsKeyPressed(KEY_F11))
         {
-            desktop_video::setFullscreen(!IsWindowFullscreen());
-            hostmenu::settings().fullscreen = IsWindowFullscreen();
+            hostmenu::settings().fullscreen = !hostmenu::settings().fullscreen;
             hostmenu::saveSettings();
         }
 #endif
@@ -3542,7 +3545,7 @@ void PS2Runtime::run()
         m_debugUiInitialized = false;
     }
     UnloadTexture(frameTex);
-#if defined(__linux__) && !defined(__ANDROID__)
+#ifdef PS2X_DESKTOP_VIDEO
     desktop_video::shutdown();
 #endif
     CloseWindow();

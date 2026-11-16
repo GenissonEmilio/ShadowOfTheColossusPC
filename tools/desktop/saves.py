@@ -1,5 +1,6 @@
 """Portable PS2 memory-card import/export with atomic replacement and backups."""
 from __future__ import annotations
+from language import translate as tr
 
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,12 +33,12 @@ class SaveCards:
     def import_card(self, source):
         source = Path(source).expanduser().resolve(strict=True)
         if source == self.card.resolve():
-            raise ValueError("Este cartão já é o cartão usado pelo jogo.")
+            raise ValueError(tr("Este cartão já é o cartão usado pelo jogo."))
         with source.open("rb") as stream:
             data = stream.read(CARD_BYTES + 1)
         if len(data) != CARD_BYTES or not data.startswith(MAGIC):
-            raise ValueError("Escolha um cartão PS2 formatado de 8 MB no formato PCSX2 (.ps2, "
-                             "8.650.752 bytes). Um save individual .psu/.max não é um cartão.")
+            raise ValueError(tr("Escolha um cartão PS2 formatado de 8 MB no formato PCSX2 (.ps2, "
+                             "8.650.752 bytes). Um save individual .psu/.max não é um cartão."))
         # Keep the previous card even if the subsequent replacement fails.
         backup = None
         if self.card.exists():
@@ -52,8 +53,8 @@ class SaveCards:
 
     def export_card(self, destination):
         if not self.card.is_file():
-            raise ValueError("Ainda não existe um cartão. Salve no jogo ou importe seu cartão primeiro.")
+            raise ValueError(tr("Ainda não existe um cartão. Salve no jogo ou importe seu cartão primeiro."))
         destination = Path(destination).expanduser().resolve()
         if destination == self.card.resolve():
-            raise ValueError("Escolha outra pasta para exportar uma cópia.")
+            raise ValueError(tr("Escolha outra pasta para exportar uma cópia."))
         atomic_bytes(destination, self.card.read_bytes())

@@ -21,6 +21,7 @@
 // from the lights in the instance's own packet.
 // Not yet: the second texture and mip levels.
 
+#include "sotc_button_prompts.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/native_tuning.h"
@@ -745,10 +746,24 @@ namespace sotc_native
             if (checked % 200u == 0u)
                 std::fprintf(stderr, "[tex-check] %llu textures, %llu mismatches\n", (unsigned long long)checked, (unsigned long long)mismatched);
         }
+        // The US button atlas is named immediately before its NTO2 header.
+        // Confirm its packed pixel content before changing only the GPU copy.
+        static const bool xboxPrompts = []
+        {
+            const char *value = std::getenv("SOTC_BUTTON_PROMPTS");
+            return value && std::strcmp(value, "xbox") == 0;
+        }();
+        constexpr char buttonAtlasName[] = "button_icon_set";
+        const uint32_t physicalHeader = header & 0x1FFFFFFu;
+        const bool replacePrompts = xboxPrompts && format == 0x01771014u && physicalHeader >= 0x1Eu &&
+            std::memcmp(g_ram + physicalHeader - 0x1Eu, buttonAtlasName, sizeof(buttonAtlasName)) == 0 &&
+            contentHash(header + word(header + 0x14u), pixelBytes, 0xcbf29ce484222325ull) == 0x47e7bfe4c9bd629dull;
         // SOTC_TEXDUMP_DIR=<dir> (debugging): level 0 of every decoded texture, raw RGBA.
         static const char *dumpDir = std::getenv("SOTC_TEXDUMP_DIR");
-        const auto finish = [key, width, height, header, psm](const std::vector<uint8_t> &rgba, uint32_t decoded)
+        const auto finish = [key, width, height, header, psm, replacePrompts](std::vector<uint8_t> &rgba, uint32_t decoded)
         {
+            if (replacePrompts)
+                sotc_button_prompts::apply(rgba.data(), rgba.size());
             if (dumpDir)
             {
                 char path[512];

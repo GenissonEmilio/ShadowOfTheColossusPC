@@ -11,7 +11,11 @@
 #include <map>
 #include <string>
 #include <vector>
+#ifdef _WIN32
+#include <process.h>
+#else
 #include <unistd.h>
+#endif
 
 struct Step { const char *field, *label; bool axis = false; };
 static const Step steps[] = {
@@ -77,7 +81,12 @@ static void save(const std::filesystem::path &file, const std::string &guid, con
         if (!old.empty() && old.substr(0, 32) != guid) content += old + "\n";
     content += line + "\n";
     std::filesystem::create_directories(file.parent_path());
-    auto tmp = file; tmp += ".tmp-" + std::to_string(getpid());
+    auto tmp = file;
+#ifdef _WIN32
+    tmp += ".tmp-" + std::to_string(_getpid());
+#else
+    tmp += ".tmp-" + std::to_string(getpid());
+#endif
     try {
         std::ofstream out(tmp, std::ios::binary);
         out << content;
@@ -146,7 +155,11 @@ int main(int argc, char **argv) {
                 for (char &c : clean) if (c == ',' || c == '\n' || c == '\r') c = ' ';
                 std::string line = guid + "," + clean + ",";
                 for (auto &[key, value] : mapping) line += key + ":" + value + ",";
+#ifdef _WIN32
+                line += "platform:Windows,";
+#else
                 line += "platform:Linux,";
+#endif
                 std::fprintf(stderr, "[controller-profile] %s\n", line.c_str());
                 if (!glfwUpdateGamepadMappings(line.c_str()) || !glfwJoystickIsGamepad(device)) {
                     error = "O driver recusou o perfil. Tente novamente."; step = -1;
@@ -183,7 +196,7 @@ int main(int argc, char **argv) {
         EndDrawing();
         if (!screenshot.empty() && step >= 0) {
             Image frame = LoadImageFromScreen();
-            ExportImage(frame, screenshot.c_str());
+            ExportImage(frame, screenshot.string().c_str());
             UnloadImage(frame);
             screenshot.clear();
         }

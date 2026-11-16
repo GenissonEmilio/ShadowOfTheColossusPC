@@ -15,12 +15,14 @@
 #include "native_history_state.h"
 #include "runtime/native_tuning.h"
 
-#if defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__)) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
+#if defined(_WIN32) || defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__)) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
 
 #if defined(__APPLE__)
 #define GL_SILENCE_DEPRECATION
 #include <OpenGL/gl3.h>
 #include <malloc/malloc.h>
+#elif defined(_WIN32)
+#include "external/glad.h" // the loader initialized by the desktop raylib window
 #elif defined(__linux__) && !defined(__ANDROID__)
 #define GL_GLEXT_PROTOTYPES 1
 #include <GL/gl.h>
@@ -70,6 +72,8 @@ namespace
         return mallinfo().uordblks;
 #elif defined(__linux__) && !defined(__ANDROID__)
         return mallinfo2().uordblks;
+#elif defined(_WIN32)
+        return 0; // no portable measurement of bytes allocated by the CRT heap
 #else
         malloc_statistics_t stats{};
         malloc_zone_statistics(nullptr, &stats);

@@ -1,0 +1,233 @@
+# Portuguese	English	Spanish	Japanese
+Wander erguendo a espada sobre um colosso de olhos azuis	Wander holding his sword over a blue-eyed colossus	Wander alza su espada sobre un coloso de ojos azules	青い目の巨像の上で剣を掲げるワンダ
+SUA BIBLIOTECA	YOUR LIBRARY	TU BIBLIOTECA	ライブラリ
+◈   Início	◈   Home	◈   Inicio	◈   ホーム
+▧   Gráficos	▧   Graphics	▧   Gráficos	▧   グラフィック
+⌘   Controles	⌘   Controls	⌘   Controles	⌘   操作
+⚙   Configurações	⚙   Settings	⚙   Ajustes	⚙   設定
+◇   Sobre o port	◇   About	◇   Acerca de	◇   この移植版について
+BIBLIOTECA    /    SHADOW OF THE COLOSSUS	LIBRARY    /    SHADOW OF THE COLOSSUS	BIBLIOTECA    /    SHADOW OF THE COLOSSUS	ライブラリ    /    ワンダと巨像
+F1 abre os ajustes durante o jogo.	F1 opens settings during play.	F1 abre los ajustes durante la partida.	プレイ中に F1 で設定を開きます。
+Meus saves ↗	My saves ↗	Mis partidas ↗	セーブデータ ↗
+Escolha sua ROM para começar.	Choose your disc image to get started.	Elige la imagen del disco para empezar.	ディスクイメージを選択してください。
+A atualização falhou	The update failed	La actualización falló	更新に失敗しました
+Controle: direcional/analógico · A/✕ confirmar · B/○ voltar\nLB/RB páginas · Start jogar/aceitar · ←/→ ajustar	Controller: D-pad/stick · A/✕ confirm · B/○ back\nLB/RB switch pages · Start play/accept · ←/→ adjust	Mando: cruceta/palanca · A/✕ confirmar · B/○ volver\nLB/RB cambiar de página · Start jugar/aceptar · ←/→ ajustar	コントローラー: 十字キーまたはスティック · A/✕ 決定 · B/○ 戻る\nLB/RB ページ切替 · Start 開始・決定 · ←/→ 調整
+Seu jogo	Your game	Tu juego	ゲーム
+Selecione sua ROM	Select your disc image	Selecciona la imagen del disco	ディスクイメージを選択
+ISO, RAR, ZIP ou 7Z · edição americana	ISO, RAR, ZIP or 7Z · North American edition	ISO, RAR, ZIP o 7Z · edición norteamericana	ISO、RAR、ZIP、7Z · 北米版
+Escolher arquivo…	Choose file…	Elegir archivo…	ファイルを選択…
+Seu arquivo fica apenas neste computador.	Your file stays on this computer.	Tu archivo se queda en este equipo.	ファイルはこの PC にのみ保存されます。
+▶   Iniciar jogo	▶   Play	▶   Jugar	▶   ゲームを開始
+Abrir Shadow of the Colossus nativamente no PC	Launch Shadow of the Colossus natively on PC	Abre Shadow of the Colossus de forma nativa en tu PC	『ワンダと巨像』を PC で起動します
+Dica: você também pode arrastar o arquivo para a área acima.	You can also drag the file into the area above.	También puedes arrastrar el archivo a la zona superior.	上の領域にファイルをドラッグすることもできます。
+Durante o jogo: F5 salva rápido · F8 carrega · F1 gerencia estados.	In game: F5 quick save · F8 quick load · F1 manage saved states.	En el juego: F5 guardado rápido · F8 carga rápida · F1 gestionar estados.	プレイ中: F5 クイックセーブ · F8 クイックロード · F1 ステート管理。
+Controles	Controls	Controles	操作
+Teclado e mouse ou controle USB/Bluetooth.\nF1 abre o menu, libera o cursor e oferece Voltar ao launcher. Esc pausa o jogo.	Use a keyboard and mouse or a USB/Bluetooth controller.\nF1 opens settings, releases the cursor and lets you return to the launcher. Esc pauses the game.	Usa teclado y ratón o un mando USB/Bluetooth.\nF1 abre los ajustes, libera el cursor y permite volver al iniciador. Esc pausa el juego.	キーボードとマウス、または USB/Bluetooth コントローラーを使えます。\nF1 でメニューを開き、カーソルの解放やランチャーへの復帰ができます。Esc で一時停止します。
+Personalizar teclado e mouse…	Customize keyboard and mouse…	Personalizar teclado y ratón…	キーボードとマウスを設定…
+F5 · Salvar estado rápido    /    F8 · Carregar estado rápido\nF1 · Gerenciar estados, configurações e sair    /    F11 · Tela cheia	F5 · Quick save    /    F8 · Quick load\nF1 · Save states, settings and exit    /    F11 · Fullscreen	F5 · Guardado rápido    /    F8 · Carga rápida\nF1 · Estados, ajustes y salir    /    F11 · Pantalla completa	F5 · クイックセーブ    /    F8 · クイックロード\nF1 · ステート、設定、終了    /    F11 · 全画面
+Controle USB / Bluetooth	USB / Bluetooth controller	Mando USB / Bluetooth	USB / Bluetooth コントローラー
+Perfis automáticos para Xbox, PlayStation e genéricos.\nSe os botões não responderem ou estiverem trocados, configure seu controle.	Automatic profiles for Xbox, PlayStation and generic controllers.\nConfigure your controller if buttons do not respond or are mapped incorrectly.	Perfiles automáticos para mandos Xbox, PlayStation y genéricos.\nConfigura el mando si los botones no responden o están mal asignados.	Xbox、PlayStation、汎用コントローラーの自動設定に対応。\nボタンが反応しない場合や割り当てが違う場合は、コントローラーを設定してください。
+Configurar meu controle…	Configure my controller…	Configurar mi mando…	コントローラーを設定…
+Dica: os sigilos dos colossos brilham com a espada equipada.	Tip: colossus sigils glow when the sword is equipped.	Consejo: los sellos de los colosos brillan con la espada equipada.	ヒント: 剣を装備すると巨像の紋章が光ります。
+Movimentar	Move	Moverse	移動
+Pular	Jump	Saltar	ジャンプ
+Atacar	Attack	Atacar	攻撃
+Agarrar	Grab	Agarrarse	つかむ
+Ação / luz da espada	Action / sword light	Acción / luz de la espada	アクション / 剣の光
+Trocar arma	Switch weapon	Cambiar de arma	武器切替
+Confirmar / voltar nos menus	Menu confirm / back	Confirmar / volver en menús	メニューで決定 / 戻る
+Mouse  ·  Câmera	Mouse  ·  Camera	Ratón  ·  Cámara	マウス  ·  カメラ
+Câmera pelo mouse desativada	Mouse camera disabled	Cámara con ratón desactivada	マウスでのカメラ操作は無効
+Feche o jogo	Close the game	Cierra el juego	ゲームを終了してください
+O perfil será aplicado na próxima abertura do jogo.	The profile takes effect the next time you open the game.	El perfil se aplicará la próxima vez que abras el juego.	次回の起動時にプロファイルが適用されます。
+Feche o jogo antes de configurar o controle.	Close the game before configuring the controller.	Cierra el juego antes de configurar el mando.	コントローラーを設定する前にゲームを終了してください。
+Atualize o pacote	Update the package	Actualiza el paquete	パッケージを更新してください
+A ferramenta de configuração não está neste pacote.	The configuration tool is missing from this package.	La herramienta de configuración no está en este paquete.	このパッケージには設定ツールがありません。
+Não foi possível configurar o controle	Could not configure the controller	No se pudo configurar el mando	コントローラーを設定できませんでした
+Siga as instruções na janela de configuração.	Follow the instructions in the configuration window.	Sigue las instrucciones de la ventana de configuración.	設定ウィンドウの指示に従ってください。
+Perfil salvo. Ele será usado na próxima abertura do jogo.	Profile saved. It takes effect the next time you open the game.	Perfil guardado. Se aplicará al volver a abrir el juego.	プロファイルを保存しました。次回起動時に適用されます。
+Configuração não concluída. Os perfis anteriores foram preservados.	Setup was incomplete. Existing profiles were kept.	La configuración quedó incompleta. Se conservaron los perfiles anteriores.	設定が完了しませんでした。以前のプロファイルは保存されています。
+Gráficos	Graphics	Gráficos	グラフィック
+Escolha como jogar. As mudanças serão usadas na próxima abertura do jogo.	Changes take effect the next time you open the game.	Los cambios se aplican al volver a abrir el juego.	変更はゲームの次回起動時に反映されます。
+Tela e proporção	Display and aspect ratio	Pantalla y proporción	画面とアスペクト比
+Janela redimensionável	Resizable window	Ventana redimensionable	サイズ変更可能なウィンドウ
+Tela cheia · resolução do monitor	Fullscreen · monitor resolution	Pantalla completa · resolución del monitor	全画面 · モニターの解像度
+Original 4:3 · preservar proporção	Original 4:3 · keep aspect ratio	Original 4:3 · conservar proporción	オリジナル 4:3 · 比率を維持
+Esticar · preencher a tela	Stretch · fill screen	Estirar · llenar la pantalla	引き伸ばし · 画面いっぱいに表示
+Pixels · escala inteira	Pixels · integer scaling	Píxeles · escala entera	ピクセル · 整数倍スケーリング
+F11 alterna entre janela e tela cheia durante o jogo.\nOriginal mantém faixas laterais em monitores largos. Esticar ocupa toda a tela.	F11 switches between windowed and fullscreen during play.\nOriginal adds side bars on wide monitors. Stretch fills the display.	F11 alterna entre ventana y pantalla completa durante el juego.\nOriginal añade bandas laterales en monitores anchos. Estirar ocupa toda la pantalla.	プレイ中に F11 でウィンドウと全画面を切り替えます。\nオリジナルではワイド画面の両側に余白ができます。引き伸ばしでは画面全体に表示します。
+Shaders e filtros	Shaders and filters	Shaders y filtros	シェーダーとフィルター
+Importe um fragment shader GLSL 330 (.frag, .fs ou .glsl).\nO filtro atua sobre a imagem final.	Import a GLSL 330 fragment shader (.frag, .fs or .glsl).\nThe filter is applied to the final image.	Importa un shader de fragmentos GLSL 330 (.frag, .fs o .glsl).\nEl filtro se aplica a la imagen final.	GLSL 330 のフラグメントシェーダー (.frag、.fs、.glsl) を読み込みます。\nフィルターは最終画像に適用されます。
+Importar shader…	Import shader…	Importar shader…	シェーダーを読み込む…
+Usar Nitidez HD	Use HD sharpening	Usar nitidez HD	HD シャープフィルターを使う
+Desativar	Disable	Desactivar	無効化
+Abrir modelo de shader ↗	Open shader template ↗	Abrir plantilla de shader ↗	シェーダーのひな型を開く ↗
+Shaders são copiados para a biblioteca e validados no seu driver.\nDepois da importação, você pode mover o arquivo original.	Shaders are copied into your library and validated with your driver.\nAfter importing, you can move the original file.	Los shaders se copian a la biblioteca y se validan con tu controlador gráfico.\nDespués de importarlos puedes mover los archivos originales.	シェーダーをライブラリにコピーし、グラフィックドライバーで検証します。\n読み込み後は元のファイルを移動できます。
+Não foi possível salvar a imagem	Could not save display settings	No se pudieron guardar los ajustes de pantalla	画面設定を保存できませんでした
+Imagem original · sem shader	Original image · no shader	Imagen original · sin shader	オリジナル画像 · シェーダーなし
+Ativo: {name}	Active: {name}	Activo: {name}	使用中: {name}
+Não foi possível desativar o shader	Could not disable the shader	No se pudo desactivar el shader	シェーダーを無効化できませんでした
+Configurações do launcher	Launcher settings	Ajustes del iniciador	ランチャー設定
+Idioma do launcher	Launcher language	Idioma del iniciador	ランチャーの言語
+Ícones dos botões no jogo	In-game button icons	Iconos de botones del juego	ゲーム内のボタンアイコン
+Os ícones mudam na próxima abertura do jogo.	Button icons change the next time you open the game.	Los iconos cambian al volver a abrir el juego.	ボタンアイコンはゲームの次回起動時に切り替わります。
+Aplicar	Apply	Aplicar	適用
+Configurações salvas.	Settings saved.	Ajustes guardados.	設定を保存しました。
+Atualizações	Updates	Actualizaciones	アップデート
+Versão instalada {version}	Installed version {version}	Versión instalada {version}	インストール済みバージョン {version}
+Verificar agora	Check now	Buscar ahora	今すぐ確認
+Atualizar	Update	Actualizar	更新
+Feche o jogo ou termine a preparação antes de aplicar.	Close the game or finish preparing it before applying settings.	Cierra el juego o termina de prepararlo antes de aplicar los ajustes.	設定を適用する前にゲームを終了するか、準備が完了するまで待ってください。
+Não foi possível salvar as configurações	Could not save settings	No se pudieron guardar los ajustes	設定を保存できませんでした
+Consultando o GitHub…	Checking GitHub…	Consultando GitHub…	GitHub を確認中…
+Não foi possível consultar o GitHub. Tente novamente.	Could not reach GitHub. Try again.	No se pudo consultar GitHub. Inténtalo de nuevo.	GitHub を確認できませんでした。もう一度お試しください。
+Atualizar para {version}	Update to {version}	Actualizar a {version}	{version} に更新
+Versão {version} disponível.	Version {version} is available.	La versión {version} está disponible.	バージョン {version} を利用できます。
+Nenhuma atualização para esta plataforma.	No updates are available for this platform.	No hay actualizaciones para esta plataforma.	このプラットフォームで利用できる更新はありません。
+Feche o jogo ou termine a preparação antes de atualizar.	Close the game or finish preparing it before updating.	Cierra el juego o termina de prepararlo antes de actualizar.	更新する前にゲームを終了するか、準備が完了するまで待ってください。
+Baixando a versão {version}…	Downloading version {version}…	Descargando la versión {version}…	バージョン {version} をダウンロード中…
+Verificando e extraindo o pacote…	Verifying and extracting the package…	Verificando y extrayendo el paquete…	パッケージを検証して展開中…
+Importar shader GLSL 330	Import GLSL 330 shader	Importar shader GLSL 330	GLSL 330 シェーダーを読み込む
+Cancelar	Cancel	Cancelar	キャンセル
+Validar e importar	Validate and import	Validar e importar	検証して読み込む
+Validando o shader no seu driver…	Validating the shader with your driver…	Validando el shader con tu controlador gráfico…	グラフィックドライバーでシェーダーを検証中…
+Esse shader não foi ativado	The shader could not be activated	No se pudo activar el shader	シェーダーを有効にできませんでした
+Não foi possível abrir o modelo	Could not open the template	No se pudo abrir la plantilla	ひな型を開けませんでした
+Sobre o port	About the port	Acerca de la adaptación	この移植版について
+Escolha seu disco uma vez. Nas próximas sessões, é só clicar em jogar.	Select your disc once. After that, press Play to start.	Elige el disco una vez. Después, basta con pulsar Jugar.	ディスクを一度選ぶと、次回から「ゲームを開始」で遊べます。
+SUA ROM	YOUR DISC IMAGE	IMAGEN DEL DISCO	ディスクイメージ
+Compatível com a edição americana SCUS-97472. ISO e RAR/ZIP/7Z são preparados na pasta do aplicativo. A primeira preparação recompila seu disco localmente; depois o cache é reutilizado. Sua ROM original não é alterada.	Supports the North American SCUS-97472 edition. ISO and RAR/ZIP/7Z files are prepared in your data folder. The first preparation recompiles your disc on this PC. Later sessions reuse the cache. Your original file is preserved.	Compatible con la edición norteamericana SCUS-97472. Los ISO y RAR/ZIP/7Z se preparan en tu carpeta de datos. La primera preparación recompila el disco en este PC. Las siguientes sesiones reutilizan la caché. El archivo original se conserva.	北米版 SCUS-97472 に対応。ISO、RAR、ZIP、7Z をデータフォルダーで準備します。初回は PC 上でディスクを再コンパイルし、以降はキャッシュを使います。元のファイルは保持されます。
+CRÉDITOS	CREDITS	CRÉDITOS	クレジット
+Interface: GenissonEmilio, baseada no launcher de ForbiddenMemoriesPC.\nBase nativa: HenryKun55 / Celosia (GPL-3.0).\nRecompilador/runtime: ran-j / PS2Recomp e colaboradores.\nReferência PS2: Tenkaichi3Decomp; launcher: ForbiddenMemoriesPC / CrashBandicootPC.\nShadow of the Colossus pertence a seus respectivos titulares.	Interface: GenissonEmilio, based on the ForbiddenMemoriesPC launcher.\nNative base: HenryKun55 / Celosia (GPL-3.0).\nRecompiler and runtime: ran-j / PS2Recomp and contributors.\nPS2 reference: Tenkaichi3Decomp. Launcher references: ForbiddenMemoriesPC / CrashBandicootPC.\nShadow of the Colossus belongs to its respective rights holders.	Interfaz: GenissonEmilio, basada en el iniciador de ForbiddenMemoriesPC.\nBase nativa: HenryKun55 / Celosia (GPL-3.0).\nRecompilador y entorno de ejecución: ran-j / PS2Recomp y colaboradores.\nReferencia PS2: Tenkaichi3Decomp. Referencias del iniciador: ForbiddenMemoriesPC / CrashBandicootPC.\nShadow of the Colossus pertenece a sus respectivos titulares.	インターフェース: GenissonEmilio、ForbiddenMemoriesPC をベースに作成。\nネイティブ基盤: HenryKun55 / Celosia (GPL-3.0)。\n再コンパイラーとランタイム: ran-j / PS2Recomp とその貢献者。\nPS2 の参考: Tenkaichi3Decomp。ランチャーの参考: ForbiddenMemoriesPC / CrashBandicootPC。\n『ワンダと巨像』の権利は各権利者に帰属します。
+＋  Adicionar ao menu de aplicativos	＋  Add to the applications menu	＋  Añadir al menú de aplicaciones	＋  アプリメニューに追加
+Abra o launcher pelo menu de aplicativos depois de criar o atalho.	After creating a shortcut, open the launcher from the applications menu.	Tras crear el acceso directo, abre el iniciador desde el menú de aplicaciones.	ショートカットを作成すると、アプリメニューから起動できます。
+Escolha sua ROM de Shadow of the Colossus	Choose your Shadow of the Colossus disc image	Elige la imagen de disco de Shadow of the Colossus	『ワンダと巨像』のディスクイメージを選択
+Selecionar ROM	Select disc image	Seleccionar imagen de disco	ディスクイメージを選択
+Escolha um arquivo deste computador.	Choose a file on this computer.	Elige un archivo de este equipo.	この PC にあるファイルを選択してください。
+Confira o arquivo escolhido	Check the selected file	Revisa el archivo seleccionado	選択したファイルを確認してください
+SCUS-97472  ·  Edição americana validada	SCUS-97472  ·  North American edition verified	SCUS-97472  ·  Edición norteamericana validada	SCUS-97472  ·  北米版を確認済み
+●  Pronto para jogar	●  Ready to play	●  Listo para jugar	●  プレイできます
+Trocar ROM…	Change disc image…	Cambiar imagen de disco…	ディスクイメージを変更…
+Preparando seu jogo…	Preparing your game…	Preparando el juego…	ゲームを準備中…
+Não foi possível preparar essa ROM.	Could not prepare this disc image.	No se pudo preparar esta imagen de disco.	このディスクイメージを準備できませんでした。
+Abrindo o jogo…	Starting the game…	Iniciando el juego…	ゲームを起動中…
+Não foi possível abrir o jogo.	Could not launch the game.	No se pudo iniciar el juego.	ゲームを起動できませんでした。
+O jogo não abriu	The game did not start	El juego no se inició	ゲームの起動に失敗しました
+Em jogo…	Playing…	En partida…	プレイ中…
+●  Jogo em execução	●  Game running	●  Juego en ejecución	●  ゲームを実行中
+O jogo encerrou com um erro.	The game exited with an error.	El juego se cerró con un error.	ゲームがエラーで終了しました。
+O jogo foi encerrado	The game closed	El juego se cerró	ゲームが終了しました
+Código de saída {code}.\n\nDetalhes em {path}	Exit code {code}.\n\nDetails in {path}	Código de salida {code}.\n\nDetalles en {path}	終了コード {code}。\n\n詳細: {path}
+Meus saves	My saves	Mis partidas	セーブデータ
+Fechar	Close	Cerrar	閉じる
+Leve sua aventura para outro PC	Move your save to another PC	Lleva tu partida a otro PC	別の PC にセーブデータを移す
+Importe seu cartão ou exporte uma cópia para usar em outro computador.\nDepois, escolha Carregar jogo no menu do próprio jogo.	Import your memory card or export a copy for another computer.\nThen choose Load Game from the game's menu.	Importa tu tarjeta de memoria o exporta una copia para otro equipo.\nDespués, elige Cargar partida en el menú del juego.	メモリーカードを読み込むか、別の PC 用にコピーを書き出します。\nその後、ゲームのメニューで「ロード」を選択します。
+Estados rápidos: F5 salva e F8 carrega durante o jogo.\nNo menu F1 → Estados, escolha o slot rápido ou um dos cinco slots manuais.\nEstados exigem a mesma versão do runtime e do disco. Continue salvando também nos altares.	During play, F5 quick saves and F8 quick loads.\nF1 → Save States offers one quick slot and five manual slots.\nSave states need the same runtime and disc version. Keep saving at shrines too.	Durante la partida, F5 guarda y F8 carga rápidamente.\nEn F1 → Estados, elige la ranura rápida o una de las cinco manuales.\nLos estados requieren la misma versión del juego y del disco. Guarda también en los altares.	プレイ中に F5 でクイックセーブ、F8 でクイックロードします。\nF1 → ステートでクイック枠または 5 つの手動枠を選べます。\nステートには同じランタイムとディスクのバージョンが必要です。祠でもセーブを続けてください。
+Abrir pasta dos estados ↗	Open save state folder ↗	Abrir carpeta de estados ↗	ステートのフォルダーを開く ↗
+Não foi possível abrir a pasta	Could not open the folder	No se pudo abrir la carpeta	フォルダーを開けませんでした
+Cartão 1 disponível.	Memory card 1 is available.	La tarjeta de memoria 1 está disponible.	メモリーカード 1 を利用できます。
+Nenhum cartão salvo neste computador.	No memory card saved on this computer.	No hay tarjetas de memoria guardadas en este equipo.	この PC に保存されたメモリーカードはありません。
+Abrir pasta ↗	Open folder ↗	Abrir carpeta ↗	フォルダーを開く ↗
+Importar cartão…	Import memory card…	Importar tarjeta de memoria…	メモリーカードを読み込む…
+Exportar cartão…	Export memory card…	Exportar tarjeta de memoria…	メモリーカードを書き出す…
+Feche o jogo antes de importar ou exportar o cartão.	Close the game before importing or exporting a memory card.	Cierra el juego antes de importar o exportar la tarjeta.	メモリーカードを読み込むか書き出す前にゲームを終了してください。
+Importar cartão PS2	Import PS2 memory card	Importar tarjeta PS2	PS2 メモリーカードを読み込む
+Exportar cartão PS2	Export PS2 memory card	Exportar tarjeta PS2	PS2 メモリーカードを書き出す
+Importar	Import	Importar	読み込む
+Exportar	Export	Exportar	書き出す
+Cartão PS2 (.ps2)	PS2 memory card (.ps2)	Tarjeta de memoria PS2 (.ps2)	PS2 メモリーカード (.ps2)
+Cartão importado. Abra o jogo e escolha Carregar jogo.	Memory card imported. Start the game and choose Load Game.	Tarjeta importada. Abre el juego y elige Cargar partida.	メモリーカードを読み込みました。ゲームを起動し「ロード」を選択してください。
+Cartão anterior preservado em {path}	Previous memory card backed up at {path}	Se guardó una copia de la tarjeta anterior en {path}	以前のメモリーカードのバックアップ: {path}
+Cópia exportada. No outro PC, use Meus saves → Importar cartão.	Copy exported. On the other PC, choose My saves → Import memory card.	Copia exportada. En el otro PC, elige Mis partidas → Importar tarjeta.	コピーを書き出しました。別の PC で「セーブデータ → メモリーカードを読み込む」を選択してください。
+Não foi possível transferir o cartão	Could not transfer the memory card	No se pudo transferir la tarjeta de memoria	メモリーカードを転送できませんでした
+Feche o jogo para importar ou exportar com segurança.	Close the game to import or export safely.	Cierra el juego para importar o exportar de forma segura.	読み込みまたは書き出しの前にゲームを終了してください。
+Não foi possível abrir o aplicativo padrão	Could not open the default application	No se pudo abrir la aplicación predeterminada	既定のアプリを開けませんでした
+✓  Atalho criado! Procure “Shadow of the Colossus PC” no menu de aplicativos.	✓  Shortcut created. Look for “Shadow of the Colossus PC” in the applications menu.	✓  Acceso directo creado. Busca «Shadow of the Colossus PC» en el menú de aplicaciones.	✓  ショートカットを作成しました。アプリメニューで「Shadow of the Colossus PC」を探してください。
+Não foi possível criar o atalho	Could not create the shortcut	No se pudo crear el acceso directo	ショートカットを作成できませんでした
+Teclado e mouse	Keyboard and mouse	Teclado y ratón	キーボードとマウス
+Restaurar padrão	Restore defaults	Restaurar valores predeterminados	初期設定に戻す
+Salvar perfil	Save profile	Guardar perfil	プロファイルを保存
+Clique numa atribuição para trocar a tecla ou o botão do mouse.\nF5 salva um estado rápido; F8 carrega. F1 gerencia estados e libera o cursor. F11 alterna a tela cheia.	Click a binding to change its key or mouse button.\nF5 quick saves and F8 quick loads. F1 manages states and releases the cursor. F11 toggles fullscreen.	Haz clic en una asignación para cambiar la tecla o el botón del ratón.\nF5 guarda y F8 carga. F1 gestiona estados y libera el cursor. F11 alterna la pantalla completa.	割り当てをクリックしてキーやマウスボタンを変更します。\nF5 でクイックセーブ、F8 でロードします。F1 でステートを管理し、カーソルを解放します。F11 で全画面を切り替えます。
+Mover a câmera com o mouse	Control the camera with the mouse	Controlar la cámara con el ratón	マウスでカメラを操作
+Inverter câmera horizontal	Invert horizontal camera	Invertir cámara horizontal	カメラの左右を反転
+Inverter câmera vertical	Invert vertical camera	Invertir cámara vertical	カメラの上下を反転
+Sensibilidade do mouse	Mouse sensitivity	Sensibilidad del ratón	マウス感度
+Pressione uma tecla, ou clique nesta área com o botão desejado.\nEsc também pode ser atribuído. Delete remove a atribuição.	Press a key, or click here with the mouse button to assign.\nEsc can be assigned. Delete clears the binding.	Pulsa una tecla o haz clic aquí con el botón del ratón que quieras asignar.\nPuedes asignar Esc. Supr elimina la asignación.	キーを押すか、割り当てたいマウスボタンでここをクリックします。\nEsc も割り当てられます。Delete で割り当てを解除します。
+Tecla não suportada ou reservada (F1 / F5 / F8 / F9 / F11). Escolha outra ou cancele.	Key is unsupported or reserved (F1 / F5 / F8 / F9 / F11). Choose another or cancel.	Tecla no admitida o reservada (F1 / F5 / F8 / F9 / F11). Elige otra o cancela.	未対応または予約済みのキーです (F1 / F5 / F8 / F9 / F11)。別のキーを選ぶか、キャンセルしてください。
+{button} já está em ‘{action}’.\nRemova a atribuição anterior ou escolha outro botão.	{button} is assigned to ‘{action}’.\nClear the previous binding or choose another button.	{button} ya está asignado a «{action}».\nElimina la asignación anterior o elige otro botón.	{button} は「{action}」に割り当て済みです。\n割り当てを解除するか、別のボタンを選んでください。
+Padrão restaurado. Clique em Salvar perfil para aplicar.	Defaults restored. Choose Save profile to apply.	Valores predeterminados restaurados. Pulsa Guardar perfil para aplicarlos.	初期設定に戻しました。「プロファイルを保存」で適用します。
+Não atribuído	Unassigned	Sin asignar	未割り当て
+Mouse esquerdo	Left mouse button	Botón izquierdo del ratón	左マウスボタン
+Mouse direito	Right mouse button	Botón derecho del ratón	右マウスボタン
+Mouse central	Middle mouse button	Botón central del ratón	中央マウスボタン
+Mouse lateral 1	Mouse side button 1	Botón lateral 1 del ratón	マウスのサイドボタン 1
+Mouse lateral 2	Mouse side button 2	Botón lateral 2 del ratón	マウスのサイドボタン 2
+Tecla {code}	Key {code}	Tecla {code}	キー {code}
+Tecla inválida. F1, F5, F8, F9 e F11 são atalhos reservados.	Invalid key. F1, F5, F8, F9 and F11 are reserved shortcuts.	Tecla no válida. F1, F5, F8, F9 y F11 son atajos reservados.	無効なキーです。F1、F5、F8、F9、F11 は予約済みです。
+Cada tecla ou botão deve ter apenas uma ação. Remova a atribuição anterior.	Each key or button can have one action. Remove the previous binding.	Cada tecla o botón admite una sola acción. Elimina la asignación anterior.	各キーやボタンには 1 つの操作を割り当てられます。以前の割り当てを解除してください。
+Opção de mouse inválida.	Invalid mouse option.	Opción de ratón no válida.	マウス設定が無効です。
+Use uma sensibilidade entre 0,1 e 5,0.	Use a sensitivity between 0.1 and 5.0.	Usa una sensibilidad entre 0,1 y 5,0.	感度には 0.1 から 5.0 までの値を指定してください。
+Mover para frente	Move forward	Avanzar	前進
+Mover para trás	Move backward	Retroceder	後退
+Mover para a esquerda	Move left	Moverse a la izquierda	左に移動
+Mover para a direita	Move right	Moverse a la derecha	右に移動
+Pular / montar · △	Jump / mount · △	Saltar / montar · △	ジャンプ / 乗る · △
+Atacar · □	Attack · □	Atacar · □	攻撃 · □
+Agarrar · R1	Grab · R1	Agarrarse · R1	つかむ · R1
+Ação / luz da espada · ○	Action / sword light · ○	Acción / luz de la espada · ○	アクション / 剣の光 · ○
+Chamar / acelerar Agro · ✕	Call / speed up Agro · ✕	Llamar / acelerar a Agro · ✕	アグロを呼ぶ / 加速 · ✕
+Arma anterior · ←	Previous weapon · ←	Arma anterior · ←	前の武器 · ←
+Próxima arma · →	Next weapon · →	Arma siguiente · →	次の武器 · →
+Pausar · Start	Pause · Start	Pausa · Start	一時停止 · Start
+Mapa · Select	Map · Select	Mapa · Select	マップ · Select
+Direcional ↑	D-pad ↑	Cruceta ↑	十字キー ↑
+Direcional ↓	D-pad ↓	Cruceta ↓	十字キー ↓
+Câmera para a esquerda	Camera left	Cámara a la izquierda	カメラを左へ
+Câmera para a direita	Camera right	Cámara a la derecha	カメラを右へ
+Câmera para cima	Camera up	Cámara hacia arriba	カメラを上へ
+Câmera para baixo	Camera down	Cámara hacia abajo	カメラを下へ
+Confirmar nos menus · ✕	Confirm in menus · ✕	Confirmar en menús · ✕	メニューで決定 · ✕
+Voltar nos menus · ○	Back in menus · ○	Volver en menús · ○	メニューで戻る · ○
+Espaço	Space	Espacio	スペース
+Shift esquerdo	Left Shift	Mayús izquierda	左 Shift
+Ctrl esquerdo	Left Ctrl	Ctrl izquierdo	左 Ctrl
+Alt esquerdo	Left Alt	Alt izquierdo	左 Alt
+Shift direito	Right Shift	Mayús derecha	右 Shift
+Ctrl direito	Right Ctrl	Ctrl derecho	右 Ctrl
+Alt direito	Right Alt	Alt derecho	右 Alt
+Resolução da janela	Window resolution	Resolución de la ventana	ウィンドウの解像度
+Automática	Automatic	Automática	自動
+Ativar upscaling AMD FSR 1	Enable AMD FSR 1 upscaling	Activar escalado AMD FSR 1	AMD FSR 1 アップスケーリングを有効にする
+Ajuste a resolução interna no jogo em F1 → Qualidade → Resolução.	Set internal rendering resolution in F1 → Quality → Resolution.	Ajusta la resolución interna en F1 → Calidad → Resolución.	内部描画の解像度はゲーム内の F1 → 品質 → 解像度で設定します。
+O arquivo escolhido não foi encontrado.	The selected file was not found.	No se encontró el archivo seleccionado.	選択したファイルが見つかりませんでした。
+Lendo e validando o disco…	Reading and verifying the disc…	Leyendo y verificando el disco…	ディスクを読み込み、検証中…
+A compilação não terminou. Consulte {path}	Compilation did not finish. See {path}	La compilación no terminó. Consulta {path}	コンパイルが完了しませんでした。{path} を確認してください。
+Escolha sua ROM para continuar. Os arquivos locais estão ausentes ou incompletos.	Choose your disc image again. The local files are missing or incomplete.	Vuelve a elegir la imagen del disco. Faltan archivos locales o están incompletos.	ディスクイメージを選び直してください。ローカルファイルが存在しないか、不完全です。
+O recompilador não produziu código.	The recompiler did not generate code.	El recompilador no generó código.	再コンパイラーがコードを生成しませんでした。
+Compilando para {system}: {done}/{total} blocos…	Compiling for {system}: {done}/{total} batches…	Compilando para {system}: {done}/{total} bloques…	{system} 向けにコンパイル中: {done}/{total} ブロック…
+Não foi possível carregar {name}. Consulte {path}	Could not load {name}. See {path}	No se pudo cargar {name}. Consulta {path}	{name} を読み込めませんでした。{path} を確認してください。
+Compilação já pronta. Reutilizando o cache…	Game already compiled. Reusing its cache…	El juego ya está compilado. Reutilizando la caché…	コンパイル済みのキャッシュを使用中…
+Recompilando o executável de inicialização…	Recompiling the boot executable…	Recompilando el ejecutable de arranque…	起動用実行ファイルを再コンパイル中…
+Carregando o módulo {name}…	Loading module {name}…	Cargando el módulo {name}…	モジュール {name} を読み込み中…
+Recompilando {name} para {system}…	Recompiling {name} for {system}…	Recompilando {name} para {system}…	{name} を {system} 向けに再コンパイル中…
+Escolha um fragment shader GLSL 330: .frag, .fs ou .glsl.	Choose a GLSL 330 fragment shader: .frag, .fs or .glsl.	Elige un shader de fragmentos GLSL 330: .frag, .fs o .glsl.	GLSL 330 のフラグメントシェーダー (.frag、.fs、.glsl) を選択してください。
+O shader deve ser um texto de até 256 KiB.	The shader must be a text file up to 256 KiB.	El shader debe ser un archivo de texto de hasta 256 KiB.	シェーダーは 256 KiB 以下のテキストファイルにしてください。
+Salve o shader como texto UTF-8.	Save the shader as UTF-8 text.	Guarda el shader como texto UTF-8.	シェーダーを UTF-8 テキストとして保存してください。
+Este port usa GLSL 330. Veja o modelo de shader na aba Gráficos.	This port uses GLSL 330. See the shader template in Graphics.	Esta adaptación usa GLSL 330. Consulta la plantilla en Gráficos.	この移植版は GLSL 330 を使います。「グラフィック」のひな型を確認してください。
+O driver demorou para validar o shader. Consulte last-shader.log.	Shader validation timed out. See last-shader.log.	Se agotó el tiempo de validación del shader. Consulta last-shader.log.	シェーダーの検証がタイムアウトしました。last-shader.log を確認してください。
+Não foi possível validar o shader. Detalhes em {path}	Could not validate the shader. See {path}	No se pudo validar el shader. Consulta {path}	シェーダーを検証できませんでした。詳細: {path}
+Este cartão já é o cartão usado pelo jogo.	The game already uses this memory card.	El juego ya usa esta tarjeta.	このメモリーカードはすでにゲームで使用されています。
+Escolha um cartão PS2 formatado de 8 MB no formato PCSX2 (.ps2, 8.650.752 bytes). Um save individual .psu/.max não é um cartão.	Choose a formatted 8 MB PS2 memory card in PCSX2 format (.ps2, 8,650,752 bytes). Individual .psu or .max saves cannot be imported here.	Elige una tarjeta PS2 formateada de 8 MB en formato PCSX2 (.ps2, 8 650 752 bytes). Aquí no se pueden importar partidas .psu o .max individuales.	PCSX2 形式 (.ps2、8,650,752 バイト) でフォーマットした 8 MB の PS2 メモリーカードを選択してください。個別の .psu、.max セーブには対応していません。
+Ainda não existe um cartão. Salve no jogo ou importe seu cartão primeiro.	No memory card yet. Save in game or import your memory card first.	Aún no hay tarjeta. Guarda en el juego o importa tu tarjeta primero.	メモリーカードがありません。ゲーム内でセーブするか、カードを読み込んでください。
+Escolha outra pasta para exportar uma cópia.	Choose another folder for the exported copy.	Elige otra carpeta para exportar la copia.	書き出すコピーには別のフォルダーを選択してください。
+Não foi possível abrir o aplicativo padrão deste computador.\nO arquivo continua disponível em:\n{path}	Could not open this computer's default application.\nThe file is still available at:\n{path}	No se pudo abrir la aplicación predeterminada de este equipo.\nEl archivo sigue disponible en:\n{path}	この PC の既定のアプリを開けませんでした。\nファイルの場所:\n{path}
+Escolha ISO, ZIP, RAR ou 7Z do Shadow of the Colossus USA.	Choose an ISO, ZIP, RAR or 7Z of Shadow of the Colossus (USA).	Elige un ISO, ZIP, RAR o 7Z de Shadow of the Colossus (USA).	北米版『ワンダと巨像』の ISO、ZIP、RAR、7Z を選択してください。
+Há arquivos compactados demais dentro de outros arquivos.	The archive has too many nested archives.	El archivo contiene demasiados archivos comprimidos anidados.	アーカイブの入れ子が多すぎます。
+Escolha uma imagem DVD ISO com setores de 2048 bytes.	Choose a DVD ISO image with 2048-byte sectors.	Elige una imagen de DVD ISO con sectores de 2048 bytes.	セクターが 2048 バイトの DVD ISO イメージを選択してください。
+Edição incompatível. É necessário SCUS-97472 (USA).	Unsupported edition. SCUS-97472 (USA) is required.	Edición incompatible. Se requiere SCUS-97472 (USA).	このエディションには対応していません。北米版 SCUS-97472 が必要です。
+{name}: edição incompatível ou arquivo modificado.	{name}: unsupported edition or modified file.	{name}: edición incompatible o archivo modificado.	{name}: 未対応のエディションまたは変更されたファイルです。
+Os dados NICO.DAT estão ausentes ou incompatíveis.	NICO.DAT is missing or incompatible.	NICO.DAT no está o es incompatible.	NICO.DAT が存在しないか、非対応です。
+Diretórios ISO profundos demais.	The ISO directory structure is too deep.	La estructura de directorios de la ISO es demasiado profunda.	ISO のディレクトリ階層が深すぎます。
+ISO truncada.	The ISO is truncated.	La ISO está incompleta.	ISO が途中で切れています。
+Esperado exatamente um disco; encontrados {count}.	Expected one disc image, found {count}.	Se esperaba una imagen de disco y se encontraron {count}.	ディスクイメージが 1 つ必要ですが、{count} 個見つかりました。
+A pasta de destino já existe. Os dados foram preservados.	The destination folder exists. Its data was preserved.	La carpeta de destino ya existe. Se conservaron sus datos.	保存先のフォルダーは既に存在します。データは保持されています。

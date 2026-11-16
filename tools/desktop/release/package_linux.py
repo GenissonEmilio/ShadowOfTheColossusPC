@@ -2,6 +2,7 @@
 """Package only the launcher, open runtime and compiler; never game output."""
 from pathlib import Path
 import hashlib
+import json
 import shutil
 import sys
 import tarfile
@@ -18,6 +19,8 @@ shutil.copy2(ROOT / 'LICENSE',OUT / 'LICENSE')
 shutil.copy2(ROOT / 'docs/SHADERS.md',OUT / 'SHADERS.md')
 shutil.copytree(ROOT / 'artifacts/distribution-licenses',OUT / 'licenses')
 shutil.copy2(ROOT / 'artifacts/third-party-sources.tar.gz',OUT / 'third-party-sources.tar.gz')
+(OUT / 'release.json').write_text(json.dumps({"version": VERSION, "platform": "linux-x86_64"}) + "\n",
+                                  encoding="utf-8")
 (OUT / 'LEIA-ME.txt').write_text('''Shadow of the Colossus PC — Linux x86_64
 
 Abra ShadowOfTheColossusPC e escolha seu disco ISO/7Z/ZIP/RAR USA SCUS-97472.
@@ -49,6 +52,8 @@ Na aba Controles, "Configurar meu controle" associa botoes e analogicos de
 controles sem perfil automatico. O perfil e salvo e usado tambem no menu F1.
 
 Na aba Gráficos, escolha Original 4:3 (faixas laterais) ou Esticar (tela toda).
+Escolha o tamanho da janela e ative o FSR 1 quando quiser ampliar a imagem.
+No jogo, F1 > Qualidade > Resolução ajusta a resolução interna.
 Importe fragment shaders GLSL 330 (.frag/.fs/.glsl) ou use Nitidez HD.
 Shaders são validados no driver local; mudanças valem na próxima abertura.
 São filtros da imagem final, não pacotes de texturas HD. Desativar remove o filtro.
@@ -57,7 +62,9 @@ Dados e saves: ~/.local/share/ShadowOfTheColossusPC (ou XDG_DATA_HOME).
 Meus saves: importe/exporte cartões PS2/PCSX2 .ps2 de 8 MB entre computadores.
 Feche o jogo antes. O cartão anterior fica em player/memcards/backups ao importar.
 No jogo, escolha Carregar jogo para continuar a aventura importada.
-Os arquivos originais não são alterados. Nenhum dado é enviado para a internet.
+O launcher consulta os releases públicos do GitHub. Use Atualizar para baixar,
+verificar e instalar uma nova versão. ROMs e saves ficam no seu computador.
+Em Configurações, escolha Português, English, Español ou 日本語.
 No painel Sobre é possível adicionar o jogo ao menu de aplicativos.
 
 Base nativa: HenryKun55/celosia e ran-j/PS2Recomp (GPL-3.0).

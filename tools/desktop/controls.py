@@ -1,5 +1,6 @@
 """Persistent keyboard/mouse profile shared with the native input backend."""
 from __future__ import annotations
+from language import translate as tr
 import math
 import os
 from pathlib import Path
@@ -37,15 +38,15 @@ def valid_binding(code):
 
 def binding_label(code):
     if code == 0:
-        return "Não atribuído"
+        return tr("Não atribuído")
     if code < 0:
-        return {-1: "Mouse esquerdo", -2: "Mouse direito", -3: "Mouse central",
-                -4: "Mouse lateral 1", -5: "Mouse lateral 2"}.get(code, f"Mouse {-code}")
+        return {-1: tr("Mouse esquerdo"), -2: tr("Mouse direito"), -3: tr("Mouse central"),
+                -4: tr("Mouse lateral 1"), -5: tr("Mouse lateral 2")}.get(code, f"Mouse {-code}")
     if code in SPECIAL_KEYS:
-        return SPECIAL_KEYS[code]
+        return tr(SPECIAL_KEYS[code])
     if 290 <= code <= 301:
         return f"F{code - 289}"
-    return chr(code) if 33 <= code <= 96 else f"Tecla {code}"
+    return chr(code) if 33 <= code <= 96 else tr("Tecla {code}").format(code=code)
 
 
 class Controls:
@@ -81,16 +82,16 @@ class Controls:
         result = {key: values.get(key, default) for key, default in DEFAULTS.items()}
         for key, _, _ in ACTIONS:
             if not valid_binding(result[key]):
-                raise ValueError("Tecla inválida. F1, F5, F8, F9 e F11 são atalhos reservados.")
+                raise ValueError(tr("Tecla inválida. F1, F5, F8, F9 e F11 são atalhos reservados."))
         used = [result[key] for key, _, _ in ACTIONS if result[key]]
         if len(used) != len(set(used)):
-            raise ValueError("Cada tecla ou botão deve ter apenas uma ação. Remova a atribuição anterior.")
+            raise ValueError(tr("Cada tecla ou botão deve ter apenas uma ação. Remova a atribuição anterior."))
         for key in ("mouse_camera", "invert_x", "invert_y"):
             if result[key] not in (0, 1):
-                raise ValueError("Opção de mouse inválida.")
+                raise ValueError(tr("Opção de mouse inválida."))
         number = result["sensitivity"]
         if not isinstance(number, (int, float)) or not math.isfinite(number) or not .1 <= number <= 5.:
-            raise ValueError("Use uma sensibilidade entre 0,1 e 5,0.")
+            raise ValueError(tr("Use uma sensibilidade entre 0,1 e 5,0."))
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, temporary = tempfile.mkstemp(prefix=".controls-", dir=self.path.parent)
         try:

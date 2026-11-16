@@ -1,0 +1,90 @@
+name: Windows native port
+on:
+  push:
+    paths-ignore: ['docs/**', 'README.md', '.recomp.json']
+  pull_request:
+    paths-ignore: ['docs/**', 'README.md', '.recomp.json']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: git
+          pacboy: >-
+            gcc:p cmake:p ninja:p pkgconf:p ffmpeg:p zlib:p
+            python:p python-gobject:p python-cairo:p gtk3:p SDL2:p libarchive:p
+      - name: Build ROM-free native runtime and launcher
+        run: |
+          cmake -S PS2Recomp -B build/windows -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS=-msse4.1 \
+            -DPython3_EXECUTABLE="$(cygpath -am /ucrt64/bin/python.exe)" \
+            -DPS2X_BUILD_WINDOWS_KIT=ON -DPS2X_BUILD_STUDIO=OFF \
+            -DPS2X_BUILD_ANALYZER=OFF -DPS2X_BUILD_TEST=OFF \
+            -DPS2X_ENABLE_DEBUG_UI=OFF -DPS2X_ENABLE_AGRESSIVE_LOGS=OFF \
+            -DPS2X_ENABLE_IOP_RPC_TRACE=OFF
+          cmake --build build/windows --parallel 2 --target \
+            ps2_recomp sotc-windows-base sotc-video-tool sotc-input-tool ShadowOfTheColossusPC
+      - name: Package native launcher and compiler
+        run: |
+          /ucrt64/bin/python.exe -X utf8 tools/windows/package.py --build build/windows --prefix /ucrt64 --destination dist/windows
+      - name: Validate relocated kit without MSYS2 on PATH
+        shell: pwsh
+        run: |
+          $errorActionPreference = 'Stop'
+          $archive = (Get-ChildItem dist/windows/*.zip).FullName
+          $testRoot = Join-Path $env:RUNNER_TEMP 'SotC relocated package'
+          Expand-Archive -LiteralPath $archive -DestinationPath $testRoot
+          $program = Join-Path $testRoot 'ShadowOfTheColossusPC'
+          $bin = Join-Path $program 'compiler/toolchain/bin'
+          $env:PATH = "$bin;$env:SystemRoot\System32;$env:SystemRoot"
+          $env:PYTHONHOME = Join-Path $program 'compiler/toolchain'
+          $env:PYTHONDONTWRITEBYTECODE = '1'
+          & "$bin/python.exe" -X utf8 tools/linux/test_compiler.py --program $program
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$program/compiler/bin/ps2_recomp.exe" --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $shots = Join-Path $env:GITHUB_WORKSPACE 'artifacts/windows-launcher'
+          New-Item -Path $shots -ItemType Directory -Force | Out-Null
+          foreach ($language in @('en', 'ja')) {
+            $profile = Join-Path $testRoot "player-$language"
+            $image = Join-Path $shots "home-$language.png"
+            New-Item -Path $profile -ItemType Directory -Force | Out-Null
+            @{ language = $language } | ConvertTo-Json |
+              Set-Content -Encoding utf8NoBOM (Join-Path $profile 'launcher-preferences.json')
+            $launcher = Start-Process -FilePath "$program/ShadowOfTheColossusPC.exe" -PassThru `
+              -ArgumentList "--data-dir `"$profile`" --page home --screenshot `"$image`""
+            if (!$launcher.WaitForExit(60000)) { Stop-Process -Id $launcher.Id; throw 'Launcher timed out' }
+            if ($launcher.ExitCode -ne 0 -or (Get-Item $image).Length -le 1000) {
+              Get-Content (Join-Path $profile 'last-launcher.log') -ErrorAction SilentlyContinue
+              throw "Launcher screenshot ($language) failed, exit code $($launcher.ExitCode)"
+            }
+          }
+          if ((Get-FileHash "$shots/home-en.png").Hash -eq (Get-FileHash "$shots/home-ja.png").Hash) {
+            throw 'English and Japanese launcher screenshots were identical'
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Windows launcher screenshots
+          path: artifacts/windows-launcher/*.png
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ShadowOfTheColossusPC-windows-x86_64
+          path: |
+            dist/windows/*.zip
+            dist/windows/*.sha256
+          if-no-files-found: error

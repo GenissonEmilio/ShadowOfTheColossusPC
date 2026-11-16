@@ -24,8 +24,10 @@ namespace hostmenu
         std::atomic<bool> fullscreen{false};
         std::atomic<int> volume{10};   // 0..10
         std::atomic<int> language{0};  // 0 auto, 1 Portuguese, 2 English
-#if defined(__linux__) && !defined(__ANDROID__)
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
         std::atomic<bool> vsync{true};
+        std::atomic<int> windowResolution{0};
+        std::atomic<bool> upscaleFsr{false};
 #endif
     };
 

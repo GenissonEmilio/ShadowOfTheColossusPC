@@ -193,7 +193,7 @@ jobs:
           for asset in hero.png icon.png; do
             cmp tools/desktop/assets/$asset dist/ShadowOfTheColossusPC/_internal/assets/$asset
           done
-          for page in home graphics controls about; do
+          for page in home graphics controls settings about; do
             docker run --rm --init --cpus=2 --network=none -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
               sotc-linux-clean xvfb-run -a -s '-screen 0 1920x1080x24' \
               /src/dist/ShadowOfTheColossusPC/ShadowOfTheColossusPC \

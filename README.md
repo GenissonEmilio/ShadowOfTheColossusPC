@@ -1,6 +1,6 @@
-# Shadow of the Colossus PC — Linux
+# Shadow of the Colossus PC
 
-Port independente da edição **PS2 USA SCUS-97472**, com launcher em português,
+Port independente da edição **PS2 USA SCUS-97472**, com launcher para Linux e Windows,
 recompilador local e renderizador nativo OpenGL. Desenvolvido a partir de
 [Celosia](https://github.com/HenryKun55/celosia) e
 [PS2Recomp](https://github.com/ran-j/PS2Recomp).
@@ -18,8 +18,9 @@ continua em andamento na base Celosia.
 
 ## Jogar
 
-1. Baixe o pacote Linux em [Releases](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases).
-2. Extraia a pasta inteira e abra `ShadowOfTheColossusPC`.
+1. Baixe o pacote para o seu sistema em [Releases](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases).
+2. Extraia a pasta inteira e abra `ShadowOfTheColossusPC` no Linux ou
+   `ShadowOfTheColossusPC.exe` no Windows.
 3. Escolha seu disco `.iso`, `.7z`, `.zip` ou `.rar` da edição USA.
 4. Aguarde a primeira compilação. Nas próximas sessões, clique em **Iniciar jogo**.
 
@@ -29,12 +30,14 @@ em paralelo, e a interface mostra o progresso. O cache é separado por versão d
 compilador/runtime e validado antes de ser reutilizado.
 Atualizações apenas da interface, shaders ou documentação preservam esse cache.
 
-Requisitos: Linux x86_64 com **glibc 2.39+** (Ubuntu 24.04+, Fedora 40+), GPU com
-OpenGL 3.3, 8 GB de RAM e pelo menos 15 GB livres. Uma CPU moderna e 16 GB de RAM
-são recomendáveis para a compilação. Este pacote é exclusivamente para Linux.
+Requisitos comuns: CPU x64 com SSE4.1, GPU com OpenGL 3.3, 8 GB de RAM e 15 GB
+livres. Linux requer **glibc 2.39+** (Ubuntu 24.04+, Fedora 40+). O pacote
+Windows é portátil e requer Windows 10 versão 1903 ou posterior, ou Windows 11.
+Uma CPU moderna e 16 GB de RAM são recomendáveis para a recompilação.
 
 A seção **Sobre** cria um atalho no menu de aplicativos. Os dados ficam em
-`~/.local/share/ShadowOfTheColossusPC` (ou `XDG_DATA_HOME`). Os saves são imagens
+`~/.local/share/ShadowOfTheColossusPC` (ou `XDG_DATA_HOME`) no Linux e em
+`%LOCALAPPDATA%\ShadowOfTheColossusPC` no Windows. Os saves são imagens
 de memory card em `player/memcards`. **Meus saves** permite importar e exportar
 um cartão PS2/PCSX2 de 8 MB (`.ps2`, 8.650.752 bytes) entre computadores. Feche o
 jogo antes de transferir; ao importar, o cartão anterior fica em
@@ -42,9 +45,21 @@ jogo antes de transferir; ao importar, o cartão anterior fica em
 O botão **Abrir pasta** usa o aplicativo padrão do sistema com o ambiente de
 bibliotecas restaurado, inclusive no pacote portátil. A ROM original permanece intacta.
 
+## Preferências e atualizações do launcher
+
+Em **Configurações → Idioma do launcher**, escolha Português, English, Español
+ou 日本語. A escolha inicial segue o sistema quando disponível, com inglês como
+alternativa. Em jogo, **F1 → Sistema → Idioma** oferece inglês e português.
+
+O launcher consulta as releases públicas do GitHub ao abrir. Quando encontra
+uma versão compatível, mostra **Atualizar** na tela inicial e nas configurações.
+O botão baixa o pacote, confere o SHA-256 publicado pelo GitHub, atualiza a pasta
+do launcher e abre a nova versão. A pasta de dados fica separada. A primeira
+versão com o atualizador precisa ser instalada a partir do pacote da release.
+
 ## Save states
 
-**F5** grava o estado rápido; **F8** restaura esse ponto. No menu **F1 → Estados**,
+No Linux, **F5** grava o estado rápido e **F8** restaura esse ponto. No menu **F1 → Estados**,
 escolha o slot rápido ou um dos cinco slots manuais para salvar, carregar e
 excluir. O gerenciador mostra a data e o tamanho dos estados e pede confirmação
 para substituir ou excluir um slot. Os arquivos ficam em `player/savestates`;
@@ -72,7 +87,11 @@ monitor atual por inteiro. **Original 4:3** preserva a proporção e deixa faixa
 nas laterais de telas largas; **Esticar** preenche toda a tela. F11 alterna entre
 tela cheia e janela e salva a preferência. O menu F1 também ajusta a proporção.
 
-No Linux, **F1 → Vídeo → VSync** sincroniza a apresentação com o monitor
+Escolha o tamanho da janela e o **FSR 1** na aba **Gráficos** ou em **F1 → Vídeo**.
+Use **F1 → Qualidade → Resolução** para ajustar a resolução de renderização
+interna. O FSR 1 amplia a imagem da resolução interna para a área de exibição.
+
+**F1 → Vídeo → VSync** sincroniza a apresentação com o monitor
 para reduzir tearing. A opção vem ligada e pode ser alterada durante o jogo.
 
 **Importar shader…** copia e compila no seu driver um fragment shader de
@@ -97,6 +116,11 @@ pelo SDL2 usam a base de mapeamentos incluída e o perfil salvo em
 **Configurar meu controle…**. A interface mostra os atalhos quando o controle
 é conectado. A navegação funciona com a janela do launcher em foco e libera
 o dispositivo enquanto o jogo ou a calibração estão abertos.
+
+Em **Configurações → Ícones dos botões no jogo**, escolha PlayStation ou Xbox.
+A escolha troca os ícones da interface do port e de elementos do jogo que
+usam o atlas de controle. Legendas de tutorial que têm o texto embutido na arte
+original continuam no formato do disco.
 
 | Teclado | Controle PS2 |
 | --- | --- |

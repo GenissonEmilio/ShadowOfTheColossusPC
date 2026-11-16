@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Compile/link an original synthetic fixture through the shipped toolchain."""
 import argparse
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -29,5 +30,6 @@ void original_test_function(uint8_t*, R5900Context* ctx, PS2Runtime*) { SET_GPR_
         print(pipeline.log.read_text(),file=sys.stderr)
         raise
     output=subprocess.check_output([str(result),'--version'],env=library.game_environment(),text=True)
-    assert 'ShadowOfTheColossusPC Linux runtime' in output,output
+    platform = "Windows" if os.name == "nt" else "Linux"
+    assert f"ShadowOfTheColossusPC {platform} runtime" in output, output
     print('Portable compiler and native runtime:',output.strip())
