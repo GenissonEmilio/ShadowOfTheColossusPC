@@ -68,7 +68,7 @@ int main(int argc, char **argv)
                     Image shot = LoadImageFromScreen();
                     edge = GetImageColor(shot, 0, shot.height / 2);
                     body = GetImageColor(shot, shot.width / 3, shot.height / 2);
-                    ExportImage(shot, (out / (std::string(name) + ".png")).c_str());
+                    ExportImage(shot, (out / (std::string(name) + ".png")).string().c_str());
                     UnloadImage(shot);
                 }
                 EndDrawing();

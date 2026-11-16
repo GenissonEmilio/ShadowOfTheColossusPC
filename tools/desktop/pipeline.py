@@ -114,7 +114,7 @@ class Pipeline:
             flags += ["--sysroot="+str(tc / "sysroot"),
                       "-B"+str(tc / "lib/gcc/x86_64-linux-gnu/13")+"/",
                       "-nostdinc++", "-isystem", str(tc / "include/c++/13"),
-                      "-isystem", str(tc / "include/x86_64-linux-gnu/13"),
+                      "-isystem", str(tc / "include/x86_64-linux-gnu/c++/13"),
                       "-isystem", str(tc / "include/c++/13/backward")]
         flags += ["-std=c++20", "-O2", "-DNDEBUG", "-msse4.1", "-fno-strict-aliasing",
                   *["-I"+str(p) for p in includes],
