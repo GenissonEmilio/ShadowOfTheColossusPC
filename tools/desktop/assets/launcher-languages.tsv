@@ -83,7 +83,7 @@ Consultando o GitHub…	Checking GitHub…	Consultando GitHub…	GitHub を確�
 Não foi possível consultar o GitHub. Tente novamente.	Could not reach GitHub. Try again.	No se pudo consultar GitHub. Inténtalo de nuevo.	GitHub を確認できませんでした。もう一度お試しください。
 Atualizar para {version}	Update to {version}	Actualizar a {version}	{version} に更新
 Versão {version} disponível.	Version {version} is available.	La versión {version} está disponible.	バージョン {version} を利用できます。
-Nenhuma atualização para esta plataforma.	No updates are available for this platform.	No hay actualizaciones para esta plataforma.	このプラットフォームで利用できる更新はありません。
+O launcher já está atualizado.	The launcher is up to date.	El iniciador ya está actualizado.	ランチャーは最新です。
 Feche o jogo ou termine a preparação antes de atualizar.	Close the game or finish preparing it before updating.	Cierra el juego o termina de prepararlo antes de actualizar.	更新する前にゲームを終了するか、準備が完了するまで待ってください。
 Baixando a versão {version}…	Downloading version {version}…	Descargando la versión {version}…	バージョン {version} をダウンロード中…
 Verificando e extraindo o pacote…	Verifying and extracting the package…	Verificando y extrayendo el paquete…	パッケージを検証して展開中…

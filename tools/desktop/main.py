@@ -155,7 +155,7 @@ class Launcher:
         self.window.connect("delete-event", self.close)
         header = Gtk.HeaderBar(); header.set_show_close_button(True)
         header.set_title("SHADOW OF THE COLOSSUS  /  PC EDITION"); self.window.set_titlebar(header)
-        root = box(Gtk.Orientation.HORIZONTAL); self.window.add(root)
+        root = box(Gtk.Orientation.HORIZONTAL, classes=("launcher-root",)); self.window.add(root)
         sidebar_frame = style(Gtk.Box(),"sidebar")
         sidebar = box(spacing=24, margin=22); sidebar.set_size_request(205,-1)
         sidebar_frame.add(sidebar); root.pack_start(sidebar_frame, False, False, 0)
@@ -178,8 +178,10 @@ class Launcher:
         sidebar.pack_start(Gtk.Box(),True,True,0)
         system = "Windows" if sys.platform == "win32" else "Linux"
         sidebar.pack_start(label(f"v{VERSION}   •   {system}", "small"),False,False,0)
-        body = box(spacing=20,margin=30,classes=("main-content",))
-        scroller = Gtk.ScrolledWindow(); scroller.set_policy(Gtk.PolicyType.NEVER,Gtk.PolicyType.AUTOMATIC)
+        body = box(spacing=18,margin=24,classes=("main-content",))
+        scroller = style(Gtk.ScrolledWindow(), "main-scroll")
+        scroller.set_shadow_type(Gtk.ShadowType.NONE)
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroller.add(body); root.pack_start(scroller,True,True,0)
         body.pack_start(label(tr("BIBLIOTECA    /    SHADOW OF THE COLOSSUS"), "breadcrumb"),False,False,0)
         body.pack_start(self.stack,True,True,0)
@@ -197,7 +199,6 @@ class Launcher:
         footer.pack_end(saves,False,False,0); body.pack_end(footer,False,False,0)
         self.window.show_all(); self.navigate(args.page)
         self.progress.hide()
-        self.update_home.hide()
         if self.library.disc:
             self.set_ready()
         else:
@@ -322,9 +323,10 @@ class Launcher:
             self.stack.get_visible_child().child_focus(Gtk.DirectionType.TAB_FORWARD)
 
     def home(self):
-        page = box(spacing=22)
+        page = box(spacing=16)
         hero_outer = style(Gtk.Overlay(), "hero")
         artwork = Artwork()
+        artwork.set_size_request(-1, 220)
         for edge in ("top", "bottom", "start", "end"):
             getattr(artwork, "set_margin_" + edge)(1)
         hero_outer.add(artwork)
@@ -354,11 +356,6 @@ class Launcher:
         inner.pack_end(self.choose_button,False,False,0); self.drop.add(inner)
         panel.pack_start(self.drop,False,False,0)
         self.progress = Gtk.ProgressBar(); panel.pack_start(self.progress,False,False,0)
-        self.update_home = style(Gtk.Button(), "secondary")
-        self.update_home.set_halign(Gtk.Align.START)
-        self.update_home.set_no_show_all(True)
-        self.update_home.connect("clicked", self.install_update)
-        panel.pack_start(self.update_home, False, False, 0)
         actions = box(Gtk.Orientation.HORIZONTAL,20)
         state = box(spacing=5)
         self.status = label(tr("Escolha sua ROM para começar."),"status"); self.status.set_line_wrap(True)
@@ -370,6 +367,7 @@ class Launcher:
         self.play_button.connect("clicked",self.play)
         actions.pack_end(self.play_button,False,False,0); panel.pack_start(actions,False,False,0)
         page.pack_start(panel_outer,False,False,0)
+        page.pack_start(self.updates_panel(), False, False, 0)
         note = label(tr("Dica: você também pode arrastar o arquivo para a área acima."),"muted")
         page.pack_start(note,False,False,0)
         if SAVE_STATES_AVAILABLE:
@@ -567,24 +565,32 @@ class Launcher:
         self.preferences_status = label("", "status", wrap=True)
         preferences_panel.pack_start(self.preferences_status, False, False, 0)
         page.pack_start(preferences_panel, False, False, 0)
-        updates_panel = box(spacing=12, classes=("panel", "graphics-panel"))
-        updates_panel.pack_start(label(tr("Atualizações"), "panel-title"), False, False, 0)
-        self.update_status_label = label(tr("Versão instalada {version}").format(version=VERSION), "muted", wrap=True)
-        updates_panel.pack_start(self.update_status_label, False, False, 0)
+        return page
+
+    def updates_panel(self):
+        panel = box(spacing=8, classes=("panel", "update-panel"))
+        row = box(Gtk.Orientation.HORIZONTAL, spacing=12)
+        info = box(spacing=4)
+        info.pack_start(label(tr("Atualizações"), "panel-title"), False, False, 0)
+        self.update_status_label = label(tr("Versão instalada {version}").format(version=VERSION),
+                                         "muted", wrap=True)
+        self.update_status_label.set_max_width_chars(42)
+        info.pack_start(self.update_status_label, False, False, 0)
+        row.pack_start(info, True, True, 0)
         self.update_progress = Gtk.ProgressBar()
         self.update_progress.set_no_show_all(True)
-        updates_panel.pack_start(self.update_progress, False, False, 0)
-        row = box(Gtk.Orientation.HORIZONTAL, spacing=10)
         self.check_button = style(Gtk.Button(label=tr("Verificar agora")), "secondary")
+        self.check_button.set_valign(Gtk.Align.CENTER)
         self.check_button.connect("clicked", self.check_updates)
-        row.pack_start(self.check_button, False, False, 0)
         self.update_button = style(Gtk.Button(label=tr("Atualizar")), "play")
+        self.update_button.set_valign(Gtk.Align.CENTER)
         self.update_button.set_no_show_all(True)
         self.update_button.connect("clicked", self.install_update)
-        row.pack_start(self.update_button, False, False, 0)
-        updates_panel.pack_start(row, False, False, 0)
-        page.pack_start(updates_panel, False, False, 0)
-        return page
+        row.pack_end(self.update_button, False, False, 0)
+        row.pack_end(self.check_button, False, False, 0)
+        panel.pack_start(row, False, False, 0)
+        panel.pack_start(self.update_progress, False, False, 0)
+        return panel
 
     def apply_preferences(self, *_):
         if self.busy or self.process or self.controller_process:
@@ -613,6 +619,8 @@ class Launcher:
             return False
         self.checking = True
         self.check_button.set_sensitive(False)
+        self.update_status_label.set_tooltip_text(None)
+        self.update_status_label.get_style_context().remove_class("ready")
         self.update_status_label.set_text(tr("Consultando o GitHub…"))
 
         def worker():
@@ -632,18 +640,17 @@ class Launcher:
         self.check_button.set_sensitive(True)
         if error:
             self.update_status_label.set_text(tr("Não foi possível consultar o GitHub. Tente novamente."))
+            self.update_status_label.set_tooltip_text(error)
             return False
         self.update = result
         if result:
-            message = tr("Atualizar para {version}").format(version=result.version)
             self.update_status_label.set_text(tr("Versão {version} disponível.").format(version=result.version))
-            for button in (self.update_button, self.update_home):
-                button.set_label(message)
-                button.show()
+            self.update_button.set_label(tr("Atualizar para {version}").format(version=result.version))
+            self.update_button.show()
         else:
-            self.update_status_label.set_text(tr("Nenhuma atualização para esta plataforma."))
+            self.update_status_label.set_text(tr("O launcher já está atualizado."))
+            self.update_status_label.get_style_context().add_class("ready")
             self.update_button.hide()
-            self.update_home.hide()
         return False
 
     def install_update(self, *_):
@@ -654,8 +661,9 @@ class Launcher:
             return
         update = self.update
         self.busy = self.updating = True
-        self.navigate("settings")
-        for button in (self.update_home, self.update_button, self.check_button):
+        self.navigate("home")
+        self.update_status_label.set_tooltip_text(None)
+        for button in (self.update_button, self.check_button):
             button.set_sensitive(False)
         self.update_progress.set_fraction(0)
         self.update_progress.show()
@@ -683,7 +691,7 @@ class Launcher:
 
     def update_finished(self, error):
         self.busy = self.updating = False
-        for button in (self.update_home, self.update_button, self.check_button):
+        for button in (self.update_button, self.check_button):
             button.set_sensitive(True)
         self.update_progress.hide()
         if error is None or self.closing:

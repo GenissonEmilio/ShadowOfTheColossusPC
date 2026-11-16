@@ -10,6 +10,7 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import ssl
 import stat
 import subprocess
 import sys
@@ -29,6 +30,12 @@ MAX_DOWNLOAD = 3 * 1024**3
 MAX_EXPANDED = 8 * 1024**3
 MAX_METADATA = 2 * 1024**2
 STARTUP_MARKER = "launcher-ready"
+LINUX_CA_BUNDLES = (
+    Path("/etc/ssl/certs/ca-certificates.crt"),
+    Path("/etc/pki/tls/certs/ca-bundle.crt"),
+    Path("/etc/ssl/cert.pem"),
+    Path("/etc/ssl/ca-bundle.pem"),
+)
 
 
 @dataclass(frozen=True)
@@ -54,6 +61,19 @@ def platform_id():
 def release_version(tag):
     match = re.fullmatch(r"(?:(?:linux|windows)-)?v?(\d{1,5})\.(\d{1,5})\.(\d{1,5})", tag)
     return tuple(map(int, match.groups())) if match else None
+
+
+def https_context():
+    context = ssl.create_default_context()
+    # The portable Linux launcher carries OpenSSL from its build distribution.
+    # Its compiled CA paths can differ from the paths on the player's system.
+    if sys.platform.startswith("linux") and not (os.environ.get("SSL_CERT_FILE")
+                                                  or os.environ.get("SSL_CERT_DIR")):
+        for bundle in LINUX_CA_BUNDLES:
+            if bundle.is_file():
+                context.load_verify_locations(cafile=str(bundle))
+                break
+    return context
 
 
 def select_update(releases, current, system):
@@ -89,7 +109,7 @@ def check_for_update(current):
         return None
     request = Request(RELEASES, headers={"Accept": "application/vnd.github+json",
                                         "User-Agent": f"{NAME}/{current}"})
-    with urlopen(request, timeout=5) as response:
+    with urlopen(request, timeout=5, context=https_context()) as response:
         data = response.read(MAX_METADATA + 1)
     if len(data) > MAX_METADATA:
         raise ValueError("GitHub release metadata exceeds the limit")
@@ -103,7 +123,7 @@ def download(update, destination, progress):
     request = Request(update.url, headers={"User-Agent": NAME})
     digest = hashlib.sha256()
     total = 0
-    with urlopen(request, timeout=20) as response, destination.open("xb") as output:
+    with urlopen(request, timeout=20, context=https_context()) as response, destination.open("xb") as output:
         if urlsplit(response.geturl()).scheme != "https":
             raise ValueError("The release download must use HTTPS")
         while block := response.read(1024 * 1024):

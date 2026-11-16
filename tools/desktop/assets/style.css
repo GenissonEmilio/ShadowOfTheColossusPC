@@ -10,7 +10,10 @@ headerbar button { background: transparent; color: #b9b4aa; border: none; box-sh
 .nav:hover { background: #191b25; color: #f2e6d0; }
 .nav.active { background: #26352a; border: 1px solid #536742; color: #d9dec5; }
 .nav label { font-size: 13px; }
-.main-content { background: #121916; }
+.launcher-root, .main-scroll, .main-scroll > viewport, .main-content { background-color: #121916; }
+.main-scroll, .main-scroll > viewport { border: none; box-shadow: none; }
+.update-panel { padding: 12px 16px; }
+.update-panel .play { padding: 11px 16px; }
 .breadcrumb { color: #777d8b; font-size: 11px; }
 .hero { background: linear-gradient(115deg, #27342c, #1d2723 55%, #182522); border: 1px solid #465348; border-radius: 14px; }
 .hero-title { font-family: 'DejaVu Serif'; font-size: 32px; font-weight: bold; color: #f6e3b5; }

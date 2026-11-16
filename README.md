@@ -51,8 +51,10 @@ Em **Configurações → Idioma do launcher**, escolha Português, English, Espa
 ou 日本語. A escolha inicial segue o sistema quando disponível, com inglês como
 alternativa. Em jogo, **F1 → Sistema → Idioma** oferece inglês e português.
 
-O launcher consulta as releases públicas do GitHub ao abrir. Quando encontra
-uma versão compatível, mostra **Atualizar** na tela inicial e nas configurações.
+O launcher consulta as releases públicas do GitHub ao abrir. Na aba **Início**,
+o painel **Atualizações** fica logo abaixo de **Seu jogo**. Quando encontra uma
+versão compatível, mostra **Atualizar**. Use **Verificar agora** para consultar
+novamente e ver se o launcher já está atualizado.
 O botão baixa o pacote, confere o SHA-256 publicado pelo GitHub, atualiza a pasta
 do launcher e abre a nova versão. A pasta de dados fica separada. A primeira
 versão com o atualizador precisa ser instalada a partir do pacote da release.

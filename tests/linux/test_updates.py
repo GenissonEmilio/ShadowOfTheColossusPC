@@ -32,6 +32,22 @@ def release(version, system, **flags):
 
 
 class UpdateTests(unittest.TestCase):
+    def test_linux_context_uses_system_bundle_and_respects_explicit_trust(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory) / "ca-bundle.pem"
+            bundle.touch()
+            with (patch("updates.sys.platform", "linux"),
+                  patch("updates.LINUX_CA_BUNDLES", (bundle.with_name("missing.pem"), bundle)),
+                  patch("updates.ssl.create_default_context") as create,
+                  patch.dict(os.environ, {}, clear=True)):
+                self.assertIs(updates.https_context(), create.return_value)
+                create.return_value.load_verify_locations.assert_called_once_with(cafile=str(bundle))
+                for override in ("SSL_CERT_FILE", "SSL_CERT_DIR"):
+                    create.return_value.reset_mock()
+                    with patch.dict(os.environ, {override: str(bundle)}):
+                        updates.https_context()
+                    create.return_value.load_verify_locations.assert_not_called()
+
     def test_version_platform_origin_and_digest(self):
         candidates = [release("1.0.2", WINDOWS), release("1.0.9", LINUX),
                       release("1.0.10", LINUX), release("1.1.0", LINUX, prerelease=True),
