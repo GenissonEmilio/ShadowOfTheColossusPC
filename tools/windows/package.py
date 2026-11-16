@@ -122,9 +122,10 @@ def package(build, prefix, destination):
                     str(ROOT / "tools/windows/utf8.rc"), str(compiler / "lib/utf8.o")], check=True)
     for source in compiler_files(prefix):
         copy(source, kit / source.relative_to(prefix))
-    for name in ("g++", "as", "ld", "windres"):
-        if not (kit / "bin" / (name + ".exe")).is_file():
-            raise FileNotFoundError(f"{name}.exe was not staged")
+    for name in ("bin/g++.exe", "bin/as.exe", "bin/ld.exe", "bin/windres.exe",
+                 "include/stdint.h", "lib/crt2.o", "lib/libstdc++.a"):
+        if not (kit / name).is_file():
+            raise FileNotFoundError(f"Toolchain file {name} was not staged")
     for name in ("SDL2.dll", "python.exe"):
         copy(prefix / "bin" / name, kit / "bin" / name)
     # sdl2-compat can load SDL3 by name at runtime instead of importing it.

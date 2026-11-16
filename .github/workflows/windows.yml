@@ -41,22 +41,23 @@ jobs:
       - name: Package native launcher and compiler
         run: |
           /ucrt64/bin/python.exe -X utf8 tools/windows/package.py --build build/windows --prefix /ucrt64 --destination dist/windows
-      - name: Validate relocated kit without MSYS2 on PATH
+      - name: Relocate package outside the source tree
+        id: relocated
         shell: pwsh
         run: |
-          $errorActionPreference = 'Stop'
           $archive = (Get-ChildItem dist/windows/*.zip).FullName
+          $expected = (Get-Content "$archive.sha256").Split(' ')[0]
+          if ((Get-FileHash $archive).Hash -ne $expected) { throw 'Package SHA-256 mismatch' }
           $testRoot = Join-Path $env:RUNNER_TEMP 'SotC relocated package'
           Expand-Archive -LiteralPath $archive -DestinationPath $testRoot
+          "SOTC_TEST_ROOT=$testRoot" >> $env:GITHUB_ENV
+      - name: Open the relocated launcher in English and Japanese
+        if: ${{ !cancelled() && steps.relocated.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $testRoot = $env:SOTC_TEST_ROOT
           $program = Join-Path $testRoot 'ShadowOfTheColossusPC'
-          $bin = Join-Path $program 'compiler/toolchain/bin'
-          $env:PATH = "$bin;$env:SystemRoot\System32;$env:SystemRoot"
-          $env:PYTHONHOME = Join-Path $program 'compiler/toolchain'
-          $env:PYTHONDONTWRITEBYTECODE = '1'
-          & "$bin/python.exe" -X utf8 tools/linux/test_compiler.py --program $program
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & "$program/compiler/bin/ps2_recomp.exe" --help
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
           $shots = Join-Path $env:GITHUB_WORKSPACE 'artifacts/windows-launcher'
           New-Item -Path $shots -ItemType Directory -Force | Out-Null
           foreach ($language in @('en', 'ja')) {
@@ -67,24 +68,46 @@ jobs:
               Set-Content -Encoding utf8NoBOM (Join-Path $profile 'launcher-preferences.json')
             $launcher = Start-Process -FilePath "$program/ShadowOfTheColossusPC.exe" -PassThru `
               -ArgumentList "--data-dir `"$profile`" --page home --screenshot `"$image`""
-            if (!$launcher.WaitForExit(60000)) { Stop-Process -Id $launcher.Id; throw 'Launcher timed out' }
-            if ($launcher.ExitCode -ne 0 -or (Get-Item $image).Length -le 1000) {
-              Get-Content (Join-Path $profile 'last-launcher.log') -ErrorAction SilentlyContinue
+            $finished = $launcher.WaitForExit(60000)
+            if (!$finished) {
+              & "$env:SystemRoot\System32\taskkill.exe" /PID $launcher.Id /T /F | Out-Null
+            }
+            $log = Join-Path $profile 'last-launcher.log'
+            if (Test-Path $log) { Copy-Item $log (Join-Path $shots "launcher-$language.log") }
+            if (!$finished) { throw 'Launcher timed out' }
+            if ($launcher.ExitCode -ne 0 -or !(Test-Path $image) -or (Get-Item $image).Length -le 1000) {
+              Get-Content $log -ErrorAction SilentlyContinue
               throw "Launcher screenshot ($language) failed, exit code $($launcher.ExitCode)"
             }
           }
           if ((Get-FileHash "$shots/home-en.png").Hash -eq (Get-FileHash "$shots/home-ja.png").Hash) {
             throw 'English and Japanese launcher screenshots were identical'
           }
+      - name: Compile and run a fixture with the relocated kit
+        if: ${{ !cancelled() && steps.relocated.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $program = Join-Path $env:SOTC_TEST_ROOT 'ShadowOfTheColossusPC'
+          $bin = Join-Path $program 'compiler/toolchain/bin'
+          $env:PATH = "$bin;$env:SystemRoot\System32;$env:SystemRoot"
+          $env:PYTHONHOME = Join-Path $program 'compiler/toolchain'
+          $env:PYTHONDONTWRITEBYTECODE = '1'
+          & "$bin/python.exe" -X utf8 tools/linux/test_compiler.py --program $program
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$program/compiler/bin/ps2_recomp.exe" --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
         with:
           name: Windows launcher screenshots
-          path: artifacts/windows-launcher/*.png
-          if-no-files-found: error
+          path: artifacts/windows-launcher/
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
+        # Keep candidates for diagnosis. Only successful builds are released.
+        if: ${{ !cancelled() }}
         with:
           name: ShadowOfTheColossusPC-windows-x86_64
           path: |
             dist/windows/*.zip
             dist/windows/*.sha256
-          if-no-files-found: error
+          if-no-files-found: ignore

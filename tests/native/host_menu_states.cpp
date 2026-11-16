@@ -40,6 +40,8 @@ extern "C"
     void DrawText(const char *text, int x, int y, int size, Color)
     { fixture::drawn.push_back({text, x, y, size}); }
     void DrawRectangle(int, int, int, int, Color) {}
+    void DrawRectangleRounded(Rectangle, float, int, Color) {}
+    void DrawCircle(int, int, float, Color) {}
     bool CheckCollisionPointRec(Vector2 point, Rectangle box)
     { return point.x >= box.x && point.x < box.x + box.width && point.y >= box.y && point.y < box.y + box.height; }
 }
