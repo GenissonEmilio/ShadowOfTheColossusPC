@@ -1,4 +1,4 @@
-# Shadow of the Colossus PC — Linux
+# Shadow of the Colossus PC — Linux e Windows
 
 Port independente da edição **PS2 USA SCUS-97472**, com launcher em português,
 recompilador local e renderizador nativo OpenGL. Desenvolvido a partir de
