@@ -2,6 +2,7 @@
 from language import translate as tr
 from gi.repository import Gdk, Gtk
 from controls import ACTIONS, DEFAULTS, Controls, binding_label, valid_binding
+from model import SAVE_STATES_AVAILABLE
 
 
 def key_code(event):
@@ -39,8 +40,11 @@ class ControlsDialog(Gtk.Dialog):
         content = self.get_content_area()
         content.set_spacing(12)
         content.set_border_width(18)
-        intro = Gtk.Label(label=tr("Clique numa atribuição para trocar a tecla ou o botão do mouse.\n"
-                          "F5 salva um estado rápido; F8 carrega. F1 gerencia estados e libera o cursor. F11 alterna a tela cheia."), xalign=0)
+        instructions = tr("Clique numa atribuição para trocar a tecla ou o botão do mouse.")
+        if SAVE_STATES_AVAILABLE:
+            instructions = tr("Clique numa atribuição para trocar a tecla ou o botão do mouse.\n"
+                              "F5 salva um estado rápido; F8 carrega. F1 gerencia estados e libera o cursor. F11 alterna a tela cheia.")
+        intro = Gtk.Label(label=instructions, xalign=0)
         intro.set_line_wrap(True)
         content.pack_start(intro, False, False, 0)
         self.mouse = Gtk.CheckButton(label=tr("Mover a câmera com o mouse"))

@@ -15,6 +15,7 @@ from pipeline import Pipeline, PROCESS_FLAGS, WINDOWS, compiler_tool
 VERSION = "0.4.0"
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 APPLICATION_ID = "io.github.GenissonEmilio.ShadowOfTheColossusPC"
+SAVE_STATES_AVAILABLE = sys.platform.startswith("linux")
 
 
 def assets_directory():

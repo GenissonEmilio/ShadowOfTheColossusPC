@@ -13,7 +13,7 @@ import sys
 import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from model import Library, VERSION, assets_directory, atomic_json, program_directory
+from model import Library, SAVE_STATES_AVAILABLE, VERSION, assets_directory, atomic_json, program_directory
 from graphics import Graphics, WINDOW_RESOLUTIONS
 from gamepad import Gamepad
 from language import LANGUAGES, PREFERENCES, PROMPTS, activate, preferences, translate as tr
@@ -372,7 +372,8 @@ class Launcher:
         page.pack_start(panel_outer,False,False,0)
         note = label(tr("Dica: você também pode arrastar o arquivo para a área acima."),"muted")
         page.pack_start(note,False,False,0)
-        page.pack_start(label(tr("Durante o jogo: F5 salva rápido · F8 carrega · F1 gerencia estados."), "small", wrap=True),False,False,0)
+        if SAVE_STATES_AVAILABLE:
+            page.pack_start(label(tr("Durante o jogo: F5 salva rápido · F8 carrega · F1 gerencia estados."), "small", wrap=True),False,False,0)
         page.pack_start(Gtk.Box(),True,True,0)
         return page
 
@@ -386,7 +387,8 @@ class Launcher:
         self.keyboard_summary = label("", "muted", wrap=True)
         page.pack_start(self.keyboard_summary,False,False,0)
         self.refresh_keyboard_summary()
-        page.pack_start(label(tr("F5 · Salvar estado rápido    /    F8 · Carregar estado rápido\nF1 · Gerenciar estados, configurações e sair    /    F11 · Tela cheia"), "small", wrap=True),False,False,0)
+        if SAVE_STATES_AVAILABLE:
+            page.pack_start(label(tr("F5 · Salvar estado rápido    /    F8 · Carregar estado rápido\nF1 · Gerenciar estados, configurações e sair    /    F11 · Tela cheia"), "small", wrap=True),False,False,0)
         page.pack_start(label(tr("Controle USB / Bluetooth"), "panel-title"),False,False,8)
         self.controller_status = label(tr("Perfis automáticos para Xbox, PlayStation e genéricos.\nSe os botões não responderem ou estiverem trocados, configure seu controle."), "muted", wrap=True)
         page.pack_start(self.controller_status, False, False, 0)
@@ -915,19 +917,20 @@ class Launcher:
         location = label(str(cards.directory), "muted", wrap=True)
         location.set_selectable(True)
         panel.pack_start(location, False, False, 0)
-        panel.pack_start(label(tr("Estados rápidos: F5 salva e F8 carrega durante o jogo.\n"
-                               "No menu F1 → Estados, escolha o slot rápido ou um dos cinco slots manuais.\n"
-                               "Estados exigem a mesma versão do runtime e do disco. Continue salvando também nos altares."), "muted", wrap=True), False, False, 0)
-        states_folder = Gtk.Button(label=tr("Abrir pasta dos estados ↗"))
-        def open_states_folder(*_):
-            try:
-                destination = self.library.player_directory / "savestates"
-                destination.mkdir(parents=True, exist_ok=True)
-                self.open_desktop_path(destination)
-            except OSError as exc:
-                self.error(tr("Não foi possível abrir a pasta"), str(exc))
-        states_folder.connect("clicked", open_states_folder)
-        panel.pack_start(states_folder, False, False, 0)
+        if SAVE_STATES_AVAILABLE:
+            panel.pack_start(label(tr("Estados rápidos: F5 salva e F8 carrega durante o jogo.\n"
+                                   "No menu F1 → Estados, escolha o slot rápido ou um dos cinco slots manuais.\n"
+                                   "Estados exigem a mesma versão do runtime e do disco. Continue salvando também nos altares."), "muted", wrap=True), False, False, 0)
+            states_folder = Gtk.Button(label=tr("Abrir pasta dos estados ↗"))
+            def open_states_folder(*_):
+                try:
+                    destination = self.library.player_directory / "savestates"
+                    destination.mkdir(parents=True, exist_ok=True)
+                    self.open_desktop_path(destination)
+                except OSError as exc:
+                    self.error(tr("Não foi possível abrir a pasta"), str(exc))
+            states_folder.connect("clicked", open_states_folder)
+            panel.pack_start(states_folder, False, False, 0)
         status = label(tr("Cartão 1 disponível.") if cards.card.is_file() else tr("Nenhum cartão salvo neste computador."), wrap=True)
         panel.pack_start(status, False, False, 0)
         row = box(Gtk.Orientation.HORIZONTAL, spacing=12)

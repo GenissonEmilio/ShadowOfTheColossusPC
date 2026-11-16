@@ -231,3 +231,4 @@ Diretórios ISO profundos demais.	The ISO directory structure is too deep.	La es
 ISO truncada.	The ISO is truncated.	La ISO está incompleta.	ISO が途中で切れています。
 Esperado exatamente um disco; encontrados {count}.	Expected one disc image, found {count}.	Se esperaba una imagen de disco y se encontraron {count}.	ディスクイメージが 1 つ必要ですが、{count} 個見つかりました。
 A pasta de destino já existe. Os dados foram preservados.	The destination folder exists. Its data was preserved.	La carpeta de destino ya existe. Se conservaron sus datos.	保存先のフォルダーは既に存在します。データは保持されています。
+Clique numa atribuição para trocar a tecla ou o botão do mouse.	Click a binding to change its key or mouse button.	Haz clic en una asignación para cambiar la tecla o el botón del ratón.	割り当てをクリックしてキーやマウスボタンを変更します。

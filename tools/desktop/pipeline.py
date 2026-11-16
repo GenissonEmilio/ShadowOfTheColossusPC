@@ -111,9 +111,9 @@ class Pipeline:
                     self.source / "PS2Recomp/ps2xRuntime/src/lib/Kernel"]
         flags = [str(tc / "bin" / executable_name("g++"))]
         if WINDOWS:
-            # GCC's C++ headers are found relative to the driver. Its C/CRT
-            # headers and startup objects also need the relocated SDK root.
-            flags += ["--sysroot=" + tc.as_posix(), "-isystem", tc.joinpath("include").as_posix(),
+            # C headers must follow GCC's built-ins and C++ wrappers so
+            # include_next in <cmath>, <cstdlib> and similar headers works.
+            flags += ["--sysroot=" + tc.as_posix(), "-idirafter", tc.joinpath("include").as_posix(),
                       "-B" + tc.joinpath("lib").as_posix() + "/"]
         else:
             flags += ["--sysroot="+str(tc / "sysroot"),
