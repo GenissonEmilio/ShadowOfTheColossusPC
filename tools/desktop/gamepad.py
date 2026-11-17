@@ -7,9 +7,10 @@ Unmapped joysticks remain available to the existing controller calibration tool.
 from __future__ import annotations
 
 import ctypes
-import os
 from pathlib import Path
 import time
+
+from sdl import load_sdl
 
 
 class Navigation:
@@ -29,7 +30,7 @@ class Navigation:
             self.armed = not held
             self.previous = held
             return []
-        actions = [name for name in ("confirm", "back", "play", "previous", "next")
+        actions = [name for name in ("back", "confirm", "play", "previous", "next", "parent")
                    if name in held and name not in self.previous]
         direction = next((name for name in ("up", "down", "left", "right") if name in held), None)
         if direction != self.direction:
@@ -46,31 +47,19 @@ class Navigation:
 
 class Gamepad:
     FLAGS = 0x2000  # SDL_INIT_GAMECONTROLLER (also initializes joystick/events)
-    BUTTONS = {0: "confirm", 1: "back", 6: "play", 9: "previous", 10: "next",
+    BUTTONS = {0: "confirm", 1: "back", 3: "parent", 6: "play", 9: "previous", 10: "next",
                11: "up", 12: "down", 13: "left", 14: "right"}
 
     def __init__(self, program, profile, clock=time.monotonic):
         self.clock = clock
         self.navigation = Navigation()
-        self.sdl = None
+        self.sdl = load_sdl(program)
         self.controller = None
         self.next_scan = 0.
         self.running = False
         self.mapping_paths = (Path(__file__).resolve().parent / "assets/gamecontrollerdb.txt",
                               Path(program) / "PS2Recomp/ps2xRuntime/third_party/gamecontrollerdb/gamecontrollerdb.txt",
                               Path(profile))
-        # A release may bundle SDL2 alongside the launcher. Source launches can
-        # use the system runtime; absence never prevents keyboard/mouse startup.
-        candidates = (Path(program) / "_internal/libSDL2-2.0.so.0",
-                      Path(program) / "compiler/lib/libSDL2-2.0.so.0", "libSDL2-2.0.so.0")
-        if os.name == "nt":
-            candidates = (Path(program) / "compiler/toolchain/bin/SDL2.dll", "SDL2.dll")
-        for candidate in candidates:
-            try:
-                self.sdl = ctypes.CDLL(str(candidate))
-                break
-            except OSError:
-                pass
         if self.sdl is None:
             return
         signatures = {

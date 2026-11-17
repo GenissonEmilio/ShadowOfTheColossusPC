@@ -28,14 +28,16 @@ def key_code(event):
 
 
 class ControlsDialog(Gtk.Dialog):
-    def __init__(self, parent, library):
+    def __init__(self, parent, library, connect_feedback=None):
         super().__init__(title=tr("Teclado e mouse"), transient_for=parent, modal=True)
         self.profile = Controls(library)
+        self.connect_feedback = connect_feedback
         self.values = self.profile.load()
         self.set_default_size(620, 660)
         for title, response in ((tr("Restaurar padrão"), 10), (tr("Cancelar"), Gtk.ResponseType.CANCEL),
                                 (tr("Salvar perfil"), Gtk.ResponseType.OK)):
             self.add_button(title, response).get_style_context().add_class("secondary")
+        self.set_default_response(Gtk.ResponseType.OK)
         self.connect("response", self.respond)
         content = self.get_content_area()
         content.set_spacing(12)
@@ -78,6 +80,8 @@ class ControlsDialog(Gtk.Dialog):
         self.status.set_line_wrap(True)
         content.pack_start(self.status, False, False, 0)
         self.refresh()
+        if self.connect_feedback is not None:
+            self.connect_feedback(self)
 
     def refresh(self):
         for key, button in self.buttons.items():
@@ -124,6 +128,8 @@ class ControlsDialog(Gtk.Dialog):
 
         popup.connect("key-press-event", keyboard)
         area.connect("button-press-event", mouse)
+        if self.connect_feedback is not None:
+            self.connect_feedback(popup)
         popup.show_all()
         popup.run()
         popup.destroy()

@@ -3,7 +3,7 @@
 FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 libgl1 libdrm2 libx11-6 xvfb xauth fonts-dejavu-core \
+    python3 libgl1 libdrm2 libx11-6 xvfb xauth openbox fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 RUN if ldconfig -p | grep -Eq 'libSDL2|libwayland-server'; then \
       echo 'Clean launcher test must not inherit SDL2/Wayland server from the host' >&2; exit 1; fi

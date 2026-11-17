@@ -17,6 +17,7 @@ from model import Library, SAVE_STATES_AVAILABLE, VERSION, assets_directory, ato
 from graphics import GRAPHICS_PROFILES, LEGACY_PROFILES, Graphics, WINDOW_RESOLUTIONS
 from gamepad import Gamepad
 from language import LANGUAGES, PREFERENCES, PROMPTS, activate, preferences, translate as tr
+from launcher_audio import LauncherAudio
 from updates import RateLimitedError, check_for_update, confirm_startup, restart_with_update, stage_update
 
 if len(sys.argv) > 1 and sys.argv[1] == "--pipeline-helper":
@@ -50,6 +51,8 @@ gi.require_version("Gdk", "3.0")
 gi.require_foreign("cairo")
 from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, Pango
 import cairo
+
+import controller_focus
 
 
 def style(widget, *names):
@@ -119,9 +122,14 @@ class Artwork(Gtk.DrawingArea):
             cr.restore()
             # Keep copy readable even when a narrow window crops away the
             # quiet left half of the wide illustration.
-            shade = cairo.LinearGradient(0, 0, min(w, 460), 0)
-            for at, alpha in ((0, .75), (.70, .80), (1, 0)):
-                shade.add_color_stop_rgba(at, .07, .11, .09, alpha)
+            shade = cairo.LinearGradient(0, 0, w * .71, 0)
+            for at, alpha in ((0, .93), (.45, .79), (1, 0)):
+                shade.add_color_stop_rgba(at, .035, .065, .058, alpha)
+            cr.set_source(shade)
+            cr.paint()
+            shade = cairo.LinearGradient(0, h * .56, 0, h)
+            shade.add_color_stop_rgba(0, .035, .065, .058, 0)
+            shade.add_color_stop_rgba(1, .035, .065, .058, .68)
             cr.set_source(shade)
             cr.paint()
         cr.restore()
@@ -135,6 +143,8 @@ class Launcher:
         self.preferences = preferences(self.library.directory)
         activate(self.preferences["language"])
         self.graphics = Graphics(self.library)
+        self.feedback = LauncherAudio(self.library.program, enabled=self.preferences["ui_sounds"])
+        self.presentation_fullscreen = self.preferences["launcher_fullscreen"]
         self.busy = False; self.process = None; self.closing = False; self.failed = False
         self.disposed = False
         self.controller_process = None
@@ -149,57 +159,70 @@ class Launcher:
         settings.set_property("gtk-application-prefer-dark-theme", True)
         self.window = Gtk.Window(title="Shadow of the Colossus PC")
         self.window.set_wmclass("shadow-of-the-colossus-pc", "ShadowOfTheColossusPC")
-        self.window.set_default_size(1120, 720); self.window.set_size_request(900, 620)
+        self.window.set_default_size(1180, 770); self.window.set_size_request(900, 600)
         self.window.set_position(Gtk.WindowPosition.CENTER)
         self.window.set_icon_from_file(str(assets_directory() / "icon.png"))
         self.window.connect("delete-event", self.close)
-        header = Gtk.HeaderBar(); header.set_show_close_button(True)
-        header.set_title("SHADOW OF THE COLOSSUS  /  PC EDITION"); self.window.set_titlebar(header)
-        root = box(Gtk.Orientation.HORIZONTAL, classes=("launcher-root",)); self.window.add(root)
-        sidebar_frame = style(Gtk.Box(),"sidebar")
-        sidebar = box(spacing=24, margin=22); sidebar.set_size_request(205,-1)
-        sidebar_frame.add(sidebar); root.pack_start(sidebar_frame, False, False, 0)
-        brand = box(Gtk.Orientation.HORIZONTAL, 9)
-        brand.pack_start(Artwork(True), False, False, 0)
-        brand_text = box(spacing=3)
-        brand_text.pack_start(label("SHADOW\nOF THE COLOSSUS", "brand"), False,False,0)
-        brand_text.pack_start(label("P C   E D I T I O N", "small"),False,False,0)
-        brand.pack_start(brand_text,False,False,0); sidebar.pack_start(brand,False,False,0)
-        sidebar.pack_start(label(tr("SUA BIBLIOTECA"), "eyebrow"),False,False,8)
+        self.window.connect("destroy", lambda *_: self.feedback.close())
+        self.window.connect("key-press-event", self.presentation_key)
+        header = Gtk.HeaderBar()
+        header.set_show_close_button(True)
+        header.set_title("Shadow of the Colossus PC")
+        self.window.set_titlebar(header)
+        root = box(classes=("launcher-root",))
+        self.window.add(root)
+        navigation = box(Gtk.Orientation.HORIZONTAL, 20, classes=("top-bar",))
+        brand = Artwork(True)
+        brand.set_size_request(46, 44)
+        navigation.pack_start(brand, False, False, 0)
+        tabs = box(Gtk.Orientation.HORIZONTAL, 7)
+        tabs.set_homogeneous(True)
         self.nav = {}
         self.stack = Gtk.Stack(); self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self.stack.set_transition_duration(130)
         self.stack.set_hhomogeneous(False); self.stack.set_vhomogeneous(False)
-        for key, title in [("home",tr("◈   Início")),("graphics",tr("▧   Gráficos")),
-                           ("controls",tr("⌘   Controles")),("settings",tr("⚙   Configurações")),("about",tr("◇   Sobre o port"))]:
-            button = style(Gtk.Button(label=title),"nav")
-            button.get_child().set_xalign(0)
+        for key, title in (("home", "Início"), ("graphics", "Gráficos"), ("controls", "Controles"),
+                           ("settings", "Configurações"), ("about", "Sobre o port")):
+            button = style(Gtk.Button(label=tr(title)), "nav")
             button.connect("clicked", lambda _, name=key: self.navigate(name))
-            sidebar.pack_start(button,False,False,0); self.nav[key] = button
-        sidebar.pack_start(Gtk.Box(),True,True,0)
+            tabs.pack_start(button, True, True, 0)
+            self.nav[key] = button
+        navigation.pack_start(tabs, True, True, 0)
         system = "Windows" if sys.platform == "win32" else "Linux"
-        sidebar.pack_start(label(f"v{VERSION}   •   {system}", "small"),False,False,0)
-        # Paint the entire scrollable surface. Widget margins are outside the
-        # allocation and can expose black pixels in the viewport on Wayland.
+        navigation.pack_end(label(f"v{VERSION}  ·  {system}", "build-label"), False, False, 0)
+        root.pack_start(navigation, False, False, 0)
+
         body = box(spacing=18, classes=("main-content",))
-        scroller = style(Gtk.ScrolledWindow(), "main-scroll")
-        scroller.set_shadow_type(Gtk.ShadowType.NONE)
-        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scroller.add(body); root.pack_start(scroller,True,True,0)
-        body.pack_start(label(tr("BIBLIOTECA    /    SHADOW OF THE COLOSSUS"), "breadcrumb"),False,False,0)
-        body.pack_start(self.stack,True,True,0)
+        self.page_scroller = style(Gtk.ScrolledWindow(), "main-scroll")
+        self.page_scroller.set_shadow_type(Gtk.ShadowType.NONE)
+        self.page_scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.page_scroller.add(body)
+        root.pack_start(self.page_scroller, True, True, 0)
+        body.pack_start(self.stack, True, True, 0)
         self.stack.add_named(self.home(),"home")
         self.stack.add_named(self.graphics_page(),"graphics")
         self.stack.add_named(self.controls(),"controls")
         self.stack.add_named(self.settings_page(),"settings")
         self.stack.add_named(self.about(),"about")
-        footer = box(Gtk.Orientation.HORIZONTAL,spacing=15,classes=("footer",)); footer.set_margin_top(2)
-        text = label(tr("F1 abre os ajustes durante o jogo."),"small")
-        self.gamepad_hint = text
-        text.set_line_wrap(True)
-        footer.pack_start(text,True,True,0)
-        saves = style(Gtk.Button(label=tr("Meus saves ↗")),"link"); saves.connect("clicked",self.open_saves)
-        footer.pack_end(saves,False,False,0); body.pack_end(footer,False,False,0)
-        self.window.show_all(); self.navigate(args.page)
+        footer = box(Gtk.Orientation.HORIZONTAL, 9, classes=("footer",))
+        self.gamepad_hint = label(tr("F1 abre os ajustes durante o jogo."), "input-hint", wrap=True)
+        footer.pack_start(self.gamepad_hint, True, True, 0)
+        self.saves_button = style(Gtk.Button(label=tr("Meus saves")), "footer-action")
+        self.saves_button.connect("clicked", self.open_saves)
+        footer.pack_start(self.saves_button, False, False, 0)
+        self.presentation_button = style(Gtk.Button(), "footer-action")
+        self.presentation_button.set_tooltip_text("F11")
+        self.presentation_button.connect("clicked", self.toggle_presentation)
+        footer.pack_start(self.presentation_button, False, False, 0)
+        self.exit_button = style(Gtk.Button(label=tr("Sair do launcher")), "footer-action")
+        self.exit_button.connect("clicked", self.close)
+        footer.pack_start(self.exit_button, False, False, 0)
+        root.pack_end(footer, False, False, 0)
+        self.connect_feedback(root)
+        self.window.connect("set-focus", self.focus_feedback)
+        self.window.show_all()
+        self.navigate(args.page)
+        self.set_presentation(self.presentation_fullscreen)
         self.progress.hide()
         if self.library.disc:
             self.set_ready()
@@ -227,9 +250,55 @@ class Launcher:
             error_file.unlink()
             GLib.idle_add(self.error, tr("A atualização falhou"), detail)
 
+    def connect_feedback(self, widget):
+        if isinstance(widget, Gtk.Button):
+            widget.connect("button-press-event", self.pointer_feedback)
+            widget.connect("enter-notify-event", self.hover_feedback)
+        if isinstance(widget, Gtk.Container):
+            for child in widget.get_children():
+                self.connect_feedback(child)
+
+    def focus_feedback(self, window, widget):
+        if widget is not None and window.is_active():
+            self.feedback.play("focus")
+
+    def pointer_feedback(self, widget, event):
+        if event.button == 1 and widget.is_sensitive():
+            self.feedback.play("confirm")
+        return False
+
+    def hover_feedback(self, widget, event):
+        if event.detail != Gdk.NotifyType.INFERIOR and widget.is_sensitive():
+            self.feedback.play("focus")
+        return False
+
+    def presentation_key(self, _window, event):
+        if event.keyval == Gdk.KEY_F11:
+            self.toggle_presentation()
+            return True
+        return False
+
+    def toggle_presentation(self, *_):
+        enabled = not self.presentation_fullscreen
+        values = {**self.preferences, "launcher_fullscreen": enabled}
+        try:
+            atomic_json(self.library.directory / PREFERENCES, values)
+        except OSError as exc:
+            self.error(tr("Não foi possível salvar as configurações"), str(exc))
+            return
+        self.preferences = values
+        self.set_presentation(enabled)
+
+    def set_presentation(self, enabled):
+        self.presentation_fullscreen = enabled
+        self.presentation_button.set_label(tr("Sair da tela cheia") if enabled else tr("Tela cheia"))
+        if enabled:
+            self.window.fullscreen()
+        else:
+            self.window.unfullscreen()
+
     def gamepad_window(self):
-        # Dialogs must belong to this launcher. Never target another application's
-        # window, and never present/raise a window in response to controller input.
+        # Only a focused launcher window or one of its own dialogs can receive input.
         for window in Gtk.Window.list_toplevels():
             if not window.is_active() or not window.get_visible():
                 continue
@@ -240,117 +309,235 @@ class Launcher:
                 return window
         return None
 
+    def gamepad_available(self):
+        return not (self.busy or self.process or self.controller_process)
+
+    def controller_hint_text(self):
+        xbox = self.preferences["button_prompts"] == "xbox"
+        confirm, back, tabs, start = ("A", "B", "LB/RB", "Menu") if xbox else ("✕", "○", "L1/R1", "Options")
+        return tr("Direcional/analógico mover · {confirm} confirmar · {back} voltar · {tabs} trocar aba · {start} jogar").format(
+            confirm=confirm, back=back, tabs=tabs, start=start)
+
     def poll_gamepad(self):
-        target = self.gamepad_window()
-        active = bool(target and not self.busy and not self.process and not self.controller_process)
-        was_connected = self.gamepad.connected
-        actions = self.gamepad.poll(active)
-        if self.gamepad.connected and not was_connected and target == self.window:
-            self.focus_gamepad_page()
-        self.gamepad_hint.set_text(
-            tr("Controle: direcional/analógico · A/✕ confirmar · B/○ voltar\n"
-            "LB/RB páginas · Start jogar/aceitar · ←/→ ajustar") if self.gamepad.connected
-            else tr("F1 abre os ajustes durante o jogo."))
-        for action in actions:
-            # A click can synchronously enter a nested GTK dialog loop or start
-            # the game. Recheck ownership before dispatching another action.
-            if self.busy or self.process or self.controller_process:
-                break
-            self.gamepad_action(self.gamepad_window(), action)
+        target = self.gamepad_window() if self.gamepad_available() else None
+        if target != getattr(self, "gamepad_target", None):
+            self.gamepad.navigation.reset()
+            self.gamepad_target = target
+        actions = self.gamepad.poll(target is not None)
+        hint = self.controller_hint_text() if self.gamepad.connected else tr("F1 abre os ajustes durante o jogo.")
+        if self.gamepad_hint.get_text() != hint:
+            self.gamepad_hint.set_text(hint)
+        if actions:
+            # Dispatch outside the timer so Gtk.Dialog.run() can keep polling
+            # in its nested loop while the triggering action is still running.
+            GLib.idle_add(self.dispatch_gamepad_action, target, actions[0])
         return True
+
+    def dispatch_gamepad_action(self, target, action):
+        if self.gamepad_available() and self.gamepad_window() == target:
+            self.gamepad_action(target, action)
+        return False
 
     def gamepad_action(self, target, action):
         if target is None:
             return
-        focus = target.get_focus()
-        if target == self.window:
-            if action in ("previous", "next"):
-                pages = list(self.nav)
-                index = pages.index(self.stack.get_visible_child_name())
-                page = pages[(index + (1 if action == "next" else -1)) % len(pages)]
-                self.navigate(page)
-                self.focus_gamepad_page()
-                return
-            if action == "back":
-                self.navigate("home")
-                self.focus_gamepad_page()
-                return
-            if action == "play":
-                if self.play_button.get_sensitive():
-                    self.play_button.clicked()
-                return
+        target.set_focus_visible(True)
+        is_main = target == self.window
+        focus = controller_focus.focus_widget(target)
+        if is_main and action in ("previous", "next"):
+            pages = list(self.nav)
+            index = pages.index(self.stack.get_visible_child_name())
+            self.navigate(pages[(index + (1 if action == "next" else -1)) % len(pages)])
+            self.focus_gamepad_page()
         elif action == "back":
-            if isinstance(target, Gtk.Dialog):
+            if is_main:
+                if self.stack.get_visible_child_name() != "home":
+                    self.feedback.play("back")
+                    self.navigate("home")
+                    self.focus_gamepad_page()
+                elif self.presentation_fullscreen:
+                    self.feedback.play("back")
+                    self.toggle_presentation()
+            elif isinstance(target, Gtk.Dialog):
+                self.feedback.play("back")
                 target.response(Gtk.ResponseType.CANCEL)
-            return
         elif action == "play":
-            target.activate_default()
-            return
-        if focus is None:
-            if target == self.window:
+            if is_main and self.play_button.is_sensitive():
+                self.feedback.play("confirm")
+                self.play_button.clicked()
+            elif not is_main:
+                default = target.get_default_widget()
+                if default is not None and default.is_sensitive():
+                    self.confirm_gamepad_focus(target, default)
+        elif action == "parent":
+            if isinstance(target, Gtk.FileChooserDialog):
+                chooser = next((widget for widget in controller_focus.widgets(target)
+                                if isinstance(widget, Gtk.FileChooserWidget)), None)
+                if chooser is not None:
+                    chooser.emit("up-folder")
+                    self.feedback.play("back")
+        elif focus is None or not focus.is_sensitive() or not focus.get_mapped():
+            if is_main:
                 self.focus_gamepad_page()
             else:
-                target.child_focus(Gtk.DirectionType.TAB_FORWARD)
-            return
-        setting = focus
-        while setting != target and not isinstance(setting, (Gtk.ComboBox, Gtk.Range)):
-            setting = setting.get_parent()
-            if setting is None:
-                break
-        if action == "confirm":
-            if isinstance(setting, Gtk.ComboBox):
-                setting.set_active((setting.get_active() + 1) % len(setting.get_model()))
-            elif isinstance(focus, Gtk.Button):
-                focus.clicked()
-            else:
-                Gtk.bindings_activate(focus, Gdk.KEY_Return, Gdk.ModifierType(0))
-        elif action in ("left", "right") and isinstance(setting, Gtk.ComboBox):
-            count = len(setting.get_model())
-            setting.set_active(max(0, min(count - 1, setting.get_active() + (1 if action == "right" else -1))))
-        elif action in ("left", "right") and isinstance(setting, Gtk.Range):
-            adjustment = setting.get_adjustment()
-            delta = adjustment.get_step_increment() * (1 if action == "right" else -1)
-            setting.set_value(setting.get_value() + delta)
-        elif target != self.window and action in ("up", "down", "left", "right") and isinstance(focus, (Gtk.TreeView, Gtk.IconView)):
-            Gtk.bindings_activate(focus, {"up": Gdk.KEY_Up, "down": Gdk.KEY_Down,
-                "left": Gdk.KEY_Left, "right": Gdk.KEY_Right}[action], Gdk.ModifierType(0))
-        elif action in ("up", "down", "left", "right", "previous", "next"):
-            direction = Gtk.DirectionType.TAB_BACKWARD if action in ("up", "left", "previous") else Gtk.DirectionType.TAB_FORWARD
+                first = next(controller_focus.focusables(target), None)
+                if first is not None:
+                    controller_focus.grab(first)
+        elif action == "confirm":
+            self.confirm_gamepad_focus(target, focus)
+        elif action in ("previous", "next"):
+            direction = Gtk.DirectionType.TAB_BACKWARD if action == "previous" else Gtk.DirectionType.TAB_FORWARD
             target.child_focus(direction)
+        elif action in ("up", "down", "left", "right"):
+            self.move_gamepad_focus(target, focus, action)
+
+    def confirm_gamepad_focus(self, target, focus):
+        if isinstance(focus, Gtk.ComboBox):
+            self.feedback.play("confirm")
+            self.choose_combo_option(target, focus)
+        elif isinstance(focus, Gtk.Button):
+            self.feedback.play("confirm")
+            focus.clicked()
+        elif isinstance(focus, Gtk.TreeView):
+            path, column = focus.get_cursor()
+            column = column or focus.get_column(0)
+            if path is not None and column is not None:
+                self.feedback.play("confirm")
+                focus.row_activated(path, column)
+        elif isinstance(focus, Gtk.IconView):
+            _, path, _ = focus.get_cursor()
+            if path is not None:
+                self.feedback.play("confirm")
+                focus.item_activated(path)
+        elif isinstance(focus, Gtk.ListBoxRow):
+            self.feedback.play("confirm")
+            focus.activate()
+        elif focus.activate():
+            self.feedback.play("confirm")
+
+    def move_gamepad_focus(self, target, focus, action):
+        if isinstance(focus, Gtk.ComboBox) and action in ("left", "right"):
+            current = focus.get_active()
+            index = current + (1 if action == "right" else -1)
+            if 0 <= index < len(focus.get_model()):
+                focus.set_active(index)
+                self.feedback.play("focus")
+        elif isinstance(focus, Gtk.Range) and action in ("left", "right"):
+            previous = focus.get_value()
+            step = focus.get_adjustment().get_step_increment() * (1 if action == "right" else -1)
+            focus.set_value(previous + step)
+            if focus.get_value() != previous:
+                self.feedback.play("focus")
+        elif isinstance(focus, (Gtk.TreeView, Gtk.IconView)) and action in ("up", "down"):
+            index = int(isinstance(focus, Gtk.IconView))
+            previous = focus.get_cursor()[index]
+            key = Gdk.KEY_Up if action == "up" else Gdk.KEY_Down
+            Gtk.bindings_activate(focus, key, Gdk.ModifierType(0))
+            if str(focus.get_cursor()[index]) != str(previous):
+                self.feedback.play("focus")
+        else:
+            self.move_gamepad_widget(target, focus, action)
+
+    def move_gamepad_widget(self, target, focus, action):
+        viewport = focus.get_ancestor(Gtk.Viewport)
+        vertical = action in ("up", "down")
+        if vertical and viewport is not None:
+            # Traverse the scrollable content before considering the persistent
+            # rows above and below it, even when the next widget is off-screen.
+            if controller_focus.move(target, focus, action, scope=viewport):
+                return
+            adjustment = viewport.get_vadjustment()
+            previous = adjustment.get_value()
+            delta = max(42, adjustment.get_step_increment())
+            adjustment.set_value(previous + (delta if action == "down" else -delta))
+            if adjustment.get_value() != previous:
+                return
+        controller_focus.move(target, focus, action)
+
+    def choose_combo_option(self, target, combo):
+        model = combo.get_model()
+        if not model or not len(model):
+            return
+        dialog = style(Gtk.Dialog(title=tr("Escolha uma opção"), transient_for=target, modal=True), "controller-dialog")
+        dialog.add_button(tr("Cancelar"), Gtk.ResponseType.CANCEL)
+        dialog.set_default_size(460, min(480, 94 + len(model) * 46))
+        scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vscrollbar_policy=Gtk.PolicyType.AUTOMATIC)
+        options = box(spacing=6, margin=16)
+        buttons = []
+        for index, row in enumerate(model):
+            button = style(Gtk.Button(label=row[combo.get_entry_text_column()]), "secondary")
+            if index == combo.get_active():
+                button.get_style_context().add_class("active")
+            button.connect("clicked", lambda _, response=index: dialog.response(response))
+            options.pack_start(button, False, False, 0)
+            buttons.append(button)
+        scroll.add(options)
+        dialog.get_content_area().pack_start(scroll, True, True, 0)
+        self.connect_dialog_feedback(dialog)
+        dialog.show_all()
+        current = buttons[max(0, combo.get_active())]
+        current.grab_focus()
+        GLib.idle_add(controller_focus.reveal, current)
+        response = dialog.run()
+        dialog.destroy()
+        if response >= 0:
+            combo.set_active(response)
+        controller_focus.grab(combo)
 
     def focus_gamepad_page(self):
-        if self.stack.get_visible_child_name() == "home":
-            (self.play_button if self.play_button.get_sensitive() else self.choose_button).grab_focus()
-        else:
-            self.stack.get_visible_child().child_focus(Gtk.DirectionType.TAB_FORWARD)
+        page = self.stack.get_visible_child_name()
+        if page == "home":
+            preferred = self.play_button if self.play_button.is_sensitive() else self.choose_button
+            if preferred.is_sensitive():
+                controller_focus.grab(preferred)
+                return
+        preferred = next(controller_focus.focusables(self.stack.get_visible_child()), self.nav[page])
+        controller_focus.grab(preferred)
+
+    def configure_file_chooser(self, dialog):
+        self.connect_dialog_feedback(dialog)
+        xbox = self.preferences["button_prompts"] == "xbox"
+        back, parent, tabs, start = ("B", "Y", "LB/RB", "Menu") if xbox else ("○", "△", "L1/R1", "Options")
+        hint = label(tr("{tabs} alternar regiões · {parent} pasta acima · {back} voltar · {start} aceitar").format(
+            parent=parent, back=back, tabs=tabs, start=start), "small", wrap=True)
+        dialog.set_extra_widget(hint)
+        hint.show()
+
+    def connect_dialog_feedback(self, dialog):
+        self.connect_feedback(dialog)
+        dialog.connect("set-focus", self.focus_feedback)
 
     def home(self):
-        page = box(spacing=16)
+        page = box(spacing=14)
+        library = box(spacing=14)
         hero_outer = style(Gtk.Overlay(), "hero")
         artwork = Artwork()
-        artwork.set_size_request(-1, 220)
+        artwork.set_size_request(-1, 284)
         for edge in ("top", "bottom", "start", "end"):
             getattr(artwork, "set_margin_" + edge)(1)
         hero_outer.add(artwork)
-        hero = box(Gtk.Orientation.HORIZONTAL, margin=24)
+        hero = box(spacing=10, margin=28)
+        hero.set_valign(Gtk.Align.END)
+        hero.pack_start(label("Shadow of the\nColossus", "hero-title", wrap=True), False, False, 0)
+        self.status = label(tr("Escolha sua ROM para começar."), "status", wrap=True)
+        hero.pack_start(self.status, False, False, 0)
+        self.play_button = style(Gtk.Button(label=tr("▶   Iniciar jogo")), "play")
+        self.play_button.set_halign(Gtk.Align.START)
+        self.play_button.connect("clicked", self.play)
+        hero.pack_start(self.play_button, False, False, 0)
         hero_outer.add_overlay(hero)
-        copy = box(spacing=12)
-        copy.pack_start(label("Shadow of the\nColossus", "hero-title",wrap=True),False,False,0)
-        hero.pack_start(copy, True, True, 0)
-        page.pack_start(hero_outer,False,False,0)
+        library.pack_start(hero_outer, False, False, 0)
         panel_outer = style(Gtk.Box(orientation=Gtk.Orientation.VERTICAL),"panel")
-        panel = box(spacing=17,margin=22); panel_outer.pack_start(panel,True,True,0)
-        heading = box(Gtk.Orientation.HORIZONTAL,12)
-        heading.pack_start(label(tr("Seu jogo"), "panel-title"),True,True,0)
-        panel.pack_start(heading,False,False,0)
+        panel = box(spacing=9, margin=15)
+        panel_outer.pack_start(panel, True, True, 0)
         self.drop = style(Gtk.EventBox(),"drop-zone")
-        inner = box(Gtk.Orientation.HORIZONTAL,16,18)
-        icon = label("▣","section-title"); inner.pack_start(icon,False,False,5)
-        info = box(spacing=6)
+        inner = box(Gtk.Orientation.HORIZONTAL, 16, 13)
+        info = box(spacing=4)
         self.file_title = label(tr("Selecione sua ROM"), "file-title")
-        self.file_title.set_ellipsize(Pango.EllipsizeMode.MIDDLE); self.file_title.set_max_width_chars(38)
+        self.file_title.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        self.file_title.set_max_width_chars(45)
         info.pack_start(self.file_title,False,False,0)
-        self.file_subtitle = label(tr("ISO, RAR, ZIP ou 7Z · edição americana"), "muted")
+        self.file_subtitle = label(tr("ISO, RAR, ZIP ou 7Z · edição americana"), "muted", wrap=True)
         info.pack_start(self.file_subtitle,False,False,0)
         inner.pack_start(info,True,True,0)
         self.choose_button = style(Gtk.Button(label=tr("Escolher arquivo…")),"secondary")
@@ -358,20 +545,10 @@ class Launcher:
         inner.pack_end(self.choose_button,False,False,0); self.drop.add(inner)
         panel.pack_start(self.drop,False,False,0)
         self.progress = Gtk.ProgressBar(); panel.pack_start(self.progress,False,False,0)
-        actions = box(Gtk.Orientation.HORIZONTAL,20)
-        state = box(spacing=5)
-        self.status = label(tr("Escolha sua ROM para começar."),"status"); self.status.set_line_wrap(True)
-        state.pack_start(self.status,False,False,0)
-        state.pack_start(label(tr("Seu arquivo fica apenas neste computador."),"muted"),False,False,0)
-        actions.pack_start(state,True,True,0)
-        self.play_button = style(Gtk.Button(label=tr("▶   Iniciar jogo")),"play")
-        self.play_button.set_tooltip_text(tr("Abrir Shadow of the Colossus nativamente no PC"))
-        self.play_button.connect("clicked",self.play)
-        actions.pack_end(self.play_button,False,False,0); panel.pack_start(actions,False,False,0)
-        page.pack_start(panel_outer,False,False,0)
+        library.pack_start(panel_outer, False, False, 0)
+        page.pack_start(library, False, False, 0)
         page.pack_start(self.updates_panel(), False, False, 0)
-        note = label(tr("Dica: você também pode arrastar o arquivo para a área acima."),"muted")
-        page.pack_start(note,False,False,0)
+        self.drop.set_tooltip_text(tr("Dica: você também pode arrastar o arquivo para a área acima."))
         if SAVE_STATES_AVAILABLE:
             page.pack_start(label(tr("Durante o jogo: F5 salva rápido · F8 carrega · F1 gerencia estados."), "small", wrap=True),False,False,0)
         page.pack_start(Gtk.Box(),True,True,0)
@@ -379,7 +556,7 @@ class Launcher:
 
     def controls(self):
         page=box(spacing=18)
-        page.pack_start(label("Controles", "section-title"),False,False,0)
+        page.pack_start(label(tr("Controles"), "section-title"),False,False,0)
         page.pack_start(label(tr("Teclado e mouse ou controle USB/Bluetooth.\nF1 abre o menu, libera o cursor e oferece Voltar ao launcher. Esc pausa o jogo."),"muted",wrap=True),False,False,0)
         edit=style(Gtk.Button(label=tr("Personalizar teclado e mouse…")),"secondary")
         edit.connect("clicked", self.configure_desktop_input)
@@ -424,7 +601,7 @@ class Launcher:
             self.error(tr("Feche o jogo"), tr("O perfil será aplicado na próxima abertura do jogo."))
             return
         from controls_dialog import ControlsDialog
-        dialog = ControlsDialog(self.window, self.library)
+        dialog = ControlsDialog(self.window, self.library, connect_feedback=self.connect_dialog_feedback)
         dialog.connect("destroy", lambda *_: self.refresh_keyboard_summary())
         dialog.show_all()
 
@@ -584,6 +761,9 @@ class Launcher:
         self.prompts_choice.set_active_id(self.preferences["button_prompts"])
         preferences_panel.pack_start(self.prompts_choice, False, False, 0)
         preferences_panel.pack_start(label(tr("Os ícones mudam na próxima abertura do jogo."), "muted", wrap=True), False, False, 0)
+        self.sound_choice = style(Gtk.CheckButton(label=tr("Sons da interface")), "sound-option")
+        self.sound_choice.set_active(self.preferences["ui_sounds"])
+        preferences_panel.pack_start(self.sound_choice, False, False, 0)
         apply = style(Gtk.Button(label=tr("Aplicar")), "secondary")
         apply.set_halign(Gtk.Align.START)
         apply.connect("clicked", self.apply_preferences)
@@ -622,8 +802,9 @@ class Launcher:
         if self.busy or self.process or self.controller_process:
             self.error(tr("Feche o jogo"), tr("Feche o jogo ou termine a preparação antes de aplicar."))
             return
-        values = {"language": self.language_choice.get_active_id(),
-                  "button_prompts": self.prompts_choice.get_active_id()}
+        values = {**self.preferences, "language": self.language_choice.get_active_id(),
+                  "button_prompts": self.prompts_choice.get_active_id(),
+                  "ui_sounds": self.sound_choice.get_active()}
         try:
             atomic_json(self.library.directory / PREFERENCES, values)
         except OSError as exc:
@@ -631,6 +812,7 @@ class Launcher:
             return
         self.restart_language = values["language"] != self.preferences["language"]
         self.preferences = values
+        self.feedback.set_enabled(values["ui_sounds"])
         if self.restart_language:
             Gtk.main_quit()
         else:
@@ -740,6 +922,7 @@ class Launcher:
         for extension in ("frag","fs","glsl"):
             selected.add_pattern("*."+extension); selected.add_pattern("*."+extension.upper())
         dialog.add_filter(selected)
+        self.configure_file_chooser(dialog)
         path = dialog.get_filename() if dialog.run()==Gtk.ResponseType.OK else None
         dialog.destroy()
         if path: self.import_shader(path)
@@ -792,7 +975,11 @@ class Launcher:
         return page
 
     def navigate(self,name):
+        changed = name != self.stack.get_visible_child_name()
         self.stack.set_visible_child_name(name)
+        if changed:
+            adjustment = self.page_scroller.get_vadjustment()
+            adjustment.set_value(adjustment.get_lower())
         for key,button in self.nav.items():
             context=button.get_style_context()
             (context.add_class if key==name else context.remove_class)("active")
@@ -806,6 +993,7 @@ class Launcher:
         for extension in ("iso","rar","zip","7z"):
             selected.add_pattern("*."+extension); selected.add_pattern("*."+extension.upper())
         dialog.add_filter(selected)
+        self.configure_file_chooser(dialog)
         if dialog.run()==Gtk.ResponseType.OK:
             path=dialog.get_filename(); dialog.destroy(); self.prepare(path)
         else:
@@ -898,6 +1086,7 @@ class Launcher:
             self.update_status(tr("Não foi possível abrir o jogo."),True); self.error(tr("O jogo não abriu"),error)
         else:
             self.process=process; self.play_button.set_label(tr("Em jogo…"))
+            self.feedback.close()
             self.update_status(tr("●  Jogo em execução"))
             GLib.timeout_add(300,self.watch_game)
         return False
@@ -938,9 +1127,12 @@ class Launcher:
             if self.args.rom or self.args.test_game:
                 GLib.timeout_add(100,self.capture_and_exit)
             return
+        self.feedback.play("error")
         dialog=Gtk.MessageDialog(transient_for=self.window,flags=0,message_type=Gtk.MessageType.ERROR,
                                  buttons=Gtk.ButtonsType.NONE,text=title)
         dialog.add_button(tr("Fechar"), Gtk.ResponseType.CLOSE)
+        dialog.set_default_response(Gtk.ResponseType.CLOSE)
+        self.connect_dialog_feedback(dialog)
         dialog.format_secondary_text(text); dialog.run(); dialog.destroy()
 
     def open_saves(self,*_):
@@ -949,6 +1141,7 @@ class Launcher:
         dialog = Gtk.Dialog(title=tr("Meus saves"), transient_for=self.window, modal=True)
         dialog.set_default_size(620, 260)
         dialog.add_button(tr("Fechar"), Gtk.ResponseType.CLOSE)
+        dialog.set_default_response(Gtk.ResponseType.CLOSE)
         panel = box(spacing=16, margin=24)
         panel.pack_start(label(tr("Leve sua aventura para outro PC"), "section-title"), False, False, 0)
         panel.pack_start(label(tr("Importe seu cartão ou exporte uma cópia para usar em outro computador.\n"
@@ -998,6 +1191,7 @@ class Launcher:
                     pattern.add_pattern("*.ps2"); pattern.add_pattern("*.PS2"); chooser.add_filter(pattern)
                 else:
                     chooser.set_current_name("Mcd001.ps2"); chooser.set_do_overwrite_confirmation(True)
+                self.configure_file_chooser(chooser)
                 response = chooser.run(); selected = chooser.get_filename(); chooser.destroy()
                 if response != Gtk.ResponseType.OK or not selected:
                     return
@@ -1017,6 +1211,7 @@ class Launcher:
         if self.busy or self.process is not None:
             panel.pack_start(label(tr("Feche o jogo para importar ou exportar com segurança."), "muted", wrap=True), False, False, 0)
         dialog.get_content_area().pack_start(panel, True, True, 0)
+        self.connect_dialog_feedback(dialog)
         dialog.show_all(); dialog.run(); dialog.destroy()
 
     def open_desktop_path(self, path):

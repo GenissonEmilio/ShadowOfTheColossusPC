@@ -1,40 +1,43 @@
-* { font-family: 'DejaVu Sans', 'SotC Launcher Japanese', sans-serif; font-size: 13px; }
-window { background: #121916; color: #f6f2e9; }
-headerbar { background: #121916; color: #d9d1bf; border: none; box-shadow: none; min-height: 36px; }
+* { font-family: 'DejaVu Sans', 'SotC Launcher Japanese', sans-serif; font-size: 14px; }
+window { background: #111a19; color: #f6f2e9; }
+headerbar { background: #111a19; color: #f0e7d3; border: none; box-shadow: none; min-height: 34px; }
 headerbar button { background: transparent; color: #b9b4aa; border: none; box-shadow: none; }
-.sidebar { background: #19231f; border-right: 1px solid #25242a; }
-.brand { font-family: 'DejaVu Serif'; font-size: 18px; font-weight: bold; color: #b8d8c1; }
-.small { font-size: 11px; color: #8f919f; }
+.top-bar { background: #1a2524; border-bottom: 1px solid #364642; padding: 9px 24px; }
+.build-label { color: #aebfba; font-size: 12px; padding: 0 4px; }
+.small { font-size: 12px; color: #a5b2b1; }
 .eyebrow { font-size: 10px; letter-spacing: 2px; font-weight: bold; color: #9fbca5; }
-.nav { background: transparent; border: 1px solid transparent; box-shadow: none; color: #9696a5; padding: 13px 17px; border-radius: 8px; }
-.nav:hover { background: #191b25; color: #f2e6d0; }
-.nav.active { background: #26352a; border: 1px solid #536742; color: #d9dec5; }
-.nav label { font-size: 13px; }
-.launcher-root, .main-scroll, .main-scroll > viewport, .main-content { background-color: #121916; }
+.nav { background: #222e2b; border: 1px solid #34433d; box-shadow: none; color: #d5e1dc; padding: 10px 12px; border-radius: 8px; min-height: 23px; }
+.nav:hover { background: #354641; color: #fff4dc; }
+.nav.active { background: #394940; border-color: #697b60; color: #fff2d3; box-shadow: inset 0 -2px 0 #ceab6c; }
+.nav label { font-size: 14px; font-weight: bold; }
+.launcher-root, .main-scroll, .main-scroll > viewport, .main-content { background-color: #111a19; }
 .main-scroll, .main-scroll > viewport { border: none; box-shadow: none; }
-.main-content { padding: 16px; }
-.update-panel { padding: 12px 16px; }
+.main-content { padding: 17px 24px; }
+.update-panel { padding: 12px 17px; }
 .update-panel .play { padding: 11px 16px; }
-.breadcrumb { color: #777d8b; font-size: 11px; }
-.hero { background: linear-gradient(115deg, #27342c, #1d2723 55%, #182522); border: 1px solid #465348; border-radius: 14px; }
-.hero-title { font-family: 'DejaVu Serif'; font-size: 32px; font-weight: bold; color: #f6e3b5; }
-.hero-subtitle { color: #c0b7b5; font-size: 13px; }
-.pill { background: #282327; border: 1px solid #4b3f3e; border-radius: 20px; color: #cdbfa7; font-size: 10px; padding: 5px 11px; }
-.panel { background: #141720; border: 1px solid #2b2d39; border-radius: 12px; }
+.hero { background: #26332b; border: 1px solid #516155; border-radius: 14px; }
+.hero-title { font-family: 'DejaVu Serif'; font-size: 43px; font-weight: bold; color: #f6e3b5; }
+.hero-subtitle { color: #d1cec1; font-size: 14px; }
+.panel { background: #1b2726; border: 1px solid #364744; border-radius: 12px; }
 .panel-title { font-size: 19px; font-weight: bold; color: #efeee9; }
-.muted { color: #8f95a5; font-size: 12px; }
-.drop-zone { background: #11141c; border: 1px dashed #48434a; border-radius: 10px; }
-.file-title { font-weight: bold; color: #ece5d8; font-size: 14px; }
-.secondary { background: #242631; color: #dedbd4; border: 1px solid #41414c; box-shadow: none; border-radius: 7px; padding: 11px 16px; font-weight: bold; }
-.secondary:hover { background: #323440; border-color: #88734b; }
-.secondary:disabled { color: #666b79; border-color: #30323b; }
-.play { background: linear-gradient(to right, #d9b56c, #efcf89); border: 1px solid #f1d699; color: #211a10; border-radius: 8px; padding: 14px 36px; font-size: 14px; font-weight: bold; box-shadow: 0 3px 18px alpha(#d9b56c, 0.14); }
+.muted { color: #b3c1be; font-size: 13px; }
+.drop-zone { background: #14201f; border: 1px dashed #526763; border-radius: 10px; }
+.drop-zone:drop(active) { background: #293b32; border-color: #edca88; }
+.file-title { font-weight: bold; color: #f0ebdc; font-size: 16px; }
+.secondary { background: #2a3835; color: #f0ede3; border: 1px solid #50635e; box-shadow: none; border-radius: 8px; padding: 11px 19px; min-height: 22px; font-weight: bold; }
+.secondary:hover { background: #3d4e45; border-color: #c1ab7a; }
+.secondary.active { border-color: #cda76d; }
+.secondary:disabled { color: #88958f; border-color: #354742; }
+.play { background: linear-gradient(to right, #d9b56c, #efcf89); border: 1px solid #f1d699; color: #211a10; border-radius: 9px; padding: 13px 40px; min-height: 25px; font-size: 16px; font-weight: bold; box-shadow: 0 3px 18px alpha(#d9b56c, 0.14); }
 .play:hover { background: #f9dfa0; }
-.play:disabled { background: #292a31; color: #707582; border-color: #3b3d47; box-shadow: none; }
-.status { font-size: 12px; color: #b6a37d; }
+.play:disabled { background: #28342f; color: #9eaaa1; border-color: #475750; box-shadow: none; }
+.status { font-size: 13px; color: #e7cf9f; }
 .ready { color: #8bd0a6; }
 .error { color: #f19892; }
-.footer { border-top: 1px solid #262833; color: #797d8a; font-size: 10px; }
+.footer { background: #1a2524; border-top: 1px solid #364642; padding: 8px 24px; }
+.footer-action { border: 1px solid transparent; box-shadow: none; background: transparent; color: #ecdfbf; padding: 8px 13px; border-radius: 7px; min-height: 24px; }
+.footer-action:hover { background: #344440; border-color: #59695e; color: #fff4d6; }
+.input-hint { font-size: 12px; color: #c5d0cc; }
 .link { background: transparent; border: none; box-shadow: none; color: #b6a37d; padding: 5px 0; }
 .link:hover { color: #f4d78c; }
 .section-title { font-family: 'DejaVu Serif', 'SotC Launcher Japanese', serif; font-size: 30px; font-weight: bold; color: #f2deb2; }
@@ -42,8 +45,14 @@ headerbar button { background: transparent; color: #b9b4aa; border: none; box-sh
 progressbar trough { min-height: 4px; background: #282b36; border: none; border-radius: 2px; }
 progressbar progress { background: #d9b56c; border: none; border-radius: 2px; }
 tooltip { background: #232632; color: #f0e5cf; border: 1px solid #5e5036; }
-button:focus { outline: 2px solid #e2c484; outline-offset: 3px; }
-dialog { background: #141720; }
+button:focus, combobox:focus button, treeview:focus, entry:focus, scale:focus {
+    outline: 3px solid #f2d392; outline-offset: -3px;
+}
+.nav:focus, .footer-action:focus, .secondary:focus, .graphics-select button:focus { background: #3d5548; color: #fff6de; }
+.play:focus { outline-color: #58421f; }
+dialog { background: #182422; }
 .graphics-panel { padding: 20px; }
-.graphics-select button { background: #242f29; color: #e3e6db; border: 1px solid #4b5c4b; border-radius: 7px; padding: 10px 14px; box-shadow: none; }
-.graphics-select button:hover { background: #304035; }
+.graphics-select button { background: #283932; color: #edf1e9; border: 1px solid #566c5c; border-radius: 8px; padding: 10px 15px; min-height: 22px; box-shadow: none; }
+.graphics-select button:hover { background: #385144; }
+.sound-option { padding: 8px 10px; }
+.sound-option:focus { background: #34483d; }

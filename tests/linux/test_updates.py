@@ -227,6 +227,18 @@ class UpdateTests(unittest.TestCase):
 
 
 class PreferencesTests(unittest.TestCase):
+    def test_launcher_presentation_and_sound_preferences(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            defaults = language.preferences(folder)
+            self.assertFalse(defaults["launcher_fullscreen"])
+            self.assertTrue(defaults["ui_sounds"])
+            atomic_json(folder / language.PREFERENCES, {"language": "es", "button_prompts": "xbox",
+                                                         "launcher_fullscreen": True, "ui_sounds": False})
+            selected = language.preferences(folder)
+            self.assertEqual(selected, {"language": "es", "button_prompts": "xbox",
+                                        "launcher_fullscreen": True, "ui_sounds": False})
+
     def test_prompt_style_reaches_the_game_without_changing_disc_state(self):
         with tempfile.TemporaryDirectory() as directory:
             library = Library(directory)

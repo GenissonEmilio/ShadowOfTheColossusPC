@@ -33,7 +33,9 @@ def preferences(directory):
     language = config.get("language")
     prompts = config.get("button_prompts")
     return {"language": language if isinstance(language, str) and language in LANGUAGES else preferred_language(),
-            "button_prompts": prompts if prompts in PROMPTS else PROMPTS[0]}
+            "button_prompts": prompts if prompts in PROMPTS else PROMPTS[0],
+            "launcher_fullscreen": config.get("launcher_fullscreen") is True,
+            "ui_sounds": config.get("ui_sounds") is not False}
 
 
 @lru_cache(maxsize=1)

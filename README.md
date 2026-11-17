@@ -80,6 +80,11 @@ bibliotecas restaurado, inclusive no pacote portátil. A ROM original permanece 
 
 ## Preferências e atualizações do launcher
 
+Abra **Tela cheia** no rodapé ou use **F11** para ver o launcher em tela cheia.
+A preferência é lembrada. As abas e os atalhos de saves e saída ficam visíveis
+enquanto a página rola. **Configurações → Sons da interface → Aplicar** liga ou
+desliga os sons de navegação e confirmação.
+
 Em **Configurações → Idioma do launcher**, escolha Português, English, Español
 ou 日本語. A escolha inicial segue o sistema quando disponível, com inglês como
 alternativa. Em jogo, **F1 → Sistema → Idioma** oferece inglês e português.
@@ -153,9 +158,10 @@ diretamente. Veja [o formato e exemplos](docs/SHADERS.md).
 
 ## Controles
 
-O launcher também aceita controle: direcional ou analógico navega, **A/✕**
-confirma, **B/○** volta e **LB/RB** alternam as páginas. **Start** inicia o
-jogo já preparado; **←/→** ajustam a opção selecionada. Controles reconhecidos
+No launcher, use o direcional ou analógico para mover o foco, **A/✕** para
+confirmar e **B/○** para voltar ou fechar diálogos. **LB/RB** ou **L1/R1**
+trocam de aba. **Start/Options** inicia o jogo preparado, e **←/→** ajustam o
+seletor em foco. Na escolha de arquivo, **Y/△** abre a pasta acima. Controles reconhecidos
 pelo SDL2 usam a base de mapeamentos incluída e o perfil salvo em
 **Configurar meu controle…**. A interface mostra os atalhos quando o controle
 é conectado. A navegação funciona com a janela do launcher em foco e libera

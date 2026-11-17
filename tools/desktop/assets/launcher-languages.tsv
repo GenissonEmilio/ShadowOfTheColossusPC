@@ -8,6 +8,12 @@ SUA BIBLIOTECA	YOUR LIBRARY	TU BIBLIOTECA	ライブラリ
 ◇   Sobre o port	◇   About	◇   Acerca de	◇   この移植版について
 BIBLIOTECA    /    SHADOW OF THE COLOSSUS	LIBRARY    /    SHADOW OF THE COLOSSUS	BIBLIOTECA    /    SHADOW OF THE COLOSSUS	ライブラリ    /    ワンダと巨像
 F1 abre os ajustes durante o jogo.	F1 opens settings during play.	F1 abre los ajustes durante la partida.	プレイ中に F1 で設定を開きます。
+Início	Home	Inicio	ホーム
+Configurações	Settings	Configuración	設定
+Tela cheia	Full screen	Pantalla completa	全画面
+Sair da tela cheia	Exit full screen	Salir de pantalla completa	全画面を終了
+Sair do launcher	Exit launcher	Cerrar el lanzador	ランチャーを終了
+Sons da interface	Interface sounds	Sonidos de la interfaz	インターフェース効果音
 Meus saves ↗	My saves ↗	Mis partidas ↗	セーブデータ ↗
 Escolha sua ROM para começar.	Choose your disc image to get started.	Elige la imagen del disco para empezar.	ディスクイメージを選択してください。
 A atualização falhou	The update failed	La actualización falló	更新に失敗しました
@@ -242,3 +248,6 @@ Esperado exatamente um disco; encontrados {count}.	Expected one disc image, foun
 A pasta de destino já existe. Os dados foram preservados.	The destination folder exists. Its data was preserved.	La carpeta de destino ya existe. Se conservaron sus datos.	保存先のフォルダーは既に存在します。データは保持されています。
 Clique numa atribuição para trocar a tecla ou o botão do mouse.	Click a binding to change its key or mouse button.	Haz clic en una asignación para cambiar la tecla o el botón del ratón.	割り当てをクリックしてキーやマウスボタンを変更します。
 O GitHub limitou as consultas. Tente mais tarde.	GitHub has rate-limited update checks. Try again later.	GitHub ha limitado las consultas de actualizaciones. Inténtalo más tarde.	GitHub のリクエスト上限に達しました。しばらくしてからお試しください。
+Direcional/analógico mover · {confirm} confirmar · {back} voltar · {tabs} trocar aba · {start} jogar	D-pad/stick move · {confirm} confirm · {back} back · {tabs} switch tabs · {start} play	Cruceta/palanca mover · {confirm} confirmar · {back} volver · {tabs} cambiar de pestaña · {start} jugar	十字キー/スティック 移動 · {confirm} 決定 · {back} 戻る · {tabs} タブ切替 · {start} プレイ
+{tabs} alternar regiões · {parent} pasta acima · {back} voltar · {start} aceitar	{tabs} switch areas · {parent} parent folder · {back} back · {start} accept	{tabs} cambiar de área · {parent} carpeta superior · {back} volver · {start} aceptar	{tabs} エリア切替 · {parent} 親フォルダー · {back} 戻る · {start} 決定
+Escolha uma opção	Choose an option	Elige una opción	項目を選択
