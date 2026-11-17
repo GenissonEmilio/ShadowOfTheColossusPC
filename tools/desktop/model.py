@@ -12,7 +12,7 @@ from import_disc import import_disc, EXPECTED
 from language import preferences, translate as tr
 from pipeline import Pipeline, PROCESS_FLAGS, WINDOWS, compiler_tool
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 APPLICATION_ID = "io.github.GenissonEmilio.ShadowOfTheColossusPC"
 SAVE_STATES_AVAILABLE = sys.platform.startswith("linux")
@@ -151,13 +151,18 @@ class Library:
             raise ValueError(tr("Escolha sua ROM para continuar. Os arquivos locais estão ausentes ou incompletos."))
         return boot
 
-    def launch(self, test=False, progress=lambda text: None):
+    def prepare_game(self, progress=lambda text: None):
         boot = self.verify()
+        self.player_directory.mkdir(parents=True, exist_ok=True)
+        return Pipeline(self.program, self.directory, self.game_environment(), progress).prepare(boot.parent)
+
+    def launch(self, test=False, progress=lambda text: None):
+        boot = self.disc
+        executable = self.prepare_game(progress)
         from graphics import Graphics
         graphics = Graphics(self)
         graphics.save_display(*graphics.display())
         environment = self.game_environment(test)
-        executable = Pipeline(self.program, self.directory, environment, progress).prepare(boot.parent)
         self.player_directory.mkdir(parents=True, exist_ok=True)
         if test:
             shots = self.directory / "game-test"

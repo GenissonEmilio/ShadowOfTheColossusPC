@@ -9,6 +9,11 @@ SUA BIBLIOTECA	YOUR LIBRARY	TU BIBLIOTECA	ライブラリ
 BIBLIOTECA    /    SHADOW OF THE COLOSSUS	LIBRARY    /    SHADOW OF THE COLOSSUS	BIBLIOTECA    /    SHADOW OF THE COLOSSUS	ライブラリ    /    ワンダと巨像
 F1 abre os ajustes durante o jogo.	F1 opens settings during play.	F1 abre los ajustes durante la partida.	プレイ中に F1 で設定を開きます。
 Início	Home	Inicio	ホーム
+Compilar / atualizar	Compile / update	Compilar / actualizar	コンパイル・更新
+Prepara a compilação em segundo plano. Inicie o jogo quando quiser.	Prepares the build in the background. Start the game whenever you are ready.	Prepara la compilación en segundo plano. Inicia el juego cuando quieras.	バックグラウンドでコンパイルします。準備ができたらゲームを開始できます。
+Compilando em segundo plano…	Compiling in the background…	Compilando en segundo plano…	バックグラウンドでコンパイル中…
+Compilação pronta. Inicie o jogo quando quiser.	Build ready. Start the game whenever you are ready.	Compilación lista. Inicia el juego cuando quieras.	コンパイル完了。いつでもゲームを開始できます。
+A compilação falhou. Tente novamente. Detalhes em last-prepare.log.	Compilation failed. Retry when ready. Details in last-prepare.log.	La compilación ha fallado. Vuelve a intentarlo. Detalles en last-prepare.log.	コンパイルに失敗しました。再試行できます。詳細は last-prepare.log を確認してください。
 Configurações	Settings	Configuración	設定
 Tela cheia	Full screen	Pantalla completa	全画面
 Sair da tela cheia	Exit full screen	Salir de pantalla completa	全画面を終了

@@ -146,6 +146,7 @@ class Launcher:
         self.feedback = LauncherAudio(self.library.program, enabled=self.preferences["ui_sounds"])
         self.presentation_fullscreen = self.preferences["launcher_fullscreen"]
         self.busy = False; self.process = None; self.closing = False; self.failed = False
+        self.prepare_only = False
         self.disposed = False
         self.controller_process = None
         self.update = None
@@ -230,6 +231,7 @@ class Launcher:
         else:
             self.play_button.set_sensitive(False)
             self.status.set_text(tr("Escolha sua ROM para começar."))
+        self.refresh_prepare_controls()
         target = Gtk.TargetEntry.new("text/uri-list",0,0)
         self.drop.drag_dest_set(Gtk.DestDefaults.ALL,[target],Gdk.DragAction.COPY)
         self.drop.connect("drag-data-received", self.dropped)
@@ -528,9 +530,14 @@ class Launcher:
         self.status = label(tr("Escolha sua ROM para começar."), "status", wrap=True)
         hero.pack_start(self.status, False, False, 0)
         self.play_button = style(Gtk.Button(label=tr("▶   Iniciar jogo")), "play")
-        self.play_button.set_halign(Gtk.Align.START)
         self.play_button.connect("clicked", self.play)
-        hero.pack_start(self.play_button, False, False, 0)
+        actions = box(Gtk.Orientation.HORIZONTAL, 12)
+        actions.pack_start(self.play_button, False, False, 0)
+        self.compile_button = style(Gtk.Button(label=tr("Compilar / atualizar")), "secondary")
+        self.compile_button.set_tooltip_text(tr("Prepara a compilação em segundo plano. Inicie o jogo quando quiser."))
+        self.compile_button.connect("clicked", self.compile_game)
+        actions.pack_start(self.compile_button, False, False, 0)
+        hero.pack_start(actions, False, False, 0)
         hero_outer.add_overlay(hero)
         library.pack_start(hero_outer, True, True, 0)
         panel_outer = style(Gtk.Box(orientation=Gtk.Orientation.VERTICAL),"panel")
@@ -630,6 +637,7 @@ class Launcher:
             self.error(tr("Não foi possível configurar o controle"), str(exc))
             return
         self.controller_button.set_sensitive(False)
+        self.refresh_prepare_controls()
         self.controller_status.set_text(tr("Siga as instruções na janela de configuração."))
         GLib.timeout_add(250, self.watch_controller)
 
@@ -638,6 +646,7 @@ class Launcher:
         if code is None:
             return True
         self.controller_process = None
+        self.refresh_prepare_controls()
         self.controller_button.set_sensitive(True)
         self.controller_status.set_text(tr("Perfil salvo. Ele será usado na próxima abertura do jogo.") if code == 0
             else tr("Configuração não concluída. Os perfis anteriores foram preservados."))
@@ -878,6 +887,7 @@ class Launcher:
             return
         update = self.update
         self.busy = self.updating = True
+        self.refresh_prepare_controls()
         self.navigate("home")
         self.update_status_label.set_tooltip_text(None)
         for button in (self.update_button, self.check_button):
@@ -908,6 +918,7 @@ class Launcher:
 
     def update_finished(self, error):
         self.busy = self.updating = False
+        self.refresh_prepare_controls()
         for button in (self.update_button, self.check_button):
             button.set_sensitive(True)
         self.update_progress.hide()
@@ -935,6 +946,7 @@ class Launcher:
     def import_shader(self,path):
         if self.busy or self.process: return
         self.busy=True; self.video_panel.set_sensitive(False)
+        self.refresh_prepare_controls()
         self.play_button.set_sensitive(False); self.choose_button.set_sensitive(False)
         self.shader_status.set_text(tr("Validando o shader no seu driver…"))
         def worker():
@@ -946,6 +958,7 @@ class Launcher:
 
     def shader_imported(self,error):
         self.busy=False; self.video_panel.set_sensitive(True)
+        self.refresh_prepare_controls()
         self.play_button.set_sensitive(bool(self.library.disc)); self.choose_button.set_sensitive(True)
         if self.closing: Gtk.main_quit(); return False
         if error:
@@ -1030,21 +1043,39 @@ class Launcher:
         self.status.get_style_context().add_class("ready")
         self.play_button.set_sensitive(True)
         self.choose_button.set_label(tr("Trocar ROM…"))
+        self.refresh_prepare_controls()
+
+    def refresh_prepare_controls(self):
+        self.compile_button.set_sensitive(bool(self.library.disc) and not
+            (self.busy or self.process or self.controller_process))
+
+    def compile_game(self, *_):
+        if self.library.disc:
+            return self.prepare()
+        return False
 
     def pulse(self):
         if not self.busy: return False
         self.progress.pulse(); return True
 
-    def prepare(self,path):
-        if self.busy or self.process: return False
+    def prepare(self,path=None):
+        if self.busy or self.process or self.controller_process: return False
+        self.prepare_only = path is None
         self.busy=True; self.failed=False
+        self.refresh_prepare_controls()
         self.choose_button.set_sensitive(False); self.play_button.set_sensitive(False)
-        self.progress.show(); self.update_status(tr("Preparando seu jogo…"))
+        self.status.set_tooltip_text(None)
+        self.progress.show()
+        self.update_status(tr("Compilando em segundo plano…") if self.prepare_only else tr("Preparando seu jogo…"))
         GLib.timeout_add(80,self.pulse)
         def worker():
             error=None
             try:
-                self.library.prepare(path,lambda text: GLib.idle_add(self.update_status,text))
+                progress = lambda text: GLib.idle_add(self.update_status,text)
+                if self.prepare_only:
+                    self.library.prepare_game(progress)
+                else:
+                    self.library.prepare(path,progress)
             except Exception as exc:
                 error=str(exc)
             GLib.idle_add(self.prepared,error)
@@ -1053,15 +1084,23 @@ class Launcher:
 
     def prepared(self,error):
         self.busy=False; self.progress.hide(); self.choose_button.set_sensitive(True)
+        self.refresh_prepare_controls()
         if self.closing: Gtk.main_quit(); return False
         if error:
             self.failed=True
-            self.update_status(tr("Não foi possível preparar essa ROM."),True)
-            self.error(tr("Confira o arquivo escolhido"),error)
+            if self.prepare_only:
+                self.update_status(tr("A compilação falhou. Tente novamente. Detalhes em last-prepare.log."), True)
+                self.status.set_tooltip_text(error)
+            else:
+                self.update_status(tr("Não foi possível preparar essa ROM."),True)
+                self.error(tr("Confira o arquivo escolhido"),error)
             self.play_button.set_sensitive(bool(self.library.disc))
         else:
             self.set_ready()
-            if self.args.test_game: GLib.idle_add(self.play)
+            if self.prepare_only:
+                self.update_status(tr("Compilação pronta. Inicie o jogo quando quiser."))
+                self.status.get_style_context().add_class("ready")
+            elif self.args.test_game: GLib.idle_add(self.play)
             elif self.args.screenshot: GLib.timeout_add(500,self.capture_and_exit)
         return False
 
@@ -1069,6 +1108,7 @@ class Launcher:
         if self.busy or self.process or self.controller_process: return False
         self.gamepad.suspend()
         self.busy=True; self.play_button.set_sensitive(False); self.choose_button.set_sensitive(False)
+        self.refresh_prepare_controls()
         self.update_status(tr("Abrindo o jogo…"))
         self.progress.show(); GLib.timeout_add(80,self.pulse)
         self.display_panel.set_sensitive(False); self.video_panel.set_sensitive(False)
@@ -1094,6 +1134,7 @@ class Launcher:
             self.feedback.close()
             self.update_status(tr("●  Jogo em execução"))
             GLib.timeout_add(300,self.watch_game)
+        self.refresh_prepare_controls()
         return False
 
     def watch_game(self):

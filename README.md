@@ -57,6 +57,11 @@ versões Linux testadas.
 3. Escolha seu disco `.iso`, `.7z`, `.zip` ou `.rar` da edição USA.
 4. Aguarde a primeira compilação. Nas próximas sessões, clique em **Iniciar jogo**.
 
+Use **Compilar / atualizar**, ao lado de **Iniciar jogo**, para preparar uma
+compilação com o disco já importado enquanto faz outras tarefas. Ao terminar,
+o launcher mostra **Compilação pronta**. Clique em **Iniciar jogo** quando quiser
+jogar. Esse botão também verifica e prepara o cache para um runtime atualizado.
+
 O compilador está incluído: o jogador não precisa instalar Docker, um SDK nem
 executar comandos. A primeira preparação pode demorar. Até duas tarefas compilam
 em paralelo, e a interface mostra o progresso. O cache é separado por versão do
