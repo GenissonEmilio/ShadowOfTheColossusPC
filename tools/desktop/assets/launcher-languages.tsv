@@ -15,6 +15,9 @@ Compilando em segundo plano…	Compiling in the background…	Compilando en segu
 Compilação pronta. Inicie o jogo quando quiser.	Build ready. Start the game whenever you are ready.	Compilación lista. Inicia el juego cuando quieras.	コンパイル完了。いつでもゲームを開始できます。
 A compilação falhou. Tente novamente. Detalhes em last-prepare.log.	Compilation failed. Retry when ready. Details in last-prepare.log.	La compilación ha fallado. Vuelve a intentarlo. Detalles en last-prepare.log.	コンパイルに失敗しました。再試行できます。詳細は last-prepare.log を確認してください。
 Configurações	Settings	Configuración	設定
+Menu	Menu	Menú	メニュー
+Abrir menu · F1	Open menu · F1	Abrir menú · F1	メニューを開く · F1
+Fechar menu	Close menu	Cerrar menú	メニューを閉じる
 Tela cheia	Full screen	Pantalla completa	全画面
 Sair da tela cheia	Exit full screen	Salir de pantalla completa	全画面を終了
 Sair do launcher	Exit launcher	Cerrar el lanzador	ランチャーを終了
@@ -253,6 +256,11 @@ Esperado exatamente um disco; encontrados {count}.	Expected one disc image, foun
 A pasta de destino já existe. Os dados foram preservados.	The destination folder exists. Its data was preserved.	La carpeta de destino ya existe. Se conservaron sus datos.	保存先のフォルダーは既に存在します。データは保持されています。
 Clique numa atribuição para trocar a tecla ou o botão do mouse.	Click a binding to change its key or mouse button.	Haz clic en una asignación para cambiar la tecla o el botón del ratón.	割り当てをクリックしてキーやマウスボタンを変更します。
 O GitHub limitou as consultas. Tente mais tarde.	GitHub has rate-limited update checks. Try again later.	GitHub ha limitado las consultas de actualizaciones. Inténtalo más tarde.	GitHub のリクエスト上限に達しました。しばらくしてからお試しください。
-Direcional/analógico mover · {confirm} confirmar · {back} voltar · {tabs} trocar aba · {start} jogar	D-pad/stick move · {confirm} confirm · {back} back · {tabs} switch tabs · {start} play	Cruceta/palanca mover · {confirm} confirmar · {back} volver · {tabs} cambiar de pestaña · {start} jugar	十字キー/スティック 移動 · {confirm} 決定 · {back} 戻る · {tabs} タブ切替 · {start} プレイ
+Direcional/analógico mover · {confirm} confirmar · {back} voltar · {tabs} trocar aba · {start} jogar · Select menu	D-pad/stick move · {confirm} confirm · {back} back · {tabs} switch tabs · {start} play · Select menu	Cruceta/palanca mover · {confirm} confirmar · {back} volver · {tabs} cambiar de pestaña · {start} jugar · Select menú	十字キー/スティック 移動 · {confirm} 決定 · {back} 戻る · {tabs} タブ切替 · {start} プレイ · Select メニュー
+Setas mover · Enter confirmar · Esc voltar · F1 menu · F11 tela cheia	Arrow keys move · Enter confirm · Esc back · F1 menu · F11 full screen	Flechas mover · Enter confirmar · Esc volver · F1 menú · F11 pantalla completa	↑↓←→ 移動 · Enter 決定 · Esc 戻る · F1 メニュー · F11 全画面
+Controle no launcher: {devices}	Launcher controller: {devices}	Mando en el lanzador: {devices}	ランチャーで使用中のコントローラー: {devices}
+Controle sem mapeamento: {devices}. Use Configurar meu controle.	Unmapped controller: {devices}. Use Configure my controller.	Mando sin asignaciones: {devices}. Usa Configurar mi mando.	設定されていないコントローラー: {devices}。「コントローラーを設定」を使ってください。
+Não foi possível iniciar a leitura do controle. Teclado e mouse continuam disponíveis.	Could not start reading controller input. Keyboard and mouse are still available.	No se pudo iniciar la lectura del mando. El teclado y el ratón siguen disponibles.	コントローラーを使えません。キーボードとマウスは引き続き使えます。
+Nenhum controle detectado. Conecte um controle; a detecção é automática.	No controller detected. Connect one and it will be detected automatically.	No se detectó ningún mando. Conecta uno y se detectará automáticamente.	コントローラーが見つかりません。つなぐと自動で使えるようになります。
 {tabs} alternar regiões · {parent} pasta acima · {back} voltar · {start} aceitar	{tabs} switch areas · {parent} parent folder · {back} back · {start} accept	{tabs} cambiar de área · {parent} carpeta superior · {back} volver · {start} aceptar	{tabs} エリア切替 · {parent} 親フォルダー · {back} 戻る · {start} 決定
 Escolha uma opção	Choose an option	Elige una opción	項目を選択

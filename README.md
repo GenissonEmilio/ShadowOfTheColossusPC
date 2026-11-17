@@ -172,6 +172,15 @@ pelo SDL2 usam a base de mapeamentos incluída e o perfil salvo em
 é conectado. A navegação funciona com a janela do launcher em foco e libera
 o dispositivo enquanto o jogo ou a calibração estão abertos.
 
+**Select/Back** ou **F1** abre o menu lateral deslizante. Ele mantém a navegação
+dentro do menu até confirmar uma página ou voltar. Os botões crescem suavemente
+ao receber foco ou passar o mouse; a área de clique permanece estável.
+**F11** alterna a tela cheia do launcher. Setas, Enter e Esc também funcionam
+com perfis do Steam Input que emulam o teclado. O launcher detecta novos controles
+automaticamente, mesmo com outro conectado, e combina os comandos físicos e
+virtuais para evitar confirmações duplicadas. A aba **Controles** mostra os nomes
+detectados e informa quando um dispositivo precisa de mapeamento.
+
 Em **Configurações → Ícones dos botões no jogo**, escolha PlayStation ou Xbox.
 A escolha troca os ícones da interface do port e de elementos do jogo que
 usam o atlas de controle. Legendas de tutorial que têm o texto embutido na arte

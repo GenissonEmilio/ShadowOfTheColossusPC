@@ -61,3 +61,10 @@ dialog { background: #182422; }
 .picture-mode .status, .picture-mode .footer-action, .picture-mode .input-hint { font-size: 15px; }
 .picture-mode .nav { min-height: 32px; }
 .picture-mode .footer-action { min-height: 30px; }
+.action-card { min-height: 36px; }
+.menu-shade { background-color: rgba(0, 0, 0, 0.68); }
+.side-menu { background-color: #1a2926; border-right: 1px solid #657763; padding: 24px 20px; }
+.side-menu .panel-title { font-size: 21px; }
+.menu-item { background: #253933; color: #e9eee7; border: 1px solid transparent; border-radius: 9px; padding: 14px 18px; min-height: 27px; box-shadow: none; }
+.menu-item:hover, .menu-item:focus { background: #425a47; border-color: #d6be85; color: #fff3d3; }
+.picture-mode .action-card { min-height: 48px; }

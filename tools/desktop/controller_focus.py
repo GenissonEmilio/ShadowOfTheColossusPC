@@ -18,6 +18,9 @@ def focusables(root):
     elif isinstance(root, (Gtk.Button, Gtk.Range, Gtk.Entry, Gtk.TreeView, Gtk.IconView, Gtk.ListBoxRow)):
         if root.get_can_focus():
             yield root
+    elif isinstance(root, Gtk.Revealer) and not root.get_reveal_child():
+        # Closing animations can leave an outgoing menu mapped for a few frames.
+        return
     elif isinstance(root, Gtk.Stack):
         # A crossfade can leave the outgoing child mapped until it finishes.
         page = root.get_visible_child()

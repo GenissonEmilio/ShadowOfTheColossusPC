@@ -41,17 +41,25 @@ class NavigationTest(unittest.TestCase):
         self.assertEqual(nav.update({'parent'}, .1), ['parent'])
         self.assertEqual(nav.update({'parent'}, 1), [])
 
+    def test_select_menu_is_an_edge_button(self):
+        nav = Navigation()
+        self.assertEqual(Gamepad.BUTTONS[4], 'menu')
+        self.assertEqual(nav.update({'menu'}, 0), [])
+        self.assertEqual(nav.update(set(), .1), [])
+        self.assertEqual(nav.update({'menu'}, .2), ['menu'])
+        self.assertEqual(nav.update({'menu'}, 2), [])
+
     def test_hotplug_waits_for_next_scheduled_scan(self):
-        from unittest.mock import Mock
+        from unittest.mock import Mock, patch
         now = [10.0]
-        pad = Gamepad.__new__(Gamepad)
-        pad.clock = lambda: now[0]
-        pad.sdl = Mock()
-        pad.controller = None
+        with patch('gamepad.load_sdl', return_value=Mock()) as load:
+            pad = Gamepad('/nonexistent', '/nonexistent', clock=lambda: now[0])
+        self.assertIs(pad.sdl, load.return_value)
         pad.running = True
         pad.next_scan = 11.0
-        pad.navigation = Navigation()
         pad.sdl.SDL_NumJoysticks.return_value = 1
+        pad.sdl.SDL_JoystickGetDeviceInstanceID.return_value = 17
+        pad.sdl.SDL_JoystickNameForIndex.return_value = b'Test controller'
         pad.sdl.SDL_IsGameController.return_value = 1
         pad.sdl.SDL_GameControllerOpen.return_value = 123
         pad.sdl.SDL_GameControllerGetButton.return_value = 0
@@ -62,7 +70,21 @@ class NavigationTest(unittest.TestCase):
         now[0] = 11.0
         self.assertEqual(pad.poll(True), [])
         self.assertTrue(pad.connected)
+        self.assertEqual(pad.device_names, ('Test controller',))
         pad.sdl.SDL_GameControllerOpen.assert_called_once_with(0)
+
+    def test_mappings_only_load_matching_platform(self):
+        from unittest.mock import Mock, patch, call
+        with patch('gamepad.load_sdl', return_value=Mock()):
+            pad = Gamepad('/nonexistent', '/nonexistent')
+        path = Mock()
+        guid = b'03000000000000000100000000000000'
+        linux = guid + b',Gamepad,a:b0,platform:Linux,'
+        android = guid + b',Gamepad,a:b1,platform:Android,'
+        profile = guid + b',Calibrated Gamepad,a:b2,'
+        path.read_bytes.return_value = b'\n'.join((b'# test', linux, android, profile))
+        self.assertTrue(pad.load_mappings(path, b'Linux'))
+        self.assertEqual(pad.sdl.SDL_GameControllerAddMapping.call_args_list, [call(linux), call(profile)])
 
     def test_absent_runtime_is_optional_and_suspend_safe(self):
         from unittest.mock import patch
@@ -113,22 +135,30 @@ sdl = pad.sdl
 assert sdl.SDL_InitSubSystem(pad.FLAGS) == 0
 sdl.SDL_JoystickAttachVirtual.argtypes=[ctypes.c_int,ctypes.c_int,ctypes.c_int,ctypes.c_int]
 sdl.SDL_JoystickAttachVirtual.restype=ctypes.c_int
+sdl.SDL_JoystickIsVirtual.argtypes=[ctypes.c_int];sdl.SDL_JoystickIsVirtual.restype=ctypes.c_int
+sdl.SDL_JoystickDetachVirtual.argtypes=[ctypes.c_int];sdl.SDL_JoystickDetachVirtual.restype=ctypes.c_int
 sdl.SDL_JoystickOpen.argtypes=[ctypes.c_int];sdl.SDL_JoystickOpen.restype=ctypes.c_void_p
 sdl.SDL_JoystickClose.argtypes=[ctypes.c_void_p]
 sdl.SDL_JoystickSetVirtualButton.argtypes=[ctypes.c_void_p,ctypes.c_int,ctypes.c_uint8]
 sdl.SDL_JoystickSetVirtualAxis.argtypes=[ctypes.c_void_p,ctypes.c_int,ctypes.c_int16]
-index=sdl.SDL_JoystickAttachVirtual(1,6,15,0)
-assert index >= 0
-stick=sdl.SDL_JoystickOpen(index)
+def attach():
+    index = sdl.SDL_JoystickAttachVirtual(1,6,15,0)
+    assert index >= 0
+    joystick = sdl.SDL_JoystickOpen(index)
+    assert joystick
+    return sdl.SDL_JoystickGetDeviceInstanceID(index), joystick
+def device_index(instance):
+    return next(index for index in range(sdl.SDL_NumJoysticks())
+                if sdl.SDL_JoystickGetDeviceInstanceID(index) == instance)
 # Ignore any real controllers on the test host; exercise the virtual pad only.
 is_controller=sdl.SDL_IsGameController
-sdl.SDL_IsGameController=lambda candidate: candidate == index and is_controller(candidate)
-assert stick
-sdl.SDL_GetError.argtypes=[];sdl.SDL_GetError.restype=ctypes.c_char_p
+sdl.SDL_IsGameController=lambda candidate: sdl.SDL_JoystickIsVirtual(candidate) and is_controller(candidate)
+first_instance, first_stick = attach()
 def connected():
     pad.poll(True)
     return pad.connected and pad.navigation.armed
 def controller_diagnostic():
+    index = device_index(first_instance)
     return {'error':'virtual controller did not connect within two seconds',
             'sdl_error':sdl.SDL_GetError().decode('utf-8',errors='replace'),
             'joysticks':sdl.SDL_NumJoysticks(),
@@ -137,17 +167,51 @@ def controller_diagnostic():
 # GTK focus settling can run the launcher's first (empty) scan before attach.
 # Respect the same one-second hotplug scan interval as the real launcher.
 settle(connected,controller_diagnostic)
+assert pad.device_names == (sdl.SDL_JoystickNameForIndex(device_index(first_instance)).decode(errors='replace'),)
+instance, stick = attach()
+assert sdl.SDL_JoystickSetVirtualButton(stick,0,1) == 0
+def second_controller_discovered():
+    assert pad.poll(True) == [], 'hotplugged controller armed while its button was held'
+    return len(pad.device_names) == 2
+settle(second_controller_discovered, 'second virtual controller was ignored while the first stayed attached')
+assert pad.ready_controllers == {first_instance}
+# The first idle device must not mask the second one, and a held duplicate
+# press from the first one must not produce another confirmation.
+sdl.SDL_JoystickSetVirtualButton(stick,0,0);pad.poll(True)
 assert sdl.SDL_JoystickSetVirtualButton(stick,0,1) == 0
 actions = pad.poll(True)
 assert actions==['confirm'], {'actions':actions,'armed':pad.navigation.armed,'held':pad.navigation.previous,
                               'sdl':pad.sdl._name,'error':sdl.SDL_GetError().decode(errors='replace')}
 assert pad.poll(True)==[]
+sdl.SDL_JoystickSetVirtualButton(first_stick,0,1);assert pad.poll(True)==[]
 sdl.SDL_JoystickSetVirtualButton(stick,0,0);pad.poll(True)
+sdl.SDL_JoystickSetVirtualButton(first_stick,0,0);pad.poll(True)
 sdl.SDL_JoystickSetVirtualAxis(stick,0,5000);assert pad.poll(True)==[]
 sdl.SDL_JoystickSetVirtualAxis(stick,0,25000);assert pad.poll(True)==['right']
 sdl.SDL_JoystickSetVirtualAxis(stick,0,0);pad.poll(True)
 pad.poll(False);assert not pad.connected and not pad.running
-pad.poll(True);assert pad.connected
+pad.poll(True);assert len(pad.device_names)==2
+# Dispatch a real GTK action from the second device with the first still attached.
+launcher.poll_gamepad()
+launcher.gamepad_timer = GLib.timeout_add(33, launcher.poll_gamepad)
+sdl.SDL_JoystickSetVirtualButton(stick,10,1)
+settle(lambda: launcher.stack.get_visible_child_name()=='graphics', 'second pad could not change tabs via the GTK timer')
+sdl.SDL_JoystickSetVirtualButton(stick,10,0)
+previous_focus = launcher.window.get_focus()
+assert sdl.SDL_JoystickSetVirtualButton(stick,4,1) == 0
+settle(lambda: launcher.menu_open and launcher.menu_revealer.get_child_revealed(),
+       'Select did not open the menu via the GTK timer')
+assert launcher.window.get_focus() == launcher.menu_buttons['graphics']
+assert sdl.SDL_JoystickSetVirtualButton(stick,4,0) == 0
+assert sdl.SDL_JoystickSetVirtualButton(stick,1,1) == 0
+settle(lambda: not launcher.menu_open and not launcher.menu_revealer.get_child_revealed(),
+       'B did not close the menu via the GTK timer')
+assert launcher.window.get_focus() == previous_focus and launcher.stack.get_visible_child_name() == 'graphics'
+assert sdl.SDL_JoystickSetVirtualButton(stick,1,0) == 0
+GLib.source_remove(launcher.gamepad_timer)
+sdl.SDL_JoystickClose(first_stick)
+assert sdl.SDL_JoystickDetachVirtual(device_index(first_instance)) == 0
+pad.poll(True);assert set(pad.controllers) == {instance}
 # Exercise a synchronous GTK modal with real virtual SDL events. The launcher
 # timer must continue ticking and wait for A to be released before B is used.
 launcher.navigate('graphics')
@@ -187,7 +251,7 @@ assert modal['seen'] and modal['released'] and modal['pressed_back'] and not mod
 assert launcher.fullscreen.get_active()==0 and controller_focus.focus_widget(launcher.window)==launcher.fullscreen
 sdl.SDL_JoystickSetVirtualButton(stick,1,0)
 sdl.SDL_JoystickClose(stick)
-sdl.SDL_JoystickDetachVirtual(index)
+assert sdl.SDL_JoystickDetachVirtual(device_index(instance)) == 0
 pad.poll(True);assert not pad.connected
 # Verify GTK actions against actual launcher widgets without sending desktop keys.
 launcher.navigate('home')
@@ -279,6 +343,7 @@ launcher.poll_gamepad();assert not pad.running
 GLib.source_remove(launcher.gamepad_timer)
 pad.suspend();sdl.SDL_QuitSubSystem(pad.FLAGS);launcher.window.destroy()
 report={'passed':True,'bundled_sdl':bool(getattr(sys,'frozen',False)),'virtual_controller_edges_deadzone_hotplug':True,
+        'second_controller_gtk_timer':True,'controller_menu_open_and_close':True,
         'focus_suspend':True,'gtk_pages_settings_play_back':True,'gtk_modal_neutral_rearm':True,
         'gtk_scroll_follows_focus':True,'gtk_file_chooser_navigation':True}
 (out/'report.json').write_text(json.dumps(report,indent=2)+'\n')
