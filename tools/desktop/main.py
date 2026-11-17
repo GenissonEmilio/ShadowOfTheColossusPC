@@ -178,7 +178,9 @@ class Launcher:
         sidebar.pack_start(Gtk.Box(),True,True,0)
         system = "Windows" if sys.platform == "win32" else "Linux"
         sidebar.pack_start(label(f"v{VERSION}   •   {system}", "small"),False,False,0)
-        body = box(spacing=18,margin=24,classes=("main-content",))
+        # Paint the entire scrollable surface. Widget margins are outside the
+        # allocation and can expose black pixels in the viewport on Wayland.
+        body = box(spacing=18, classes=("main-content",))
         scroller = style(Gtk.ScrolledWindow(), "main-scroll")
         scroller.set_shadow_type(Gtk.ShadowType.NONE)
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)

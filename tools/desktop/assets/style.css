@@ -12,6 +12,7 @@ headerbar button { background: transparent; color: #b9b4aa; border: none; box-sh
 .nav label { font-size: 13px; }
 .launcher-root, .main-scroll, .main-scroll > viewport, .main-content { background-color: #121916; }
 .main-scroll, .main-scroll > viewport { border: none; box-shadow: none; }
+.main-content { padding: 16px; }
 .update-panel { padding: 12px 16px; }
 .update-panel .play { padding: 11px 16px; }
 .breadcrumb { color: #777d8b; font-size: 11px; }

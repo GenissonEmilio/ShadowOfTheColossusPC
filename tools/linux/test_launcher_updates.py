@@ -46,6 +46,11 @@ main.check_for_update = check
 args = argparse.Namespace(data_dir=data, page='home', rom=None, test_game=False, screenshot=None)
 app = Launcher(args)
 try:
+    body = app.stack.get_parent()
+    assert all(getattr(body, 'get_margin_' + edge)() == 0
+               for edge in ('top', 'bottom', 'start', 'end'))
+    padding = body.get_style_context().get_padding(Gtk.StateFlags.NORMAL)
+    assert min(padding.left, padding.top, padding.right, padding.bottom) > 0
     assert not app.update_button.get_visible()
     settle(lambda: app.update_button.get_visible())
     assert calls == [main.VERSION], calls
