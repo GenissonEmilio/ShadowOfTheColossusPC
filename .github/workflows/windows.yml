@@ -51,7 +51,7 @@ jobs:
           $testRoot = Join-Path $env:RUNNER_TEMP 'SotC relocated package'
           Expand-Archive -LiteralPath $archive -DestinationPath $testRoot
           "SOTC_TEST_ROOT=$testRoot" >> $env:GITHUB_ENV
-      - name: Open the relocated launcher in English and Japanese
+      - name: Open the relocated launcher and graphics profiles
         if: ${{ !cancelled() && steps.relocated.outcome == 'success' }}
         shell: pwsh
         run: |
@@ -60,24 +60,26 @@ jobs:
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
           $shots = Join-Path $env:GITHUB_WORKSPACE 'artifacts/windows-launcher'
           New-Item -Path $shots -ItemType Directory -Force | Out-Null
-          foreach ($language in @('en', 'ja')) {
+          foreach ($probe in @(@{language='en'; page='home'}, @{language='ja'; page='home'}, @{language='en'; page='graphics'})) {
+            $language = $probe.language
+            $page = $probe.page
             $profile = Join-Path $testRoot "player-$language"
-            $image = Join-Path $shots "home-$language.png"
+            $image = Join-Path $shots "$page-$language.png"
             New-Item -Path $profile -ItemType Directory -Force | Out-Null
             @{ language = $language } | ConvertTo-Json |
               Set-Content -Encoding utf8NoBOM (Join-Path $profile 'launcher-preferences.json')
             $launcher = Start-Process -FilePath "$program/ShadowOfTheColossusPC.exe" -PassThru `
-              -ArgumentList "--data-dir `"$profile`" --page home --screenshot `"$image`""
+              -ArgumentList "--data-dir `"$profile`" --page $page --screenshot `"$image`""
             $finished = $launcher.WaitForExit(60000)
             if (!$finished) {
               & "$env:SystemRoot\System32\taskkill.exe" /PID $launcher.Id /T /F | Out-Null
             }
             $log = Join-Path $profile 'last-launcher.log'
-            if (Test-Path $log) { Copy-Item $log (Join-Path $shots "launcher-$language.log") }
+            if (Test-Path $log) { Copy-Item $log (Join-Path $shots "$page-$language.log") }
             if (!$finished) { throw 'Launcher timed out' }
             if ($launcher.ExitCode -ne 0 -or !(Test-Path $image) -or (Get-Item $image).Length -le 1000) {
               Get-Content $log -ErrorAction SilentlyContinue
-              throw "Launcher screenshot ($language) failed, exit code $($launcher.ExitCode)"
+              throw "Launcher screenshot ($page, $language) failed, exit code $($launcher.ExitCode)"
             }
           }
           if ((Get-FileHash "$shots/home-en.png").Hash -eq (Get-FileHash "$shots/home-ja.png").Hash) {

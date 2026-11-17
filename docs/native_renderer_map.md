@@ -137,6 +137,11 @@ grazing angle the mirror). Bit 25 surfaces go to layer 14 instead (unrippled
 mirror, ALPHA 0x8000000064: written as is). Natively:
 `refractionSample` draws at layer 9 (`SOTC_NATIVE_NOREFRACT`,
 `SOTC_REFRACT_SHOW` paints them red).
+On desktop OpenGL, the optional water detail builds the layer 9 copy and
+mirror at 512² or 1024². The copy still reduces once to half size and back.
+The ripple keeps its original normalized displacement. Depth of field,
+heat haze and underwater screen copies use their existing buffers and
+layer order.
 
 Immediate gl* (glBeginWithDlLayerNo 0x108bb38 .. glEnd 0x108d060): a GIF
 packet built on the CPU at *0x1186398 (DMA tag, GIF tag A+D at +0x10,
@@ -160,7 +165,27 @@ texTransResolve uploads them (MIPTBP1/2) and sets TEX1 from the header:
 MXL = levels - 1, MMAG +0x74, MMIN +0x78, L +0x94, K = +0x90 x *0x118c180
 (7.4 fixed). The GS level is log2(1/Q) x 2^L + K with Q = 1/w. Natively the
 fragment stage picks the level the same way (FogParams lodK / lodScale /
-maxLod); Metal's own derivative LOD blurred the floors.
+maxLod). Desktop OpenGL selects the mip level from the pixel footprint for
+anisotropic filtering when the driver supports it and the draw can use the
+whole authored mip chain. The GS formula still serves trilinear, UI,
+backgrounds and draws that depend on preserving alpha-fail depth coverage.
+
+### Desktop presentation
+
+The GL renderer completes depth, stencil, effects and the game's UI before
+`desktop_video::draw`. Presentation then reduces with a separable area filter
+where the viewport is smaller than the render target or uses FSR 1 for
+enlargement when enabled. FXAA and the optional imported shader follow.
+Host menus are composed after those passes. The optional presentation
+framebuffers use RGBA8 within a combined 96 MiB budget and fall back to
+direct presentation if unavailable.
+
+Adding scene MSAA would require resolving color at each framebuffer reader
+and preserving sample depth and stencil for shadows and depth-based effects.
+SMAA would need edge, weight and neighborhood passes. The renderer has no
+motion vectors or disocclusion data for temporal AA. A texture replacement
+manifest would need stable asset identifiers independent of texture-cache
+keys, which include the active CLUT and can change during gameplay.
 
 VIF ROW: every ST unpack (V2-16, and the two-texture V4-16) uses STMOD 1
 (offset). texTransResolve builds, for each requested texture, a RET packet

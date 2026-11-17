@@ -14,6 +14,15 @@ WINDOW_RESOLUTIONS = (
     (1600, 900), (1920, 1080), (2560, 1440), (3840, 2160),
 )
 
+# IDs are persisted by native_renderer::Tuning. Keep the older IDs readable.
+GRAPHICS_PROFILES = (
+    ("0", "Baixo"), ("1", "Original"), ("5", "Equilibrado"), ("6", "Aprimorado"), ("7", "Ultra"),
+)
+LEGACY_PROFILES = (("2", "Alto (legado)"), ("3", "Ultra (legado)"))
+QUALITY_KEYS = {
+    "quality_preset", "render_scale", "msaa", "fxaa", "texture_filter", "model_detail", "water_detail", "effect_detail",
+}
+
 
 class Graphics:
     def __init__(self, library):
@@ -42,16 +51,31 @@ class Graphics:
         window = values.get("window_resolution", "0")
         return int(window) if window in modes else 0, values.get("upscale_fsr") == "1"
 
+    def quality_profile(self):
+        values = self.settings()
+        profile = values.get("quality_preset")
+        if profile in dict(GRAPHICS_PROFILES + LEGACY_PROFILES):
+            return profile
+        return "4" if QUALITY_KEYS.intersection(values) else "1"
+
+    def save_quality_profile(self, profile):
+        if profile in dict(GRAPHICS_PROFILES + LEGACY_PROFILES):
+            # The runtime applies the selected preset, then does individual overrides.
+            self._save_settings({"quality_preset": profile}, QUALITY_KEYS)
+
     def save_display(self, fullscreen, mode, *, window=None, fsr=None):
         values = {"fullscreen": int(bool(fullscreen)), "screen": max(0, min(2, int(mode)))}
         if window is not None:
             values["window_resolution"] = max(0, min(len(WINDOW_RESOLUTIONS), int(window)))
         if fsr is not None:
             values["upscale_fsr"] = int(bool(fsr))
+        self._save_settings(values, values)
+
+    def _save_settings(self, values, replace):
         self.config.parent.mkdir(parents=True, exist_ok=True)
         try:
             lines = [line for line in self.config.read_text(encoding="utf-8").splitlines()
-                     if line.partition("=")[0] not in values]
+                     if line.partition("=")[0] not in replace]
         except OSError:
             lines = []
         lines += [f"{key}={value}" for key, value in values.items()]

@@ -198,7 +198,16 @@ Alt direito	Right Alt	Alt derecho	右 Alt
 Resolução da janela	Window resolution	Resolución de la ventana	ウィンドウの解像度
 Automática	Automatic	Automática	自動
 Ativar upscaling AMD FSR 1	Enable AMD FSR 1 upscaling	Activar escalado AMD FSR 1	AMD FSR 1 アップスケーリングを有効にする
-Ajuste a resolução interna no jogo em F1 → Qualidade → Resolução.	Set internal rendering resolution in F1 → Quality → Resolution.	Ajusta la resolución interna en F1 → Calidad → Resolución.	内部描画の解像度はゲーム内の F1 → 品質 → 解像度で設定します。
+Perfil gráfico	Graphics profile	Perfil gráfico	グラフィックプロファイル
+Baixo	Low	Bajo	低
+Original	Original	Original	オリジナル
+Equilibrado	Balanced	Equilibrado	バランス
+Aprimorado	Enhanced	Mejorado	高画質
+Ultra	Ultra	Ultra	最高画質
+Alto (legado)	High (legacy)	Alto (anterior)	高（従来）
+Ultra (legado)	Ultra (legacy)	Ultra (anterior)	最高（従来）
+Personalizado (F1)	Custom (F1)	Personalizado (F1)	カスタム（F1）
+Equilibrado suaviza bordas. Aprimorado e Ultra aumentam a resolução e o detalhe da água. Ajuste cada opção no jogo em F1 → Qualidade.	Balanced smooths edges. Enhanced and Ultra raise resolution and water detail. Adjust individual options in F1 → Quality.	Equilibrado suaviza los bordes. Mejorado y Ultra aumentan la resolución y el detalle del agua. Ajusta cada opción en F1 → Calidad.	バランスは輪郭を滑らかにします。高画質と最高画質は解像度と水の描写を向上させます。個別の設定はゲーム内の F1 → 品質で変更できます。
 O arquivo escolhido não foi encontrado.	The selected file was not found.	No se encontró el archivo seleccionado.	選択したファイルが見つかりませんでした。
 Lendo e validando o disco…	Reading and verifying the disc…	Leyendo y verificando el disco…	ディスクを読み込み、検証中…
 A compilação não terminou. Consulte {path}	Compilation did not finish. See {path}	La compilación no terminó. Consulta {path}	コンパイルが完了しませんでした。{path} を確認してください。
@@ -232,3 +241,4 @@ ISO truncada.	The ISO is truncated.	La ISO está incompleta.	ISO が途中で切
 Esperado exatamente um disco; encontrados {count}.	Expected one disc image, found {count}.	Se esperaba una imagen de disco y se encontraron {count}.	ディスクイメージが 1 つ必要ですが、{count} 個見つかりました。
 A pasta de destino já existe. Os dados foram preservados.	The destination folder exists. Its data was preserved.	La carpeta de destino ya existe. Se conservaron sus datos.	保存先のフォルダーは既に存在します。データは保持されています。
 Clique numa atribuição para trocar a tecla ou o botão do mouse.	Click a binding to change its key or mouse button.	Haz clic en una asignación para cambiar la tecla o el botón del ratón.	割り当てをクリックしてキーやマウスボタンを変更します。
+O GitHub limitou as consultas. Tente mais tarde.	GitHub has rate-limited update checks. Try again later.	GitHub ha limitado las consultas de actualizaciones. Inténtalo más tarde.	GitHub のリクエスト上限に達しました。しばらくしてからお試しください。

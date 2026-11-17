@@ -30,6 +30,21 @@ class GraphicsTests(unittest.TestCase):
         self.graphics.save_display(False,0)
         self.assertEqual(Graphics(self.library).display(),(False,0))
 
+    def test_quality_profile_replaces_overrides_but_preserves_other_settings(self):
+        self.assertEqual(self.graphics.quality_profile(), "1")
+        self.graphics.config.parent.mkdir(parents=True)
+        self.graphics.config.write_text(
+            "quality_preset=4\nrender_scale=2\nfxaa=0\nwater_detail=0\neffect_detail=2\n"
+            "volume=7\nfullscreen=0\nscreen=2\nupscale_fsr=1\n")
+        self.assertEqual(self.graphics.quality_profile(), "4")
+        self.graphics.save_quality_profile("6")
+        self.assertEqual(self.graphics.quality_profile(), "6")
+        self.assertEqual(self.graphics.settings(), {
+            "volume": "7", "fullscreen": "0", "screen": "2", "upscale_fsr": "1", "quality_preset": "6",
+        })
+        self.graphics.save_display(True, 1)
+        self.assertEqual(self.graphics.quality_profile(), "6")
+
     def test_invalid_shader_preserves_current_selection(self):
         self.library.directory.mkdir()
         self.graphics.shader_config.write_text('{"file":"previous.frag"}')

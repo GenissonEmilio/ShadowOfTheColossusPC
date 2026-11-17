@@ -1,4 +1,5 @@
 import hashlib
+from http.client import HTTPMessage
 import io
 import json
 import os
@@ -10,6 +11,7 @@ import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools/desktop"))
@@ -29,6 +31,22 @@ def release(version, system, **flags):
     url = f"https://github.com/{updates.REPOSITORY}/releases/download/{tag}/{name}"
     return {"tag_name": tag, "assets": [{"name": name, "state": "uploaded",
             "browser_download_url": url, "size": 1200, "digest": "sha256:" + "a" * 64}], **flags}
+
+
+class MetadataResponse(io.BytesIO):
+    def __init__(self, data, url="https://release-assets.githubusercontent.com/manifest"):
+        super().__init__(json.dumps(data).encode())
+        self.url = url
+
+    def geturl(self):
+        return self.url
+
+
+def http_error(url, code, headers=None, content=b""):
+    message = HTTPMessage()
+    for name, value in (headers or {}).items():
+        message[name] = value
+    return HTTPError(url, code, "test response", message, io.BytesIO(content))
 
 
 class UpdateTests(unittest.TestCase):
@@ -60,6 +78,65 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(updates.select_update(candidates, "1.0.8", LINUX).version, "1.0.10")
         self.assertEqual(updates.select_update(candidates, "1.0.1", WINDOWS).version, "1.0.2")
         self.assertIsNone(updates.select_update(candidates, "1.0.10", LINUX))
+
+    @patch("updates.platform_id", return_value=LINUX)
+    @patch("updates.https_context")
+    def test_manifest_is_sufficient_for_update_and_current_version(self, context, _platform):
+        latest = release("1.0.3", LINUX, draft=False, prerelease=False)
+        for current, expected in (("1.0.2", "1.0.3"), ("1.0.3", None), ("1.0.4", None)):
+            with (self.subTest(current=current),
+                  patch("updates.urlopen", return_value=MetadataResponse(latest)) as open_url):
+                result = updates.check_for_update(current)
+                self.assertEqual(result.version if result else None, expected)
+                if result:
+                    self.assertEqual((result.system, result.size, result.sha256), (LINUX, 1200, "a" * 64))
+                open_url.assert_called_once()
+                self.assertEqual(open_url.call_args.args[0].full_url, updates.MANIFEST)
+                self.assertIs(open_url.call_args.kwargs["context"], context.return_value)
+
+    @patch("updates.platform_id", return_value=LINUX)
+    @patch("updates.https_context")
+    def test_api_fallback_for_missing_manifest_or_platform(self, _context, _platform):
+        latest = release("1.0.4", WINDOWS, draft=False, prerelease=False)
+        for primary in (http_error(updates.MANIFEST, 404), MetadataResponse(latest)):
+            with patch("updates.urlopen", side_effect=[primary, MetadataResponse(
+                    [release("1.0.3", LINUX)], updates.RELEASES)]) as open_url:
+                self.assertEqual(updates.check_for_update("1.0.2").version, "1.0.3")
+                self.assertEqual([call.args[0].full_url for call in open_url.call_args_list],
+                                 [updates.MANIFEST, updates.RELEASES])
+
+    @patch("updates.platform_id", return_value=LINUX)
+    @patch("updates.https_context")
+    def test_manifest_refuses_untrusted_redirect_or_invalid_package(self, _context, _platform):
+        latest = release("1.0.3", LINUX, draft=False, prerelease=False)
+        for url in ("http://github.com/manifest", "https://github.com.example.org/manifest"):
+            with (patch("updates.urlopen", return_value=MetadataResponse(latest, url)) as open_url,
+                  self.assertRaisesRegex(ValueError, "must come from GitHub")):
+                updates.check_for_update("1.0.2")
+            open_url.assert_called_once()
+        for field, invalid in (("digest", None), ("size", True), ("state", "new"),
+                               ("browser_download_url", "https://github.com/example/package")):
+            invalid_manifest = release("1.0.3", LINUX, draft=False, prerelease=False)
+            invalid_manifest["assets"][0][field] = invalid
+            with (self.subTest(field=field),
+                  patch("updates.urlopen", return_value=MetadataResponse(invalid_manifest)) as open_url,
+                  self.assertRaisesRegex(ValueError, "invalid package metadata")):
+                updates.check_for_update("1.0.2")
+            open_url.assert_called_once()
+
+    @patch("updates.platform_id", return_value=LINUX)
+    @patch("updates.https_context")
+    def test_distinguishes_rate_limited_fallback_from_forbidden(self, _context, _platform):
+        for code, headers, content, expected in (
+                (403, {"X-RateLimit-Remaining": "0"}, b"", updates.RateLimitedError),
+                (403, {"Retry-After": "60"}, b"", updates.RateLimitedError),
+                (403, {}, b'{"message": "You have exceeded a secondary rate limit."}', updates.RateLimitedError),
+                (429, {}, b"", updates.RateLimitedError),
+                (403, {}, b'{"message": "Forbidden"}', HTTPError)):
+            responses = [http_error(updates.MANIFEST, 404), http_error(updates.RELEASES, code, headers, content)]
+            with (self.subTest(code=code, headers=headers, content=content),
+                  patch("updates.urlopen", side_effect=responses), self.assertRaises(expected)):
+                updates.check_for_update("1.0.2")
 
     def test_stage_and_exchange_keeps_stable_path_and_user_data(self):
         with tempfile.TemporaryDirectory() as directory:

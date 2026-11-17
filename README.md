@@ -96,6 +96,10 @@ novamente e ver se o launcher já está atualizado.
 O botão baixa o pacote, confere o SHA-256 publicado pelo GitHub, atualiza a pasta
 do launcher e abre a nova versão. A pasta de dados fica separada. A primeira
 versão com o atualizador precisa ser instalada a partir do pacote da release.
+Se a v0.4.2 mostrar erro 403 ao consultar o GitHub, instale a v0.5.0 pela
+página de [Releases](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases).
+A partir da v0.5.0 o launcher usa o manifesto publicado com os pacotes para
+verificar novas versões.
 
 ## Save states
 
@@ -126,6 +130,11 @@ Na aba **Gráficos**, escolha **Tela cheia · resolução do monitor** para usar
 monitor atual por inteiro. **Original 4:3** preserva a proporção e deixa faixas
 nas laterais de telas largas; **Esticar** preenche toda a tela. F11 alterna entre
 tela cheia e janela e salva a preferência. O menu F1 também ajusta a proporção.
+
+Em **Gráficos → Perfil gráfico**, escolha **Original**, **Equilibrado**,
+**Aprimorado** ou **Ultra**. Os perfis ajustam a resolução interna, o FXAA, a
+filtragem de texturas e o detalhe dos modelos e da água. Use **F1 → Qualidade**
+para alterar cada opção durante o jogo. [Tabela dos perfis](docs/SHADERS.md#perfis-gráficos)
 
 Escolha o tamanho da janela e o **FSR 1** na aba **Gráficos** ou em **F1 → Vídeo**.
 Use **F1 → Qualidade → Resolução** para ajustar a resolução de renderização

@@ -1,5 +1,6 @@
 #include "runtime/desktop_video.h"
 #ifdef PS2X_DESKTOP_VIDEO
+#include "desktop_antialias.h"
 #include "desktop_fsr.h"
 #include "runtime/host_menu.h"
 #include "rlgl.h"
@@ -13,7 +14,7 @@ namespace desktop_video
 namespace
 {
     Shader shader{};
-    int sourceLocation = -1, outputLocation = -1, timeLocation = -1;
+    int sourceLocation = -1, outputLocation = -1, timeLocation = -1, fsrSharpenedLocation = -1;
     int windowWidth = 1024, windowHeight = 720;
     Vector2 windowPosition{};
     int windowResolution = 0;
@@ -22,61 +23,128 @@ namespace
     int refreshRate = 60;
     double nextRefreshCheck = 0.0;
 
-    Shader easuShader{}, rcasShader{};
-    int easuSourceLocation = -1;
-    bool fsrInitialized = false;
-    RenderTexture2D easuTarget{}, rcasTarget{};
-    int fsrWidth = 0, fsrHeight = 0;
-    bool fsrWithShader = false, fsrTargetsReady = false;
-
-    void releaseFsrTargets()
+    struct BuiltinShader
     {
-        if (easuTarget.id) UnloadRenderTexture(easuTarget);
-        if (rcasTarget.id) UnloadRenderTexture(rcasTarget);
-        easuTarget = {};
-        rcasTarget = {};
-        fsrWidth = fsrHeight = 0;
-        fsrTargetsReady = false;
-    }
+        Shader shader{};
+        int sourceSize = -1;
+        int targetSize = -1;
+        bool attempted = false;
 
-    void initializeFsr()
-    {
-        fsrInitialized = true;
-        easuShader = LoadShaderFromMemory(nullptr, kEasuFragment);
-        rcasShader = LoadShaderFromMemory(nullptr, kRcasFragment);
-        const unsigned int fallback = rlGetShaderIdDefault();
-        if (easuShader.id == fallback) easuShader = {};
-        if (rcasShader.id == fallback) rcasShader = {};
-        if (!IsShaderValid(easuShader) || !IsShaderValid(rcasShader))
+        bool initialize(const char *fragment, const char *name, bool needsSourceSize, bool needsTargetSize = false)
         {
-            TraceLog(LOG_WARNING, "VIDEO: could not compile FSR 1 shaders");
-            return;
-        }
-        easuSourceLocation = GetShaderLocation(easuShader, "sourceSize");
-    }
-
-    bool prepareFsr(int width, int height)
-    {
-        if (!fsrInitialized) initializeFsr();
-        if (easuSourceLocation < 0) return false;
-        const bool withShader = shader.id != 0;
-        if (width != fsrWidth || height != fsrHeight || withShader != fsrWithShader)
-        {
-            releaseFsrTargets();
-            fsrWidth = width;
-            fsrHeight = height;
-            fsrWithShader = withShader;
-            easuTarget = LoadRenderTexture(width, height);
-            fsrTargetsReady = IsRenderTextureValid(easuTarget) && rlFramebufferComplete(easuTarget.id);
-            if (fsrTargetsReady && withShader)
+            if (!attempted)
             {
-                rcasTarget = LoadRenderTexture(width, height);
-                fsrTargetsReady = IsRenderTextureValid(rcasTarget) && rlFramebufferComplete(rcasTarget.id);
+                attempted = true;
+                Shader candidate = LoadShaderFromMemory(nullptr, fragment);
+                if (candidate.id != rlGetShaderIdDefault())
+                {
+                    if (IsShaderValid(candidate))
+                    {
+                        if (needsSourceSize) sourceSize = GetShaderLocation(candidate, "sourceSize");
+                        if (needsTargetSize) targetSize = GetShaderLocation(candidate, "targetSize");
+                        if ((!needsSourceSize || sourceSize >= 0) && (!needsTargetSize || targetSize >= 0))
+                            shader = candidate;
+                    }
+                    if (candidate.id && !shader.id) UnloadShader(candidate);
+                }
+                if (!shader.id) TraceLog(LOG_WARNING, "VIDEO: could not initialize %s", name);
             }
-            if (!fsrTargetsReady)
-                TraceLog(LOG_WARNING, "VIDEO: could not allocate FSR 1 render targets (%dx%d)", width, height);
+            return shader.id != 0;
         }
-        return fsrTargetsReady;
+
+        void release()
+        {
+            if (shader.id) UnloadShader(shader);
+            *this = {};
+        }
+    } easu, rcas, area, fxaaShader;
+
+    struct Pass
+    {
+        const BuiltinShader *program;
+        int width, height;
+    };
+
+    struct Target
+    {
+        RenderTexture2D frame{};
+        int width = 0, height = 0;
+        int filter = TEXTURE_FILTER_POINT;
+
+        void release()
+        {
+            if (frame.texture.id) UnloadTexture(frame.texture);
+            if (frame.id) rlUnloadFramebuffer(frame.id);
+            *this = {};
+        }
+
+        bool prepare(int w, int h)
+        {
+            if (w == width && h == height) return frame.id != 0;
+            // The presentation passes only need one RGBA8 attachment each.
+            frame.id = rlLoadFramebuffer();
+            if (frame.id)
+            {
+                constexpr int format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+                frame.texture = {rlLoadTexture(nullptr, w, h, format, 1), w, h, 1, format};
+                rlFramebufferAttach(frame.id, frame.texture.id, RL_ATTACHMENT_COLOR_CHANNEL0, RL_ATTACHMENT_TEXTURE2D, 0);
+                if (!frame.texture.id || !rlFramebufferComplete(frame.id)) release();
+            }
+            // Remember a failed size until the layout changes.
+            width = w;
+            height = h;
+            if (!frame.id)
+                TraceLog(LOG_WARNING, "VIDEO: could not allocate presentation target (%dx%d)", w, h);
+            return frame.id != 0;
+        }
+
+        void setFilter(int wanted)
+        {
+            if (wanted == filter) return;
+            SetTextureFilter(frame.texture, wanted);
+            filter = wanted;
+        }
+    };
+
+    std::array<Target, 3> targets;
+    bool overTargetBudget = false;
+
+    bool prepareTargets(const std::array<Pass, 3> &passes, int count)
+    {
+        // 96 MiB of optional color buffers, enough for two 4K buffers and
+        // a typical resolve intermediate. Fall back to the original picture
+        // for unusually large windows or insufficient GPU resources.
+        constexpr long long maxTargetPixels = 96LL * 1024 * 1024 / 4;
+        long long pixels = 0;
+        for (int i = 0; i < count; ++i)
+            pixels += static_cast<long long>(passes[i].width) * passes[i].height;
+        const bool exceedsBudget = pixels > maxTargetPixels;
+        if (exceedsBudget && !overTargetBudget)
+            TraceLog(LOG_WARNING, "VIDEO: presentation targets exceed the 96 MiB budget");
+        overTargetBudget = exceedsBudget;
+        if (exceedsBudget) count = 0;
+        for (int i = 0; i < static_cast<int>(targets.size()); ++i)
+            if (i >= count || targets[i].width != passes[i].width || targets[i].height != passes[i].height)
+                targets[i].release();
+        if (exceedsBudget) return false;
+
+        for (int i = 0; i < count; ++i)
+            if (!targets[i].prepare(passes[i].width, passes[i].height)) return false;
+        return true;
+    }
+
+    void drawPass(const Pass &pass, Texture2D texture, Rectangle source, Rectangle destination)
+    {
+        const int sourceSize[]{static_cast<int>(source.width), static_cast<int>(std::abs(source.height))};
+        const int targetSize[]{pass.width, pass.height};
+        const auto &program = *pass.program;
+        if (program.sourceSize >= 0)
+            SetShaderValue(program.shader, program.sourceSize, sourceSize, SHADER_UNIFORM_IVEC2);
+        if (program.targetSize >= 0)
+            SetShaderValue(program.shader, program.targetSize, targetSize, SHADER_UNIFORM_IVEC2);
+        BeginShaderMode(program.shader);
+        DrawTexturePro(texture, source, destination, {0, 0}, 0, WHITE);
+        EndShaderMode();
     }
 
 }
@@ -182,6 +250,11 @@ void updatePresentation(bool vsync, bool cap30)
 
 bool shaderActive() { return shader.id != 0; }
 
+bool fxaaAvailable()
+{
+    return IsWindowReady() && fxaaShader.initialize(kFxaaFragment, "FXAA", true);
+}
+
 bool loadShader(const char *path, std::string &error)
 {
     error.clear();
@@ -217,49 +290,86 @@ bool loadShader(const char *path, std::string &error)
     sourceLocation = GetShaderLocation(shader, "sourceSize");
     outputLocation = GetShaderLocation(shader, "outputSize");
     timeLocation = GetShaderLocation(shader, "time");
+    fsrSharpenedLocation = GetShaderLocation(shader, "fsrSharpened");
     return true;
 }
 
-void draw(Texture2D texture, int width, int height, bool flipY, int mode, bool upscaleFsr)
+void draw(Texture2D texture, int width, int height, bool flipY, int mode, bool upscaleFsr, bool fxaa)
 {
     const Rectangle target = destination(GetScreenWidth(), GetScreenHeight(), width, height, mode);
-    const float outputSize[]{target.width * GetRenderWidth() / std::max(1, GetScreenWidth()),
-                             target.height * GetRenderHeight() / std::max(1, GetScreenHeight())};
+    const float scaleX = static_cast<float>(GetRenderWidth()) / std::max(1, GetScreenWidth());
+    const float scaleY = static_cast<float>(GetRenderHeight()) / std::max(1, GetScreenHeight());
+    const float outputSize[]{target.width * scaleX, target.height * scaleY};
     Rectangle source{0, 0, static_cast<float>(width), static_cast<float>(flipY ? -height : height)};
-    const int outputWidth = static_cast<int>(std::lround(outputSize[0]));
-    const int outputHeight = static_cast<int>(std::lround(outputSize[1]));
+    const int outputWidth = std::max(1, static_cast<int>(std::lround(outputSize[0])));
+    const int outputHeight = std::max(1, static_cast<int>(std::lround(outputSize[1])));
     const bool needsUpscale = upscaleFsr && mode != hostmenu::kScreenInteger &&
         outputWidth >= width && outputHeight >= height && (outputWidth > width || outputHeight > height);
-    if (!needsUpscale && fsrWidth != 0)
-        releaseFsrTargets();
-    if (needsUpscale && prepareFsr(outputWidth, outputHeight))
+
+    std::array<Pass, 3> passes{};
+    int passCount = 0;
+    if (needsUpscale && easu.initialize(kEasuFragment, "FSR 1 EASU", true)
+                     && rcas.initialize(kRcasFragment, "FSR 1 RCAS", false))
     {
-        const Rectangle passTarget{0, 0, static_cast<float>(outputWidth), static_cast<float>(outputHeight)};
-        const int sourceSize[]{width, height};
-        BeginTextureMode(easuTarget);
-        SetShaderValue(easuShader, easuSourceLocation, sourceSize, SHADER_UNIFORM_IVEC2);
-        BeginShaderMode(easuShader);
-        DrawTexturePro(texture, source, passTarget, {0, 0}, 0, WHITE);
-        EndShaderMode();
-        EndTextureMode();
-
-        const Rectangle upscaledSource{0, 0, passTarget.width, -passTarget.height};
-        if (!shader.id)
+        width = outputWidth;
+        height = outputHeight;
+        passes[passCount++] = {&easu, width, height};
+        passes[passCount++] = {&rcas, width, height};
+    }
+    else if ((outputWidth < width || outputHeight < height) &&
+             area.initialize(kAreaFragment, "supersampling resolve", true, true))
+    {
+        // Resolve only the axes that actually shrink, even for mixed-aspect
+        // presentation. Magnification on the remaining axis happens last.
+        if (outputWidth < width)
         {
-            BeginShaderMode(rcasShader);
-            DrawTexturePro(easuTarget.texture, upscaledSource, target, {0, 0}, 0, WHITE);
-            EndShaderMode();
-            return;
+            width = outputWidth;
+            passes[passCount++] = {&area, width, height};
         }
+        if (outputHeight < height)
+        {
+            height = outputHeight;
+            passes[passCount++] = {&area, width, height};
+        }
+    }
+    if (fxaa && fxaaAvailable()) passes[passCount++] = {&fxaaShader, width, height};
 
-        // Imported shaders still see the presented picture before the host UI.
-        BeginTextureMode(rcasTarget);
-        BeginShaderMode(rcasShader);
-        DrawTexturePro(easuTarget.texture, upscaledSource, passTarget, {0, 0}, 0, WHITE);
-        EndShaderMode();
-        EndTextureMode();
-        texture = rcasTarget.texture;
-        source = upscaledSource;
+    // A full-size last pass can go straight to a pixel-aligned window.
+    const auto pixelAligned = [](float x) { return std::abs(x - std::round(x)) < 0.001f; };
+    const bool direct = passCount > 0 && !shader.id && width == outputWidth && height == outputHeight &&
+        pixelAligned(target.x * scaleX) && pixelAligned(target.y * scaleY) &&
+        pixelAligned(outputSize[0]) && pixelAligned(outputSize[1]);
+    int targetCount = passCount - (direct ? 1 : 0);
+    // Reuse the EASU buffer for FXAA when a user shader also needs the output.
+    const bool reuseFirst = targetCount == 3 && passes[0].width == passes[2].width && passes[0].height == passes[2].height;
+    if (reuseFirst) --targetCount;
+
+    int fsrSharpened = 0;
+    if (prepareTargets(passes, targetCount))
+    {
+        const bool integerMagnification = mode == hostmenu::kScreenInteger &&
+            outputWidth >= width && outputHeight >= height;
+        for (int i = 0; i < passCount; ++i)
+        {
+            const Pass &pass = passes[i];
+            if (direct && i == passCount - 1)
+            {
+                drawPass(pass, texture, source, target);
+                return;
+            }
+
+            auto &buffer = targets[reuseFirst && i == 2 ? 0 : i];
+            const Rectangle passTarget{0, 0, static_cast<float>(pass.width), static_cast<float>(pass.height)};
+            buffer.setFilter(integerMagnification ? TEXTURE_FILTER_POINT : TEXTURE_FILTER_BILINEAR);
+            BeginTextureMode(buffer.frame);
+            rlDisableColorBlend();
+            drawPass(pass, texture, source, passTarget);
+            if (pass.program == &rcas) fsrSharpened = 1;
+            EndTextureMode();
+            rlEnableColorBlend();
+            texture = buffer.frame.texture;
+            source = {0, 0, passTarget.width, -passTarget.height};
+        }
     }
     if (shader.id)
     {
@@ -268,6 +378,7 @@ void draw(Texture2D texture, int width, int height, bool flipY, int mode, bool u
         if (sourceLocation >= 0) SetShaderValue(shader, sourceLocation, sourceSize, SHADER_UNIFORM_VEC2);
         if (outputLocation >= 0) SetShaderValue(shader, outputLocation, outputSize, SHADER_UNIFORM_VEC2);
         if (timeLocation >= 0) SetShaderValue(shader, timeLocation, &seconds, SHADER_UNIFORM_FLOAT);
+        if (fsrSharpenedLocation >= 0) SetShaderValue(shader, fsrSharpenedLocation, &fsrSharpened, SHADER_UNIFORM_INT);
         BeginShaderMode(shader);
     }
     DrawTexturePro(texture, source, target, {0, 0}, 0, WHITE);
@@ -277,14 +388,13 @@ void draw(Texture2D texture, int width, int height, bool flipY, int mode, bool u
 void shutdown()
 {
     if (shader.id) UnloadShader(shader);
-    if (easuShader.id) UnloadShader(easuShader);
-    if (rcasShader.id) UnloadShader(rcasShader);
     shader = {};
-    easuShader = {};
-    rcasShader = {};
-    easuSourceLocation = -1;
-    fsrInitialized = false;
-    releaseFsrTargets();
+    easu.release();
+    rcas.release();
+    area.release();
+    fxaaShader.release();
+    for (auto &target : targets) target.release();
+    overTargetBudget = false;
     windowResolution = 0;
     restoreFrames = frameLimit = 0;
     nextRefreshCheck = 0.0;

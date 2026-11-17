@@ -22,7 +22,9 @@ namespace desktop_video
     void updatePresentation(bool vsync, bool cap30);
     bool loadShader(const char *path, std::string &error);
     bool shaderActive();
-    void draw(Texture2D texture, int width, int height, bool flipY, int mode, bool upscaleFsr = false);
+    bool fxaaAvailable();
+    void draw(Texture2D texture, int width, int height, bool flipY, int mode,
+              bool upscaleFsr = false, bool fxaa = false);
     void shutdown();
 }
 #endif

@@ -109,6 +109,29 @@ namespace
     }
 
 #if !defined(PS2X_NATIVE_VITA)
+    float queryMaxAnisotropy()
+    {
+        GLint major = 0, minor = 0;
+        glGetIntegerv(GL_MAJOR_VERSION, &major);
+        glGetIntegerv(GL_MINOR_VERSION, &minor);
+        bool supported = major > 4 || (major == 4 && minor >= 6);
+        if (!supported)
+        {
+            GLint count = 0;
+            glGetIntegerv(GL_NUM_EXTENSIONS, &count);
+            for (GLint i = 0; i < count && !supported; ++i)
+            {
+                const auto *extension = reinterpret_cast<const char *>(glGetStringi(GL_EXTENSIONS, i));
+                supported = extension && (std::strcmp(extension, "GL_EXT_texture_filter_anisotropic") == 0 ||
+                                          std::strcmp(extension, "GL_ARB_texture_filter_anisotropic") == 0);
+            }
+        }
+        GLfloat limit = 1.0f;
+        if (supported)
+            glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &limit);
+        return limit;
+    }
+
     // ---- GLSL (macOS) ----
     const char *kMainVertex = R"(#version 330 core
 layout(location = 0) in vec3 aPos;
@@ -154,7 +177,7 @@ in vec4 vColor;
 in vec4 vScreen;
 uniform sampler2D uTex, uBackground, uReflection, uRefraction;
 uniform vec4 uFogA;      // start, width, steps, fogged
-uniform vec4 uFogC;      // scale, lod K, lod scale, max lod
+uniform vec4 uFogC;      // scale, lod K, lod scale, max lod (-1: hardware footprint)
 uniform vec4 uFogColour; // rgb, textured mode
 uniform vec4 uDebug;
 uniform vec4 uAlphaTest; // FB_ONLY enabled, GS byte reference, depth-only phase
@@ -198,7 +221,9 @@ void main()
         return;
     }
     float lod = uFogC.w > 0.0 ? clamp(log2(max(depth, 1e-3)) * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
-    vec4 t = textured > 0.5 ? textureLod(uTex, vUV.xy, lod) : vec4(vec3(128.0 / 255.0), 1.0); // GS untextured RGB uses vertex / 255
+    vec4 t = vec4(vec3(128.0 / 255.0), 1.0); // GS untextured RGB uses vertex / 255
+    if (textured > 0.5)
+        t = uFogC.w < 0.0 ? texture(uTex, vUV.xy) : textureLod(uTex, vUV.xy, lod);
     float alpha = clamp(t.a * (textured > 0.5 ? 2.0 : 1.0) * vColor.a, 0.0, 1.0);
     // Alpha TEST precedes the GS's blend-alpha saturation at 0x80. AFAIL
     // FB_ONLY keeps even a low-alpha colour fragment, but not its Z.
@@ -582,7 +607,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         GLuint name = 0;
         uint32_t clamp = 0; // the wrap set on it (bit 0 s, bit 1 t clamp): new textures repeat
         uint32_t filter = 2; // the min / mag filter set on it (Tuning::textureFilter; 2 trilinear, as uploaded)
-        bool mipped = false; // has mip levels
+        uint32_t levels = 1; // number of uploaded mip levels, including level 0
         uint64_t used = 0;
         uint64_t bytes = 0;
         bool inHeap = false; // vitaGL put it in the newlib heap (its pools were full)
@@ -632,6 +657,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     {
         GLuint mainProgram = 0, quadProgram = 0;
         GLuint skinProgram = 0; // the main program posing a skinned mesh's bind pose first (0: not built)
+#if !defined(PS2X_NATIVE_VITA)
+        float maxAnisotropy = 1.0f;
+#endif
 #if defined(PS2X_NATIVE_VITA)
         GLuint quadPrograms[12] = {}; // by mode (8 and 11: the bloom mask's, see kQuadFragment)
 #endif
@@ -652,6 +680,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         std::unordered_map<UniformKey, GLint, UniformKeyHash> uniforms;
         Target colorPlain; // the picture's colour alone (passes that read its depth)
         Target color, background, backgroundSmall, reflection, refraction, refractionHalf, snapshot, shadowMask;
+#if !defined(PS2X_NATIVE_VITA)
+        Target waterRefraction, waterRefractionHalf; // higher-resolution copies for layer 9 only
+#endif
         Target previous; // the last frame shown (feedbackBlur)
         // Tuning midFrameRedraw: the picture up to a mid-frame effect's layer
         // drawn again into a target of its own (one per effect), and the
@@ -1110,6 +1141,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             if (!mainProgram || !quadProgram)
                 return false;
 #if !defined(PS2X_NATIVE_VITA)
+            maxAnisotropy = queryMaxAnisotropy();
+            std::cerr << "[native:gl] maximum texture anisotropy " << maxAnisotropy << 'x' << std::endl;
             glGenVertexArrays(1, &vao);
             glBindVertexArray(vao);
 #endif
@@ -1315,7 +1348,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             return t;
         }
 
-        static void makeTarget(Target &t, uint32_t w, uint32_t h, bool depth)
+        static void destroyTarget(Target &t)
         {
             if (t.fbo)
                 glDeleteFramebuffers(1, &t.fbo);
@@ -1324,6 +1357,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             if (t.depth)
                 glDeleteTextures(1, &t.depth);
             t = Target{};
+        }
+
+        static bool makeTarget(Target &t, uint32_t w, uint32_t h, bool depth)
+        {
+            destroyTarget(t);
             t.width = w;
             t.height = h;
             t.texture = newTexture(w, h, true);
@@ -1343,11 +1381,32 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, t.depth, 0);
             }
             if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+            {
                 std::cerr << "[native:gl] incomplete framebuffer " << w << "x" << h << std::endl;
+                return false;
+            }
 #else
             (void)depth; // vitaGL gives every framebuffer its depth and stencil
 #endif
+            return true;
         }
+
+#if !defined(PS2X_NATIVE_VITA)
+        static bool resizeEffectTarget(Target &target, uint32_t size, bool depth)
+        {
+            if (target.texture && target.width == size)
+                return true;
+            Target candidate;
+            if (!makeTarget(candidate, size, size, depth))
+            {
+                destroyTarget(candidate);
+                return false;
+            }
+            destroyTarget(target);
+            target = candidate;
+            return true;
+        }
+#endif
 
         void ensureTargets(uint32_t w, uint32_t h)
         {
@@ -1368,8 +1427,6 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             // Full size on the Vita: the 256 x 256 targets drawn mid-frame
             // did not hold there (the refraction copy came out white).
             makeTarget(reflection, w, h, true);
-#else
-            makeTarget(reflection, 256, 256, true);
 #endif
             makeTarget(refraction, 256, 256, false);
             for (Target &t : hazeSmall)
@@ -1840,7 +1897,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // Invalidate an anisotropic sampler so a change back to trilinear
         // is applied even when the image was just uploaded again.
         t.filter = t.filter >= 3u ? ~0u : 2u;
-        t.mipped = levels > 1u;
+        t.levels = levels;
         cache.texture = ~0u;
     }
 
@@ -1938,13 +1995,38 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             drawOrder.push_back((static_cast<uint64_t>(draws[i].state.order) << 32) | i);
         std::sort(drawOrder.begin(), drawOrder.end());
         const bool fogOn = fog.enabled && fog.width > 0.0f;
+#if defined(PS2X_NATIVE_VITA)
+        constexpr float kMaxFilter = 2.0f;
+#else
+        constexpr float kMaxFilter = 6.0f;
+#endif
+        const auto frameFilter = static_cast<uint32_t>(std::clamp(native_renderer::tuning().textureFilter + 0.5f, 0.0f, kMaxFilter));
         bool haveMirror = false;
+        bool haveRefraction = false;
+        std::vector<uint32_t> screenCopyOrders;
         for (const Draw &d : draws)
-            if (d.state.reflectionSource)
-            {
-                haveMirror = true;
-                break;
-            }
+        {
+            haveMirror |= d.state.reflectionSource;
+            haveRefraction |= d.state.refractionSample;
+            if (d.state.screenCopy)
+                screenCopyOrders.push_back(d.state.order);
+        }
+        const auto waterFrom = static_cast<int>(native_renderer::tuning().waterSource + 0.5f);
+        bool enhancedWater = false;
+#if !defined(PS2X_NATIVE_VITA)
+        const auto detail = static_cast<unsigned>(std::clamp(native_renderer::tuning().effectDetail + 0.5f, 0.0f, 2.0f));
+        const uint32_t effectSize = 256u << detail;
+        if (haveMirror && !resizeEffectTarget(reflection, effectSize, true))
+            haveMirror = resizeEffectTarget(reflection, 256u, true);
+        if (detail > 0 && haveRefraction && waterFrom == 0)
+            enhancedWater = resizeEffectTarget(waterRefraction, effectSize, false) &&
+                            resizeEffectTarget(waterRefractionHalf, effectSize / 2u, false);
+        if ((!enhancedWater && haveRefraction) || detail == 0 || waterFrom != 0)
+        {
+            destroyTarget(waterRefraction);
+            destroyTarget(waterRefractionHalf);
+        }
+#endif
 #if defined(PS2X_NATIVE_VITA)
         // The soft path draws a separate mask that must test the picture's
         // stencil; vitaGL framebuffers cannot share it, so the mask covered
@@ -2212,11 +2294,12 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 if (textured == 3 || textured == 4)
                 {
                     const native_renderer::Tuning &t = native_renderer::tuning();
-                    const int source = static_cast<int>((textured == 4 ? t.hazeSource : t.waterSource) + 0.5f);
+                    const int source = textured == 4 ? static_cast<int>(t.hazeSource + 0.5f) : waterFrom;
                     const auto hazeSource = hazeSourceTextures.find(d.state.order);
                     const GLuint redrawn = textured == 4 ? (hazeSource == hazeSourceTextures.end() ? 0u : hazeSource->second) : waterSource;
                     bindTexture(3, redrawn && source != 2 ? redrawn : (source == 2 ? previous.texture : (source == 1 ? snapshot.texture : refraction.texture)));
                 }
+                float maxLod = std::max(d.state.maxLod, 0.0f);
                 if (textured == 1)
                 {
                     tex->second.used = arenaFrame;
@@ -2232,33 +2315,35 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, (d.state.clamp & 1u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
                         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, (d.state.clamp & 2u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
                     }
-                    // Quality "Texture filtering": nearest, bilinear, trilinear, anisotropic 2x-16x (EXT_texture_filter_anisotropic; Vita: trilinear).
-#if defined(PS2X_NATIVE_VITA)
-                    constexpr float kMaxFilter = 2.0f;
-#else
-                    constexpr float kMaxFilter = 6.0f;
+                    uint32_t filter = d.state.screen ? 2u : frameFilter;
+#if !defined(PS2X_NATIVE_VITA)
+                    if (filter >= 3u)
+                    {
+                        // Use the pixel footprint for anisotropic world surfaces. The
+                        // GS's explicit LOD handles draws that limit the mip range,
+                        // UI and FB_ONLY depth coverage.
+                        const uint32_t levels = tex->second.levels;
+                        if (maxAnisotropy >= 2.0f && levels > 1u && maxLod >= static_cast<float>(levels - 1u) &&
+                            !d.state.background && !d.state.framebufferOnlyAlphaFail)
+                            maxLod = -1.0f;
+                        else
+                            filter = 2u;
+                    }
 #endif
-                    const uint32_t filter = d.state.screen ? 2u : static_cast<uint32_t>(std::clamp(native_renderer::tuning().textureFilter + 0.5f, 0.0f, kMaxFilter)); // 2D keeps the default
                     if (tex->second.filter != filter)
                     {
                         tex->second.filter = filter;
                         bindTexture(0, tex->second.name);
-                        const bool mipped = tex->second.mipped;
+                        const bool mipped = tex->second.levels > 1u;
                         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
                                         filter == 0 ? (mipped ? GL_NEAREST_MIPMAP_NEAREST : GL_NEAREST)
                                                     : (filter == 1 ? (mipped ? GL_LINEAR_MIPMAP_NEAREST : GL_LINEAR) : (mipped ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR)));
                         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter == 0 ? GL_NEAREST : GL_LINEAR);
 #if !defined(PS2X_NATIVE_VITA)
-                        // Anisotropic levels 3..6 = 2x..16x, up to what the GPU has (0 when it lacks the extension).
-                        static const float maxAniso = []
-                        {
-                            GLfloat v = 0.0f;
-                            glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &v);
-                            return glGetError() == GL_NO_ERROR ? v : 0.0f;
-                        }();
-                        if (maxAniso >= 1.0f)
+                        // Anisotropic levels 3..6 = 2x..16x, capped by the GPU.
+                        if (maxAnisotropy >= 2.0f)
                             glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT,
-                                            filter >= 3u && mipped ? std::min(maxAniso, static_cast<float>(1u << (filter - 2u))) : 1.0f);
+                                            filter >= 3u ? std::min(maxAnisotropy, static_cast<float>(1u << (filter - 2u))) : 1.0f);
 #endif
                     }
                 }
@@ -2275,7 +2360,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 const float fogB[4] = {static_cast<float>(w), static_cast<float>(h), vertexFog ? 1.0f : 0.0f, fog.base};
                 // The mirror's ripple (t, H) where a reflection reads no mip level.
                 const float fogC[4] = {fog.scale, d.state.reflectionSample ? d.state.mirrorRipple[0] : d.state.lodK,
-                                       d.state.reflectionSample ? d.state.mirrorRipple[1] : d.state.lodScale, d.state.reflectionSample ? 0.0f : d.state.maxLod};
+                                       d.state.reflectionSample ? d.state.mirrorRipple[1] : d.state.lodScale, d.state.reflectionSample ? 0.0f : maxLod};
                 const float fogColour[4] = {fog.colour[0], fog.colour[1], fog.colour[2], static_cast<float>(textured)};
                 float debug[4] = {static_cast<float>(d.state.debugColour & 0xFFu) / 255.0f, static_cast<float>((d.state.debugColour >> 8) & 0xFFu) / 255.0f,
                                   static_cast<float>((d.state.debugColour >> 16) & 0xFFu) / 255.0f, d.state.debugColour ? 1.0f : 0.0f};
@@ -2580,15 +2665,15 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             bindTexture(0, bloomTex[0].texture);
             quad(color, 9, QuadBlend::Darken, amount);
         };
-        bool haveRefraction = false;
-        std::vector<uint32_t> screenCopyOrders;
-        for (const Draw &d : draws)
+        auto copyWaterRefraction = [&]([[maybe_unused]] const Target &source)
         {
-            if (d.state.refractionSample)
-                haveRefraction = true;
-            if (d.state.screenCopy)
-                screenCopyOrders.push_back(d.state.order);
-        }
+#if !defined(PS2X_NATIVE_VITA)
+            copy(source, waterRefraction);
+            copy(waterRefraction, waterRefractionHalf);
+            copy(waterRefractionHalf, waterRefraction);
+            waterSource = waterRefraction.texture;
+#endif
+        };
         std::sort(screenCopyOrders.begin(), screenCopyOrders.end());
         screenCopyOrders.erase(std::unique(screenCopyOrders.begin(), screenCopyOrders.end()), screenCopyOrders.end());
         // Submission order is not layer order. Every consumer layer needs the
@@ -2603,8 +2688,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         {
             // The copies the chosen sources need (Tuning hazeSource / waterSource).
             const native_renderer::Tuning &t = native_renderer::tuning();
-            const int haze = static_cast<int>(t.hazeSource + 0.5f), water = static_cast<int>(t.waterSource + 0.5f);
-            if (haze == 2 && water == 2)
+            const int haze = static_cast<int>(t.hazeSource + 0.5f);
+            if (haze == 2 && waterFrom == 2)
                 return;
 #if defined(__linux__) && !defined(__ANDROID__)
             traceWaterCopy("screen-source", color, nullptr, order);
@@ -2613,7 +2698,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #if defined(__linux__) && !defined(__ANDROID__)
             traceWaterCopy("screen-snapshot", snapshot, &color, order);
 #endif
-            if (haze == 0 || water == 0)
+            if (enhancedWater && order == 9u)
+                copyWaterRefraction(snapshot);
+            const bool legacyCopy = enhancedWater ? (haze == 0 && std::binary_search(screenCopyOrders.begin(), screenCopyOrders.end(), order))
+                                                  : (haze == 0 || waterFrom == 0);
+            if (legacyCopy)
             {
                 copy(snapshot, refraction);
 #if defined(__linux__) && !defined(__ANDROID__)
@@ -2763,7 +2852,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         if (redraw)
         {
             const native_renderer::Tuning &t = native_renderer::tuning();
-            const int hazeFrom = static_cast<int>(t.hazeSource + 0.5f), waterFrom = static_cast<int>(t.waterSource + 0.5f);
+            const int hazeFrom = static_cast<int>(t.hazeSource + 0.5f);
             int k = 0, last = -1;
             uint32_t lastOrder = ~0u;
             static const bool share = !std::getenv("SOTC_GL_REDRAW_NOSHARE");
@@ -2812,9 +2901,15 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 };
                 if (water)
                 {
-                    if (waterFrom == 0)
+                    if (enhancedWater)
+                        copyWaterRefraction(pre);
+                    else if (waterFrom == 0)
+                    {
                         small(refraction);
-                    waterSource = waterFrom == 0 ? refraction.texture : pre.texture;
+                        waterSource = refraction.texture;
+                    }
+                    else
+                        waterSource = pre.texture;
                 }
                 if (haze)
                 {

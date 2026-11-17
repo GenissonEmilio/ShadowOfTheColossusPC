@@ -2847,7 +2847,7 @@ void PS2Runtime::run()
             ClearBackground(BLACK);
 #ifdef PS2X_DESKTOP_VIDEO
             desktop_video::draw(shown, std::max(1u, presentWidth), std::max(1u, presentHeight), hostFrameFlipY,
-                                hostmenu::settings().screenMode, hostmenu::settings().upscaleFsr);
+                                hostmenu::settings().screenMode, hostmenu::settings().upscaleFsr, native_renderer::tuning().fxaa);
 #else
             const float srcWidth = static_cast<float>(std::max<uint32_t>(1u, presentWidth));
             const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight));

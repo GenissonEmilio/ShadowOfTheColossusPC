@@ -18,6 +18,7 @@ import tarfile
 import tempfile
 import time
 from urllib.parse import urlsplit
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 import zipfile
 
@@ -26,6 +27,8 @@ from desktop_services import host_environment
 NAME = "ShadowOfTheColossusPC"
 REPOSITORY = f"GenissonEmilio/{NAME}"
 RELEASES = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=20"
+MANIFEST = f"https://github.com/{REPOSITORY}/releases/latest/download/update-manifest.json"
+MANIFEST_HOSTS = ("github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com")
 MAX_DOWNLOAD = 3 * 1024**3
 MAX_EXPANDED = 8 * 1024**3
 MAX_METADATA = 2 * 1024**2
@@ -48,6 +51,10 @@ class Update:
     sha256: str
 
 
+class RateLimitedError(RuntimeError):
+    pass
+
+
 def platform_id():
     if platform.machine().lower() not in ("x86_64", "amd64"):
         return None
@@ -59,7 +66,9 @@ def platform_id():
 
 
 def release_version(tag):
-    match = re.fullmatch(r"(?:(?:linux|windows)-)?v?(\d{1,5})\.(\d{1,5})\.(\d{1,5})", tag)
+    if not isinstance(tag, str):
+        return None
+    match = re.fullmatch(r"(?:(?:linux|windows)-)?v?([0-9]{1,5})\.([0-9]{1,5})\.([0-9]{1,5})", tag)
     return tuple(map(int, match.groups())) if match else None
 
 
@@ -76,44 +85,91 @@ def https_context():
     return context
 
 
+def release_package(release, version, system, *, strict=False):
+    label = ".".join(map(str, version))
+    extension = "zip" if system.startswith("windows") else "tar.gz"
+    name = f"{NAME}-{label}-{system}.{extension}"
+    url = f"https://github.com/{REPOSITORY}/releases/download/{release['tag_name']}/{name}"
+    assets = release.get("assets")
+    if not isinstance(assets, list):
+        return None
+    candidates = [asset for asset in assets if isinstance(asset, dict) and asset.get("name") == name]
+    if strict and len(candidates) > 1:
+        raise ValueError("GitHub update manifest contains duplicate packages")
+    for asset in candidates:
+        digest = asset.get("digest")
+        size = asset.get("size")
+        if (asset.get("state") == "uploaded" and asset.get("browser_download_url") == url
+                and isinstance(digest, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
+                and type(size) is int and 0 < size <= MAX_DOWNLOAD):
+            return Update(label, system, name, url, size, digest.removeprefix("sha256:"))
+    if strict and candidates:
+        raise ValueError("GitHub update manifest contains invalid package metadata")
+    return None
+
+
 def select_update(releases, current, system):
     old = release_version(current)
     if not old or system not in ("linux-x86_64", "windows-x86_64"):
         return None
     choices = []
-    extension = "zip" if system.startswith("windows") else "tar.gz"
     for release in releases:
-        if release.get("draft") or release.get("prerelease"):
+        if not isinstance(release, dict) or release.get("draft") or release.get("prerelease"):
             continue
-        tag = release.get("tag_name", "")
-        version = release_version(tag)
+        version = release_version(release.get("tag_name"))
         if not version or version <= old:
             continue
-        label = ".".join(map(str, version))
-        name = f"{NAME}-{label}-{system}.{extension}"
-        url = f"https://github.com/{REPOSITORY}/releases/download/{tag}/{name}"
-        for asset in release.get("assets", ()):
-            if (asset.get("state") != "uploaded" or asset.get("name") != name
-                    or asset.get("browser_download_url") != url):
-                continue
-            digest = re.fullmatch(r"sha256:([0-9a-f]{64})", asset.get("digest") or "")
-            size = asset.get("size")
-            if digest and type(size) is int and 0 < size <= MAX_DOWNLOAD:
-                choices.append((version, Update(label, system, name, url, size, digest[1])))
+        package = release_package(release, version, system)
+        if package:
+            choices.append((version, package))
     return max(choices, default=(None, None), key=lambda choice: choice[0])[1]
+
+
+def github_metadata(url, current, context, *, accept, hosts):
+    request = Request(url, headers={"Accept": accept, "User-Agent": f"{NAME}/{current}"})
+    try:
+        with urlopen(request, timeout=5, context=context) as response:
+            origin = urlsplit(response.geturl())
+            if origin.scheme != "https" or origin.netloc not in hosts:
+                raise ValueError("GitHub release metadata must come from GitHub over HTTPS")
+            data = response.read(MAX_METADATA + 1)
+    except HTTPError as error:
+        with error:
+            if (error.code == 429 or (error.code == 403 and (
+                    error.headers.get("X-RateLimit-Remaining") == "0"
+                    or error.headers.get("Retry-After")
+                    or b"rate limit" in error.read(4096).lower()))):
+                raise RateLimitedError(f"GitHub rate limit reached (HTTP {error.code})") from error
+        raise
+    if len(data) > MAX_METADATA:
+        raise ValueError("GitHub release metadata exceeds the limit")
+    return json.loads(data)
 
 
 def check_for_update(current):
     system = platform_id()
-    if not system:
+    installed = release_version(current)
+    if not system or not installed:
         return None
-    request = Request(RELEASES, headers={"Accept": "application/vnd.github+json",
-                                        "User-Agent": f"{NAME}/{current}"})
-    with urlopen(request, timeout=5, context=https_context()) as response:
-        data = response.read(MAX_METADATA + 1)
-    if len(data) > MAX_METADATA:
-        raise ValueError("GitHub release metadata exceeds the limit")
-    releases = json.loads(data)
+    context = https_context()
+    try:
+        latest = github_metadata(MANIFEST, current, context, accept="application/json", hosts=MANIFEST_HOSTS)
+    except HTTPError as error:
+        if error.code != 404:
+            raise
+    else:
+        version = release_version(latest.get("tag_name")) if isinstance(latest, dict) else None
+        if (not version or latest.get("draft") is not False or latest.get("prerelease") is not False
+                or not isinstance(latest.get("assets"), list)
+                or not all(isinstance(asset, dict) for asset in latest["assets"])):
+            raise ValueError("Invalid GitHub update manifest")
+        package = release_package(latest, version, system, strict=True)
+        if version <= installed:
+            return None
+        if package:
+            return package
+    releases = github_metadata(RELEASES, current, context,
+                               accept="application/vnd.github+json", hosts=("api.github.com",))
     if not isinstance(releases, list):
         raise ValueError("Invalid GitHub release response")
     return select_update(releases, current, system)

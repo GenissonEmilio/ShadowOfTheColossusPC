@@ -3,6 +3,7 @@
 // the GL path against Metal); the Vita: OpenGL (vitaGL); elsewhere none.
 #include "native_backend.h"
 #include "runtime/native_tuning.h"
+#include "runtime/desktop_video.h"
 #include "ThreadNaming.h"
 
 #include <algorithm>
@@ -12,6 +13,7 @@
 #include <vector>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <cmath>
 #include <tuple>
 #include <functional>
@@ -43,6 +45,12 @@ namespace native_renderer::detail
 
 namespace native_renderer
 {
+#ifdef PS2X_DESKTOP_VIDEO
+    static constexpr int kLastPreset = kPresetDesktopUltra;
+#else
+    static constexpr int kLastPreset = kPresetCustom;
+#endif
+
     Tuning defaultTuning()
     {
         Tuning d;
@@ -82,6 +90,9 @@ namespace native_renderer
         d.textureFilter = std::clamp(std::round(number("SOTC_TEXTURE_FILTER", d.textureFilter)), 0.0f, 6.0f);
         d.modelDetail = std::clamp(std::round(number("SOTC_MODEL_DETAIL", d.modelDetail)), 0.0f, 2.0f);
         d.effectDetail = std::clamp(std::round(number("SOTC_EFFECT_DETAIL", d.effectDetail)), 0.0f, 2.0f);
+#ifdef PS2X_DESKTOP_VIDEO
+        d.fxaa = number("SOTC_FXAA", d.fxaa) != 0.0f;
+#endif
     }
 
     Tuning *g_tuning = nullptr;
@@ -94,7 +105,7 @@ namespace native_renderer
             auto number = [](const char *name, float fallback) { return std::getenv(name) ? static_cast<float>(std::atof(std::getenv(name))) : fallback; };
             // The preset first; a variable for one of its items overrides it.
             if (on("SOTC_PRESET"))
-                applyPreset(d, std::clamp(std::atoi(std::getenv("SOTC_PRESET")), 0, static_cast<int>(kPresetUltra)));
+                applyPreset(d, std::clamp(std::atoi(std::getenv("SOTC_PRESET")), 0, kLastPreset));
             qualityFromEnv(d);
             const float strength = number("SOTC_BLOOM_SCALE", d.bloomStrength);
             d.bloom = strength > 0.0f;
@@ -170,6 +181,8 @@ namespace native_renderer
             add("SOTC_MODEL_DETAIL=" + number(t.modelDetail));
         if (t.effectDetail != d.effectDetail)
             add("SOTC_EFFECT_DETAIL=" + number(t.effectDetail));
+        if (t.fxaa != d.fxaa)
+            add(t.fxaa ? "SOTC_FXAA=1" : "SOTC_FXAA=0");
         if (!t.bloom)
             add("SOTC_BLOOM_SCALE=0");
         else if (t.bloomStrength != d.bloomStrength)
@@ -229,17 +242,30 @@ namespace native_renderer
         {
         std::vector<TuningItem> v = {
             {"quality_preset", "Graphics preset", "Predefinição gráfica",
+#ifdef PS2X_DESKTOP_VIDEO
+             "Original: PS2 render resolution. Balanced: 1.5x, FXAA and 4x anisotropic filtering. Enhanced: 2.5x, 8x filtering, finer models "
+             "and sharper water. Ultra: 4x, 16x filtering, finest models and the largest water buffers.",
+             "Original: resolução interna do PS2. Equilibrado: 1,5x, FXAA e filtro anisotrópico 4x. Aprimorado: 2,5x, filtro 8x, modelos "
+             "mais detalhados e água mais definida. Ultra: 4x, filtro 16x, detalhe máximo e os maiores buffers de água.",
+#else
              "Sets resolution, anti-aliasing, texture filtering, model detail and effect detail at once. Low: half resolution (faster). "
              "Medium: the PS2's 512 x 448 (the Vita's default). High: 3x (the Mac's default). Ultra: 4x, 4x MSAA, 16x anisotropic, finest models, "
              "high effect detail (Mac). Changing any of those makes it Custom.",
              "Ajusta resolução, anti-aliasing, filtro de texturas, detalhe dos modelos e dos efeitos de uma vez. Baixo: metade da resolução (mais rápido). "
              "Médio: os 512 x 448 do PS2 (o padrão do Vita). Alto: 3x (o padrão do Mac). Ultra: 4x, MSAA 4x, anisotrópico 16x, modelos mais detalhados, "
              "efeitos em alto detalhe (Mac). Mudar qualquer um deles vira Personalizado.",
-             nullptr, &Tuning::preset, 0.0f, 4.0f, 1.0f, "SOTC_PRESET"},
+#endif
+             nullptr, &Tuning::preset, 0.0f, static_cast<float>(kLastPreset), 1.0f, "SOTC_PRESET"},
             {"render_scale", "Resolution", "Resolução",
              "The picture is drawn at 512 x 448 times this: 0.5 is faster, 1 is the PS2's, 2 to 4 are sharper.",
              "A imagem é desenhada em 512 x 448 vezes este valor: 0,5 é mais rápido, 1 é a do PS2, 2 a 4 ficam mais nítidas.",
              nullptr, &Tuning::renderScale, 0.5f, 4.0f, 0.5f, "SOTC_RENDER_SCALE"},
+#ifdef PS2X_DESKTOP_VIDEO
+            {"fxaa", "Anti-aliasing (FXAA)", "Anti-aliasing (FXAA)",
+             "Smooths edges in the final picture. Use a higher internal resolution to retain more texture detail.",
+             "Suaviza os contornos na imagem final. Uma resolução interna mais alta preserva mais detalhes das texturas.",
+             &Tuning::fxaa, nullptr, 0, 1, 1, "SOTC_FXAA"},
+#endif
             {"msaa", "Anti-aliasing (MSAA)", "Anti-aliasing (MSAA)",
              "Metal (Mac) only: smooths the edges of the 3D models with 2, 4 or 8 samples a pixel (as many as the GPU has). Costs GPU memory and time, more at a high resolution. "
              "OpenGL / Vita: not available.",
@@ -258,6 +284,11 @@ namespace native_renderer
              "Qual nível de detalhe de cada modelo é desenhado. Escolha do jogo: o que o jogo escolhe pela distância (o do PS2). Mais fino: um nível mais detalhado. "
              "Máximo: sempre o mais detalhado (morros e colossos distantes perdem o contorno quadrado; mais geometria a desenhar).",
              nullptr, &Tuning::modelDetail, 0.0f, 2.0f, 1.0f, "SOTC_MODEL_DETAIL"},
+#ifdef PS2X_DESKTOP_VIDEO
+            {"water_detail", "Water effect detail", "Detalhe da água",
+             "PS2: original effect buffers. High: 512 px reflections and refraction. Very high: 1024 px. Larger buffers cost GPU time and memory.",
+             "PS2: buffers de efeitos originais. Alto: reflexão e refração a 512 px. Muito alto: 1024 px. Buffers maiores custam tempo e memória da GPU.",
+#else
             {"effect_detail", "Effect detail", "Detalhe dos efeitos",
              "Metal (Mac) only. PS2: the effects' buffers as the PS2 has them. High: the picture reduced for depth of field, distance fog, water and the "
              "glow by averaging all of it (at a high resolution one sample of it made far cliffs blocky and pixelated) and the mirror image on water "
@@ -265,6 +296,7 @@ namespace native_renderer
              "Só Metal (Mac). PS2: os buffers dos efeitos como no PS2. Alto: a imagem reduzida para profundidade de campo, névoa, água e brilho pela "
              "média de toda ela (em resolução alta uma amostra só deixava os penhascos distantes quadriculados e pixelados) e a imagem espelhada na "
              "água e no chão em 512 x 512 (a do PS2: 256). Muito alto: o espelho em 1024. OpenGL / Vita: sempre a do PS2.",
+#endif
              nullptr, &Tuning::effectDetail, 0.0f, 2.0f, 1.0f, "SOTC_EFFECT_DETAIL"},
             {"bloom", "Bloom", "Bloom", "The glow around bright light and sky.", "O brilho em volta da luz forte e do céu.",
              &Tuning::bloom, nullptr, 0, 1, 1, "SOTC_BLOOM_SCALE"},
@@ -410,9 +442,13 @@ namespace native_renderer
         {
             const std::string key = item.key;
             item.quality = key == "quality_preset" || key == "render_scale" || key == "msaa" || key == "texture_filter" || key == "model_detail" ||
-                           key == "effect_detail";
-            if (key == "msaa" || key == "effect_detail")
+                           key == "effect_detail" || key == "water_detail" || key == "fxaa";
+            if (key == "msaa")
                 item.backends = 1;
+            if (key == "effect_detail")
+                item.backends = 1;
+            if (key == "water_detail")
+                item.backends = 2;
             if (key == "bloom_rounds" || key == "bloom_spread" || key == "dbg_haze_source" || key == "dbg_water_source" || key == "dbg_redraw" ||
                 key == "dbg_gpu_skin" || key == "dbg_render_thread")
                 item.backends = 2;
@@ -430,12 +466,19 @@ namespace native_renderer
         struct PresetValues
         {
             float renderScale, msaa, textureFilter, modelDetail, effectDetail;
+            bool fxaa = false;
         };
-        constexpr PresetValues kPresets[4] = {
+        constexpr PresetValues kPresets[] = {
             {0.5f, 0.0f, 1.0f, 0.0f, 0.0f}, // Low: half the PS2's resolution, bilinear
             {1.0f, 0.0f, 2.0f, 0.0f, 0.0f}, // Medium: the PS2's 512 x 448
             {3.0f, 0.0f, 2.0f, 0.0f, 0.0f}, // High: 3x
-            {4.0f, 2.0f, 6.0f, 2.0f, 1.0f}, // Ultra: 4x, 4x MSAA, 16x anisotropic, the finest models, high effect detail
+            {4.0f, 2.0f, 6.0f, 2.0f, kLastPreset == kPresetCustom ? 1.0f : 0.0f}, // Legacy Ultra
+#ifdef PS2X_DESKTOP_VIDEO
+            {}, // The Custom ID is persisted in existing settings.
+            {1.5f, 0.0f, 4.0f, 0.0f, 0.0f, true}, // Balanced
+            {2.5f, 0.0f, 5.0f, 1.0f, 1.0f, true}, // Enhanced
+            {4.0f, 0.0f, 6.0f, 2.0f, 2.0f, true}, // Desktop Ultra
+#endif
         };
 
         // Named values: count, English, Portuguese.
@@ -446,8 +489,13 @@ namespace native_renderer
         };
         Choices choicesOf(const TuningItem &item)
         {
+#ifdef PS2X_DESKTOP_VIDEO
+            static const char *presetEn[] = {"Low", "Original", "High (legacy)", "Ultra (legacy)", "Custom", "Balanced", "Enhanced", "Ultra"};
+            static const char *presetPt[] = {"Baixo", "Original", "Alto (legado)", "Ultra (legado)", "Personalizado", "Equilibrado", "Aprimorado", "Ultra"};
+#else
             static const char *presetEn[] = {"Low", "Medium", "High", "Ultra", "Custom"};
             static const char *presetPt[] = {"Baixo", "Médio", "Alto", "Ultra", "Personalizado"};
+#endif
             static const char *msaaEn[] = {"Off", "2x", "4x", "8x"};
             static const char *msaaPt[] = {"Desligado", "2x", "4x", "8x"};
             static const char *filterEn[] = {"Nearest", "Bilinear", "Trilinear", "Anisotropic 2x", "Anisotropic 4x", "Anisotropic 8x", "Anisotropic 16x"};
@@ -459,7 +507,7 @@ namespace native_renderer
             static const char *sourceEn[] = {"small copy", "full copy", "last frame"};
             static const char *sourcePt[] = {"cópia pequena", "cópia inteira", "quadro anterior"};
             if (item.number == &Tuning::preset)
-                return {5, presetEn, presetPt};
+                return {kLastPreset + 1, presetEn, presetPt};
             if (item.number == &Tuning::msaa)
                 return {4, msaaEn, msaaPt};
             if (item.number == &Tuning::textureFilter)
@@ -476,7 +524,7 @@ namespace native_renderer
 
     void applyPreset(Tuning &t, int preset)
     {
-        if (preset < 0 || preset >= kPresetCustom)
+        if (preset < 0 || preset == kPresetCustom || preset > kLastPreset)
             return;
         const PresetValues &p = kPresets[preset];
         t.renderScale = p.renderScale;
@@ -484,16 +532,19 @@ namespace native_renderer
         t.textureFilter = p.textureFilter;
         t.modelDetail = p.modelDetail;
         t.effectDetail = p.effectDetail;
+        t.fxaa = p.fxaa;
         t.preset = static_cast<float>(preset);
     }
 
     int matchingPreset(const Tuning &t)
     {
-        for (int i = 0; i < kPresetCustom; ++i)
+        for (int i = 0; i <= kLastPreset; ++i)
         {
+            if (i == kPresetCustom)
+                continue;
             const PresetValues &p = kPresets[i];
             if (t.renderScale == p.renderScale && t.msaa == p.msaa && t.textureFilter == p.textureFilter && t.modelDetail == p.modelDetail &&
-                t.effectDetail == p.effectDetail)
+                t.effectDetail == p.effectDetail && t.fxaa == p.fxaa)
                 return i;
         }
         return kPresetCustom;
@@ -532,7 +583,7 @@ namespace native_renderer
         Tuning &t = tuning();
         if (item.number == &Tuning::preset)
         {
-            const int p = std::clamp(static_cast<int>(t.preset + 0.5f), 0, static_cast<int>(kPresetCustom));
+            const int p = std::clamp(static_cast<int>(t.preset + 0.5f), 0, kLastPreset);
             if (p != kPresetCustom)
                 applyPreset(t, p);
         }
@@ -545,6 +596,8 @@ namespace native_renderer
         if (item.toggle)
         {
             t.*item.toggle = !(t.*item.toggle);
+            if (item.quality)
+                t.preset = static_cast<float>(matchingPreset(t));
             return;
         }
         if (item.mask)
@@ -554,9 +607,22 @@ namespace native_renderer
         }
         if (item.number == &Tuning::preset)
         {
-            // Low .. Ultra, round; from Custom to the platform's own.
             int p = matchingPreset(t);
+#ifdef PS2X_DESKTOP_VIDEO
+            // Present the desktop profiles in quality order. Saved legacy
+            // profiles still load and step from the closest current profile.
+            constexpr int profiles[] = {kPresetLow, kPresetMedium, kPresetBalanced, kPresetEnhanced, kPresetDesktopUltra};
+            if (p == kPresetHigh)
+                p = kPresetEnhanced;
+            if (p == kPresetUltra)
+                p = kPresetDesktopUltra;
+            const auto *entry = std::find(std::begin(profiles), std::end(profiles), p);
+            constexpr int count = sizeof(profiles) / sizeof(profiles[0]);
+            p = entry == std::end(profiles) ? kPresetMedium
+                                          : profiles[(entry - profiles + (dir > 0 ? 1 : count - 1)) % count];
+#else
             p = p == kPresetCustom ? static_cast<int>(defaultTuning().preset) : (p + (dir > 0 ? 1 : kPresetCustom - 1)) % kPresetCustom;
+#endif
             applyPreset(t, p);
             return;
         }

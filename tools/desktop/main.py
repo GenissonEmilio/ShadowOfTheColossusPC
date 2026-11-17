@@ -14,10 +14,10 @@ import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from model import Library, SAVE_STATES_AVAILABLE, VERSION, assets_directory, atomic_json, program_directory
-from graphics import Graphics, WINDOW_RESOLUTIONS
+from graphics import GRAPHICS_PROFILES, LEGACY_PROFILES, Graphics, WINDOW_RESOLUTIONS
 from gamepad import Gamepad
 from language import LANGUAGES, PREFERENCES, PROMPTS, activate, preferences, translate as tr
-from updates import check_for_update, confirm_startup, restart_with_update, stage_update
+from updates import RateLimitedError, check_for_update, confirm_startup, restart_with_update, stage_update
 
 if len(sys.argv) > 1 and sys.argv[1] == "--pipeline-helper":
     from pipeline import helper
@@ -489,7 +489,15 @@ class Launcher:
         self.fsr = Gtk.CheckButton(label=tr("Ativar upscaling AMD FSR 1"))
         self.fsr.set_active(fsr)
         panel.pack_start(self.fsr, False, False, 0)
-        panel.pack_start(label(tr("Ajuste a resolução interna no jogo em F1 → Qualidade → Resolução."),
+        panel.pack_start(label(tr("Perfil gráfico"), "muted"), False, False, 0)
+        self.quality_profile = style(Gtk.ComboBoxText(), "graphics-select")
+        for profile_id, name in GRAPHICS_PROFILES + LEGACY_PROFILES:
+            self.quality_profile.append(profile_id, tr(name))
+        self.quality_profile.append("4", tr("Personalizado (F1)"))
+        self.quality_profile.set_active_id(self.graphics.quality_profile())
+        self.quality_profile.connect("changed", self.save_quality_profile)
+        panel.pack_start(self.quality_profile, False, False, 0)
+        panel.pack_start(label(tr("Equilibrado suaviza bordas. Aprimorado e Ultra aumentam a resolução e o detalhe da água. Ajuste cada opção no jogo em F1 → Qualidade."),
                                "muted", wrap=True), False, False, 0)
         self.display_panel = panel
         self.window_resolution.connect("changed", self.save_graphics)
@@ -531,6 +539,22 @@ class Launcher:
                                        window=self.window_resolution.get_active(), fsr=self.fsr.get_active())
         except OSError as exc:
             self.error(tr("Não foi possível salvar a imagem"),str(exc))
+
+    def save_quality_profile(self, combo):
+        if self.busy or self.process or getattr(self, "syncing_display", False):
+            return
+        profile = combo.get_active_id()
+        if profile == "4":
+            active = self.graphics.quality_profile()
+            if active != profile:
+                self.syncing_display = True
+                combo.set_active_id(active)
+                self.syncing_display = False
+            return
+        try:
+            self.graphics.save_quality_profile(profile)
+        except OSError as exc:
+            self.error(tr("Não foi possível salvar a imagem"), str(exc))
 
     def refresh_shader(self):
         shader = self.graphics.selected()
@@ -629,7 +653,7 @@ class Launcher:
             try:
                 result = check_for_update(VERSION)
             except Exception as exc:
-                GLib.idle_add(self.update_checked, None, str(exc))
+                GLib.idle_add(self.update_checked, None, exc)
             else:
                 GLib.idle_add(self.update_checked, result, None)
         threading.Thread(target=worker, daemon=True).start()
@@ -641,8 +665,12 @@ class Launcher:
         self.checking = False
         self.check_button.set_sensitive(True)
         if error:
-            self.update_status_label.set_text(tr("Não foi possível consultar o GitHub. Tente novamente."))
-            self.update_status_label.set_tooltip_text(error)
+            if isinstance(error, RateLimitedError):
+                message = tr("O GitHub limitou as consultas. Tente mais tarde.")
+            else:
+                message = tr("Não foi possível consultar o GitHub. Tente novamente.")
+            self.update_status_label.set_text(message)
+            self.update_status_label.set_tooltip_text(str(error))
             return False
         self.update = result
         if result:
@@ -885,6 +913,7 @@ class Launcher:
         self.syncing_display = True
         self.fullscreen.set_active(int(fullscreen)); self.aspect.set_active(mode)
         self.window_resolution.set_active(window); self.fsr.set_active(fsr)
+        self.quality_profile.set_active_id(self.graphics.quality_profile())
         self.syncing_display = False
         if code:
             self.failed=True

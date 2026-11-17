@@ -20,9 +20,9 @@ namespace native_renderer
         // (kPresetCustom: none), kept up to date by the menus.
         float preset = 2.0f;        // SOTC_PRESET (0 Low .. 3 Ultra); High on the Mac, Medium on the Vita
         float msaa = 0.0f;          // Metal: 0 off, 1 2x, 2 4x, 3 8x samples a pixel, as far as the GPU has them (SOTC_MSAA=0/2/4/8)
-        float textureFilter = 2.0f; // 0 nearest, 1 bilinear, 2 trilinear at the game's mip level, 3-6 anisotropic 2x-16x (Metal) (SOTC_TEXTURE_FILTER)
+        float textureFilter = 2.0f; // 0 nearest, 1 bilinear, 2 trilinear, 3-6 anisotropic 2x-16x (SOTC_TEXTURE_FILTER)
         float modelDetail = 0.0f;   // 0 the game's level of detail, 1 one level finer, 2 always the finest (SOTC_MODEL_DETAIL)
-        float effectDetail = 0.0f;  // Metal: 0 the PS2's effect buffers; 1 reductions averaged over their footprint, the mirror 512; 2 the mirror 1024 (SOTC_EFFECT_DETAIL)
+        float effectDetail = 0.0f;  // 0 PS2 buffers, 1 high, 2 very high (SOTC_EFFECT_DETAIL)
         bool bloom = true;          // SOTC_BLOOM_SCALE=0 turns it off
         float bloomStrength = 1.0f; // x the game's add strength (SOTC_BLOOM_SCALE); 1 = the PS2 (measured 2026-10-19 against the GS chain)
         float bloomRounds = 1.0f;   // blur rounds of +-3 texels at a quarter size, whole (SOTC_BLOOM_ROUNDS)
@@ -114,6 +114,7 @@ namespace native_renderer
         // camera cut) is not shown; the last one stays up instead, at most 3
         // frames in a row (SOTC_HOLD_INCOMPLETE=0/1; on by default on the Vita).
         bool holdIncomplete = false;
+        bool fxaa = false;          // Desktop presentation anti-aliasing (SOTC_FXAA)
     };
 
     // The settings (made from the environment on first use). Inline: the
@@ -170,7 +171,10 @@ namespace native_renderer
         kPresetMedium,
         kPresetHigh,
         kPresetUltra,
-        kPresetCustom
+        kPresetCustom,
+        kPresetBalanced,
+        kPresetEnhanced,
+        kPresetDesktopUltra
     };
     // Sets the render scale and the quality items to a preset's values.
     void applyPreset(Tuning &t, int preset);
