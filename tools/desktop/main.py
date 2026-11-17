@@ -320,8 +320,6 @@ class Launcher:
         dim = style(Gtk.EventBox(), "menu-shade")
         dim.connect("button-press-event", self.dismiss_menu)
         self.menu_overlay.add(dim)
-        self.shell.add_overlay(self.menu_overlay)
-        self.shell.set_overlay_pass_through(self.menu_overlay, True)
         self.menu_revealer = Gtk.Revealer()
         self.menu_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_RIGHT)
         self.menu_revealer.set_transition_duration(220)
@@ -349,8 +347,17 @@ class Launcher:
         panel_surface = Gtk.EventBox()
         panel_surface.add(self.menu_panel)
         self.menu_revealer.add(panel_surface)
-        self.shell.add_overlay(self.menu_revealer)
-        self.shell.set_overlay_pass_through(self.menu_revealer, True)
+        for revealer in (self.menu_overlay, self.menu_revealer):
+            revealer.set_no_show_all(True)
+            revealer.get_child().show_all()
+            revealer.connect("notify::child-revealed", self.hide_closed_menu_layer)
+            self.shell.add_overlay(revealer)
+
+    def hide_closed_menu_layer(self, revealer, *_):
+        # A collapsed revealer can retain an input window even when its
+        # GtkOverlay child is marked pass-through. Unmap it after the fade.
+        if not self.menu_open and not revealer.get_child_revealed():
+            revealer.hide()
 
     def toggle_menu(self, *_):
         self.set_menu_open(not self.menu_open)
@@ -362,10 +369,10 @@ class Launcher:
             self.menu_restore_focus = self.window.get_focus()
         self.menu_open = opened
         self.content_root.set_sensitive(not opened)
-        self.menu_overlay.set_reveal_child(opened)
-        self.menu_revealer.set_reveal_child(opened)
-        self.shell.set_overlay_pass_through(self.menu_overlay, not opened)
-        self.shell.set_overlay_pass_through(self.menu_revealer, not opened)
+        for revealer in (self.menu_overlay, self.menu_revealer):
+            if opened:
+                revealer.show()
+            revealer.set_reveal_child(opened)
         if opened:
             self.window.set_focus_visible(True)
             controller_focus.grab(self.menu_buttons[self.stack.get_visible_child_name()])

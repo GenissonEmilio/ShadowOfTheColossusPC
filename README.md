@@ -269,7 +269,10 @@ O pipeline original de desenvolvimento segue disponível em `./celosia`;
 
 ## Origem e licenças
 
-- Base fixada em **HenryKun55/celosia e0bc43d6d4eb8cc1a022c4b277f396be3ee4fbbe**.
+- Base principal fixada em **HenryKun55/celosia e0bc43d6d4eb8cc1a022c4b277f396be3ee4fbbe**,
+  com [rotinas nativas e otimizações selecionadas](docs/CELOSIA-INTEGRATION-2026-11-17.md)
+  da revisão **c2514d9**. A decompilação continua em andamento; a cobertura
+  nativa dos serviços do PS2 e do renderizador é uma medida separada.
 - Celosia e PS2Recomp: **GPL-3.0**, [LICENSE](LICENSE). O código correspondente do
   port também acompanha o release em `compiler/source`.
 - Launcher Linux e ilustração vetorial original: GenissonEmilio, MIT em

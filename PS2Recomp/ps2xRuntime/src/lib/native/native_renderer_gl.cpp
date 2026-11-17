@@ -3548,7 +3548,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             for (const auto &[id, t] : r->textures)
                 if (t.used < oldest && !m_keepTextures.count(id))
                     m_candidates.push_back({t.used, id, t.bytes, true});
-            std::sort(m_candidates.begin(), m_candidates.end(), [](const Candidate &a, const Candidate &b) { return a.used < b.used; });
+            // Age/pressure eviction visits every eligible entry. Only the
+            // budget pass stops at a byte target and needs oldest-first order.
+            if (budgetBefore)
+                std::sort(m_candidates.begin(), m_candidates.end(), [](const Candidate &a, const Candidate &b) { return a.used < b.used; });
             uint64_t cached = r->textureBytes + r->meshBytes;
             const uint64_t target = m_cacheBudget - m_cacheBudget / 8u;
             for (const Candidate &c : m_candidates)

@@ -83,6 +83,38 @@ def pointer(widget, kind):
     widget.event(event)
 
 
+def click(window, widget, position=None):
+    display = window.get_display()
+    if display.__gtype__.name != 'GdkX11Display':
+        pointer(widget, Gdk.EventType.ENTER_NOTIFY)
+        pointer(widget, Gdk.EventType.BUTTON_PRESS)
+        pointer(widget, Gdk.EventType.BUTTON_RELEASE)
+        return
+
+    # Resolve the recipient from the screen position. Emitting events directly
+    # on a button bypasses overlapping GDK input windows.
+    x, y = position or (widget.get_allocated_width() // 2, widget.get_allocated_height() // 2)
+    x, y = widget.translate_coordinates(window, x, y)
+    _, origin_x, origin_y = window.get_window().get_origin()
+    root_x, root_y = origin_x + x, origin_y + y
+    device = display.get_default_seat().get_pointer()
+    device.warp(window.get_screen(), root_x, root_y)
+    display.sync()
+    hit, hit_x, hit_y = device.get_window_at_position()
+    expected = widget.get_event_window() if isinstance(widget, Gtk.Button) else widget.get_window()
+    assert hit == expected, f'Pointer does not reach {widget.get_name()} at ({root_x}, {root_y})'
+
+    for kind in (Gdk.EventType.BUTTON_PRESS, Gdk.EventType.BUTTON_RELEASE):
+        event = Gdk.Event.new(kind)
+        event.window = hit
+        event.set_device(device)
+        event.set_source_device(device)
+        event.button.button = 1
+        event.button.x, event.button.y = hit_x, hit_y
+        event.button.x_root, event.button.y_root = root_x, root_y
+        Gtk.main_do_event(event)
+
+
 def probe(out):
     data = out / 'profile'
     args = argparse.Namespace(data_dir=data, page='home', rom=None, test_game=False,
@@ -117,18 +149,19 @@ def probe(out):
         settle(lambda: card.progress == 1, 'Pointer hover did not grow the card')
         pointer(card, Gdk.EventType.LEAVE_NOTIFY)
         settle(lambda: card.progress == 0, 'Pointer leave did not shrink the card')
-        pointer(app.menu_button, Gdk.EventType.ENTER_NOTIFY)
-        pointer(app.menu_button, Gdk.EventType.BUTTON_PRESS)
-        pointer(app.menu_button, Gdk.EventType.BUTTON_RELEASE)
+        click(window, app.menu_button)
         settle(lambda: app.menu_open and app.menu_revealer.get_child_revealed()
                and app.menu_overlay.get_child_revealed(),
                'Pointer click did not open the side menu')
         assert window.get_focus() == app.menu_buttons['home'], 'Opening the menu did not focus the current page'
         shade = app.menu_overlay.get_child()
-        pointer(shade, Gdk.EventType.BUTTON_PRESS)
-        pointer(shade, Gdk.EventType.BUTTON_RELEASE)
-        settle(lambda: not app.menu_open and not app.menu_overlay.get_child_revealed(),
+        click(window, shade, (shade.get_allocated_width() - 20, shade.get_allocated_height() // 2))
+        settle(lambda: not app.menu_open and not app.menu_overlay.get_mapped() and not app.menu_revealer.get_mapped(),
                'Clicking the dimmed background did not close the side menu')
+        click(window, app.nav['controls'])
+        assert app.stack.get_visible_child_name() == 'controls', 'Pointer click did not switch tabs'
+        click(window, app.nav['home'])
+        assert app.stack.get_visible_child_name() == 'home', 'Pointer click did not return home'
 
         app.choose_button.grab_focus()
         assert key(window, Gdk.KEY_F1), 'The launcher did not handle the menu shortcut'
@@ -162,6 +195,11 @@ def probe(out):
         assert key(window, Gdk.KEY_Escape), 'The launcher did not handle Escape on the graphics page'
         assert app.stack.get_visible_child_name() == 'home'
         assert app.gamepad_hint.get_text(), 'The launcher did not show input hints'
+
+        app.set_menu_open(True)
+        app.set_menu_open(False)
+        settle(lambda: not app.menu_overlay.get_mapped() and not app.menu_revealer.get_mapped(),
+               'An interrupted opening left the menu input windows mapped')
 
         pointer(card, Gdk.EventType.LEAVE_NOTIFY)
         settle(lambda: card.progress == 0 and not card._tick, 'Menu button did not return to rest')
