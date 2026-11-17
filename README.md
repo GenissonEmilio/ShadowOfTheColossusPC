@@ -13,6 +13,44 @@ continua em andamento na base Celosia.
 
 **Nenhuma ROM, BIOS ou código gerado do jogo é distribuído.**
 
+## Validação da campanha
+
+**12,5% validados no Linux · 2 de 16 colossos.** Valus e Basaran estão
+**100% validados** nas versões indicadas abaixo. Há 4 colossos com testes
+parciais e 10 aguardando validação. O encerramento e os créditos também
+aguardam validação.
+
+Cada colosso conta quando o teste cobre o acesso, a luta, o HUD, os pontos
+fracos, os efeitos da derrota e a recarga do save. Derrotas registradas em
+cartões importados ficam fora da contagem. Os resultados se referem às
+versões Linux testadas.
+
+<details>
+<summary>Ver o status dos 16 colossos</summary>
+
+| # | Colosso | Validação | Evidência ou próximo teste |
+| --- | --- | --- | --- |
+| 1 | Valus | **100% validado** | Luta, derrota, salvamento e recarga verificados. [Linux v0.2.7](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.2.7) |
+| 2 | Quadratus | Parcial | Acesso investigado. Falta concluir e revisar a luta. |
+| 3 | Gaius | Parcial | Subida, piso e descida da rampa testados. Falta validar a luta. [Linux v0.3.1](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.1) |
+| 4 | Phaedra | Pendente | — |
+| 5 | Avion | Pendente | — |
+| 6 | Barba | Pendente | — |
+| 7 | Hydrus | Parcial | Revanche concluída. O brilho do sigilo e a revisão visual integral seguem pendentes. |
+| 8 | Kuromori | Pendente | — |
+| 9 | Basaran | **100% validado** | Luta, sigilo, efeitos da derrota, salvamento e recarga verificados. [Linux v0.3.4](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.4) |
+| 10 | Dirge | Pendente | — |
+| 11 | Celosia | Pendente | — |
+| 12 | Pelagia | Pendente | — |
+| 13 | Phalanx | Pendente | — |
+| 14 | Cenobia | Pendente | — |
+| 15 | Argus | Pendente | — |
+| 16 | Malus | Parcial | Acesso testado até depois do segundo túnel. Luta e encerramento pendentes. |
+
+</details>
+
+[Critérios e histórico dos testes](docs/CAMPAIGN-VALIDATION.md)
+
 <img width="1109" height="751" alt="image" src="https://github.com/user-attachments/assets/856dbfab-25f1-40a2-95b1-1b8060d062c9" />
 
 
@@ -177,15 +215,10 @@ As colisões usam por padrão o código original traduzido; as reescritas manuai
 experimentais dessa parte ficam desativadas. Isso preserva também os registradores
 VU0 que as reescritas não reproduzem integralmente.
 
-Os testes sintéticos cobrem essas correções. A luta com o terceiro colosso,
-os pontos fracos e os efeitos após derrotá-lo ainda precisam de uma reprodução
-com save compatível; não foram declarados corrigidos apenas porque o build passou.
-Consulte [o acompanhamento](docs/FIDELITY-2026-10.md).
-
-O acompanhamento de [28/10](docs/FIDELITY-2026-10-28.md) registra os três
-trajetos no altar Cliff Path com o cartão recebido e a correção de conteúdo
-gráfico antigo no cache. As quedas não foram reproduzidas nesses trajetos;
-a colisão de Gaius e os raios de Hydrus continuam em validação.
+Os testes sintéticos cobrem essas correções. O registro de 28/10 reúne os
+três trajetos no altar Cliff Path com o cartão recebido e a correção de
+conteúdo gráfico antigo no cache. O estado das lutas está na
+[validação da campanha](#validação-da-campanha). [Registro de 28/10](docs/FIDELITY-2026-10-28.md)
 
 ## Compilar e verificar
 

@@ -25,13 +25,15 @@ nos restos do colosso, sem alterar flags ou memória do jogo.
 
 ## Progresso
 
-**2/16 etapas validadas:** Valus no nativo `cb15` e Basaran no `0281`.
-Os outros quatorze colossos e o encerramento permanecem pendentes. Basaran
-foi concluído em 10 de novembro de 2026 com a correção comum de
-[transparência e profundidade](FIDELITY-2026-11-07-ALPHA-DEPTH.md), destinada
-à v0.3.4 junto da navegação por controle no launcher. A publicação exige
-também a aprovação do pacote portátil; veja as versões disponíveis em
-[Releases](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases).
+**12,5% da campanha validada no Linux (2 de 16 colossos).** Valus foi
+validado no nativo `cb15` e Basaran no `0281`. Quadratus, Gaius, Hydrus e
+Malus têm evidências parciais. Os outros dez colossos, o encerramento e os
+créditos aguardam validação.
+
+Basaran foi concluído em 10 de novembro de 2026. O pacote publicado inclui a
+correção de transparência e profundidade e a navegação por controle no
+launcher. [Correção gráfica](FIDELITY-2026-11-07-ALPHA-DEPTH.md) ·
+[Linux v0.3.4](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.4)
 
 A captura de água foi [verificada em 240 quadros de Hydrus](FIDELITY-2026-11-05-COPY-LAYERS.md).
 A revanche de Hydrus foi concluída no runtime anterior, mas sua aprovação
@@ -42,20 +44,20 @@ não transforma os demais colossos em batalhas validadas automaticamente.
 | --- | --- | --- | --- |
 | 1 | Valus | Validado no nativo cb15: acesso, luta, efeitos da derrota, salvamento e recarga | [v0.2.7](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.2.7) |
 | 2 | Quadratus | Acesso investigado na v0.2.8; derrota ainda pendente | — |
-| 3 | Gaius | Subida, piso e descida da rampa testados; luta e novo replay visual da água pendentes | — |
+| 3 | Gaius | Subida, piso e descida da rampa testados; luta e novo replay visual da água pendentes | [v0.3.1, colisão da rampa](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.1) |
 | 4 | Phaedra | Pendente | — |
 | 5 | Avion | Pendente | — |
 | 6 | Barba | Pendente | — |
 | 7 | Hydrus | Revanche concluída: três espinhos, cabeça, derrota, retorno e F5/F8; brilho inequívoco do sigilo e aprovação visual integral ainda pendentes | [v0.3.3, correção de materiais](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.3) |
 | 8 | Kuromori | Pendente | — |
-| 9 | Basaran | Validado por etapas no mesmo nativo 0281: tornozelos, tombamento, escalada, sigilo com espada, carga, sete estocadas, derrota/sombras, salvamento normal e recarga em processo novo | v0.3.4 |
+| 9 | Basaran | Validado por etapas no mesmo nativo 0281: tornozelos, tombamento, escalada, sigilo com espada, carga, sete estocadas, derrota/sombras, salvamento normal e recarga em processo novo | [v0.3.4](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.4) |
 | 10 | Dirge | Pendente | — |
 | 11 | Celosia | Pendente | — |
 | 12 | Pelagia | Pendente | — |
 | 13 | Phalanx | Pendente | — |
 | 14 | Cenobia | Pendente | — |
 | 15 | Argus | Pendente | — |
-| 16 | Malus e encerramento | Pendente | — |
+| 16 | Malus | Chegou ao fim do segundo túnel do acesso com uma cópia de teste de um cartão importado. A luta e o encerramento aguardam validação. | — |
 
 ## Basaran — 10 de novembro de 2026
 
