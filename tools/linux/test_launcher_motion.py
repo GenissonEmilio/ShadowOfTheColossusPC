@@ -36,6 +36,28 @@ def settle(predicate, description):
     raise AssertionError(description)
 
 
+def allocation(widget):
+    rectangle = widget.get_allocation()
+    return rectangle.x, rectangle.y, rectangle.width, rectangle.height
+
+
+def settled_allocation(widget):
+    frames = []
+
+    def sample(_widget, _clock):
+        frames.append(allocation(widget))
+        return True
+
+    tick = widget.add_tick_callback(sample)
+    try:
+        # Active and mapped can precede the initial Win32 configure and allocation.
+        settle(lambda: len(frames) >= 3 and frames[-3] == frames[-2] == frames[-1]
+               and min(frames[-1][2:]) > 1, 'Card geometry did not settle across three GTK frames')
+        return frames[-1]
+    finally:
+        widget.remove_tick_callback(tick)
+
+
 def key(window, keyval, state=0):
     event = Gdk.Event.new(Gdk.EventType.KEY_PRESS)
     event.key.window = window.get_window()
@@ -76,11 +98,16 @@ def probe(out):
         card = app.menu_button
         settle(lambda: window.is_active() and card.get_mapped() and card.progress == 0,
                'Launcher did not acquire focus with the unfocused card at rest')
-        size = card.get_allocation()
+        before = settled_allocation(card)
         card.grab_focus()
         settle(lambda: 0 < card.progress < 1, 'Focused card did not animate through an intermediate state')
+        during = allocation(card)
         settle(lambda: card.progress == 1, 'Focused card did not reach its final size')
-        assert card.get_allocation().equal(size), 'The animation shifted the card hitbox or layout'
+        after = settled_allocation(card)
+        assert before == during == after, (
+            f'The animation shifted the card hitbox or layout (x, y, width, height): '
+            f'before={before}, during={during}, after={after}'
+        )
         app.choose_button.grab_focus()
         settle(lambda: 0 < card.progress < 1, 'Unfocused card did not animate through an intermediate state')
         settle(lambda: card.progress == 0, 'Unfocused card did not return to its resting size')
