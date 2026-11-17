@@ -203,16 +203,26 @@ assert launcher.stack.get_visible_child_name()=='graphics'
 launcher.fullscreen.grab_focus();launcher.fullscreen.set_active(0)
 launcher.gamepad_action(launcher.window,'right');assert launcher.fullscreen.get_active()==1
 launcher.gamepad_action(launcher.window,'left');assert launcher.fullscreen.get_active()==0
-settle(lambda: launcher.shader_import.get_allocated_height() > 1, 'graphics layout did not settle')
+page = launcher.stack.get_visible_child()
+scroll_probe = Gtk.Button(label='Off-screen controller test')
+scroll_probe.set_margin_top(950)
+page.pack_end(scroll_probe, False, False, 0)
+scroll_probe.show()
 adjustment = launcher.page_scroller.get_vadjustment()
+settle(lambda: not launcher.stack.get_transition_running()
+       and adjustment.get_upper() > adjustment.get_page_size() + 500
+       and scroll_probe.get_allocated_height() > 1, 'graphics overflow fixture did not settle')
 adjustment.set_value(0)
-shader_buttons = (launcher.shader_import, launcher.shader_hd)
-for _ in range(20):
-    if launcher.window.get_focus() in shader_buttons:
+for _ in range(30):
+    if launcher.window.get_focus() == scroll_probe:
         break
     launcher.gamepad_action(launcher.window,'down')
-assert launcher.window.get_focus() in shader_buttons, launcher.window.get_focus()
-assert adjustment.get_value()>0, 'the graphics page did not scroll to reveal its focused shader button'
+assert launcher.window.get_focus() == scroll_probe, launcher.window.get_focus()
+viewport = launcher.page_scroller.get_child()
+visible = scroll_probe.translate_coordinates(viewport, 0, 0)
+assert adjustment.get_value() > 0 and visible is not None
+assert 0 <= visible[1] <= viewport.get_allocated_height() - scroll_probe.get_allocated_height(), visible
+page.remove(scroll_probe)
 launcher.gamepad_action(launcher.window,'next');assert launcher.stack.get_visible_child_name()=='controls'
 launcher.gamepad_action(launcher.window,'back');assert launcher.stack.get_visible_child_name()=='home'
 called=[];launcher.play_button.set_sensitive(True)
