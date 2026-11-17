@@ -165,10 +165,10 @@ class Launcher:
         self.window.connect("delete-event", self.close)
         self.window.connect("destroy", lambda *_: self.feedback.close())
         self.window.connect("key-press-event", self.presentation_key)
-        header = Gtk.HeaderBar()
-        header.set_show_close_button(True)
-        header.set_title("Shadow of the Colossus PC")
-        self.window.set_titlebar(header)
+        self.header = Gtk.HeaderBar()
+        self.header.set_show_close_button(True)
+        self.header.set_title("Shadow of the Colossus PC")
+        self.window.set_titlebar(self.header)
         root = box(classes=("launcher-root",))
         self.window.add(root)
         navigation = box(Gtk.Orientation.HORIZONTAL, 20, classes=("top-bar",))
@@ -199,7 +199,8 @@ class Launcher:
         self.page_scroller.add(body)
         root.pack_start(self.page_scroller, True, True, 0)
         body.pack_start(self.stack, True, True, 0)
-        self.stack.add_named(self.home(),"home")
+        self.home_page = self.home()
+        self.stack.add_named(self.home_page, "home")
         self.stack.add_named(self.graphics_page(),"graphics")
         self.stack.add_named(self.controls(),"controls")
         self.stack.add_named(self.settings_page(),"settings")
@@ -292,9 +293,14 @@ class Launcher:
     def set_presentation(self, enabled):
         self.presentation_fullscreen = enabled
         self.presentation_button.set_label(tr("Sair da tela cheia") if enabled else tr("Tela cheia"))
+        self.header.set_visible(not enabled)
+        self.home_page.set_child_packing(self.home_library, enabled, enabled, 0, Gtk.PackType.START)
+        context = self.window.get_style_context()
         if enabled:
+            context.add_class("picture-mode")
             self.window.fullscreen()
         else:
+            context.remove_class("picture-mode")
             self.window.unfullscreen()
 
     def gamepad_window(self):
@@ -509,7 +515,7 @@ class Launcher:
 
     def home(self):
         page = box(spacing=14)
-        library = box(spacing=14)
+        library = self.home_library = box(spacing=14)
         hero_outer = style(Gtk.Overlay(), "hero")
         artwork = Artwork()
         artwork.set_size_request(-1, 284)
@@ -526,7 +532,7 @@ class Launcher:
         self.play_button.connect("clicked", self.play)
         hero.pack_start(self.play_button, False, False, 0)
         hero_outer.add_overlay(hero)
-        library.pack_start(hero_outer, False, False, 0)
+        library.pack_start(hero_outer, True, True, 0)
         panel_outer = style(Gtk.Box(orientation=Gtk.Orientation.VERTICAL),"panel")
         panel = box(spacing=9, margin=15)
         panel_outer.pack_start(panel, True, True, 0)
@@ -551,7 +557,6 @@ class Launcher:
         self.drop.set_tooltip_text(tr("Dica: você também pode arrastar o arquivo para a área acima."))
         if SAVE_STATES_AVAILABLE:
             page.pack_start(label(tr("Durante o jogo: F5 salva rápido · F8 carrega · F1 gerencia estados."), "small", wrap=True),False,False,0)
-        page.pack_start(Gtk.Box(),True,True,0)
         return page
 
     def controls(self):

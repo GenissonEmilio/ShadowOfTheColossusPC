@@ -191,6 +191,8 @@ sdl.SDL_JoystickDetachVirtual(index)
 pad.poll(True);assert not pad.connected
 # Verify GTK actions against actual launcher widgets without sending desktop keys.
 launcher.navigate('home')
+settle(lambda: not launcher.stack.get_transition_running()
+       and launcher.choose_button.get_allocated_height() > 1, 'home layout did not settle')
 launcher.focus_gamepad_page();assert launcher.window.get_focus() == launcher.choose_button
 launcher.gamepad_action(launcher.window,'down')
 assert launcher.window.get_focus() is not None and launcher.window.get_focus() != launcher.choose_button

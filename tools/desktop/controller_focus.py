@@ -18,6 +18,11 @@ def focusables(root):
     elif isinstance(root, (Gtk.Button, Gtk.Range, Gtk.Entry, Gtk.TreeView, Gtk.IconView, Gtk.ListBoxRow)):
         if root.get_can_focus():
             yield root
+    elif isinstance(root, Gtk.Stack):
+        # A crossfade can leave the outgoing child mapped until it finishes.
+        page = root.get_visible_child()
+        if page is not None:
+            yield from focusables(page)
     elif isinstance(root, Gtk.Container):
         for child in root.get_children():
             yield from focusables(child)

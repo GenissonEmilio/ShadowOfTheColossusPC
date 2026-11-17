@@ -56,3 +56,8 @@ dialog { background: #182422; }
 .graphics-select button:hover { background: #385144; }
 .sound-option { padding: 8px 10px; }
 .sound-option:focus { background: #34483d; }
+.picture-mode .hero-title { font-size: 55px; }
+.picture-mode .nav label, .picture-mode .play { font-size: 18px; }
+.picture-mode .status, .picture-mode .footer-action, .picture-mode .input-hint { font-size: 15px; }
+.picture-mode .nav { min-height: 32px; }
+.picture-mode .footer-action { min-height: 30px; }
