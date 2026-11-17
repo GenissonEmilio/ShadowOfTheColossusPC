@@ -25,9 +25,6 @@ fracos, os efeitos da derrota e a recarga do save. Derrotas registradas em
 cartões importados ficam fora da contagem. Os resultados se referem às
 versões Linux testadas.
 
-<details>
-<summary>Ver o status dos 16 colossos</summary>
-
 | # | Colosso | Validação | Evidência ou próximo teste |
 | --- | --- | --- | --- |
 | 1 | Valus | **100% validado** | Luta, derrota, salvamento e recarga verificados. [Linux v0.2.7](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.2.7) |
@@ -46,8 +43,6 @@ versões Linux testadas.
 | 14 | Cenobia | Pendente | — |
 | 15 | Argus | Pendente | — |
 | 16 | Malus | Parcial | Acesso testado até depois do segundo túnel. Luta e encerramento pendentes. |
-
-</details>
 
 [Critérios e histórico dos testes](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/blob/codex/alpha-depth/docs/CAMPAIGN-VALIDATION.md)
 
