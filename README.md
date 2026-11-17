@@ -72,7 +72,7 @@ de memory card em `player/memcards`. A ROM original permanece intacta.
 
 ## Tela cheia e shaders
 
-<img width="1109" height="751" alt="image" src="https://github.com/user-attachments/assets/f4dfb9da-b702-46d1-b79a-d151fa18b36a" />
+<img width="1172" height="807" alt="image" src="https://github.com/user-attachments/assets/3814964c-d53b-4899-9490-69edd722dd77" />
 
 
 Na aba **Gráficos**, escolha **Tela cheia · resolução do monitor** para usar o
