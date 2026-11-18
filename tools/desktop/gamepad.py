@@ -56,6 +56,10 @@ class Gamepad:
         self.controllers = {}
         self.ready_controllers = set()
         self.unmapped_devices = ()
+        self.last_style = "xbox"
+        self.activity_serial = 0
+        self.activity_states = {}
+        self.controller_type = None
         self.sdl = load_sdl(program)
         self.error = None
         self.next_scan = 0.
@@ -94,6 +98,12 @@ class Gamepad:
         except AttributeError as exc:
             self.error = str(exc)
             self.sdl = None
+        if self.sdl is not None:
+            # SDL < 2.0.12 has no type API; retain its controller-name fallback.
+            self.controller_type = getattr(self.sdl, "SDL_GameControllerGetType", None)
+            if self.controller_type is not None:
+                self.controller_type.argtypes = [ctypes.c_void_p]
+                self.controller_type.restype = ctypes.c_int
 
     @property
     def connected(self):
@@ -105,7 +115,19 @@ class Gamepad:
 
     def reset_navigation(self):
         self.ready_controllers.clear()
+        self.activity_states.clear()
         self.navigation.reset()
+
+    def prompt_style(self, controller, name):
+        kind = self.controller_type(controller) if self.controller_type is not None else 0
+        # SDL_GameControllerType: PS3, PS4 and PS5. Virtual Xbox pads, including
+        # Steam Input translations, keep the layout actually exposed by SDL.
+        if kind in (3, 4, 7):
+            return "playstation"
+        if isinstance(kind, int) and kind > 0:
+            return "xbox"
+        lowered = name.casefold()
+        return "playstation" if any(word in lowered for word in ("playstation", "dualshock", "dualsense", "ps3", "ps4", "ps5")) else "xbox"
 
     def suspend(self):
         for controller, _ in self.controllers.values():
@@ -183,16 +205,21 @@ class Gamepad:
                 self.sdl.SDL_GameControllerClose(controller)
                 del self.controllers[instance]
                 self.ready_controllers.discard(instance)
+                self.activity_states.pop(instance, None)
         if now >= self.next_scan:
             self.next_scan = now + 1.
             self.scan_controllers()
         held = set()
-        for instance, (controller, _) in self.controllers.items():
+        for instance, (controller, name) in self.controllers.items():
             buttons = self.held_actions(controller)
             if instance in self.ready_controllers:
                 held.update(buttons)
+                if buttons - self.activity_states.get(instance, set()):
+                    self.last_style = self.prompt_style(controller, name)
+                    self.activity_serial += 1
             elif not buttons:
                 self.ready_controllers.add(instance)
+            self.activity_states[instance] = buttons
         if not self.ready_controllers:
             self.navigation.reset()
             return []

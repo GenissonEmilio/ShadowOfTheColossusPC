@@ -126,7 +126,13 @@ class Pipeline:
                   "-DPS2_RUNTIME_LOGS=1", "-DPS2X_ENABLE_IOP_RPC_TRACE=0", "-DPS2X_VU1_TRUST_FPU=1"]
         objects = directory / "objects"
         objects.mkdir(exist_ok=True)
-        batches = [cpp[i:i+32] for i in range(0,len(cpp),32)]
+        # A smaller unity batch lets memory-capped build/QA machines compile
+        # the same generated code. Per-batch content keys also cover regrouping.
+        try:
+            batch_size = max(1, min(32, int(self.env.get("SOTC_BUILD_BATCH_SIZE", "32"))))
+        except ValueError:
+            batch_size = 32
+        batches = [cpp[i:i+batch_size] for i in range(0,len(cpp),batch_size)]
         header_key = hashlib.sha256(self.build_id.encode()+repr(flags).encode())
         for header in sorted(generated.glob("*.h")):
             header_key.update(header.read_bytes())

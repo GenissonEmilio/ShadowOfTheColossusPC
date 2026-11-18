@@ -44,6 +44,11 @@ Estados exigem o mesmo runtime e disco. Aguarde o fim de vídeos/carregamentos.
 Continuar salvando nos altares permite transferir progresso entre versões.
 Carregar estado não substitui o cartão real; cartão alterado bloqueia o load.
 Controle USB/Bluetooth também funciona junto com teclado e mouse.
+Configurações > Ícones dos botões no jogo: Automático, PlayStation, Xbox ou teclado/mouse.
+Automático acompanha o último dispositivo usado durante a partida. O teclado segue seu perfil.
+Configurações > Assistências: vida infinita e resistência infinita, desligadas por padrão.
+O modo e as assistências escolhidos valem na próxima abertura do jogo.
+O suporte à edição PAL SCES-53326 permanece pendente de recompilação e validação.
 No launcher: direcional/analógico navega, A/X confirma, B/Círculo volta,
 LB/RB trocam de página e Start inicia o jogo preparado. Esquerda/direita ajusta.
 Os sigilos dos colossos brilham com a espada equipada.

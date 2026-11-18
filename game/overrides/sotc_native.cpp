@@ -24,6 +24,7 @@
 #include "sotc_button_prompts.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
+#include "runtime/desktop_input.h"
 #include "runtime/native_tuning.h"
 #include "runtime/native_renderer.h"
 #include "runtime/save_state_archive.h"
@@ -401,6 +402,14 @@ namespace sotc_native
         uint64_t frame = ~0ull, key = 0;
     };
     TextureMemo g_textureMemo[256];
+    desktop_input::PromptProfile g_buttonPrompts;
+    uint64_t g_buttonPromptVariant = 0;
+    void sampleButtonPrompts()
+    {
+        g_buttonPrompts = desktop_input::prompts();
+        g_buttonPromptVariant = g_buttonPrompts.variant();
+    }
+
     uint64_t texture(uint32_t header)
     {
         if (!native_renderer::tuning().fastHooks)
@@ -674,7 +683,17 @@ namespace sotc_native
             h = contentHash(clut, paletteBytes, h ^ g_ram[(header + 0x1Fu) & 0x1FFFFFFu]);
             return (h & 0x03FFFFFFFFFFFFFFull) | (1ull << 58);
         };
+        const auto isButtonAtlas = [&]
+        {
+            // Verify the named US atlas against its original packed pixels.
+            constexpr char name[] = "button_icon_set";
+            const uint32_t physicalHeader = header & 0x1FFFFFFu;
+            return format == 0x01771014u && physicalHeader >= 0x1Eu &&
+                std::memcmp(g_ram + physicalHeader - 0x1Eu, name, sizeof(name)) == 0 &&
+                contentHash(header + word(header + 0x14u), pixelBytes, 0xcbf29ce484222325ull) == 0x47e7bfe4c9bd629dull;
+        };
         bool changedInPlace = false;
+        bool buttonAtlas = false;
         if (native_renderer::tuning().fastHooks)
         {
             // Fast hooks: a hash of the texture's bytes (every level, the
@@ -686,6 +705,7 @@ namespace sotc_native
                 uint32_t address = 0;
                 uint64_t frame = ~0ull, sampled = 0, key = 0, verifiedAt = 0;
                 bool rewritten = false;
+                bool buttonAtlas = false;
             };
             static WayMemo<ContentMemo, 512> memos;
             static uint64_t epoch = 0;
@@ -697,21 +717,26 @@ namespace sotc_native
             if (reuse)
             {
                 key = memo.key;
+                buttonAtlas = memo.buttonAtlas;
                 memo.frame = g_frame;
             }
             else
             {
                 key = fullKey();
+                buttonAtlas = isButtonAtlas();
                 // Sparse samples cannot prove that streamed or animated bytes
                 // are unchanged. Check every byte periodically and on return
                 // after a gap; once animated, check fully on every frame.
                 changedInPlace = found && key != memo.key && memo.frame + 2u >= g_frame;
                 const bool rewritten = found && (memo.rewritten || changedInPlace);
-                memo = {header, g_frame, sampled, key, g_frame, rewritten};
+                memo = {header, g_frame, sampled, key, g_frame, rewritten, buttonAtlas};
             }
         }
-        else
+        else {
             key = fullKey(); // diagnostic slow path must not reuse sparse keys either
+            buttonAtlas = isButtonAtlas();
+        }
+        if (buttonAtlas) key = sotc_button_prompts::textureKey(key, g_buttonPromptVariant);
         if (native_renderer::hasTexture(key))
             return key;
         if ((psm != 0x00u && psm != 0x13u && psm != 0x14u) || width > 1024u || height > 1024u)
@@ -746,24 +771,12 @@ namespace sotc_native
             if (checked % 200u == 0u)
                 std::fprintf(stderr, "[tex-check] %llu textures, %llu mismatches\n", (unsigned long long)checked, (unsigned long long)mismatched);
         }
-        // The US button atlas is named immediately before its NTO2 header.
-        // Confirm its packed pixel content before changing only the GPU copy.
-        static const bool xboxPrompts = []
-        {
-            const char *value = std::getenv("SOTC_BUTTON_PROMPTS");
-            return value && std::strcmp(value, "xbox") == 0;
-        }();
-        constexpr char buttonAtlasName[] = "button_icon_set";
-        const uint32_t physicalHeader = header & 0x1FFFFFFu;
-        const bool replacePrompts = xboxPrompts && format == 0x01771014u && physicalHeader >= 0x1Eu &&
-            std::memcmp(g_ram + physicalHeader - 0x1Eu, buttonAtlasName, sizeof(buttonAtlasName)) == 0 &&
-            contentHash(header + word(header + 0x14u), pixelBytes, 0xcbf29ce484222325ull) == 0x47e7bfe4c9bd629dull;
         // SOTC_TEXDUMP_DIR=<dir> (debugging): level 0 of every decoded texture, raw RGBA.
         static const char *dumpDir = std::getenv("SOTC_TEXDUMP_DIR");
-        const auto finish = [key, width, height, header, psm, replacePrompts](std::vector<uint8_t> &rgba, uint32_t decoded)
+        const auto finish = [key, width, height, header, psm, prompts = buttonAtlas ? g_buttonPrompts : desktop_input::PromptProfile{}]
+            (std::vector<uint8_t> &rgba, uint32_t decoded)
         {
-            if (replacePrompts)
-                sotc_button_prompts::apply(rgba.data(), rgba.size());
+            sotc_button_prompts::apply(rgba.data(), rgba.size(), prompts);
             if (dumpDir)
             {
                 char path[512];
@@ -779,7 +792,8 @@ namespace sotc_native
         // On the worker: decoded there, uploaded at the next frame's start.
         auto out = std::make_shared<std::pair<std::vector<uint8_t>, uint32_t>>();
         auto ok = std::make_shared<bool>(false);
-        if (!changedInPlace && native_renderer::buildAsync({key}, [src, out, ok] { *ok = decodeTexture(*src, out->first, out->second); },
+        // The small button atlas is needed in this frame when a device changes.
+        if (!buttonAtlas && !changedInPlace && native_renderer::buildAsync({key}, [src, out, ok] { *ok = decodeTexture(*src, out->first, out->second); },
                                         [out, ok, finish]
                                         {
                                             if (*ok)
@@ -1831,6 +1845,7 @@ namespace sotc_native
             frameLog();
             native_renderer::beginFrame();
             g_frame = frame;
+            sampleButtonPrompts();
             gcovDump(frame);
             g_frameDraws = 0;
             g_skinnedDraws = 0;
@@ -4367,6 +4382,7 @@ namespace sotc_native {
             if (!native_renderer::resetStateFrame(error)) return false;
             if (!native_renderer::restoreState(s.gpu,error) || !restoreSotcSystemState(s.system,error)) return false;
             ++g_stateEpoch; for (auto &memo:g_textureMemo) memo={}; g_packetMemo={};
+            sampleButtonPrompts();
             g_packetChangedInPlace=false; g_skinnedPackets.clear(); g_skinnedPacketBytes=0; g_litPackets={}; g_skinnedIds={};
             g_bossMask.id.store(0); g_bossMask.frame.store(~0ull); g_bossMask.hash=0; g_bossMask.slot=0; g_bossMask.rgba.clear();
             ps2_stats::vif1Chains.store(s.counter);

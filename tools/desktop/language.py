@@ -7,7 +7,7 @@ import sys
 
 
 LANGUAGES = {"pt": "Português", "en": "English", "es": "Español", "ja": "日本語"}
-PROMPTS = ("playstation", "xbox")
+PROMPTS = ("auto", "playstation", "xbox", "keyboard")
 active = "en"
 PREFERENCES = "launcher-preferences.json"
 
@@ -34,6 +34,8 @@ def preferences(directory):
     prompts = config.get("button_prompts")
     return {"language": language if isinstance(language, str) and language in LANGUAGES else preferred_language(),
             "button_prompts": prompts if prompts in PROMPTS else PROMPTS[0],
+            "infinite_health": config.get("infinite_health") is True,
+            "infinite_grip": config.get("infinite_grip") is True,
             "launcher_fullscreen": config.get("launcher_fullscreen") is True,
             "ui_sounds": config.get("ui_sounds") is not False}
 

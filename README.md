@@ -181,10 +181,28 @@ automaticamente, mesmo com outro conectado, e combina os comandos físicos e
 virtuais para evitar confirmações duplicadas. A aba **Controles** mostra os nomes
 detectados e informa quando um dispositivo precisa de mapeamento.
 
-Em **Configurações → Ícones dos botões no jogo**, escolha PlayStation ou Xbox.
-A escolha troca os ícones da interface do port e de elementos do jogo que
-usam o atlas de controle. Legendas de tutorial que têm o texto embutido na arte
-original continuam no formato do disco.
+Em **Configurações → Ícones dos botões no jogo**, escolha **Automático**,
+**PlayStation**, **Xbox** ou **Teclado e mouse**. Automático é o padrão de novos
+perfis: os ícones mudam durante a partida conforme o último dispositivo usado.
+Um controle conectado sem atividade ou com pequeno desvio no analógico não
+altera a escolha. Os ícones de teclado/mouse seguem suas atribuições na aba
+Controles. Perfis existentes conservam a escolha manual; selecione Automático
+para ativar a troca. Controles apresentados pelo Steam Input como Xbox usam
+os ícones Xbox; a seleção manual continua disponível.
+
+A escolha troca os elementos do jogo que usam o atlas de controle. Legendas
+de tutorial que têm o texto embutido na arte original continuam no formato
+do disco. A escolha do modo vale na próxima abertura do jogo.
+
+Em **Configurações → Assistências (cheats)**, vida infinita e resistência
+infinita são opções independentes, desligadas por padrão e aplicadas na próxima
+abertura do jogo. Elas impedem as reduções normais de vida/resistência de Wander;
+não aumentam os limites do personagem nem substituem eventos roteirizados.
+Veja o [escopo e os testes das assistências](docs/ASSISTS.md).
+
+O suporte à edição **PAL SCES-53326** permanece [pendente](docs/PAL-SUPPORT.md)
+até termos um disco dessa edição para recompilar e validar. O launcher identifica
+essa edição e explica a pendência; os arquivos PAL não são tratados como USA.
 
 | Teclado | Controle PS2 |
 | --- | --- |

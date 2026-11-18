@@ -20,6 +20,7 @@ import traceback
 
 from main import Gdk, GLib, Gtk, Launcher, controller_focus
 from model import atomic_json
+import json
 
 
 def settle(predicate, description):
@@ -214,6 +215,38 @@ def probe(out):
         assert key(window, Gdk.KEY_Escape)
         assert not app.menu_revealer.get_child_revealed() and not app.menu_overlay.get_child_revealed(), \
             'Reduced motion still animated the menu closing'
+
+        # Preferences reached through actual pointer hit testing, including the
+        # toggles below a scroll boundary. Verify the resulting game process
+        # environment rather than only the selected widgets.
+        click(window, app.nav['settings'])
+        assert app.preferences['button_prompts'] == 'auto'
+        app.last_input_style = 'xbox'
+        assert 'LB/RB' in app.controller_hint_text()
+        app.last_input_style = 'playstation'
+        assert 'L1/R1' in app.controller_hint_text()
+        key(window, Gdk.KEY_Shift_L)
+        assert 'Enter' in app.controller_hint_text()
+        assert not app.health_choice.get_active() and not app.grip_choice.get_active()
+        for mode in ('auto', 'playstation', 'xbox', 'keyboard'):
+            assert app.prompts_choice.set_active_id(mode), mode
+        controller_focus.grab(app.health_choice)
+        settled_allocation(app.health_choice)
+        click(window, app.health_choice)
+        controller_focus.grab(app.grip_choice)
+        settled_allocation(app.grip_choice)
+        click(window, app.grip_choice)
+        apply = next(w for w in controller_focus.focusables(app.stack.get_visible_child())
+                     if isinstance(w, Gtk.Button) and w.get_label() == 'Apply')
+        controller_focus.grab(apply)
+        settled_allocation(apply)
+        click(window, apply)
+        env = app.library.game_environment()
+        assert (env['SOTC_BUTTON_PROMPTS'], env['SOTC_INFINITE_HEALTH'], env['SOTC_INFINITE_GRIP']) == ('keyboard', '1', '1')
+        assert app.last_input_style == 'keyboard'
+        assert not app.library.config.exists(), 'Preferences changed disc/progress state'
+        (out / 'adaptive-preferences.json').write_text(json.dumps({'mouse_confirm': True, 'modes': 4,
+             'health_and_grip_persisted': True, 'environment_verified': True}))
     finally:
         app.gamepad.suspend()
         app.window.destroy()

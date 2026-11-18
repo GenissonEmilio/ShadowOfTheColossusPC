@@ -53,6 +53,18 @@ class ImportTests(unittest.TestCase):
             p=Path(t)/'truncated.iso';p.write_bytes(b'CD001')
             with self.assertRaises(ValueError):inspect_disc(p)
 
+    def test_pal_is_identified_without_using_usa_hashes_or_compiling_it(self):
+        from unittest.mock import MagicMock
+        image = MagicMock()
+        image.sector, image.skip = 2048, 0
+        image.find.return_value = (20, 64)
+        image.read.return_value = b'BOOT2 = cdrom0:\\SCES_533.26;1\r\n'
+        with patch('import_disc.DiscImage') as disc:
+            disc.return_value.__enter__.return_value = image
+            with self.assertRaisesRegex(ImportError_, 'SCES-53326'):
+                inspect_disc('/synthetic-pal.iso')
+        image.find.assert_called_once_with('SYSTEM.CNF')
+
     def test_config_failure_preserves_previous_selection(self):
         with tempfile.TemporaryDirectory() as t:
             p=Path(t);library=Library(p/'data',p/'program');atomic_json(library.config,{'name':'previous'})

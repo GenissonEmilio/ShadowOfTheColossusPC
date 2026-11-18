@@ -1,4 +1,5 @@
 #include "runtime/host_menu.h"
+#include "runtime/desktop_input.h"
 #include "runtime/desktop_video.h"
 #include "runtime/native_tuning.h"
 #include "runtime/ps2_pad.h"
@@ -26,7 +27,6 @@ namespace
     Settings g_settings;
     std::atomic<bool> g_open{false};
     bool g_help = false;
-    bool g_xboxPrompts = false;
     bool g_quit = false;
     bool g_quitArmed = false; // "Quit game" needs a second Cross
     std::atomic<bool> g_holdBlock{false}; // a button pressed in the menu is still held
@@ -539,6 +539,11 @@ namespace
 
     enum class HintRow { Menu, States, Back };
 
+    bool xboxPrompts()
+    {
+        return desktop_input::prompts().style == desktop_input::PromptStyle::Xbox;
+    }
+
     void drawXboxHints(HintRow row, int x, int y, int width, int fontSize, Color color)
     {
         struct Hint { const char *button; const char *action; Color badge; };
@@ -594,7 +599,7 @@ namespace
                 ? "Estados retomam a sessão exatamente no ponto salvo e são compatíveis com a mesma versão do núcleo e do jogo. F5 salva no espaço rápido; F8 carrega esse espaço diretamente. Use os cinco espaços manuais para manter outros pontos. Carregar pelo menu, substituir e excluir pedem confirmação. O cartão de memória continua separado: se ele mudar, estados anteriores podem deixar de ser compatíveis."
                 : "States resume the session at its saved position and require the same core and game version. F5 saves the quick slot; F8 loads it directly. Keep other positions in the five manual slots. Menu loads, overwrites and deletions require confirmation. The memory card stays separate: changing it can make an older state incompatible.";
             drawWrapped(help, boxX + pad, listY + size * 2, boxW - 2 * pad, small, text, small / 3);
-            if (g_xboxPrompts)
+            if (xboxPrompts())
                 drawXboxHints(HintRow::Back, boxX + pad, boxY + boxH - size * 3 / 2, boxW - 2 * pad, small, dim);
             else
                 DrawText(T("Triangle / O: back"), boxX + pad, boxY + boxH - size * 3 / 2, small, dim);
@@ -657,7 +662,7 @@ namespace
                                        : "Q/E: tabs  Arrows: slot/action  Enter/click: select  H: help  F1: close";
         int hintSize = small;
         while (hintSize > 8 && MeasureText(hint, hintSize) > boxW - 2 * pad) --hintSize;
-        if (g_xboxPrompts)
+        if (xboxPrompts())
             drawXboxHints(HintRow::States, boxX + pad, boxY + boxH - size, boxW - 2 * pad, hintSize, dim);
         else
             DrawText(hint, boxX + pad, boxY + boxH - size, hintSize, dim);
@@ -697,8 +702,6 @@ void saveSettings() { save(); }
 
 void load()
 {
-    if (const char *prompts = std::getenv("SOTC_BUTTON_PROMPTS"))
-        g_xboxPrompts = std::strcmp(prompts, "xbox") == 0;
     if (const char *open = std::getenv("PS2X_SETTINGS_OPEN")) // development: open at start on tab N
     {
         g_open = true;
@@ -952,7 +955,7 @@ void draw(int screenWidth, int screenHeight)
     {
         DrawText(renderer ? rendererLabel(g_item) : T(tab.items[g_item].label), boxX + pad, listY, size, accent);
         drawWrapped(renderer ? rendererHelp(g_item) : T(tab.items[g_item].help), boxX + pad, listY + size * 2, boxW - 2 * pad, small, text, small / 2);
-        if (g_xboxPrompts)
+        if (xboxPrompts())
             drawXboxHints(HintRow::Back, boxX + pad, boxY + boxH - size * 3 / 2, boxW - 2 * pad, small, dim);
         else
             DrawText(T("Triangle / O: back"), boxX + pad, boxY + boxH - size * 3 / 2, small, dim);
@@ -998,7 +1001,7 @@ void draw(int screenWidth, int screenHeight)
             helpSize -= 2;
         drawWrapped(help, boxX + pad, helpY, boxW - 2 * pad, helpSize, dim, helpSize / 3);
     }
-    if (g_xboxPrompts)
+    if (xboxPrompts())
     {
         drawXboxHints(HintRow::Menu, boxX + pad, boxY + boxH - size * 3 / 2, boxW - 2 * pad, small, dim);
         return;

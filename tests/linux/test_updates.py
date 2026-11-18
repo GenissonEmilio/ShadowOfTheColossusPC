@@ -233,20 +233,43 @@ class PreferencesTests(unittest.TestCase):
             defaults = language.preferences(folder)
             self.assertFalse(defaults["launcher_fullscreen"])
             self.assertTrue(defaults["ui_sounds"])
+            self.assertEqual(defaults["button_prompts"], "auto")
+            self.assertFalse(defaults["infinite_health"])
+            self.assertFalse(defaults["infinite_grip"])
             atomic_json(folder / language.PREFERENCES, {"language": "es", "button_prompts": "xbox",
                                                          "launcher_fullscreen": True, "ui_sounds": False})
             selected = language.preferences(folder)
             self.assertEqual(selected, {"language": "es", "button_prompts": "xbox",
-                                        "launcher_fullscreen": True, "ui_sounds": False})
+                                        "launcher_fullscreen": True, "ui_sounds": False,
+                                        "infinite_health": False, "infinite_grip": False})
 
     def test_prompt_style_reaches_the_game_without_changing_disc_state(self):
         with tempfile.TemporaryDirectory() as directory:
             library = Library(directory)
-            self.assertEqual(library.game_environment()["SOTC_BUTTON_PROMPTS"], "playstation")
+            self.assertEqual(library.game_environment()["SOTC_BUTTON_PROMPTS"], "auto")
             atomic_json(library.directory / language.PREFERENCES, {"language": "ja", "button_prompts": "xbox"})
             self.assertEqual(library.game_environment()["SOTC_BUTTON_PROMPTS"], "xbox")
             self.assertEqual(language.preferences(library.directory)["language"], "ja")
             self.assertFalse(library.config.exists())
+
+    def test_modes_and_assists_are_strict_and_isolated_from_game_progress(self):
+        with tempfile.TemporaryDirectory() as directory:
+            library = Library(directory)
+            for mode in language.PROMPTS:
+                atomic_json(library.directory / language.PREFERENCES,
+                            {"button_prompts": mode, "infinite_health": True, "infinite_grip": False})
+                env = library.game_environment()
+                self.assertEqual(env["SOTC_BUTTON_PROMPTS"], mode)
+                self.assertEqual(env["SOTC_INFINITE_HEALTH"], "1")
+                self.assertEqual(env["SOTC_INFINITE_GRIP"], "0")
+            atomic_json(library.directory / language.PREFERENCES,
+                        {"button_prompts": "bad", "infinite_health": "true", "infinite_grip": 1})
+            self.assertEqual(language.preferences(library.directory)["button_prompts"], "auto")
+            with patch.dict(os.environ, {"SOTC_INFINITE_HEALTH": "1", "SOTC_INFINITE_GRIP": "1"}):
+                env = library.game_environment()
+            self.assertEqual((env["SOTC_INFINITE_HEALTH"], env["SOTC_INFINITE_GRIP"]), ("0", "0"))
+            self.assertFalse(library.config.exists())
+            self.assertFalse(library.player_directory.exists())
 
     def test_catalog_placeholders_are_preserved(self):
         fields = lambda message: {field for _, field, _, _ in Formatter().parse(message) if field}

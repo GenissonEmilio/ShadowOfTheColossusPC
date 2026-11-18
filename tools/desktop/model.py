@@ -12,7 +12,7 @@ from import_disc import import_disc, EXPECTED
 from language import preferences, translate as tr
 from pipeline import Pipeline, PROCESS_FLAGS, WINDOWS, compiler_tool
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 APPLICATION_ID = "io.github.GenissonEmilio.ShadowOfTheColossusPC"
 SAVE_STATES_AVAILABLE = sys.platform.startswith("linux")
@@ -88,7 +88,10 @@ class Library:
             environment["LD_LIBRARY_PATH"] = original_ld
         environment["SOTC_NATIVE"] = "1"
         environment["SOTC_NATIVE_GL"] = "1"
-        environment["SOTC_BUTTON_PROMPTS"] = preferences(self.directory)["button_prompts"]
+        selected_preferences = preferences(self.directory)
+        environment["SOTC_BUTTON_PROMPTS"] = selected_preferences["button_prompts"]
+        environment["SOTC_INFINITE_HEALTH"] = "1" if selected_preferences["infinite_health"] else "0"
+        environment["SOTC_INFINITE_GRIP"] = "1" if selected_preferences["infinite_grip"] else "0"
         environment["PS2X_GS_THREADS"] = "2"
         environment["PS2X_MEMCARD_DIR"] = str(self.player_directory / "memcards")
         environment["PS2X_STATE_DIR"] = str(self.player_directory / "savestates")

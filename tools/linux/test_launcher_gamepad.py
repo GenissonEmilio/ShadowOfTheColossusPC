@@ -94,6 +94,43 @@ class NavigationTest(unittest.TestCase):
         pad.suspend()
         self.assertFalse(pad.connected)
 
+    def test_prompt_family_prefers_reported_layout_and_falls_back_for_old_sdl(self):
+        from unittest.mock import Mock, patch
+        with patch('gamepad.load_sdl', return_value=Mock()):
+            pad = Gamepad('/nonexistent', '/nonexistent')
+        for kind in (3, 4, 7):
+            pad.controller_type.return_value = kind
+            self.assertEqual(pad.prompt_style(1, 'Generic pad'), 'playstation')
+        pad.controller_type.return_value = 1
+        self.assertEqual(pad.prompt_style(1, 'PS4 translated by Steam'), 'xbox')
+        pad.controller_type = None
+        self.assertEqual(pad.prompt_style(1, 'Sony DualSense'), 'playstation')
+        self.assertEqual(pad.prompt_style(1, 'Generic USB controller'), 'xbox')
+
+    def test_only_new_input_changes_prompt_family_not_drift_holds_or_unplug(self):
+        from unittest.mock import Mock, patch
+        with patch('gamepad.load_sdl', return_value=Mock()):
+            pad = Gamepad('/nonexistent', '/nonexistent', clock=lambda: 10.)
+        pad.running = True; pad.next_scan = 100.
+        pad.controllers = {1: (11, 'Xbox'), 2: (22, 'DualShock')}
+        pad.controller_type.side_effect = lambda c: 4 if c == 22 else 1
+        pad.sdl.SDL_GameControllerGetAttached.return_value = True
+        pad.sdl.SDL_GameControllerGetAxis.return_value = 1000
+        pressed = set()
+        pad.sdl.SDL_GameControllerGetButton.side_effect = lambda c, b: (c, b) in pressed
+        self.assertEqual(pad.poll(True), [])
+        self.assertEqual(pad.activity_serial, 0)
+        pressed.add((11, 0)); self.assertEqual(pad.poll(True), ['confirm'])
+        self.assertEqual((pad.activity_serial, pad.last_style), (1, 'xbox'))
+        self.assertEqual(pad.poll(True), [])
+        self.assertEqual(pad.activity_serial, 1)
+        pressed.add((22, 1)); self.assertEqual(pad.poll(True), ['back'])
+        self.assertEqual((pad.activity_serial, pad.last_style), (2, 'playstation'))
+        pressed.clear(); pad.poll(True)
+        pad.sdl.SDL_GameControllerGetAttached.side_effect = lambda c: c != 22
+        pad.poll(True)
+        self.assertEqual((pad.activity_serial, pad.last_style), (2, 'playstation'))
+
 
 PROBE = r'''
 import argparse, ctypes, json, sys, time

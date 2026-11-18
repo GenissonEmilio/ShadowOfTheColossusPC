@@ -1,5 +1,6 @@
 // Actual menu implementation with deterministic host events, no ROM/window.
 #include "raylib.h"
+#include "runtime/desktop_input.h"
 #include "runtime/state_manager.h"
 #include "runtime/native_tuning.h"
 #include "runtime/ps2_pad.h"
@@ -21,6 +22,12 @@ namespace fixture
     std::vector<Text> drawn;
     int width = 1024, height = 768;
     double clock = 0;
+    desktop_input::PromptStyle promptStyle = desktop_input::PromptStyle::PlayStation;
+}
+
+namespace desktop_input
+{
+    PromptProfile prompts() { return {fixture::promptStyle}; }
 }
 
 extern "C"
@@ -133,6 +140,14 @@ int main()
     for (int i = 0; i < 6; ++i) key(KEY_E);
     assert(hostmenu::g_tab == hostmenu::kStatesTab);
     assert(hostmenu::g_rowRects.size() == 18);
+    const auto xboxHints = [] {
+        return std::any_of(drawn.begin(), drawn.end(), [](const auto &text) { return text.value == "LB/RB"; });
+    };
+    assert(!xboxHints());
+    promptStyle = desktop_input::PromptStyle::Xbox;
+    frame(); assert(xboxHints());
+    promptStyle = desktop_input::PromptStyle::Keyboard;
+    frame(); assert(!xboxHints());
     key(KEY_ENTER);
     assert(requests.size() == 1 && requests.back() == std::make_pair(savestates::Action::Save, 0));
     stored[0] = {true, 64u * 1024u * 1024u, "01/11 12:34:56"};

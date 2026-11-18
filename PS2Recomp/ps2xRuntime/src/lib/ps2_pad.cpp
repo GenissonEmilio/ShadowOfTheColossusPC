@@ -14,9 +14,11 @@
 #include "ps2_host_backend.h"
 #include <cstring>
 #include <atomic>
+#include <cctype>
 #include <fstream>
 #include <mutex>
 #include <array>
+#include <string_view>
 #if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
 #if defined(__linux__)
 #include "runtime/linux_gamepad_mappings.h"
@@ -24,6 +26,8 @@
 // GLFW is linked by the desktop raylib backend. A present joystick may have
 // no mapping: raylib still reports it available, but returns no gamepad input.
 extern "C" int glfwJoystickIsGamepad(int jid);
+extern "C" const char *glfwGetGamepadName(int jid);
+extern "C" const char *glfwGetJoystickGUID(int jid);
 #endif
 
 namespace
@@ -47,6 +51,74 @@ namespace
     constexpr uint16_t PAD_L1 = 0x0400u;
     constexpr uint16_t PAD_R2 = 0x0200u;
     constexpr uint16_t PAD_L2 = 0x0100u;
+
+    float stickDeadZone()
+    {
+        static const float value = []
+        {
+            const char *env = std::getenv("PS2X_STICK_DEADZONE");
+            return std::clamp(env ? static_cast<float>(std::atof(env)) : 0.18f, 0.0f, 0.9f);
+        }();
+        return value;
+    }
+
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+    desktop_input::PromptStyle gamepadStyle(int index)
+    {
+        using desktop_input::PromptStyle;
+        const char *guidText = glfwGetJoystickGUID(index);
+        const std::string_view guid = guidText ? guidText : "";
+        if (guid.starts_with("78696e707574")) return PromptStyle::Xbox; // GLFW XInput
+        if (guid.size() == 32 && (guid.starts_with("03000000") || guid.starts_with("05000000"))) {
+            const auto vendor = guid.substr(8, 8);
+            if (vendor == "5e040000") return PromptStyle::Xbox;
+            if (vendor == "4c050000") return PromptStyle::PlayStation;
+        }
+
+        const auto lowerName = [](const char *name)
+        {
+            std::string lower = name ? name : "";
+            for (char &c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            return lower;
+        };
+        const auto sonyName = [](std::string_view name)
+        {
+            return name.find("playstation") != name.npos || name.find("ps3 controller") != name.npos ||
+                name.find("ps4 controller") != name.npos || name.find("ps5 controller") != name.npos ||
+                name.find("dualshock") != name.npos || name.find("dualsense") != name.npos || name.find("sony") != name.npos;
+        };
+        const std::string raw = lowerName(GetGamepadName(index));
+        if (raw.find("xbox") != raw.npos || raw.find("x-box") != raw.npos || raw.find("xinput") != raw.npos)
+            return PromptStyle::Xbox;
+        return sonyName(raw) || sonyName(lowerName(glfwGetGamepadName(index))) ? PromptStyle::PlayStation : PromptStyle::Xbox;
+    }
+
+    struct PromptPadActivity {
+        bool sticks[2]{}, triggers[2]{};
+
+        bool read(const ps2pad::GamepadState &current, const ps2pad::GamepadState &previous)
+        {
+            bool pressed = false;
+            for (int b = GAMEPAD_BUTTON_LEFT_FACE_UP; b <= GAMEPAD_BUTTON_RIGHT_THUMB; ++b)
+                if (b != GAMEPAD_BUTTON_LEFT_TRIGGER_2 && b != GAMEPAD_BUTTON_RIGHT_TRIGGER_2 && b != GAMEPAD_BUTTON_MIDDLE)
+                    pressed |= current.buttons[b] && !previous.buttons[b];
+
+            const float threshold = std::max(0.45f, stickDeadZone() + 0.05f);
+            for (int i = 0; i < 2; ++i) {
+                const float x = current.axes[GAMEPAD_AXIS_LEFT_X + i * 2];
+                const float y = current.axes[GAMEPAD_AXIS_LEFT_Y + i * 2];
+                const float limit = sticks[i] ? threshold - 0.10f : threshold;
+                const bool stick = x * x + y * y > limit * limit;
+                const bool trigger = current.axes[GAMEPAD_AXIS_LEFT_TRIGGER + i] > (triggers[i] ? 0.10f : 0.20f);
+                pressed |= (stick && !sticks[i]) || (trigger && !triggers[i]);
+                sticks[i] = stick;
+                triggers[i] = trigger;
+            }
+            // The first sample after a connection establishes the baseline.
+            return pressed && current.index >= 0 && previous.index >= 0;
+        }
+    };
+#endif
 
     void loadGamepadMappings()
     {
@@ -107,8 +179,23 @@ void ps2pad::pollGamepads()
         for (int axis = GAMEPAD_AXIS_LEFT_X; axis <= GAMEPAD_AXIS_RIGHT_TRIGGER; ++axis)
             snapshot[i].axes[axis] = GetGamepadAxisMovement(i, axis);
     }
-    std::lock_guard<std::mutex> lock(gamepadMutex);
-    gamepads = snapshot;
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+    static std::array<PromptPadActivity, 4> promptActivity;
+    int promptPad = -1;
+#endif
+    {
+        std::lock_guard<std::mutex> lock(gamepadMutex);
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+        for (size_t i = 0; i < snapshot.size(); ++i) {
+            if (promptActivity[i].read(snapshot[i], gamepads[i]) && promptPad < 0 && !stateReleaseGate)
+                promptPad = static_cast<int>(i);
+        }
+#endif
+        gamepads = snapshot;
+    }
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+    if (promptPad >= 0) desktop_input::gamepadActivity(gamepadStyle(promptPad));
+#endif
 }
 
 void ps2pad::resetAfterStateLoad()
@@ -223,12 +310,7 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
         // still; the DualShock 2 came back to 0x80. Games aim with the raw
         // values (SotC's sword follows them every frame), so a radial dead
         // zone rescaled to the full range: PS2X_STICK_DEADZONE (0..0.9, 0.18).
-        static const float deadZone = []
-        {
-            const char *env = std::getenv("PS2X_STICK_DEADZONE");
-            const float v = env ? static_cast<float>(std::atof(env)) : 0.18f;
-            return std::clamp(v, 0.0f, 0.9f);
-        }();
+        static const float deadZone = stickDeadZone();
         auto shape = [](float &x, float &y)
         {
             const float m = std::sqrt(x * x + y * y);

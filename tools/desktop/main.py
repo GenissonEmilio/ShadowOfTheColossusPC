@@ -142,6 +142,7 @@ class Launcher:
         self.args = args
         self.library = Library(args.data_dir)
         self.preferences = preferences(self.library.directory)
+        self.last_input_style = "keyboard"
         activate(self.preferences["language"])
         self.graphics = Graphics(self.library)
         self.feedback = LauncherAudio(self.library.program, enabled=self.preferences["ui_sounds"])
@@ -169,6 +170,7 @@ class Launcher:
         self.window.connect("delete-event", self.close)
         self.window.connect("destroy", lambda *_: self.feedback.close())
         self.window.connect("key-press-event", self.presentation_key)
+        self.window.connect("button-press-event", self.pointer_input)
         self.header = Gtk.HeaderBar()
         self.header.set_show_close_button(True)
         self.header.set_title("Shadow of the Colossus PC")
@@ -277,8 +279,13 @@ class Launcher:
             self.feedback.play("focus")
 
     def pointer_feedback(self, widget, event):
+        self.last_input_style = "keyboard"
         if event.button == 1 and widget.is_sensitive():
             self.feedback.play("confirm")
+        return False
+
+    def pointer_input(self, _widget, _event):
+        self.last_input_style = "keyboard"
         return False
 
     def hover_feedback(self, widget, event):
@@ -287,6 +294,7 @@ class Launcher:
         return False
 
     def presentation_key(self, _window, event):
+        self.last_input_style = "keyboard"
         if event.keyval == Gdk.KEY_F11:
             self.toggle_presentation()
             return True
@@ -433,8 +441,15 @@ class Launcher:
     def gamepad_available(self):
         return not (self.busy or self.process or self.controller_process)
 
+    def resolved_prompt_style(self):
+        mode = self.preferences["button_prompts"]
+        return self.last_input_style if mode == "auto" else mode
+
     def controller_hint_text(self):
-        xbox = self.preferences["button_prompts"] == "xbox"
+        resolved = self.resolved_prompt_style()
+        if resolved == "keyboard":
+            return tr("Setas mover · Enter confirmar · Esc voltar · F1 menu · F11 tela cheia")
+        xbox = resolved == "xbox"
         confirm, back, tabs, start = ("A", "B", "LB/RB", "Menu") if xbox else ("✕", "○", "L1/R1", "Options")
         return tr("Direcional/analógico mover · {confirm} confirmar · {back} voltar · {tabs} trocar aba · {start} jogar · Select menu").format(
             confirm=confirm, back=back, tabs=tabs, start=start)
@@ -445,6 +460,9 @@ class Launcher:
             self.gamepad.reset_navigation()
             self.gamepad_target = target
         actions = self.gamepad.poll(target is not None)
+        if self.gamepad.activity_serial != getattr(self, "gamepad_activity_serial", 0):
+            self.gamepad_activity_serial = self.gamepad.activity_serial
+            self.last_input_style = self.gamepad.last_style
         hint = self.controller_hint_text() if self.gamepad.connected else tr("Setas mover · Enter confirmar · Esc voltar · F1 menu · F11 tela cheia")
         if self.gamepad_hint.get_text() != hint:
             self.gamepad_hint.set_text(hint)
@@ -640,7 +658,13 @@ class Launcher:
 
     def configure_file_chooser(self, dialog):
         self.connect_dialog_feedback(dialog)
-        xbox = self.preferences["button_prompts"] == "xbox"
+        resolved = self.resolved_prompt_style()
+        if resolved == "keyboard":
+            hint = label(tr("Setas mover · Enter confirmar · Esc voltar"), "small", wrap=True)
+            dialog.set_extra_widget(hint)
+            hint.show()
+            return
+        xbox = resolved == "xbox"
         back, parent, tabs, start = ("B", "Y", "LB/RB", "Menu") if xbox else ("○", "△", "L1/R1", "Options")
         hint = label(tr("{tabs} alternar regiões · {parent} pasta acima · {back} voltar · {start} aceitar").format(
             parent=parent, back=back, tabs=tabs, start=start), "small", wrap=True)
@@ -910,11 +934,22 @@ class Launcher:
         preferences_panel.pack_start(self.language_choice, False, False, 0)
         preferences_panel.pack_start(label(tr("Ícones dos botões no jogo"), "panel-title"), False, False, 0)
         self.prompts_choice = style(Gtk.ComboBoxText(), "graphics-select")
-        self.prompts_choice.append(PROMPTS[0], "PlayStation  ✕ ○ □ △")
-        self.prompts_choice.append(PROMPTS[1], "Xbox  A B X Y")
+        for mode, text in (("auto", tr("Automático · último dispositivo usado")),
+                           ("playstation", "PlayStation  ✕ ○ □ △"),
+                           ("xbox", "Xbox  A B X Y"),
+                           ("keyboard", tr("Teclado e mouse"))):
+            self.prompts_choice.append(mode, text)
         self.prompts_choice.set_active_id(self.preferences["button_prompts"])
         preferences_panel.pack_start(self.prompts_choice, False, False, 0)
-        preferences_panel.pack_start(label(tr("Os ícones mudam na próxima abertura do jogo."), "muted", wrap=True), False, False, 0)
+        preferences_panel.pack_start(label(tr("No modo Automático, os ícones acompanham o último dispositivo usado durante o jogo. Os atalhos de teclado respeitam seu perfil de controles. A escolha do modo vale na próxima abertura do jogo."), "muted", wrap=True), False, False, 0)
+        preferences_panel.pack_start(label(tr("Assistências (cheats)"), "panel-title"), False, False, 0)
+        self.health_choice = style(Gtk.CheckButton(label=tr("Vida infinita")), "sound-option")
+        self.health_choice.set_active(self.preferences["infinite_health"])
+        preferences_panel.pack_start(self.health_choice, False, False, 0)
+        self.grip_choice = style(Gtk.CheckButton(label=tr("Resistência infinita")), "sound-option")
+        self.grip_choice.set_active(self.preferences["infinite_grip"])
+        preferences_panel.pack_start(self.grip_choice, False, False, 0)
+        preferences_panel.pack_start(label(tr("Desligadas por padrão. As assistências são aplicadas na próxima abertura do jogo."), "muted", wrap=True), False, False, 0)
         self.sound_choice = style(Gtk.CheckButton(label=tr("Sons da interface")), "sound-option")
         self.sound_choice.set_active(self.preferences["ui_sounds"])
         preferences_panel.pack_start(self.sound_choice, False, False, 0)
@@ -958,6 +993,8 @@ class Launcher:
             return
         values = {**self.preferences, "language": self.language_choice.get_active_id(),
                   "button_prompts": self.prompts_choice.get_active_id(),
+                  "infinite_health": self.health_choice.get_active(),
+                  "infinite_grip": self.grip_choice.get_active(),
                   "ui_sounds": self.sound_choice.get_active()}
         try:
             atomic_json(self.library.directory / PREFERENCES, values)

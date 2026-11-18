@@ -203,7 +203,10 @@ def inspect_disc(source):
         if (disc.sector, disc.skip) != (2048, 0):
             raise ImportError_(tr("Escolha uma imagem DVD ISO com setores de 2048 bytes."))
         cnf = disc.find("SYSTEM.CNF")
-        if not cnf or b"SCUS_974.72" not in disc.read(*cnf):
+        configuration = disc.read(*cnf) if cnf else b""
+        if b"SCES_533.26" in configuration:
+            raise ImportError_(tr("Edição PAL europeia detectada (SCES-53326). O suporte a essa edição está pendente; esta versão recompila somente o disco USA SCUS-97472."))
+        if b"SCUS_974.72" not in configuration:
             raise ImportError_(tr("Edição incompatível. É necessário SCUS-97472 (USA)."))
         for name, (size, digest) in EXPECTED.items():
             loc = disc.find(name)
