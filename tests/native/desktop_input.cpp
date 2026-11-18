@@ -76,6 +76,18 @@ void testPromptAtlas()
     assert(painted != source);
     assert(std::equal(painted.begin() + (128 * 80 * 4), painted.end(), source.begin() + (128 * 80 * 4)));
     for (size_t i = 3; i < painted.size(); i += 4) assert(painted[i] == 23 || painted[i] == 0);
+    // The map samples the stick artwork separately from its adjacent labels.
+    bool leftClickPainted = false, rightClickPainted = false;
+    for (int y = 59; y < 77; ++y)
+        for (int x = 0; x < 74; ++x) {
+            const auto pixel = 4 * (128 * y + x);
+            const bool leftLabel = x >= 18 && x < 35 && y >= 63 && y < 74;
+            const bool rightLabel = x >= 54 && x < 72 && y >= 63 && y < 74;
+            if (leftLabel) leftClickPainted |= painted[pixel] == 254;
+            else if (rightLabel) rightClickPainted |= painted[pixel] == 254;
+            else assert(std::equal(painted.begin() + pixel, painted.begin() + pixel + 4, source.begin() + pixel));
+        }
+    assert(leftClickPainted && rightClickPainted);
     // A remap changes the attack cell and its cache identity; other cells round-trip.
     profile.codes[static_cast<size_t>(Control::Attack)] = MOUSE_BUTTON_LEFT - 1;
     assert(sotc_button_prompts::textureKey(sourceId, profile.variant()) != keyboardId);

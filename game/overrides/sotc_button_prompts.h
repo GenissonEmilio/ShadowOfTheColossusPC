@@ -263,11 +263,16 @@ namespace sotc_button_prompts
             fill({area.x, area.y + 1, area.width, area.height - 2}, {30, 30, 32, alpha});
             fill({area.x + 1, area.y, area.width - 2, area.height - 1}, {97, 97, 102, alpha});
             fill({area.x + 1, area.y + 1, area.width - 2, area.height - 3}, {49, 49, 54, alpha});
+            label({area.x + 1, area.y + 1, area.width - 2, area.height - 3}, code, alpha);
+        }
+
+        void label(Cell area, int code, uint8_t alpha) const
+        {
+            if (!alpha) return;
             const Pixel ink{254, 254, 254, alpha};
-            const Cell label{area.x + 1, area.y + 1, area.width - 2, area.height - 3};
-            if (code < 0) mouse(label, -code, ink);
-            else if (code >= KEY_RIGHT && code <= KEY_UP) arrow(label, code, ink);
-            else text(label, keyLabel(code), ink);
+            if (code < 0) mouse(area, -code, ink);
+            else if (code >= KEY_RIGHT && code <= KEY_UP) arrow(area, code, ink);
+            else text(area, keyLabel(code), ink);
         }
 
         void replace(Cell area, int code) const { key(area, code, clear(area)); }
@@ -317,7 +322,10 @@ namespace sotc_button_prompts
         atlas.replace({74, 39, 18, 19}, down);
         atlas.replace({92, 39, 18, 19}, left);
 
-        atlas.replace({0, 59, 36, 18}, code(Control::L3));
-        atlas.replace({36, 59, 37, 18}, code(Control::R3));
+        // The map draws the stick diagrams without the click labels. Keep the
+        // original artwork at x=1..16 and x=37..52 and replace only L3/R3 ink.
+        constexpr Cell leftClick{18, 63, 17, 11}, rightClick{54, 63, 18, 11};
+        atlas.label(leftClick, code(Control::L3), atlas.clear(leftClick));
+        atlas.label(rightClick, code(Control::R3), atlas.clear(rightClick));
     }
 }
