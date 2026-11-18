@@ -19,7 +19,14 @@ O ensaio de mesclagem indicou conflitos em 24 arquivos, incluindo o renderer, o 
 
 - O [teste sem ROM](../tools/linux/test_native_decomp.sh) passou com as sete funções registradas. A segunda execução confirmou que `SOTC_DECOMP_SKIP=curveEval` mantém a função recompilada em uso nesse endereço.
 - A correção do launcher passou no [teste GTK](../tools/linux/test_launcher_motion.py) e em cliques X11 enviados aos controles da janela, incluindo o menu lateral, a lista de opções nativa e o diálogo de confirmação.
-- **Pendente** — teste diferencial com o jogo e execução do CI. Use a lista abaixo para comparar as sete funções com as rotinas recompiladas em execução. `SOTC_DECOMP_SKIP` permite excluir rotinas específicas do registro nativo para executar o caminho recompilado.
+- Os workflows [Linux](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/actions/runs/44197380528) e [Windows](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/actions/runs/44197380772) passaram no código `b02ac13`.
+- No Linux, duas execuções diferenciais alcançaram as sete funções, com `SOTC_DIFFTEST_FIRST=4` e nenhuma divergência reportada nas amostras. `motionKeys` foi testada separadamente para exercitar o caminho que avalia as curvas em lote, sem o wrapper da curva forçar o fallback.
+- Uma execução normal com as sete rotinas ativas carregou um cartão PS2 copiado para o perfil de teste e chegou ao Santuário. F5 salvou um estado novo e F8 o restaurou; o cartão de origem permaneceu intacto. Os testes ocorreram em Xvfb isolado, sem medir um ganho de FPS no hardware do usuário.
+- A campanha continua com a validação indicada no README. Esses testes não certificam todas as lutas ou todos os argumentos possíveis das rotinas.
+
+Cartões PS2 mantêm o progresso. Save-states continuam exigindo o executável que os criou; os antigos podem ser retomados com o núcleo anterior. A integração preserva a versão 0.7.0 para esse retorno.
+
+`SOTC_DECOMP_SKIP` exclui rotinas específicas do registro nativo. A lista abaixo ativa o comparador com o caminho recompilado:
 
 ```sh
 export SOTC_DIFFTEST=iosGetSinf,iosGetCosf,curveEval,motionKeys,texSearchMopByName,kernel_sub_001ADDC0,kernel_sub_001ADBC0
