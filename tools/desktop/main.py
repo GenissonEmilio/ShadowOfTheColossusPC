@@ -18,6 +18,7 @@ from graphics import GRAPHICS_PROFILES, LEGACY_PROFILES, Graphics, WINDOW_RESOLU
 from gamepad import Gamepad
 from language import LANGUAGES, PREFERENCES, PROMPTS, activate, preferences, translate as tr
 from launcher_audio import LauncherAudio
+from pipeline import CompilationError
 from updates import RateLimitedError, check_for_update, confirm_startup, restart_with_update, stage_update
 
 if len(sys.argv) > 1 and sys.argv[1] == "--pipeline-helper":
@@ -1254,7 +1255,7 @@ class Launcher:
                 else:
                     self.library.prepare(path,progress)
             except Exception as exc:
-                error=str(exc)
+                error=exc
             GLib.idle_add(self.prepared,error)
         threading.Thread(target=worker,daemon=False).start()
         return False
@@ -1267,10 +1268,14 @@ class Launcher:
             self.failed=True
             if self.prepare_only:
                 self.update_status(tr("A compilação falhou. Tente novamente. Detalhes em last-prepare.log."), True)
-                self.status.set_tooltip_text(error)
+                self.status.set_tooltip_text(str(error))
+            elif isinstance(error, CompilationError):
+                title = tr("Falha na compilação")
+                self.update_status(title, True)
+                self.error(title, str(error))
             else:
                 self.update_status(tr("Não foi possível preparar essa ROM."),True)
-                self.error(tr("Confira o arquivo escolhido"),error)
+                self.error(tr("Confira o arquivo escolhido"),str(error))
             self.play_button.set_sensitive(bool(self.library.disc))
         else:
             self.set_ready()

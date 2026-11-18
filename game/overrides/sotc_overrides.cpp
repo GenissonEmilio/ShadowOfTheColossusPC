@@ -880,7 +880,8 @@ namespace
         }
         installCallTracing(runtime);
         installCensus(runtime);
-        installSotcNative(runtime);
+        if (!std::getenv("PS2X_MODULE_CAPTURE"))
+            installSotcNative(runtime);
         sysnative::install(runtime);
         sotc_decomp::install(runtime);
         sotc_ground_support::installGroundSupport(runtime);

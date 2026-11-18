@@ -225,6 +225,7 @@ Equilibrado suaviza bordas. Aprimorado e Ultra aumentam a resolução e o detalh
 O arquivo escolhido não foi encontrado.	The selected file was not found.	No se encontró el archivo seleccionado.	選択したファイルが見つかりませんでした。
 Lendo e validando o disco…	Reading and verifying the disc…	Leyendo y verificando el disco…	ディスクを読み込み、検証中…
 A compilação não terminou. Consulte {path}	Compilation did not finish. See {path}	La compilación no terminó. Consulta {path}	コンパイルが完了しませんでした。{path} を確認してください。
+Falha na compilação	Compilation failed	Error de compilación	コンパイルに失敗しました
 Escolha sua ROM para continuar. Os arquivos locais estão ausentes ou incompletos.	Choose your disc image again. The local files are missing or incomplete.	Vuelve a elegir la imagen del disco. Faltan archivos locales o están incompletos.	ディスクイメージを選び直してください。ローカルファイルが存在しないか、不完全です。
 O recompilador não produziu código.	The recompiler did not generate code.	El recompilador no generó código.	再コンパイラーがコードを生成しませんでした。
 Compilando para {system}: {done}/{total} blocos…	Compiling for {system}: {done}/{total} batches…	Compilando para {system}: {done}/{total} bloques…	{system} 向けにコンパイル中: {done}/{total} ブロック…

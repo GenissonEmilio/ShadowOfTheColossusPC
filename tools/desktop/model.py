@@ -10,9 +10,9 @@ import sys
 import tempfile
 from import_disc import import_disc, EXPECTED
 from language import preferences, translate as tr
-from pipeline import Pipeline, PROCESS_FLAGS, WINDOWS, compiler_tool
+from pipeline import CompilationError, Pipeline, PROCESS_FLAGS, WINDOWS, compiler_tool
 
-VERSION = "0.9.0"
+VERSION = "0.9.1"
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 APPLICATION_ID = "io.github.GenissonEmilio.ShadowOfTheColossusPC"
 SAVE_STATES_AVAILABLE = sys.platform.startswith("linux")
@@ -132,7 +132,7 @@ class Library:
         try:
             executable = Pipeline(self.program, self.directory, self.game_environment(), progress).prepare(destination)
         except subprocess.CalledProcessError as exc:
-            raise ValueError(tr("A compilação não terminou. Consulte {path}").format(path=self.directory / "last-prepare.log")) from exc
+            raise CompilationError(tr("A compilação não terminou. Consulte {path}").format(path=self.directory / "last-prepare.log")) from exc
         state = {"disc": str(boot.relative_to(self.directory)), "name": source.name, "serial": "SCUS-97472", "executable": str(executable)}
         atomic_json(self.config, state)
         self.state = state

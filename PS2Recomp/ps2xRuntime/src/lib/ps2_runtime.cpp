@@ -980,6 +980,12 @@ bool PS2Runtime::initialize(const char *title)
             std::cerr << "Failed to bind runtime core subsystems" << std::endl;
             return false;
         }
+        if (std::getenv("PS2X_MODULE_CAPTURE"))
+        {
+            setMissingFunctionPolicy(MissingFunctionPolicy::Stop);
+            std::cerr << "[capture] core ready without host video or audio" << std::endl;
+            return true;
+        }
 #if defined(PLATFORM_VITA) && !defined(PS2X_VITA_SDL2_SHIM)
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
 #else
@@ -1662,12 +1668,24 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
     {
         if (const char *dumpPath = std::getenv("PS2X_DUMP_RAM_ON_MISSING"))
         {
-            if (FILE *dump = std::fopen(dumpPath, "wb"))
+            const bool captureOnly = std::getenv("PS2X_MODULE_CAPTURE") != nullptr;
+            const std::string path = captureOnly ? std::string(dumpPath) + ".part" : dumpPath;
+            if (FILE *dump = std::fopen(path.c_str(), "wb"))
             {
-                std::fwrite(rdram, 1, PS2_RAM_SIZE, dump);
-                std::fclose(dump);
-                std::cerr << "[guest-branch:missing-target] RAM dumped to " << dumpPath << std::endl;
+                const size_t written = std::fwrite(rdram, 1, PS2_RAM_SIZE, dump);
+                const int closed = std::fclose(dump);
+                if (written == PS2_RAM_SIZE && closed == 0 &&
+                    (!captureOnly || std::rename(path.c_str(), dumpPath) == 0))
+                    std::cerr << "[guest-branch:missing-target] RAM dumped to " << dumpPath << std::endl;
+                else
+                {
+                    if (captureOnly)
+                        std::remove(path.c_str());
+                    std::cerr << "[guest-branch:missing-target] incomplete RAM dump at " << dumpPath << std::endl;
+                }
             }
+            else
+                std::cerr << "[guest-branch:missing-target] could not open RAM dump at " << dumpPath << std::endl;
         }
     }
 
@@ -2832,6 +2850,48 @@ void PS2Runtime::run()
 
     RUNTIME_LOG("Starting execution at address 0x" << std::hex << m_cpuContext.pc << std::dec);
 
+    const bool captureOnly = std::getenv("PS2X_MODULE_CAPTURE") != nullptr;
+    auto runGuest = [&]()
+    {
+        ThreadNaming::SetCurrentThreadName("GameThread");
+#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+        // Cores 0 and 1: the native renderer's render thread has core 2.
+        sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), SCE_KERNEL_CPU_MASK_USER_0 | SCE_KERNEL_CPU_MASK_USER_1);
+#endif
+        ps2_load::setThreadSlot(ps2_load::kGame);
+        // Guest float code runs like the EE: round toward zero, no denormals.
+        ps2SetEeFloatingPointMode();
+        g_ps2FpuSetcsrNearest = std::getenv("PS2X_FPU_SETCSR") != nullptr && std::atoi(std::getenv("PS2X_FPU_SETCSR")) != 0;
+        try
+        {
+            m_eeScheduler->reset(m_memory.getRDRAM(), m_cpuContext);
+            if (captureOnly)
+                std::cerr << "[capture] starting EE scheduler" << std::endl;
+            else
+                savestates::bind(this); // Accept requests only after reset/wake state is ready.
+            m_eeScheduler->run();
+            uint32_t pc = m_debugPc.load(std::memory_order_relaxed);
+            RUNTIME_LOG("Game thread returned. PC=0x" << std::hex << pc
+                      << " RA=0x" << static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[31], 0)) << std::dec << std::endl);
+        }
+        catch (const std::exception &e)
+        {
+            if (captureOnly) throw;
+            std::cerr << "Error during program execution: " << e.what() << std::endl;
+        }
+        catch (...)
+        {
+            if (captureOnly) throw;
+            std::cerr << "Error during program execution: unknown exception" << std::endl;
+        }
+    };
+    if (captureOnly)
+    {
+        // The module loader uses the same EE scheduler without a host frame loop.
+        runGuest();
+        return;
+    }
+
     // A blank image to use as a framebuffer
     Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
     Texture2D frameTex = LoadTextureFromImage(blank);
@@ -3006,34 +3066,10 @@ void PS2Runtime::run()
     _pthread_stack_default_user = 1024u * 1024u;
 #endif
     std::thread gameThread([&]()
-                           {
-        ThreadNaming::SetCurrentThreadName("GameThread");
-#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
-        // Cores 0 and 1: the native renderer's render thread has core 2.
-        sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), SCE_KERNEL_CPU_MASK_USER_0 | SCE_KERNEL_CPU_MASK_USER_1);
-#endif
-        ps2_load::setThreadSlot(ps2_load::kGame);
-        // Guest float code runs like the EE: round toward zero, no denormals.
-        ps2SetEeFloatingPointMode();
-        g_ps2FpuSetcsrNearest = std::getenv("PS2X_FPU_SETCSR") != nullptr && std::atoi(std::getenv("PS2X_FPU_SETCSR")) != 0;
-        try
-        {
-            m_eeScheduler->reset(m_memory.getRDRAM(), m_cpuContext);
-            savestates::bind(this); // Accept requests only after reset/wake state is ready.
-            m_eeScheduler->run();
-            uint32_t pc = m_debugPc.load(std::memory_order_relaxed);
-            RUNTIME_LOG("Game thread returned. PC=0x" << std::hex << pc
-                      << " RA=0x" << static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[31], 0)) << std::dec << std::endl);
-        }
-        catch (const std::exception &e)
-        {
-            std::cerr << "Error during program execution: " << e.what() << std::endl;
-        }
-        catch (...)
-        {
-            std::cerr << "Error during program execution: unknown exception" << std::endl;
-        }
-        gameThreadFinished.store(true, std::memory_order_release); });
+    {
+        runGuest();
+        gameThreadFinished.store(true, std::memory_order_release);
+    });
 #if defined(PLATFORM_VITA)
     _pthread_stack_default_user = threadStackDefault;
 #endif

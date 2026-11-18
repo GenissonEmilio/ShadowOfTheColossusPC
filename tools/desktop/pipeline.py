@@ -18,6 +18,11 @@ BOOT = "SCUS_974.72"
 MODULES = ("KERNEL", "MANAGER", "GAMECORE")
 WINDOWS = os.name == "nt"
 PROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if WINDOWS else 0
+RAM_BYTES = 32 * 1024 * 1024
+
+
+class CompilationError(ValueError):
+    """The disc passed validation but local compilation did not finish."""
 
 
 def executable_name(name):
@@ -195,29 +200,37 @@ class Pipeline:
 
     def capture(self, executable, disc, name):
         output = self.work / "captures" / (name.lower()+".bin")
+        partial = output.with_suffix(".bin.part")
         output.parent.mkdir(exist_ok=True)
         output.unlink(missing_ok=True)
-        env = dict(self.env, PS2X_DUMP_RAM_ON_MISSING=str(output), PS2X_HIDDEN_WINDOW="1",
-                   PS2X_MEMCARD_DIR=str(self.work / "capture-memcards"))
-        env.pop("SOTC_SHADER", None)
-        env.pop("SOTC_SHADER_STATUS", None)
-        with self.log.open("a") as stream:
-            p = subprocess.Popen([str(executable),str(disc / BOOT)],cwd=self.work, env=env,
-                                 stdout=stream, stderr=subprocess.STDOUT, creationflags=PROCESS_FLAGS)
+        partial.unlink(missing_ok=True)
+        env = dict(self.env, PS2X_MODULE_CAPTURE="1", PS2X_DUMP_RAM_ON_MISSING=str(output),
+                   PS2X_GS_HW="0", PS2X_GS_GPU="0", PS2X_MEMCARD_DIR=str(self.work / "capture-memcards"))
+        started = time.monotonic()
+        with self.log.open("a", encoding="utf-8") as stream:
+            print(f"\n[capture] {name}: starting {executable}", file=stream, flush=True)
             try:
-                deadline = time.monotonic()+180
-                while time.monotonic()<deadline:
-                    if output.is_file() and output.stat().st_size == 33554432:
-                        return output
-                    if p.poll() is not None:
-                        break
-                    time.sleep(.25)
-                raise ValueError(tr("Não foi possível carregar {name}. Consulte {path}").format(name=name, path=self.log))
-            finally:
-                if p.poll() is None:
-                    p.terminate()
-                    try: p.wait(timeout=5)
-                    except subprocess.TimeoutExpired: p.kill(); p.wait()
+                with subprocess.Popen([str(executable), str(disc / BOOT)], cwd=self.work, env=env,
+                                      stdout=stream, stderr=subprocess.STDOUT, creationflags=PROCESS_FLAGS) as process:
+                    try:
+                        code = process.wait(timeout=180)
+                        status = f"exit {code} (0x{code & 0xffffffff:08x})" if WINDOWS else f"exit {code}"
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                        code = None
+                        status = "timed out after 180 seconds"
+            except OSError as exc:
+                code = None
+                status = f"could not start ({exc})"
+            size = output.stat().st_size if output.is_file() else 0
+            print(f"\n[capture] {name}: {status}; {size}/{RAM_BYTES} bytes; "
+                  f"{time.monotonic() - started:.1f}s", file=stream)
+        if code == 0 and size == RAM_BYTES:
+            return output
+        output.unlink(missing_ok=True)
+        partial.unlink(missing_ok=True)
+        raise CompilationError(tr("Não foi possível carregar {name}. Consulte {path}").format(name=name, path=self.log))
 
     def prepare(self, disc):
         disc = Path(disc).resolve()
@@ -229,7 +242,7 @@ class Pipeline:
                 if manifest.get("sha256") == hashlib.sha256(final.read_bytes()).hexdigest():
                     self.progress(tr("Compilação já pronta. Reutilizando o cache…"))
                     return final
-            self.log.write_text("Local static recompilation — "+self.build_id+"\n")
+            self.log.write_text("Local static recompilation — "+self.build_id+"\n", encoding="utf-8")
             boot = self.work / "boot"
             boot.mkdir(exist_ok=True)
             symbols = self.work / "symbols.txt"
