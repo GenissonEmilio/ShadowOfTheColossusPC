@@ -27,9 +27,10 @@ nos restos do colosso, sem alterar flags ou memória do jogo.
 
 ## Progresso
 
-**12,5% da campanha validada no Linux (2 de 16 colossos).** Valus foi
-validado no nativo `cb15` e Basaran no `0281`. Quadratus, Gaius, Hydrus e
-Malus têm evidências parciais. Os outros dez colossos, o encerramento e os
+**18,75% da campanha validada no Linux (3 de 16 colossos).** Valus foi
+validado no nativo `cb15`, Basaran no `0281` e Hydrus na sequência de testes
+concluída com o runtime da v0.9.3. Quadratus, Gaius e Malus têm evidências
+parciais. Os outros dez colossos, o encerramento e os
 créditos aguardam validação.
 
 Basaran foi concluído em 10 de novembro de 2026. O pacote publicado inclui a
@@ -39,7 +40,8 @@ launcher. [Correção gráfica](FIDELITY-2026-11-07-ALPHA-DEPTH.md) ·
 
 A captura de água foi [verificada em 240 quadros de Hydrus](FIDELITY-2026-11-05-COPY-LAYERS.md).
 A revanche de Hydrus foi concluída no runtime anterior. O teste de retorno à
-margem foi repetido na v0.9.1. A aprovação visual integral continua pendente.
+margem foi repetido na v0.9.1, e a sequência após o choque, o sigilo e a
+câmera foram verificados na v0.9.3.
 
 | # | Colosso | Situação | Release |
 | --- | --- | --- | --- |
@@ -49,7 +51,7 @@ margem foi repetido na v0.9.1. A aprovação visual integral continua pendente.
 | 4 | Phaedra | Pendente | — |
 | 5 | Avion | Pendente | — |
 | 6 | Barba | Pendente | — |
-| 7 | Hydrus | Revanche concluída na v0.3.3. Golpe final, derrota e retorno à margem repetidos na v0.9.1. Brilho do sigilo e revisão visual integral pendentes. | [Teste na v0.9.1](#hydrus-na-v091-linux) · [v0.3.3, correção de materiais](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.3) |
+| 7 | Hydrus | Validado pelas etapas de acesso e revanche na v0.3.3 e pelo teste de choque, terceiro espinho, sigilo, câmera, derrota, margem e recarga na v0.9.3. | [v0.9.4](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/v0.9.4) · [Teste na v0.9.3](#hydrus-na-v093-linux) |
 | 8 | Kuromori | Pendente | — |
 | 9 | Basaran | Validado por etapas no mesmo nativo 0281: tornozelos, tombamento, escalada, sigilo com espada, carga, sete estocadas, derrota/sombras, salvamento normal e recarga em processo novo | [v0.3.4](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.4) |
 | 10 | Dirge | Pendente | — |
@@ -89,6 +91,27 @@ descargas com perdas de 15 pontos de vida, desativou o terceiro espinho e
 alcançou a cabeça. A captura antes da primeira estocada mostrou o brilho
 ciano do sigilo. O dano acumulado nesse ponto ainda era zero e a intensidade
 do efeito estava em 1.
+
+O estado rápido gravado após o choque e a desativação do espinho foi recarregado
+na mesma compilação. Com entradas normais de teclado, a luta foi concluída
+nesse ponto. A estocada final tinha carga de 41,33% e levou a vida do colosso
+de 2,54 a zero. A cena de derrota terminou por completo, e os três emissores
+de descarga foram encerrados.
+
+Wander alcançou a margem e fez passos com contato de terreno confirmado. As
+capturas com a câmera girada e após recarregar pelo F8 continuaram sem os
+brilhos elétricos. A recarga manteve oito derrotados no cartão de QA e o
+registro de Basaran como ativo, como esperado após a revanche.
+
+A revisão incluiu os ciclos de submersão durante a escalada e um trecho de
+nado livre com movimento de câmera durante o mergulho e o retorno à superfície.
+O breve quadro preto da gravação de combate coincidiu com o F9, que troca
+temporariamente o renderizador para a comparação de diagnóstico. A captura
+de nado livre foi feita sem F9 e a piscada durante o nado não foi reproduzida.
+
+A v0.9.4 publica o resultado da validação com o mesmo código do runtime.
+As verificações de gameplay documentadas aqui são da edição americana no
+Linux com OpenGL a 1×.
 
 ## Basaran — 10 de novembro de 2026
 

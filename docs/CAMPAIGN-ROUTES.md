@@ -95,12 +95,12 @@ confirme nele a resposta dos controles, a colisão e os efeitos em movimento.
 | 15. Argus | Fortaleza no deserto → arena. Atrair o pisão numa placa basculante, escalar usando os escombros e alcançar a ponte. Após a destruição da ponte, saltar na cabeça. Ferir o braço para derrubar a arma e alcançar o sigilo na palma. | Guardar antes do pisão e depois da quebra da ponte. Conferir a colisão da placa e da ponte, a queda da arma e a palma no chão. [Placas e subida, 6:40](https://www.youtube.com/watch?v=ptG0SbkRyiQ&t=400s) · [Ponte, 8:40](https://www.youtube.com/watch?v=ptG0SbkRyiQ&t=520s) · [Palma, 11:40](https://www.youtube.com/watch?v=ptG0SbkRyiQ&t=700s) |
 | 16. Malus | Abrir o portão ao sul com a espada, atravessar a ponte com Agro e subir ao acesso da arena. Avançar de abrigo em abrigo pelos túneis. Escalar do dorso à mão, passar pelo antebraço e pela outra mão, usar o arco no ombro e subir à cabeça. | Retomar no fim do segundo túnel se houver estado compatível; preservar outro na base e um na mão. Rever projéteis, colisão, agarramento e sigilo. Validar também o trecho jogável do final, as cenas e os créditos. [Abrigos, 10:20](https://www.youtube.com/watch?v=F0YgCa2SCn0&t=620s) · [Escalada, 15:20](https://www.youtube.com/watch?v=F0YgCa2SCn0&t=920s) · [Final, 21:20](https://www.youtube.com/watch?v=F0YgCa2SCn0&t=1280s) |
 
-## Hydrus — o que ainda falta
+## Hydrus — rota para repetir a validação
 
-A revanche foi concluída no runtime anterior. O teste na v0.9.1 confirmou o
-golpe final, a cena de derrota e o retorno à margem. Ele começou com os três
-espinhos já atingidos. O choque sofrido por Wander e a desativação do terceiro
-espinho foram demonstrados em outras tentativas. [Evidência da v0.9.1](CAMPAIGN-VALIDATION.md#hydrus-na-v091-linux)
+A revanche foi concluída no runtime anterior. A v0.9.3 confirmou a sequência
+do choque à margem, com uma recarga do checkpoint após o terceiro espinho,
+e registrou o sigilo intacto e a câmera durante o mergulho.
+[Evidência da v0.9.3](CAMPAIGN-VALIDATION.md#hydrus-na-v093-linux)
 
 1. No perfil privado, partir de Dried Marsh e seguir até a ponte quebrada e
    a descida em espiral. Na revanche, iniciar pela oração nos restos. Gravar
