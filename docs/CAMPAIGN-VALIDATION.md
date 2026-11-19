@@ -27,11 +27,10 @@ nos restos do colosso, sem alterar flags ou memória do jogo.
 
 ## Progresso
 
-**18,75% da campanha validada no Linux (3 de 16 colossos).** Valus foi
-validado no nativo `cb15`, Basaran no `0281` e Hydrus na sequência de testes
-concluída com o runtime da v0.9.3. Quadratus, Gaius e Malus têm evidências
-parciais. Os outros dez colossos, o encerramento e os
-créditos aguardam validação.
+**25% da campanha validada no Linux (4 de 16 colossos).** Valus foi
+validado no nativo `cb15`, Basaran no `0281`, Hydrus com o runtime da v0.9.3
+e Quadratus com o runtime da v0.9.4. Gaius e Malus têm testes parciais.
+Os outros dez colossos, o encerramento e os créditos aguardam validação.
 
 Basaran foi concluído em 10 de novembro de 2026. O pacote publicado inclui a
 correção de transparência e profundidade e a navegação por controle no
@@ -46,7 +45,7 @@ câmera foram verificados na v0.9.3.
 | # | Colosso | Situação | Release |
 | --- | --- | --- | --- |
 | 1 | Valus | Validado no nativo cb15: acesso, luta, efeitos da derrota, salvamento e recarga | [v0.2.7](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.2.7) |
-| 2 | Quadratus | Acesso, flecha na sola, duas plataformas, HUD e sigilo da cauda verificados na v0.9.4. Sigilo da cabeça, derrota e recarga pendentes. | [Teste na v0.9.4](#quadratus-na-v094-linux) |
+| 2 | Quadratus | **100% validado.** Acesso pela praia, escalada, HUD, os dois sigilos, efeitos da derrota e recarga. | [Linux v0.9.5](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/v0.9.5) · [Teste na v0.9.4](#quadratus-na-v094-linux) |
 | 3 | Gaius | Subida, piso e descida da rampa testados; luta e novo replay visual da água pendentes | [v0.3.1, colisão da rampa](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.1) |
 | 4 | Phaedra | Pendente | — |
 | 5 | Avion | Pendente | — |
@@ -75,9 +74,19 @@ apoio. O sigilo da cauda brilhou antes do primeiro golpe. O HUD mostrou a carga
 das estocadas e a barra de vida caiu a cada golpe registrado até esgotar o
 ponto fraco da cauda.
 
-Wander atravessou o dorso e chegou ao alto da cabeça. O efeito do sigilo ficou
-ativo na telemetria. A confirmação visual do brilho, o dano no sigilo da
-cabeça, a derrota e a recarga do cartão seguem pendentes.
+Wander atravessou o dorso e chegou ao alto da cabeça. A rotação da câmera
+mostrou o sigilo da testa brilhando em ciano antes do dano. Soltar a
+agarrada por um instante e agarrar novamente mais abaixo deu acesso ao
+sigilo. As estocadas carregadas atingiram a testa até zerar a vida de
+Quadratus. A cena mostrou o corpo escurecendo e as sombras alcançando
+Wander. O teste usou checkpoints de QA e controles normais, com as opções
+de assistência desligadas.
+
+O jogo confirmou o salvamento em um terceiro registro próprio de QA,
+`2 Defeated / 1:28:08`. Na sessão seguinte, o menu original recarregou
+o registro e voltou ao templo. A leitura do jogo confirmou Quadratus
+derrotado e Gaius como próximo colosso. A v0.9.5 publica os resultados
+com o mesmo runtime usado no teste.
 
 ## Hydrus na v0.9.1 Linux
 

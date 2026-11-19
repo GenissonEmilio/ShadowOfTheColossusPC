@@ -15,10 +15,10 @@ continua em andamento na base Celosia.
 
 ## Validação da campanha
 
-**18,75% validados no Linux · 3 de 16 colossos.** Valus, Hydrus e Basaran estão
-**100% validados** nas versões indicadas abaixo. Há 3 colossos com testes
-parciais e 10 aguardando validação. O encerramento e os créditos também
-aguardam validação.
+**25% validados no Linux · 4 de 16 colossos.** Valus, Quadratus, Hydrus e
+Basaran estão **100% validados** nas versões indicadas abaixo. Há 2 colossos
+com testes parciais e 10 aguardando validação. O encerramento e os créditos
+também aguardam validação.
 
 Cada colosso conta quando o teste cobre o acesso, a luta, o HUD, os pontos
 fracos, os efeitos da derrota e a recarga do save. Derrotas registradas em
@@ -28,7 +28,7 @@ versões Linux testadas.
 | # | Colosso | Validação | Evidência ou próximo teste |
 | --- | --- | --- | --- |
 | 1 | Valus | **100% validado** | Luta, derrota, salvamento e recarga verificados. [Linux v0.2.7](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.2.7) |
-| 2 | Quadratus | Parcial | Acesso, flecha na sola dianteira, escalada, HUD e sigilo da cauda verificados. Sigilo da cabeça, derrota e recarga pendentes. [Registro do teste](docs/CAMPAIGN-VALIDATION.md#quadratus-na-v094-linux) |
+| 2 | Quadratus | **100% validado** | Acesso, escalada, HUD, os dois sigilos, derrota, salvamento e recarga verificados. [Linux v0.9.5](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/v0.9.5) · [Registro do teste](docs/CAMPAIGN-VALIDATION.md#quadratus-na-v094-linux) |
 | 3 | Gaius | Parcial | Subida, piso e descida da rampa testados. Falta validar a luta. [Linux v0.3.1](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.1) |
 | 4 | Phaedra | Pendente | — |
 | 5 | Avion | Pendente | — |
