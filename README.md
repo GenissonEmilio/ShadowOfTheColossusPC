@@ -15,8 +15,8 @@ continua em andamento na base Celosia.
 
 ## Validação da campanha
 
-**12,5% validados no Linux · 2 de 16 colossos.** Valus e Basaran estão
-**100% validados** nas versões indicadas abaixo. Há 4 colossos com testes
+**18,75% validados no Linux · 3 de 16 colossos.** Valus, Hydrus e Basaran estão
+**100% validados** nas versões indicadas abaixo. Há 3 colossos com testes
 parciais e 10 aguardando validação. O encerramento e os créditos também
 aguardam validação.
 
@@ -33,7 +33,7 @@ versões Linux testadas.
 | 4 | Phaedra | Pendente | — |
 | 5 | Avion | Pendente | — |
 | 6 | Barba | Pendente | — |
-| 7 | Hydrus | Parcial | Revanche concluída. O brilho do sigilo e a revisão visual integral seguem pendentes. |
+| 7 | Hydrus | **100% validado** | Revanche, sigilo antes do dano, câmera submersa, derrota e recarga na margem verificados. [Linux v0.9.4](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/v0.9.4) · [Registro do teste](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/blob/codex/hydrus-validation-v094/docs/CAMPAIGN-VALIDATION.md#hydrus-na-v093-linux) |
 | 8 | Kuromori | Pendente | — |
 | 9 | Basaran | **100% validado** | Luta, sigilo, efeitos da derrota, salvamento e recarga verificados. [Linux v0.3.4](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.4) |
 | 10 | Dirge | Pendente | — |
