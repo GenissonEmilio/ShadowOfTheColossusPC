@@ -18,6 +18,8 @@ nos restos do colosso, sem alterar flags ou memória do jogo.
 
 ## Critério de conclusão por colosso
 
+[Rotas, checkpoints e pontos de teste da campanha](CAMPAIGN-ROUTES.md)
+
 1. Percorrer o acesso e jogar a luta com comandos normais. Observar terreno, plataformas, pelo/agarrar, mudanças de câmera e possíveis quedas pela geometria.
 2. Conferir HUD, carga da estocada, pontos fracos, dano, partículas, efeitos específicos e sequência da derrota. Guardar evidências de tela e do renderizador quando houver divergência.
 3. Correlacionar vídeo/capturas com as flags SCUS observadas por leitura; guardar o checkpoint de QA e verificar persistência ao carregar.
@@ -78,6 +80,15 @@ Em tentativas separadas na v0.9.1, a descarga elétrica chegou a tirar 15 pontos
 de vida de Wander e uma estocada desativou o terceiro espinho. Ficam pendentes
 uma sequência contínua do choque à margem, o brilho do sigilo antes do dano e
 a revisão visual integral da luta.
+
+## Hydrus na v0.9.3 Linux
+
+A compilação do pacote estável da v0.9.3 retomou uma cópia do checkpoint
+privado com dois espinhos desativados. Na mesma tentativa, Wander recebeu
+descargas com perdas de 15 pontos de vida, desativou o terceiro espinho e
+alcançou a cabeça. A captura antes da primeira estocada mostrou o brilho
+ciano do sigilo. O dano acumulado nesse ponto ainda era zero e a intensidade
+do efeito estava em 1.
 
 ## Basaran — 10 de novembro de 2026
 
