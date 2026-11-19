@@ -28,7 +28,7 @@ versões Linux testadas.
 | # | Colosso | Validação | Evidência ou próximo teste |
 | --- | --- | --- | --- |
 | 1 | Valus | **100% validado** | Luta, derrota, salvamento e recarga verificados. [Linux v0.2.7](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.2.7) |
-| 2 | Quadratus | Parcial | Acesso investigado. Falta concluir e revisar a luta. |
+| 2 | Quadratus | Parcial | Acesso, flecha na sola dianteira, escalada, HUD e sigilo da cauda verificados. Sigilo da cabeça, derrota e recarga pendentes. [Registro do teste](docs/CAMPAIGN-VALIDATION.md#quadratus-na-v094-linux) |
 | 3 | Gaius | Parcial | Subida, piso e descida da rampa testados. Falta validar a luta. [Linux v0.3.1](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.1) |
 | 4 | Phaedra | Pendente | — |
 | 5 | Avion | Pendente | — |

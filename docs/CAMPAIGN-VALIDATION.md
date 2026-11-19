@@ -46,7 +46,7 @@ câmera foram verificados na v0.9.3.
 | # | Colosso | Situação | Release |
 | --- | --- | --- | --- |
 | 1 | Valus | Validado no nativo cb15: acesso, luta, efeitos da derrota, salvamento e recarga | [v0.2.7](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.2.7) |
-| 2 | Quadratus | Acesso investigado na v0.2.8; derrota ainda pendente | — |
+| 2 | Quadratus | Acesso, flecha na sola, duas plataformas, HUD e sigilo da cauda verificados na v0.9.4. Sigilo da cabeça, derrota e recarga pendentes. | [Teste na v0.9.4](#quadratus-na-v094-linux) |
 | 3 | Gaius | Subida, piso e descida da rampa testados; luta e novo replay visual da água pendentes | [v0.3.1, colisão da rampa](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.1) |
 | 4 | Phaedra | Pendente | — |
 | 5 | Avion | Pendente | — |
@@ -61,6 +61,23 @@ câmera foram verificados na v0.9.3.
 | 14 | Cenobia | Pendente | — |
 | 15 | Argus | Pendente | — |
 | 16 | Malus | Chegou ao fim do segundo túnel do acesso com uma cópia de teste de um cartão importado. A luta e o encerramento aguardam validação. | — |
+
+## Quadratus na v0.9.4 Linux
+
+O teste da edição americana SCUS-97472, no modo Normal, começou por um cartão
+privado de QA com Valus derrotado. Wander atravessou a ponte norte, desceu pela
+trilha até a praia e acionou a cena da caverna. A flecha atingiu a sola
+dianteira esquerda quando Quadratus levantou a pata, e ele caiu sobre o joelho.
+
+A subida pelo lado externo da perna levou à placa do ombro e à plataforma
+superior. A estamina baixou na escalada e se recuperou durante as pausas com
+apoio. O sigilo da cauda brilhou antes do primeiro golpe. O HUD mostrou a carga
+das estocadas e a barra de vida caiu a cada golpe registrado até esgotar o
+ponto fraco da cauda.
+
+Wander atravessou o dorso e chegou ao alto da cabeça. O efeito do sigilo ficou
+ativo na telemetria. A confirmação visual do brilho, o dano no sigilo da
+cabeça, a derrota e a recarga do cartão seguem pendentes.
 
 ## Hydrus na v0.9.1 Linux
 
