@@ -3155,6 +3155,18 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             m_rec.palettes.insert(m_rec.palettes.end(), qwords, qwords + count * 4u);
             return static_cast<uint32_t>(at / 4u) + 1u;
         }
+        void rewriteFramePalette(uint32_t handle, const float *qwords, uint32_t count) override
+        {
+            if (!handle || !qwords || !count || count > native_renderer::kSkinPaletteQwords)
+                return;
+            // Check qword offsets before multiplying, including on 32-bit hosts.
+            // Only the game thread's recording buffer is mutable here; the
+            // render thread owns a separate frame after submission.
+            const size_t at = static_cast<size_t>(handle - 1u);
+            const size_t available = m_rec.palettes.size() / 4u;
+            if (at <= available && count <= available - at)
+                std::memcpy(m_rec.palettes.data() + at * 4u, qwords, static_cast<size_t>(count) * 16u);
+        }
         bool hasTexture(uint64_t id) override { return m_knownTextures.count(id) != 0; }
         void uploadTexture(uint64_t key, uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t levels) override
         {

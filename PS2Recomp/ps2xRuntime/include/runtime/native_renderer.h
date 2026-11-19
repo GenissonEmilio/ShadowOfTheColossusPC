@@ -180,6 +180,12 @@ namespace native_renderer
     bool gpuSkinning();
     void uploadSkinnedMesh(uint64_t id, const SkinVertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount);
     uint32_t framePalette(const float *qwords, uint32_t count); // 0: not kept
+    // Replace matrices in a palette allocated by framePalette in the current
+    // recording frame, on the game thread before that frame is submitted.
+    // count is in qwords and must fit the original allocation (at most
+    // kSkinPaletteQwords). Invalid/null/empty ranges and unsupported backends
+    // are ignored. Handles must not be retained across frames or flushes.
+    void rewriteFramePalette(uint32_t handle, const float *qwords, uint32_t count);
 
     bool hasTexture(uint64_t id);
     // RGBA8 (alpha 0x80 = opaque, as the PS2's), kept on the GPU under `id`.

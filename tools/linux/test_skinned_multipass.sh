@@ -17,6 +17,7 @@ wraps=(
   _ZN15native_renderer16frameMeshIndicesEjRj
   _ZN15native_renderer15commitFrameMeshEmjj
   _ZN15native_renderer12framePaletteEPKfj
+  _ZN15native_renderer19rewriteFramePaletteEjPKfj
 )
 for symbol in "${wraps[@]}"; do extra+=("-Wl,--wrap=$symbol"); done
 g++ -std=c++20 -O1 -msse4.1 -fno-strict-aliasing -ffunction-sections -fdata-sections \

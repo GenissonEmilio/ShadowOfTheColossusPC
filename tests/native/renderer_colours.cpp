@@ -47,5 +47,41 @@ int main() {
     frame("textured modulation unchanged",true,128,64,32,128,{64,16,4});
     frame("untextured full range",false,255,128,64,128,{255,128,64});
     frame("untextured alpha unchanged",false,128,64,32,64,{64,32,16},true);
-    std::puts("PASS: four GS colour and alpha cases");std::fflush(nullptr);std::_Exit(0);
+
+    check(native_renderer::gpuSkinning(), "OpenGL skinning program is available");
+    native_renderer::SkinVertex triangle[3]{};
+    triangle[0].x = -0.18f; triangle[0].y = -0.23f;
+    triangle[1].x = 0.18f; triangle[1].y = -0.23f;
+    triangle[2].y = 0.23f;
+    for (auto &vertex : triangle) {
+        vertex.r = 240;
+        vertex.a = 128;
+        vertex.weight[0] = 1;
+    }
+    const uint32_t indices[] = {0, 1, 2};
+    native_renderer::uploadSkinnedMesh(2, triangle, 3, indices, 3);
+    native_renderer::beginFrame();
+    float movingBone[16];
+    std::copy(matrix, matrix + 16, movingBone);
+    movingBone[12] = -0.5f;
+    native_renderer::DrawState state;
+    state.blend = native_renderer::Blend::Opaque;
+    state.skinPaletteCount = 4;
+    state.skinPalette = native_renderer::framePalette(movingBone, 4);
+    native_renderer::draw(2, matrix, state);
+    const auto movingHandle = state.skinPalette;
+    state.skinPalette = native_renderer::framePalette(matrix, 4);
+    native_renderer::draw(2, matrix, state);
+
+    movingBone[12] = 0.5f;
+    native_renderer::rewriteFramePalette(movingHandle, movingBone, 4);
+    native_renderer::endFrame(64, 64);
+    std::vector<uint8_t> rgba;
+    uint32_t w = 0, h = 0;
+    check(native_renderer::latestFrame(rgba, w, h) && w == 64 && h == 64,
+          "updated skin palette frame readback");
+    const auto red = [&](uint32_t x) { return rgba[(32u * w + x) * 4u]; };
+    check(red(16) == 0 && red(48) >= 239, "GPU renders the pose written after draw submission");
+    check(red(32) >= 239, "rewriting the palette leaves the next draw's palette intact");
+    std::puts("PASS: GS colour, alpha and GPU pose cases");std::fflush(nullptr);std::_Exit(0);
 }

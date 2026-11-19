@@ -87,6 +87,7 @@ namespace {
         std::fill(ram.begin(),ram.end(),0);
         meshes.clear();draws.clear();frameVertices.clear();frameIndices.clear();palette.clear();useGpu=gpu;
         using namespace sotc_native;
+        clearPendingSkin();
         g_ram=ram.data();g_frame=0;ps2_stats::vif1Chains.store(0);
         g_cameraContext=camera;g_layers={2};g_modelDisp=originalModel;g_skinnedDraws=0;
         g_skinnedPackets.clear();g_skinnedIds={};g_litPackets={};g_packetMemo={};g_skinnedPacketBytes=0;
@@ -162,6 +163,48 @@ namespace {
             }
         }
     }
+    void verifySharedPaletteAtKick(bool fast, bool gpu) {
+        setup(true, true, fast, gpu);
+        const auto drawPart = [](uint32_t address) {
+            R5900Context ctx{};
+            SET_GPR_U32(&ctx, 4, address);
+            SET_GPR_U32(&ctx, 5, matrix);
+            sotc_native::modelDispHook(ram.data(), &ctx, nullptr);
+        };
+        const auto firstX = [](const CapturedDraw &draw) {
+            if (draw.state.skinPalette) {
+                const auto from = (draw.state.skinPalette - 1u) * 4u;
+                return 2.0f + palette.at(from + 12u);
+            }
+            return meshes.at(draw.mesh).vertices.at(0).x;
+        };
+
+        drawPart(instance);
+        constexpr uint32_t secondInstance = instance + 0x400u;
+        put(secondInstance, object);
+        put(secondInstance + 12, own);
+        put(ret + 12 + 12 * 4, 20.0f);
+        drawPart(secondInstance);
+        check(draws.size() == 4, "two parts each emit both texture passes");
+        if (draws.size() != 4) return;
+        check(near(firstX(draws[0]), 12) && near(firstX(draws[2]), 22),
+              "parts initially read different writes to the shared palette");
+
+        // The guest completes its pose before the VIF1 DMA reads the chain.
+        put(ret + 12 + 12 * 4, 30.0f);
+        sotc_native::refreshSkinnedDrawsAtKick();
+        for (size_t i = 0; i < draws.size(); ++i) {
+            check(near(firstX(draws[i]), 32), "each texture pass uses the final shared pose");
+            const float u = (i % 2) ? 0.5f : 0.0f;
+            const auto &mesh = meshes.at(draws[i].mesh);
+            check(near(gpu ? mesh.skin[0].u : mesh.vertices[0].u, u),
+                  "pose refresh preserves first and second texture coordinates");
+        }
+        put(ret + 12 + 12 * 4, 40.0f);
+        sotc_native::refreshSkinnedDrawsAtKick();
+        check(near(firstX(draws[0]), 32), "a later kick cannot rewrite completed draws");
+    }
+
     void verifyAlphaMetadata() {
         setup(true,true,true,true);
         native_renderer::DrawState state;
@@ -235,7 +278,17 @@ extern "C" uint32_t *__wrap__ZN15native_renderer16frameMeshIndicesEjRj(uint32_t 
 extern "C" void __wrap__ZN15native_renderer15commitFrameMeshEmjj(uint64_t id,uint32_t n,uint32_t ni){
     meshes[id].vertices.assign(frameVertices.begin(),frameVertices.begin()+n);meshes[id].indices.assign(frameIndices.begin(),frameIndices.begin()+ni);
 }
-extern "C" uint32_t __wrap__ZN15native_renderer12framePaletteEPKfj(const float *v,uint32_t n){palette.assign(v,v+n*4);return 1;}
+extern "C" uint32_t __wrap__ZN15native_renderer12framePaletteEPKfj(const float *v,uint32_t n){
+    const auto handle = static_cast<uint32_t>(palette.size() / 4u) + 1u;
+    palette.insert(palette.end(), v, v + n * 4u);
+    return handle;
+}
+extern "C" void __wrap__ZN15native_renderer19rewriteFramePaletteEjPKfj(uint32_t handle, const float *v, uint32_t n){
+    const size_t from = (handle - 1u) * 4u;
+    check(handle && from + n * 4u <= palette.size(), "rewrite fits the submitted palette");
+    if (handle && from + n * 4u <= palette.size())
+        std::copy(v, v + n * 4u, palette.begin() + from);
+}
 
 int main(){
     verifyCase("GPU two textures",true,true,true,true);
@@ -249,6 +302,9 @@ int main(){
     verifyCase("GPU dual opacity",true,true,true,true,0.5f);
     verifyCase("CPU dual opacity",true,true,true,false,0.75f);
     verifyCase("single opacity",true,false,true,true,0.25f);
+    verifySharedPaletteAtKick(true, true);
+    verifySharedPaletteAtKick(true, false);
+    verifySharedPaletteAtKick(false, false);
     verifyAlphaMetadata();
     std::printf("%s: %u checks; %u failures (synthetic skinned/rigid materials, no GPU)\n",failures?"FAIL":"PASS",checks,failures);
     return failures?1:0;

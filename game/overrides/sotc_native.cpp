@@ -1512,6 +1512,102 @@ namespace sotc_native
     native_renderer::IdSet g_skinnedIds;                              // g_skinnedPackets' keys (most packets are not: no map lookup for them)
     uint64_t g_skinnedDraws = 0;                                       // this frame's skinned meshes
 
+    // Several parts of one character refer to a shared DMA chain. The
+    // game may rewrite the palette after recording the first part. Match
+    // what the PS2 reads at the VIF1 kick (Celosia bb0bfd840a).
+    struct SkinDraw
+    {
+        const SkinnedPacket *packet;
+        uint64_t mesh;
+        uint32_t handle;
+        bool secondTexture;
+        bool fast;
+    };
+    struct SkinPaletteAtDraw
+    {
+        uint32_t chain, lo, hi;
+        size_t firstDraw, firstFloat;
+    };
+    std::vector<SkinDraw> g_pendingSkinDraws;
+    std::vector<SkinPaletteAtDraw> g_pendingSkinPalettes;
+    std::vector<float> g_skinPaletteSamples;
+
+    void clearPendingSkin()
+    {
+        g_pendingSkinDraws.clear();
+        g_pendingSkinPalettes.clear();
+        g_skinPaletteSamples.clear();
+    }
+
+    void poseCpuMesh(uint64_t mesh, const SkinnedPacket &packet, const float *palette,
+                     bool secondTexture, bool fast)
+    {
+        if (fast)
+        {
+            if (auto *out = native_renderer::frameMesh(std::max<uint32_t>(packet.maxVertices, static_cast<uint32_t>(packet.bind.size()))))
+            {
+                const PosedMesh written = poseSkinned(packet, palette, out, secondTexture);
+                native_renderer::commitFrameMesh(mesh, written.vertices, written.indices);
+            }
+            return;
+        }
+        const auto place = [palette](const BatchVertex &v, native_renderer::Vertex &o)
+        {
+            o.x = o.y = o.z = o.nx = o.ny = o.nz = 0.0f;
+            for (uint32_t b = 0; b < v.bones; ++b)
+            {
+                const float *m = palette + (v.bone[b] * 4u % 1024u) * 4u;
+                const float w = v.weight[b];
+                o.x += w * (m[0] * v.x + m[4] * v.y + m[8] * v.z + m[12]);
+                o.y += w * (m[1] * v.x + m[5] * v.y + m[9] * v.z + m[13]);
+                o.z += w * (m[2] * v.x + m[6] * v.y + m[10] * v.z + m[14]);
+                o.nx += w * (m[0] * v.nx + m[4] * v.ny + m[8] * v.nz);
+                o.ny += w * (m[1] * v.nx + m[5] * v.ny + m[9] * v.nz);
+                o.nz += w * (m[2] * v.nx + m[6] * v.ny + m[10] * v.nz);
+            }
+        };
+        static std::vector<native_renderer::Vertex> vertices;
+        vertices.clear();
+        triangulate(packet.strips, place, vertices, secondTexture);
+        native_renderer::uploadMesh(mesh, vertices.data(), static_cast<uint32_t>(vertices.size()), true);
+    }
+
+    void refreshSkinnedDrawsAtKick()
+    {
+        static VuPalette finalPalette;
+        static const bool log = std::getenv("SOTC_SKIN_KICK_LOG") != nullptr;
+        static unsigned logged = 0;
+        for (size_t i = 0; i < g_pendingSkinPalettes.size(); ++i)
+        {
+            const auto &sample = g_pendingSkinPalettes[i];
+            if (!readChainPalette(sample.chain, finalPalette) || finalPalette.hi <= finalPalette.lo)
+                continue;
+            if (sample.lo == finalPalette.lo && sample.hi == finalPalette.hi &&
+                std::memcmp(g_skinPaletteSamples.data() + sample.firstFloat, finalPalette.data() + sample.lo * 4u,
+                            (sample.hi - sample.lo) * 4u * sizeof(float)) == 0)
+                continue;
+            const size_t end = i + 1 < g_pendingSkinPalettes.size()
+                ? g_pendingSkinPalettes[i + 1].firstDraw : g_pendingSkinDraws.size();
+            for (size_t d = sample.firstDraw; d < end; ++d)
+            {
+                const SkinDraw &draw = g_pendingSkinDraws[d];
+                const SkinnedPacket &packet = *draw.packet;
+                if (draw.handle)
+                    native_renderer::rewriteFramePalette(draw.handle, finalPalette.data() + packet.lo * 4u,
+                                                        packet.hi - packet.lo);
+                else
+                    poseCpuMesh(draw.mesh, packet, finalPalette.data(), draw.secondTexture, draw.fast);
+            }
+            if (log && logged < 30)
+            {
+                ++logged;
+                std::fprintf(stderr, "[skin-kick] frame %llu chain %08x: updated %zu draws\n",
+                             static_cast<unsigned long long>(g_frame), sample.chain, end - sample.firstDraw);
+            }
+        }
+        clearPendingSkin();
+    }
+
     void flush2D();
 
     // zFog (0x10ac0a8, layer 4): after the opaque world (layers 2-3) it
@@ -1842,6 +1938,7 @@ namespace sotc_native
         if (frame != g_frame)
         {
             endFrame();
+            clearPendingSkin();
             frameLog();
             native_renderer::beginFrame();
             g_frame = frame;
@@ -3908,6 +4005,21 @@ namespace sotc_native
         const bool hasPalette = readPalette(instance, palette);
         const bool fast = native_renderer::tuning().fastHooks;
         uint32_t paletteHandle = 0, paletteLo = 0, paletteHi = 0; // this instance's palette as last sent
+        bool sampledPalette = false;
+        const auto rememberSkinDraw = [&](const SkinDraw &draw)
+        {
+            if (palette.hi <= palette.lo)
+                return;
+            if (!sampledPalette)
+            {
+                g_pendingSkinPalettes.push_back({word(instance + 0xCu), palette.lo, palette.hi,
+                                                g_pendingSkinDraws.size(), g_skinPaletteSamples.size()});
+                g_skinPaletteSamples.insert(g_skinPaletteSamples.end(), palette.data() + palette.lo * 4u,
+                                            palette.data() + palette.hi * 4u);
+                sampledPalette = true;
+            }
+            g_pendingSkinDraws.push_back(draw);
+        };
         float projection[16];
         for (int i = 0; i < 16; ++i)
             projection[i] = real(g_cameraContext + 0x40u + i * 4u);
@@ -4000,6 +4112,8 @@ namespace sotc_native
                         paletteHandle = native_renderer::framePalette(palette.data() + packet.lo * 4u, packet.hi - packet.lo);
                         paletteLo = packet.lo;
                         paletteHi = packet.hi;
+                        if (paletteHandle)
+                            rememberSkinDraw({&packet, 0, paletteHandle, false, true});
                     }
                     if (!paletteHandle)
                         continue;
@@ -4007,54 +4121,18 @@ namespace sotc_native
                     skinPaletteCount = packet.hi - packet.lo;
                     transform = projection;
                 }
-                // Posed on the CPU (camera space), one mesh per draw this frame.
-                else if (fast)
-                {
-                    // Written straight into the frame's vertex buffer.
-                    mesh = (1ull << 63) | g_skinnedDraws++;
-                    if (native_renderer::Vertex *out = native_renderer::frameMesh(std::max<uint32_t>(packet.maxVertices, static_cast<uint32_t>(packet.bind.size()))))
-                    {
-                        const PosedMesh written = poseSkinned(packet, palette.data(), out);
-                        native_renderer::commitFrameMesh(mesh, written.vertices, written.indices);
-                    }
-                    if (twoPasses)
-                    {
-                        secondMesh = (1ull << 63) | g_skinnedDraws++;
-                        if (native_renderer::Vertex *out = native_renderer::frameMesh(std::max<uint32_t>(packet.maxVertices, static_cast<uint32_t>(packet.bind.size()))))
-                        {
-                            const PosedMesh written = poseSkinned(packet, palette.data(), out, true);
-                            native_renderer::commitFrameMesh(secondMesh, written.vertices, written.indices);
-                        }
-                    }
-                    transform = projection;
-                }
                 else
                 {
-                    const auto place = [](const BatchVertex &v, native_renderer::Vertex &o)
-                    {
-                        o.x = o.y = o.z = o.nx = o.ny = o.nz = 0.0f;
-                        for (uint32_t b = 0; b < v.bones; ++b)
-                        {
-                            const float *m = &palette[(v.bone[b] * 4u % 1024u) * 4u];
-                            const float w = v.weight[b];
-                            o.x += w * (m[0] * v.x + m[4] * v.y + m[8] * v.z + m[12]);
-                            o.y += w * (m[1] * v.x + m[5] * v.y + m[9] * v.z + m[13]);
-                            o.z += w * (m[2] * v.x + m[6] * v.y + m[10] * v.z + m[14]);
-                            o.nx += w * (m[0] * v.nx + m[4] * v.ny + m[8] * v.nz);
-                            o.ny += w * (m[1] * v.nx + m[5] * v.ny + m[9] * v.nz);
-                            o.nz += w * (m[2] * v.nx + m[6] * v.ny + m[10] * v.nz);
-                        }
-                    };
-                    vertices.clear();
-                    triangulate(packet.strips, place, vertices);
+                    // Posed on the CPU in camera space. Keep both passes tied
+                    // to the same pose when the palette is refreshed.
                     mesh = (1ull << 63) | g_skinnedDraws++;
-                    native_renderer::uploadMesh(mesh, vertices.data(), static_cast<uint32_t>(vertices.size()), true);
+                    poseCpuMesh(mesh, packet, palette.data(), false, fast);
+                    rememberSkinDraw({&packet, mesh, 0, false, fast});
                     if (twoPasses)
                     {
-                        vertices.clear();
-                        triangulate(packet.strips, place, vertices, true);
                         secondMesh = (1ull << 63) | g_skinnedDraws++;
-                        native_renderer::uploadMesh(secondMesh, vertices.data(), static_cast<uint32_t>(vertices.size()), true);
+                        poseCpuMesh(secondMesh, packet, palette.data(), true, fast);
+                        rememberSkinDraw({&packet, secondMesh, 0, true, fast});
                     }
                     transform = projection;
                 }
@@ -4383,6 +4461,7 @@ namespace sotc_native {
             if (!native_renderer::restoreState(s.gpu,error) || !restoreSotcSystemState(s.system,error)) return false;
             ++g_stateEpoch; for (auto &memo:g_textureMemo) memo={}; g_packetMemo={};
             sampleButtonPrompts();
+            clearPendingSkin();
             g_packetChangedInPlace=false; g_skinnedPackets.clear(); g_skinnedPacketBytes=0; g_litPackets={}; g_skinnedIds={};
             g_bossMask.id.store(0); g_bossMask.frame.store(~0ull); g_bossMask.hash=0; g_bossMask.slot=0; g_bossMask.rgba.clear();
             ps2_stats::vif1Chains.store(s.counter);
@@ -4463,5 +4542,6 @@ void installSotcNative(PS2Runtime &runtime)
         g_zFog = runtime.lookupFunction(kZFog);
         runtime.registerFunction(kZFog, zFogHook);
     }
+    ps2_stats::kickHook = refreshSkinnedDrawsAtKick;
     std::cerr << "[sotc:native] models drawn by the native renderer" << std::endl;
 }

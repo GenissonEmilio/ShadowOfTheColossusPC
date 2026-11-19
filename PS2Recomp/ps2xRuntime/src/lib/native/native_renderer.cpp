@@ -1027,6 +1027,11 @@ namespace native_renderer
         }
     }
     uint32_t framePalette(const float *qwords, uint32_t count) { return backend() ? g_backend->framePalette(qwords, count) : 0u; }
+    void rewriteFramePalette(uint32_t handle, const float *qwords, uint32_t count)
+    {
+        if (handle && qwords && count && count <= kSkinPaletteQwords && backend())
+            g_backend->rewriteFramePalette(handle, qwords, count);
+    }
     void cancelFrameMesh()
     {
         if (backend())
