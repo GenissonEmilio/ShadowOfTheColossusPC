@@ -36,9 +36,8 @@ launcher. [Correção gráfica](FIDELITY-2026-11-07-ALPHA-DEPTH.md) ·
 [Linux v0.3.4](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.4)
 
 A captura de água foi [verificada em 240 quadros de Hydrus](FIDELITY-2026-11-05-COPY-LAYERS.md).
-A revanche de Hydrus foi concluída no runtime anterior, mas sua aprovação
-visual integral continua pendente. A correção compartilhada de transparência
-não transforma os demais colossos em batalhas validadas automaticamente.
+A revanche de Hydrus foi concluída no runtime anterior. O teste de retorno à
+margem foi repetido na v0.9.1. A aprovação visual integral continua pendente.
 
 | # | Colosso | Situação | Release |
 | --- | --- | --- | --- |
@@ -48,7 +47,7 @@ não transforma os demais colossos em batalhas validadas automaticamente.
 | 4 | Phaedra | Pendente | — |
 | 5 | Avion | Pendente | — |
 | 6 | Barba | Pendente | — |
-| 7 | Hydrus | Revanche concluída: três espinhos, cabeça, derrota, retorno e F5/F8; brilho inequívoco do sigilo e aprovação visual integral ainda pendentes | [v0.3.3, correção de materiais](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.3) |
+| 7 | Hydrus | Revanche concluída na v0.3.3. Golpe final, derrota e retorno à margem repetidos na v0.9.1. Brilho do sigilo e revisão visual integral pendentes. | [Teste na v0.9.1](#hydrus-na-v091-linux) · [v0.3.3, correção de materiais](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.3) |
 | 8 | Kuromori | Pendente | — |
 | 9 | Basaran | Validado por etapas no mesmo nativo 0281: tornozelos, tombamento, escalada, sigilo com espada, carga, sete estocadas, derrota/sombras, salvamento normal e recarga em processo novo | [v0.3.4](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.4) |
 | 10 | Dirge | Pendente | — |
@@ -58,6 +57,27 @@ não transforma os demais colossos em batalhas validadas automaticamente.
 | 14 | Cenobia | Pendente | — |
 | 15 | Argus | Pendente | — |
 | 16 | Malus | Chegou ao fim do segundo túnel do acesso com uma cópia de teste de um cartão importado. A luta e o encerramento aguardam validação. | — |
+
+## Hydrus na v0.9.1 Linux
+
+O teste de 19 de novembro usou o pacote publicado da v0.9.1 com OpenGL a 1×,
+cartão privado de QA e assistências desativadas. O trecho final partiu de
+uma cópia de um checkpoint de QA anterior, com os três espinhos já atingidos.
+A adaptação preservou o estado da simulação e atualizou a identificação do
+runtime na cópia. O F5 da v0.9.1 gravou um novo checkpoint antes da última
+estocada. [Pacote Linux v0.9.1](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/v0.9.1)
+
+Uma estocada carregada levou Hydrus de 15,97 de vida a zero. A cena de derrota
+terminou normalmente, seguida pelo retorno ao lago e pela chegada de Wander ao
+solo rochoso. O runtime encerrou as três descargas, e os efeitos elétricos de
+Hydrus registrados antes da transição estavam ausentes nas amostras após o
+retorno. Nas capturas da margem e durante a rotação da câmera, os brilhos
+brancos do relato não apareceram.
+
+Em tentativas separadas na v0.9.1, a descarga elétrica chegou a tirar 15 pontos
+de vida de Wander e uma estocada desativou o terceiro espinho. Ficam pendentes
+uma sequência contínua do choque à margem, o brilho do sigilo antes do dano e
+a revisão visual integral da luta.
 
 ## Basaran — 10 de novembro de 2026
 

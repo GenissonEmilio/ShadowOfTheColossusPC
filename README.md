@@ -33,7 +33,7 @@ versões Linux testadas.
 | 4 | Phaedra | Pendente | — |
 | 5 | Avion | Pendente | — |
 | 6 | Barba | Pendente | — |
-| 7 | Hydrus | Parcial | Revanche concluída. O brilho do sigilo e a revisão visual integral seguem pendentes. |
+| 7 | Hydrus | Parcial | Golpe final, derrota e retorno à margem verificados na v0.9.1. O brilho do sigilo e a revisão visual integral seguem pendentes. [Registro do teste](docs/CAMPAIGN-VALIDATION.md#hydrus-na-v091-linux) |
 | 8 | Kuromori | Pendente | — |
 | 9 | Basaran | **100% validado** | Luta, sigilo, efeitos da derrota, salvamento e recarga verificados. [Linux v0.3.4](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.4) |
 | 10 | Dirge | Pendente | — |
