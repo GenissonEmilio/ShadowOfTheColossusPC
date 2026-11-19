@@ -15,10 +15,10 @@ continua em andamento na base Celosia.
 
 ## Validação da campanha
 
-**18,75% validados no Linux · 3 de 16 colossos.** Valus, Hydrus e Basaran estão
-**100% validados** nas versões indicadas abaixo. Há 3 colossos com testes
-parciais e 10 aguardando validação. O encerramento e os créditos também
-aguardam validação.
+**25% validados no Linux · 4 de 16 colossos.** Valus, Quadratus, Hydrus e
+Basaran estão **100% validados** nas versões indicadas abaixo. Há 2 colossos
+com testes parciais e 10 aguardando validação. O encerramento e os créditos
+também aguardam validação.
 
 Cada colosso conta quando o teste cobre o acesso, a luta, o HUD, os pontos
 fracos, os efeitos da derrota e a recarga do save. Derrotas registradas em
@@ -28,12 +28,12 @@ versões Linux testadas.
 | # | Colosso | Validação | Evidência ou próximo teste |
 | --- | --- | --- | --- |
 | 1 | Valus | **100% validado** | Luta, derrota, salvamento e recarga verificados. [Linux v0.2.7](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.2.7) |
-| 2 | Quadratus | Parcial | Acesso investigado. Falta concluir e revisar a luta. |
+| 2 | Quadratus | **100% validado** | Acesso, escalada, HUD, os dois sigilos, derrota, salvamento e recarga verificados. [Linux v0.9.5](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/v0.9.5) · [Registro do teste](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/blob/5f11f5e3d4a0905d8f47c977f84bc98db7b31676/docs/CAMPAIGN-VALIDATION.md#quadratus-na-v094-linux) |
 | 3 | Gaius | Parcial | Subida, piso e descida da rampa testados. Falta validar a luta. [Linux v0.3.1](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.1) |
 | 4 | Phaedra | Pendente | — |
 | 5 | Avion | Pendente | — |
 | 6 | Barba | Pendente | — |
-| 7 | Hydrus | **100% validado** | Revanche, sigilo antes do dano, câmera submersa, derrota e recarga na margem verificados. [Linux v0.9.4](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/v0.9.4) · [Registro do teste](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/blob/codex/hydrus-validation-v094/docs/CAMPAIGN-VALIDATION.md#hydrus-na-v093-linux) |
+| 7 | Hydrus | **100% validado** | Revanche, sigilo antes do dano, câmera submersa, derrota e recarga na margem verificados. [Linux v0.9.4](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/v0.9.4) · [Registro do teste](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/blob/5f11f5e3d4a0905d8f47c977f84bc98db7b31676/docs/CAMPAIGN-VALIDATION.md#hydrus-na-v093-linux) |
 | 8 | Kuromori | Pendente | — |
 | 9 | Basaran | **100% validado** | Luta, sigilo, efeitos da derrota, salvamento e recarga verificados. [Linux v0.3.4](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.4) |
 | 10 | Dirge | Pendente | — |
@@ -44,7 +44,7 @@ versões Linux testadas.
 | 15 | Argus | Pendente | — |
 | 16 | Malus | Parcial | Acesso testado até depois do segundo túnel. Luta e encerramento pendentes. |
 
-[Critérios e histórico dos testes](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/blob/codex/alpha-depth/docs/CAMPAIGN-VALIDATION.md)
+[Critérios e histórico dos testes](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/blob/5f11f5e3d4a0905d8f47c977f84bc98db7b31676/docs/CAMPAIGN-VALIDATION.md)
 
 <img width="1172" height="807" alt="image" src="https://github.com/user-attachments/assets/d18109b2-af2e-4947-a7b2-74f1a5ad8160" />
 
