@@ -224,7 +224,12 @@ cmd_run() {
     mkdir -p "$LOGS" "$VU1_DUMPS"
     say "playing (log: logs/play.log)"
     cd "$ROOT"
-    PS2X_MEMCARD_DIR=$MEMCARDS PS2X_VU1_DUMP_MISSING=${PS2X_VU1_DUMP_MISSING:-$VU1_DUMPS} exec "$RUNNER" "$DISC/$BOOT" "$@" >"$LOGS/play.log" 2>&1
+    # On GNOME the screen does not blank and the PC does not suspend while
+    # the game runs (a controller's input does not count as activity).
+    local inhibit=()
+    command -v gnome-session-inhibit >/dev/null 2>&1 &&
+        inhibit=(gnome-session-inhibit --app-id shadow-of-the-colossus-pc --inhibit idle:suspend --reason "Playing Shadow of the Colossus")
+    PS2X_MEMCARD_DIR=$MEMCARDS PS2X_VU1_DUMP_MISSING=${PS2X_VU1_DUMP_MISSING:-$VU1_DUMPS} exec "${inhibit[@]}" "$RUNNER" "$DISC/$BOOT" "$@" >"$LOGS/play.log" 2>&1
 }
 
 # Scripted run that saves screenshots: ./celosia autotest [seconds] [interval]
