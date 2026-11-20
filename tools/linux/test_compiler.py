@@ -43,6 +43,17 @@ struct InstallFixture {
     platform = "Windows" if os.name == "nt" else "Linux"
     assert f"ShadowOfTheColossusPC {platform} runtime" in output, output
     print('Portable compiler and native runtime:',output.strip())
+    if os.name == "nt":
+        import ctypes
+
+        # Loading an EXE for inspection maps the image without running its entry point.
+        image = ctypes.WinDLL(str(result))
+        try:
+            for symbol in ("NvOptimusEnablement", "AmdPowerXpressRequestHighPerformance"):
+                assert ctypes.c_uint32.in_dll(image, symbol).value == 1, symbol
+        finally:
+            ctypes.windll.kernel32.FreeLibrary(ctypes.c_void_p(image._handle))
+        print("Windows high-performance GPU exports passed")
 
     # Exercise the same subprocess contract used by the installer, without a
     # display, audio device or game files. The registered EE function stamps RAM

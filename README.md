@@ -73,6 +73,12 @@ livres. Linux requer **glibc 2.39+** (Ubuntu 24.04+, Fedora 40+). O pacote
 Windows é portátil e requer Windows 10 versão 1903 ou posterior, ou Windows 11.
 Uma CPU moderna e 16 GB de RAM são recomendáveis para a recompilação.
 
+O jogo prefere a GPU dedicada em computadores híbridos. No Linux, o launcher
+consulta o `switcheroo-control` e aplica a seleção do driver ao iniciar o jogo.
+Em sistemas sem o serviço, há detecção alternativa para NVIDIA. Configurações
+explícitas do driver, como `DRI_PRIME=0`, têm prioridade. No Windows, o
+executável do jogo informa a preferência de alto desempenho ao driver.
+
 A seção **Sobre** cria um atalho no menu de aplicativos. Os dados ficam em
 `~/.local/share/ShadowOfTheColossusPC` (ou `XDG_DATA_HOME`) no Linux e em
 `%LOCALAPPDATA%\ShadowOfTheColossusPC` no Windows. Os saves são imagens

@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -6,6 +7,7 @@ import unittest
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/"tools/desktop"))
 from graphics import Graphics
+from gpu import nvidia_environment, prefer_discrete_gpu, switcheroo_environment
 from model import Library
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/"tools/linux"))
 from compiler_key import compiler_key
@@ -83,6 +85,70 @@ class GraphicsTests(unittest.TestCase):
         self.library.directory.mkdir()
         self.graphics.shader_config.write_text(json.dumps({"file":"../../outside.frag"}))
         self.assertIsNone(self.graphics.selected())
+
+    def test_launch_prefers_discrete_gpu_with_switcheroo(self):
+        gpus = [
+            {"Default": True, "Discrete": False, "Environment": ["DRI_PRIME", "0"]},
+            {"Default": False, "Discrete": True, "Environment": [
+                "__NV_PRIME_RENDER_OFFLOAD", "1", "__GLX_VENDOR_LIBRARY_NAME", "nvidia",
+                "VK_LOADER_DRIVERS_SELECT", "*nvidia*",
+            ]},
+        ]
+        disc = self.folder / "SCUS_974.72"
+        disc.touch()
+        self.library.state["disc"] = str(disc)
+        with patch.dict(os.environ, {}, clear=True), patch("gpu.switcheroo_gpus", return_value=gpus) as probe:
+            self.assertNotIn("__NV_PRIME_RENDER_OFFLOAD", self.library.game_environment())
+            probe.assert_not_called()
+            with patch.object(self.library, "prepare_game", return_value=self.folder / "game"), patch("model.subprocess.Popen") as launch:
+                self.library.launch()
+        environment = launch.call_args.kwargs["env"]
+        self.assertEqual(environment["__NV_PRIME_RENDER_OFFLOAD"], "1")
+        self.assertEqual(environment["__GLX_VENDOR_LIBRARY_NAME"], "nvidia")
+        self.assertNotIn("VK_LOADER_DRIVERS_SELECT", environment)
+        probe.assert_called_once()
+
+    def test_mesa_discrete_and_legacy_switcheroo_selection(self):
+        environment = ["DRI_PRIME", "pci-0000_03_00_0"]
+        for flags in ({"Discrete": True}, {}):
+            with self.subTest(flags=flags):
+                self.assertEqual(switcheroo_environment([
+                    {"Default": True, "Environment": ["DRI_PRIME", "0"]},
+                    {"Default": False, "Environment": environment, **flags},
+                ]), {"DRI_PRIME": "pci-0000_03_00_0"})
+
+    def test_keeps_default_discrete_or_integrated_only(self):
+        dedicated = {"Default": True, "Discrete": True, "Environment": ["DRI_PRIME", "pci-0000_03_00_0"]}
+        integrated = {"Default": False, "Discrete": False, "Environment": ["DRI_PRIME", "0"]}
+        self.assertEqual(switcheroo_environment([dedicated, integrated]), {})
+        self.assertEqual(switcheroo_environment([integrated]), {})
+
+    def test_explicit_gpu_choice_is_kept(self):
+        for environment in ({"DRI_PRIME": "0"}, {"__NV_PRIME_RENDER_OFFLOAD": "0"}, {"LIBGL_ALWAYS_SOFTWARE": "1"}):
+            with self.subTest(environment=environment), patch("gpu.switcheroo_gpus") as probe:
+                original = environment.copy()
+                prefer_discrete_gpu(environment)
+                self.assertEqual(environment, original)
+                probe.assert_not_called()
+
+    def test_nvidia_fallback_requires_secondary_render_device(self):
+        drm = self.folder / "drm"
+        sys_device = self.folder / "0000:01:00.0"
+        sys_device.mkdir()
+        (drm / "renderD129").mkdir(parents=True)
+        (drm / "renderD129/device").symlink_to(sys_device)
+        (sys_device / "vendor").write_text("0x10de\n")
+        (sys_device / "boot_vga").write_text("0\n")
+        driver = self.folder / "nvidia"
+        driver.mkdir()
+        (sys_device / "driver").symlink_to(driver)
+        self.assertEqual(nvidia_environment(drm), {})
+        (drm / "renderD128").mkdir()
+        self.assertEqual(nvidia_environment(drm), {
+            "__NV_PRIME_RENDER_OFFLOAD": "1", "__GLX_VENDOR_LIBRARY_NAME": "nvidia",
+        })
+        (sys_device / "boot_vga").write_text("1\n")
+        self.assertEqual(nvidia_environment(drm), {})
 
     def test_gui_update_keeps_cache_but_runtime_and_pipeline_changes_invalidate_it(self):
         root=self.folder/"compiler"
