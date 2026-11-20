@@ -13,6 +13,9 @@ public:
     bool readState(int port, int slot, uint8_t *data, size_t size);
     // Guest RAM for PS2X_INPUT_SCRIPT entries that wait on a memory word.
     static void setScriptMemory(const uint8_t *rdram);
+    // Window thread, once a frame: captures the mouse for the camera (a
+    // click captures it, Esc or the F1 menu frees it).
+    static void hostUpdate();
 };
 
 #endif

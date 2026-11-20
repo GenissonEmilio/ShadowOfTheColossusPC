@@ -11,7 +11,9 @@
 #include "runtime/ps2_pad.h"
 #include "runtime/ps2_stats.h"
 #include "ps2_host_backend.h"
+#include <atomic>
 #include <cstring>
+#include <utility>
 
 namespace
 {
@@ -42,6 +44,53 @@ namespace
 }
 
 void PSPadBackend::setScriptMemory(const uint8_t *rdram) { g_scriptRam = rdram; }
+
+namespace
+{
+    std::atomic<bool> g_mouseCaptured{false};
+    std::atomic<bool> g_captureClickHeld{false}; // the click that captured the mouse is not a game button
+    std::atomic<float> g_mouseDx{0.0f}, g_mouseDy{0.0f}; // pixels moved since the pad last read them
+    std::atomic<int> g_wheelDir{0};          // the last wheel step: -1 down (d-pad left), +1 up (d-pad right)
+    std::atomic<double> g_wheelUntil{0.0};   // held as a d-pad press until then
+
+    void addTo(std::atomic<float> &total, float value)
+    {
+        float old = total.load(std::memory_order_relaxed);
+        while (!total.compare_exchange_weak(old, old + value, std::memory_order_relaxed))
+        {
+        }
+    }
+}
+
+void PSPadBackend::hostUpdate()
+{
+    bool captured = g_mouseCaptured.load(std::memory_order_relaxed);
+    if (!captured && !hostmenu::isOpen() && IsWindowFocused() && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+    {
+        DisableCursor();
+        captured = true;
+        g_captureClickHeld = true;
+    }
+    else if (captured && (IsKeyPressed(KEY_ESCAPE) || hostmenu::isOpen() || !IsWindowFocused()))
+    {
+        EnableCursor();
+        captured = false;
+    }
+    if (g_captureClickHeld.load(std::memory_order_relaxed) && !IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+        g_captureClickHeld = false;
+    g_mouseCaptured.store(captured, std::memory_order_relaxed);
+    if (captured)
+    {
+        const Vector2 d = GetMouseDelta();
+        addTo(g_mouseDx, d.x);
+        addTo(g_mouseDy, d.y);
+        if (const float wheel = GetMouseWheelMove(); wheel != 0.0f)
+        {
+            g_wheelDir = wheel > 0.0f ? 1 : -1;
+            g_wheelUntil = GetTime() + 0.12; // long enough for the game's next pad reads to see it
+        }
+    }
+}
 
 bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t size)
 {
@@ -140,42 +189,55 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
         data[5] = toByte(ry);
     }
 
-    // Keyboard, laid out like an arcade panel (works alongside a gamepad):
-    //   WASD = left stick, arrows = D-pad
-    //   Y U I O = Square Triangle L1 L2 (top row)
-    //   H J K L = Cross  Circle   R1 R2 (bottom row)
-    //   Z = Start, X = Select
-    if (IsKeyDown(KEY_Y))
-        clearBit(PAD_SQUARE);
-    if (IsKeyDown(KEY_U))
-        clearBit(PAD_TRIANGLE);
-    if (IsKeyDown(KEY_I))
-        clearBit(PAD_L1);
-    if (IsKeyDown(KEY_O))
-        clearBit(PAD_L2);
-    if (IsKeyDown(KEY_H))
-        clearBit(PAD_CROSS);
-    if (IsKeyDown(KEY_J))
-        clearBit(PAD_CIRCLE);
-    if (IsKeyDown(KEY_K))
-        clearBit(PAD_R1);
-    if (IsKeyDown(KEY_L))
-        clearBit(PAD_R2);
-    if (IsKeyDown(KEY_Z))
-        clearBit(PAD_START);
-    if (IsKeyDown(KEY_X))
-        clearBit(PAD_SELECT);
-    if (IsKeyDown(KEY_UP))
-        clearBit(PAD_UP);
-    if (IsKeyDown(KEY_DOWN))
-        clearBit(PAD_DOWN);
-    if (IsKeyDown(KEY_LEFT))
-        clearBit(PAD_LEFT);
-    if (IsKeyDown(KEY_RIGHT))
-        clearBit(PAD_RIGHT);
+    // Keyboard and mouse, PC layout (works alongside a gamepad; table in README.md):
+    //   WASD move (Left Alt held: walk), mouse (captured by a click): camera, arrows: d-pad,
+    //   Space triangle (jump), left button square (weapon), right button / F R1 (grab),
+    //   E / Enter cross (call Agro, confirm), Left Shift circle, Tab / middle button L1,
+    //   wheel or 1/2 d-pad left/right (weapon), Z L2, X R2, C L3, V R3,
+    //   Esc Start (pause; also frees the mouse), Backspace Select.
+    const bool mouseButtons = g_mouseCaptured.load(std::memory_order_relaxed) && !g_captureClickHeld.load(std::memory_order_relaxed);
+    const std::pair<int, uint16_t> keys[] = {
+        {KEY_SPACE, PAD_TRIANGLE}, {KEY_F, PAD_R1}, {KEY_E, PAD_CROSS}, {KEY_ENTER, PAD_CROSS},
+        {KEY_LEFT_SHIFT, PAD_CIRCLE}, {KEY_TAB, PAD_L1}, {KEY_ONE, PAD_LEFT}, {KEY_TWO, PAD_RIGHT},
+        {KEY_LEFT, PAD_LEFT}, {KEY_RIGHT, PAD_RIGHT}, {KEY_UP, PAD_UP}, {KEY_DOWN, PAD_DOWN}, {KEY_Z, PAD_L2}, {KEY_X, PAD_R2}, {KEY_C, PAD_L3},
+        {KEY_V, PAD_R3}, {KEY_ESCAPE, PAD_START}, {KEY_BACKSPACE, PAD_SELECT}};
+    for (const auto &[key, mask] : keys)
+        if (IsKeyDown(key))
+            clearBit(mask);
+    if (mouseButtons)
+    {
+        if (IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+            clearBit(PAD_SQUARE);
+        if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+            clearBit(PAD_R1);
+        if (IsMouseButtonDown(MOUSE_BUTTON_MIDDLE))
+            clearBit(PAD_L1);
+    }
+    if (GetTime() < g_wheelUntil.load(std::memory_order_relaxed))
+        clearBit(g_wheelDir.load(std::memory_order_relaxed) > 0 ? PAD_RIGHT : PAD_LEFT);
 
     auto keyAxis = [](int negative, int positive) -> int
     { return (IsKeyDown(positive) ? 1 : 0) - (IsKeyDown(negative) ? 1 : 0); };
+    auto toStick = [](float v) { return static_cast<uint8_t>(std::clamp(128.0f + v * 127.5f, 0.0f, 255.0f)); };
+    const float walk = IsKeyDown(KEY_LEFT_ALT) ? 0.5f : 1.0f;
+    // Keyboard and mouse add to the controller's sticks (both can be used at once).
+    auto fromStick = [](uint8_t b) { return (static_cast<float>(b) - 128.0f) / 127.5f; };
+    auto addStick = [&](int xIndex, int yIndex, float x, float y)
+    {
+        data[xIndex] = toStick(std::clamp(fromStick(data[xIndex]) + x, -1.0f, 1.0f));
+        data[yIndex] = toStick(std::clamp(fromStick(data[yIndex]) + y, -1.0f, 1.0f));
+    };
+    if (const int x = keyAxis(KEY_A, KEY_D), y = keyAxis(KEY_W, KEY_S); x || y)
+        addStick(6, 7, static_cast<float>(x) * walk, static_cast<float>(y) * walk);
+    // Camera: the mouse's movement since the last read (PS2X_MOUSE_SENS, PS2X_MOUSE_INVERT_Y=1), smoothed.
+    static const float sensitivity = std::getenv("PS2X_MOUSE_SENS") ? static_cast<float>(std::atof(std::getenv("PS2X_MOUSE_SENS"))) : 1.0f;
+    static const float invertY = std::getenv("PS2X_MOUSE_INVERT_Y") && std::atoi(std::getenv("PS2X_MOUSE_INVERT_Y")) ? -1.0f : 1.0f;
+    static float camX = 0.0f, camY = 0.0f;
+    const float dx = g_mouseDx.exchange(0.0f, std::memory_order_relaxed), dy = g_mouseDy.exchange(0.0f, std::memory_order_relaxed);
+    camX = std::clamp(camX * 0.5f + dx * 0.04f * sensitivity, -1.0f, 1.0f);
+    camY = std::clamp(camY * 0.5f + dy * 0.04f * sensitivity * invertY, -1.0f, 1.0f);
+    if (std::fabs(camX) > 0.02f || std::fabs(camY) > 0.02f)
+        addStick(4, 5, camX, camY);
     auto setStick = [&data](int xIndex, int yIndex, int x, int y)
     {
         if (x == 0 && y == 0)
@@ -183,7 +245,6 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
         data[xIndex] = static_cast<uint8_t>(x < 0 ? 0x00 : (x > 0 ? 0xFF : kPadStickCenter));
         data[yIndex] = static_cast<uint8_t>(y < 0 ? 0x00 : (y > 0 ? 0xFF : kPadStickCenter));
     };
-    setStick(6, 7, keyAxis(KEY_A, KEY_D), keyAxis(KEY_W, KEY_S));
 
     // PS2X_INPUT_SCRIPT="<sec>:<BUTTON>:<duration>;..." scripted presses for testing.
     // Besides buttons, LS_UP/LS_DOWN/LS_LEFT/LS_RIGHT push the left stick.

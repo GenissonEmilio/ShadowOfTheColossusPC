@@ -11,6 +11,7 @@
 #include <filesystem>
 #include "runtime/native_tuning.h"
 #include "runtime/host_menu.h"
+#include "runtime/ps2_pad.h"
 #include "runtime/desktop_video.h"
 #if defined(__linux__) && !defined(__ANDROID__)
 #include "rlgl.h"
@@ -985,6 +986,9 @@ bool PS2Runtime::initialize(const char *title)
         setenv("RESOURCE_NAME", "shadow-of-the-colossus-pc", 0);
 #endif
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
+#if defined(__linux__) && !defined(__ANDROID__)
+        SetExitKey(KEY_NULL); // Esc frees the mouse; closing is the window's button or the F1 menu
+#endif
 #if defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__))
         if (std::getenv("PS2X_GS_HW"))
         {
@@ -3462,6 +3466,7 @@ void PS2Runtime::run()
             hostmenu::settings().fullscreen = IsWindowFullscreen();
             hostmenu::saveSettings();
         }
+        PSPadBackend::hostUpdate();
 #endif
         hostmenu::update();
 
