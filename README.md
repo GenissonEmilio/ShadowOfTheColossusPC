@@ -148,3 +148,5 @@ O pipeline original de desenvolvimento segue disponível em `./celosia`;
 
 Shadow of the Colossus pertence à Sony / Team Ico. Projeto não oficial, sem
 vínculo com os titulares. Créditos completos da base estão na documentação Celosia.
+
+[![Verified developer on RecompStore](https://recompstore.com/assets/press/verified-dark.svg)](https://recompstore.com/dev/genissonemilio)
