@@ -34,7 +34,7 @@ int main(int argc, char **) {
     const float clip[] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     unsigned frameNumber = 0;
     uint64_t presentationRevision = 0;
-    auto frame = [&](uint8_t r, uint8_t g, uint8_t b) {
+    auto frame = [&](uint8_t r, uint8_t g, uint8_t b, bool held = false) {
         using V = native_renderer::Vertex;
         V vertices[] = {{-1,-1,0,0,0,1,0,0,r,g,b,128}, {1,-1,0,0,0,1,1,0,r,g,b,128}, {1,1,0,0,0,1,1,1,r,g,b,128},
                         {-1,-1,0,0,0,1,0,0,r,g,b,128}, {1,1,0,0,0,1,1,1,r,g,b,128}, {-1,1,0,0,0,1,0,1,r,g,b,128}};
@@ -55,8 +55,9 @@ int main(int argc, char **) {
         std::string error; check(native_renderer::stateBarrier(error), error);
         std::vector<uint8_t> pixels; uint32_t w = 0, h = 0;
         using native_renderer::FrameRead;
-        check(native_renderer::readFrame(pixels, w, h, presentationRevision) == FrameRead::Updated && w == 64 && h == 64,
-              "finished frame readback");
+        const auto expectedRead = held ? FrameRead::Unchanged : FrameRead::Updated;
+        check(native_renderer::readFrame(pixels, w, h, presentationRevision) == expectedRead && w == 64 && h == 64,
+              held ? "discarded partial frame keeps the previous picture" : "finished frame readback");
         std::vector<uint8_t> untouched;
         check(native_renderer::readFrame(untouched, w, h, presentationRevision) == FrameRead::Unchanged && untouched.empty(),
               "the presentation context can keep the last texture without copying the same frame again");
@@ -80,7 +81,7 @@ int main(int argc, char **) {
     check(native_renderer::resetStateFrame(error), error);
     check(native_renderer::restoreState(saved, error), error);
     check(native_renderer::captureState(actualHistory, error) && actualHistory == saved, "RGBA8 GPU readback matches every restored temporal buffer");
-    frame(25, 200, 40); // hidden partial guest frame; must not touch histories
+    frame(25, 200, 40, true); // hidden partial guest frame; must not touch histories
     check(native_renderer::captureState(actualHistory, error) && actualHistory == saved, "discarded partial frame preserves restored history");
     const auto actual = frame(25, 200, 40);
     check(actual == expected, "same next whole frame renders identical RGBA8 after restore");
