@@ -24,7 +24,7 @@ class RecompLauncherTests(unittest.TestCase):
         profile_path = "{local}/ShadowOfTheColossusPC"
         self.assertEqual(profile["start"]["args"], ["--play", "--data-dir", profile_path])
         self.assertEqual(profile["prepare"]["args"], ["--prepare", "--rom", "{game}", "--data-dir", profile_path])
-        self.assertEqual(profile["config"][0]["file"], profile_path + "/player/celosia_settings.cfg")
+        self.assertEqual(profile["config"][0]["file"], [{"path": profile_path + "/player/celosia_settings.cfg"}])
         defaults = profile["config"][0]["new"]
         self.assertEqual(set(defaults), set(RECOMP_VIDEO_KEYS))
         for option in profile["settings"]:

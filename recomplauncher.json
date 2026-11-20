@@ -21,7 +21,7 @@
     {
       "id": "main",
       "format": "ini",
-      "file": "{local}/ShadowOfTheColossusPC/player/celosia_settings.cfg",
+      "file": [{ "path": "{local}/ShadowOfTheColossusPC/player/celosia_settings.cfg" }],
       "new": { "fullscreen": "1", "screen": "0", "window_resolution": "0", "vsync": "1", "upscale_fsr": "0", "show_fps": "1", "volume": "10" }
     }
   ],
@@ -118,8 +118,8 @@
   ],
   "saves": ["{local}/ShadowOfTheColossusPC/player/memcards"],
   "folders": {
-    "saves": "{local}/ShadowOfTheColossusPC/player/memcards",
-    "logs": "{local}/ShadowOfTheColossusPC"
+    "saves": [{ "path": "{local}/ShadowOfTheColossusPC/player/memcards" }],
+    "logs": [{ "path": "{local}/ShadowOfTheColossusPC" }]
   },
   "looks": { "graphics": "opengl", "lines": 448 },
   "exit_codes": {
