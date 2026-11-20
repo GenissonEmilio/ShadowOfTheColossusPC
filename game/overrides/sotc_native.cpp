@@ -1818,7 +1818,8 @@ namespace sotc_native
         const float scale = std::clamp(native_renderer::tuning().renderScale, 0.5f, 4.0f);
         native_renderer::endFrame(static_cast<uint32_t>(512.0f * scale + 0.5f), static_cast<uint32_t>(448.0f * scale + 0.5f));
         static const bool show = std::atoi(std::getenv("SOTC_NATIVE")) != 2; // 2: draw, keep the emulated picture
-        native_renderer::setShown(show && native_renderer::tuning().showNative && g_frameDraws != 0);
+        // Leave the GS drawing if the native worker could not initialize.
+        native_renderer::setShown(show && native_renderer::tuning().showNative && g_frameDraws != 0 && native_renderer::available());
     }
 
     void getCameraContextHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

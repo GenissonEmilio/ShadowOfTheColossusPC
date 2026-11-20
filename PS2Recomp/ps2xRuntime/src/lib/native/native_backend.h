@@ -6,10 +6,34 @@
 #include "runtime/native_renderer.h"
 
 #include <functional>
+#include <mutex>
 
 namespace native_renderer::detail
 {
     void setInEmulator(bool emulator); // the backend's probe (native_renderer::inEmulator)
+
+    struct FrameOutput
+    {
+        std::mutex mutex;
+        std::vector<uint8_t> pixels;
+        uint32_t width = 0, height = 0;
+        uint64_t revision = 0;
+
+        FrameRead read(std::vector<uint8_t> &rgba, uint32_t &w, uint32_t &h, uint64_t *seen)
+        {
+            const std::lock_guard lock(mutex);
+            if (!revision)
+                return FrameRead::Missing;
+            w = width;
+            h = height;
+            if (seen && *seen == revision)
+                return FrameRead::Unchanged;
+            rgba = pixels;
+            if (seen)
+                *seen = revision;
+            return FrameRead::Updated;
+        }
+    };
 
     class Backend
     {
@@ -64,7 +88,11 @@ namespace native_renderer::detail
         // The frame ending next is not shown (its uploads still made): the
         // last one stays on screen (holdIncomplete). Backends that cannot: no-op.
         virtual void holdFrame() {}
-        virtual bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height) = 0;
+        virtual FrameRead readFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height, uint64_t *seen) = 0;
+        bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height)
+        {
+            return readFrame(rgba, width, height, nullptr) == FrameRead::Updated;
+        }
         // A backend that draws on a thread of its own: returns once every
         // frame handed over is drawn.
         virtual void finishFrames() {}

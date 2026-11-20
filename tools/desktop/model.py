@@ -93,6 +93,7 @@ class Library:
         environment["SOTC_INFINITE_HEALTH"] = "1" if selected_preferences["infinite_health"] else "0"
         environment["SOTC_INFINITE_GRIP"] = "1" if selected_preferences["infinite_grip"] else "0"
         environment["PS2X_GS_THREADS"] = "2"
+        environment.setdefault("PS2X_STATS", "1")
         environment["PS2X_MEMCARD_DIR"] = str(self.player_directory / "memcards")
         environment["PS2X_STATE_DIR"] = str(self.player_directory / "savestates")
         if WINDOWS:
@@ -168,7 +169,11 @@ class Library:
         environment = self.game_environment(test)
         from texture_mods import TextureMods
         environment.update(TextureMods(self).environment())
-        if sys.platform.startswith("linux"):
+        gpu_status = None
+        if WINDOWS:
+            from gpu import prefer_windows_gpu
+            gpu_status = prefer_windows_gpu(executable)
+        elif sys.platform.startswith("linux"):
             from gpu import prefer_discrete_gpu
             prefer_discrete_gpu(environment)
         self.player_directory.mkdir(parents=True, exist_ok=True)
@@ -178,6 +183,8 @@ class Library:
             environment.update(PS2X_SNAPSHOT_DIR=str(shots), PS2X_SNAPSHOT_SECONDS="5",
                                PS2X_EXIT_AT_FRAME="600")
         with (self.directory / "last-game.log").open("w") as output:
+            if gpu_status:
+                print(f"[gpu] {gpu_status}", file=output, flush=True)
             return subprocess.Popen([str(executable), str(boot)], cwd=self.player_directory,
                                     env=environment, stdout=output, stderr=subprocess.STDOUT,
                                     start_new_session=not WINDOWS, creationflags=PROCESS_FLAGS)

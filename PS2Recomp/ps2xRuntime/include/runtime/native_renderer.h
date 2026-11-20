@@ -376,6 +376,9 @@ namespace native_renderer
     bool shown();
     // The last finished frame (RGBA8); false before the first.
     bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height);
+    enum class FrameRead { Missing, Unchanged, Updated };
+    // A presentation consumer owns its own revision, initially zero.
+    FrameRead readFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height, uint64_t &revision);
 
     // The frame timing log (Debug 'Frame timing log', SOTC_FRAME_LOG): what
     // one game frame spent where, filled by the frontend, the backends and the

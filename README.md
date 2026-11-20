@@ -75,9 +75,14 @@ Uma CPU moderna e 16 GB de RAM são recomendáveis para a recompilação.
 
 O jogo prefere a GPU dedicada em computadores híbridos. No Linux, o launcher
 consulta o `switcheroo-control` e aplica a seleção do driver ao iniciar o jogo.
-Em sistemas sem o serviço, há detecção alternativa para NVIDIA. Configurações
-explícitas do driver, como `DRI_PRIME=0`, têm prioridade. No Windows, o
-executável do jogo informa a preferência de alto desempenho ao driver.
+Em sistemas sem o serviço, há detecção alternativa para NVIDIA e notebooks
+com Radeon integrada e dedicada. Configurações explícitas do driver, como
+`DRI_PRIME=0`, têm prioridade. No Windows, o launcher pede alto desempenho
+para o `game.exe` compilado e respeita a preferência existente nos ajustes
+gráficos do Windows.
+
+O `last-game.log` informa a GPU ativa em `Renderer:`. As linhas `[stats]`
+mostram o ritmo do jogo, da janela e os envios de quadros novos à GPU.
 
 A seção **Sobre** cria um atalho no menu de aplicativos. Os dados ficam em
 `~/.local/share/ShadowOfTheColossusPC` (ou `XDG_DATA_HOME`) no Linux e em

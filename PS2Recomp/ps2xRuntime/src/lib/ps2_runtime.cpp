@@ -449,7 +449,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     constexpr double kVsyncRate = 59.94;
     constexpr double kLatencyVsyncs = 2.0;
     const double now = GetTime();
-    const double goal = static_cast<double>(rt->eeScheduler().currentVSyncTick()) - kLatencyVsyncs;
+    const double goal = static_cast<double>(rt->memory().gs().vsyncTick.load(std::memory_order_acquire)) - kLatencyVsyncs;
     if (s_clock < 0.0 || std::fabs(goal - s_clock) > 8.0)
         s_clock = goal;
     else
@@ -1039,8 +1039,8 @@ bool PS2Runtime::initialize(const char *title)
 #endif
         )
         {
-            // The native renderer on OpenGL (to check it against Metal): its own
-            // hidden context, current on the game thread that drives it.
+            // The native renderer has a separate hidden context that becomes
+            // current on its render worker.
             glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
             glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
             glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
@@ -3079,6 +3079,7 @@ void PS2Runtime::run()
 #endif
 
     uint64_t tick = 0;
+    uint64_t nativeFrameUploads = 0;
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
     {
 #ifdef PS2X_DESKTOP_VIDEO
@@ -3171,11 +3172,13 @@ void PS2Runtime::run()
         // than the PS2's 512 x 448), filtered: not through the GS's display.
         static Texture2D nativeTex{};
         static std::vector<uint8_t> nativePixels;
+        static uint64_t nativeRevision = 0;
         bool nativeOnScreen = false;
         if (native_renderer::shown())
         {
             uint32_t nw = 0, nh = 0;
-            if (native_renderer::latestFrame(nativePixels, nw, nh) && nw && nh && nativePixels.size() >= static_cast<size_t>(nw) * nh * 4u)
+            const auto frameRead = native_renderer::readFrame(nativePixels, nw, nh, nativeRevision);
+            if (frameRead == native_renderer::FrameRead::Updated && nw && nh && nativePixels.size() >= static_cast<size_t>(nw) * nh * 4u)
             {
                 // The display shows colour only (the PS2's CRTC ignores alpha):
                 // drawn blended over black, the picture's alpha darkened it.
@@ -3191,8 +3194,15 @@ void PS2Runtime::run()
                 }
                 else
                     UpdateTexture(nativeTex, nativePixels.data());
-                presentWidth = nw;
-                presentHeight = nh;
+                if (nativeTex.id != 0)
+                    ++nativeFrameUploads;
+                else
+                    nativeRevision = 0; // Retry if the graphics driver could not allocate the texture.
+            }
+            if (frameRead != native_renderer::FrameRead::Missing && nativeTex.id != 0)
+            {
+                presentWidth = static_cast<uint32_t>(nativeTex.width);
+                presentHeight = static_cast<uint32_t>(nativeTex.height);
                 nativeOnScreen = true;
             }
         }
@@ -3272,6 +3282,8 @@ void PS2Runtime::run()
             std::cerr << "[stats] t=" << static_cast<int>(GetTime())
                       << " gameFps=" << (statChains - lastStatChains) / 5.0
                       << " shownFps=" << ps2_stats::presentedFrames.exchange(0) / 5.0
+                      << " hostFps=" << (hostFrames - lastHostFrames) / 5.0
+                      << " nativeUploads=" << std::exchange(nativeFrameUploads, uint64_t{0})
                       << " frames=" << statChains
                       << []
                       {

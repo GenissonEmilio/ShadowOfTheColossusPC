@@ -14,3 +14,6 @@ g++ -std=c++20 -O1 -msse4.1 -ffunction-sections -fdata-sections \
   tests/native/widescreen.cpp PS2Recomp/ps2xRuntime/src/lib/desktop_video.cpp \
   -Wl,--gc-sections -o artifacts/state-menu-check/widescreen
 timeout --kill-after=3s 15s artifacts/state-menu-check/widescreen
+g++ -std=c++20 -O1 -IPS2Recomp/ps2xRuntime/include -IPS2Recomp/ps2xRuntime/src/lib/native \
+  tests/native/frame_output.cpp -pthread -o artifacts/state-menu-check/frame-output
+timeout --kill-after=3s 15s artifacts/state-menu-check/frame-output

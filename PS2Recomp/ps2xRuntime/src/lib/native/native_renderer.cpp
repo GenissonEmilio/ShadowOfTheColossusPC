@@ -719,7 +719,8 @@ namespace
                 }
             }
         }
-        bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &w, uint32_t &h) override { return a->latestFrame(rgba, w, h); }
+        native_renderer::FrameRead readFrame(std::vector<uint8_t> &rgba, uint32_t &w, uint32_t &h, uint64_t *seen) override
+        { return a->readFrame(rgba, w, h, seen); }
 
     private:
         native_renderer::detail::Backend *a, *b;
@@ -727,6 +728,7 @@ namespace
     };
 
     native_renderer::detail::Backend *g_backend = nullptr;
+    std::atomic<native_renderer::detail::Backend *> g_publishedBackend{nullptr};
     bool g_tried = false;
     std::atomic<bool> g_shown{false};
     std::function<void()> g_glMakeCurrent;
@@ -763,6 +765,7 @@ namespace
             }
             if (!g_backend && !wantGl())
                 g_backend = native_renderer::detail::createMetalBackend();
+            g_publishedBackend.store(g_backend, std::memory_order_release);
         }
         return g_backend;
     }
@@ -1214,11 +1217,17 @@ namespace native_renderer
             u.staticMeshes = u.staticBytes = u.frameMeshes = u.frameBytes = u.textures = u.textureBytes = u.draws = 0;
         }
     }
-    void setShown(bool shown) { g_shown.store(shown, std::memory_order_relaxed); }
-    bool shown() { return g_shown.load(std::memory_order_relaxed); }
+    void setShown(bool shown) { g_shown.store(shown, std::memory_order_release); }
+    bool shown() { return g_shown.load(std::memory_order_acquire); }
     bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height)
     {
         // Not backend(): the presenting thread must not create it.
-        return g_backend && g_backend->latestFrame(rgba, width, height);
+        const auto ready = g_publishedBackend.load(std::memory_order_acquire);
+        return ready && ready->latestFrame(rgba, width, height);
+    }
+    FrameRead readFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height, uint64_t &revision)
+    {
+        const auto ready = g_publishedBackend.load(std::memory_order_acquire);
+        return ready ? ready->readFrame(rgba, width, height, &revision) : FrameRead::Missing;
     }
 }

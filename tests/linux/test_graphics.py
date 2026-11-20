@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/"tools/desktop"))
 from graphics import Graphics
-from gpu import nvidia_environment, prefer_discrete_gpu, switcheroo_environment
+from gpu import amd_environment, amd_is_integrated, nvidia_environment, prefer_discrete_gpu, prefer_windows_gpu, switcheroo_environment
 from model import Library
 from texture_mods import TextureMods
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/"tools/linux"))
@@ -142,6 +142,29 @@ class GraphicsTests(unittest.TestCase):
                 self.assertEqual(environment, original)
                 probe.assert_not_called()
 
+    def test_windows_gpu_preference_targets_game_and_preserves_existing_choice(self):
+        from unittest.mock import MagicMock
+
+        registry = MagicMock()
+        handle = registry.CreateKeyEx.return_value.__enter__.return_value
+        game = self.folder / "builds" / "gamecore" / "game.exe"
+        with patch.dict(sys.modules, {"winreg": registry}):
+            registry.QueryValueEx.return_value = ("GpuPreference=1;", registry.REG_SZ)
+            self.assertIn("kept existing", prefer_windows_gpu(game))
+            registry.SetValueEx.assert_not_called()
+            registry.QueryValueEx.side_effect = FileNotFoundError
+            self.assertIn("high performance", prefer_windows_gpu(game))
+        registry.SetValueEx.assert_called_once_with(handle, str(game.resolve()), 0,
+                                                     registry.REG_SZ, "GpuPreference=2;")
+
+    def test_windows_gpu_preference_failure_allows_game_start(self):
+        from unittest.mock import MagicMock
+
+        registry = MagicMock()
+        registry.CreateKeyEx.side_effect = PermissionError(13, "Access denied")
+        with patch.dict(sys.modules, {"winreg": registry}):
+            self.assertIn("unavailable", prefer_windows_gpu(self.folder / "game.exe"))
+
     def test_nvidia_fallback_requires_secondary_render_device(self):
         drm = self.folder / "drm"
         sys_device = self.folder / "0000:01:00.0"
@@ -160,6 +183,74 @@ class GraphicsTests(unittest.TestCase):
         })
         (sys_device / "boot_vga").write_text("1\n")
         self.assertEqual(nvidia_environment(drm), {})
+
+    def test_amd_hybrid_fallback_uses_driver_reported_discrete_adapter(self):
+        drm = self.folder / "drm"
+        nodes = self.folder / "dev"
+        driver = self.folder / "amdgpu"
+        driver.mkdir()
+
+        def adapter(render, slot, boot):
+            target = self.folder / slot
+            target.mkdir()
+            (drm / render).mkdir(parents=True)
+            (drm / render / "device").symlink_to(target)
+            (target / "vendor").write_text("0x1002\n")
+            (target / "boot_vga").write_text(f"{boot}\n")
+            (target / "driver").symlink_to(driver)
+
+        adapter("renderD128", "0000:04:00.0", 1)
+        adapter("renderD129", "0000:01:00.0", 0)
+        for results, expected in (
+            ([True, False], {"DRI_PRIME": "pci-0000_01_00_0"}),
+            ([True, True], {}),
+            ([True, None], {}),
+            ([None], {}),
+            ([False], {}),
+        ):
+            with self.subTest(results=results), patch("gpu.amd_is_integrated", side_effect=results):
+                self.assertEqual(amd_environment(drm, nodes), expected)
+
+    def test_amd_kernel_query_distinguishes_fusion_flag_from_other_flags(self):
+        import ctypes
+        import struct
+
+        node = self.folder / "renderD129"
+        node.touch()
+        for flags, integrated in ((0x03, True), (0x02, False)):
+            def reply(device, command, request):
+                self.assertEqual(command, 0x40206445)
+                pointer, size, query = struct.unpack("=QII16x", request)
+                self.assertEqual((size, query), (144, 0x16))
+                result = (ctypes.c_char * size).from_address(pointer)
+                struct.pack_into("=I", result, 0, 0x67FF)
+                struct.pack_into("=Q", result, 136, flags)
+
+            with self.subTest(flags=flags), patch("fcntl.ioctl", side_effect=reply):
+                self.assertIs(amd_is_integrated(node), integrated)
+        with patch("fcntl.ioctl", side_effect=PermissionError):
+            self.assertIsNone(amd_is_integrated(node))
+
+    def test_amd_fallback_respects_switcheroo_and_nvidia(self):
+        with patch("gpu.switcheroo_gpus") as switcheroo, patch("gpu.nvidia_environment") as nvidia, \
+                patch("gpu.amd_environment", return_value={"DRI_PRIME": "pci-0000_01_00_0"}) as amd:
+            switcheroo.return_value = []
+            environment = {}
+            prefer_discrete_gpu(environment)
+            self.assertEqual(environment, {})
+            nvidia.assert_not_called()
+            amd.assert_not_called()
+
+            switcheroo.return_value = None
+            nvidia.return_value = {"__NV_PRIME_RENDER_OFFLOAD": "1"}
+            prefer_discrete_gpu(environment)
+            self.assertEqual(environment, nvidia.return_value)
+            amd.assert_not_called()
+
+            environment = {}
+            nvidia.return_value = {}
+            prefer_discrete_gpu(environment)
+            self.assertEqual(environment, amd.return_value)
 
     def test_texture_mod_selection_is_atomic_and_deactivates_without_deleting_files(self):
         mods = TextureMods(self.library)

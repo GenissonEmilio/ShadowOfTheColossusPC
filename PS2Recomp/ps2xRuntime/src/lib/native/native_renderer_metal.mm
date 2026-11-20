@@ -556,10 +556,7 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
         uint32_t reflectionSize = 256; // the mirror image's (Tuning::effectDetail)
         bool colorDirty = false;       // MSAA: color changed by a full-screen effect since the last resolve
 
-        std::mutex outputMutex;
-        std::vector<uint8_t> output;
-        uint32_t outputWidth = 0, outputHeight = 0;
-        bool hasOutput = false;
+        native_renderer::detail::FrameOutput output;
 
         bool init()
         {
@@ -1742,12 +1739,12 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
                 }
                 [commands commit];
                 [commands waitUntilCompleted];
-                std::lock_guard<std::mutex> lock(outputMutex);
-                output.resize(static_cast<size_t>(w) * h * 4u);
-                [color getBytes:output.data() bytesPerRow:w * 4u fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0];
-                outputWidth = w;
-                outputHeight = h;
-                hasOutput = true;
+                std::lock_guard<std::mutex> lock(output.mutex);
+                output.pixels.resize(static_cast<size_t>(w) * h * 4u);
+                [color getBytes:output.pixels.data() bytesPerRow:w * 4u fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0];
+                output.width = w;
+                output.height = h;
+                ++output.revision;
             }
         }
     };
@@ -1806,15 +1803,9 @@ fragment float4 bloomComposite(Quad in [[stage_in]], texture2d<float> src [[text
         void setGlowComposite(const native_renderer::GlowComposite &glow) override { r->glow = glow; }
         void setDepthOfField(const native_renderer::DepthOfField &dof) override { r->dof = dof; }
         void endFrame(uint32_t width, uint32_t height) override { r->render(width, height); }
-        bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height) override
+        native_renderer::FrameRead readFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height, uint64_t *seen) override
         {
-            std::lock_guard<std::mutex> lock(r->outputMutex);
-            if (!r->hasOutput)
-                return false;
-            rgba = r->output;
-            width = r->outputWidth;
-            height = r->outputHeight;
-            return true;
+            return r->output.read(rgba, width, height, seen);
         }
 
     private:

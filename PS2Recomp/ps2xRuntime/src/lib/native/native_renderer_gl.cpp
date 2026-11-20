@@ -23,6 +23,8 @@
 #include <malloc/malloc.h>
 #elif defined(_WIN32)
 #include "external/glad.h" // the loader initialized by the desktop raylib window
+#define GLFW_INCLUDE_NONE
+#include "GLFW/glfw3.h"
 #elif defined(__linux__) && !defined(__ANDROID__)
 #define GL_GLEXT_PROTOTYPES 1
 #include <GL/gl.h>
@@ -48,6 +50,7 @@ extern "C" unsigned int _newlib_heap_size_user;      // ps2_vita_runtime.cpp
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -994,10 +997,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         native_renderer::DepthOfField dof;
         bool hold = false; // holdFrame: uploads only, not drawn or shown
 
-        std::mutex outputMutex;
-        std::vector<uint8_t> output;
-        uint32_t outputWidth = 0, outputHeight = 0;
-        bool hasOutput = false;
+        native_renderer::detail::FrameOutput output;
 
         static GLuint compile(GLenum type, const char *source)
         {
@@ -3001,14 +3001,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         glBindFramebuffer(GL_FRAMEBUFFER, color.fbo);
         glReadPixels(0, 0, static_cast<GLsizei>(w), static_cast<GLsizei>(h), GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        std::lock_guard<std::mutex> lock(outputMutex);
-        output.resize(pixels.size());
+        std::lock_guard<std::mutex> lock(output.mutex);
+        output.pixels.resize(pixels.size());
         const size_t row = static_cast<size_t>(w) * 4u;
         for (uint32_t y = 0; y < h; ++y)
-            std::memcpy(output.data() + static_cast<size_t>(y) * row, pixels.data() + static_cast<size_t>(h - 1u - y) * row, row);
-        outputWidth = w;
-        outputHeight = h;
-        hasOutput = true;
+            std::memcpy(output.pixels.data() + static_cast<size_t>(y) * row, pixels.data() + static_cast<size_t>(h - 1u - y) * row, row);
+        output.width = w;
+        output.height = h;
+        ++output.revision;
     }
 
     // The game thread's side of the renderer (every Backend call) and the
@@ -3288,15 +3288,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         }
         bool timesItself() override { return true; }
         void holdFrame() override { m_rec.hold = true; }
-        bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height) override
+        native_renderer::FrameRead readFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height, uint64_t *seen) override
         {
-            std::lock_guard<std::mutex> lock(r->outputMutex);
-            if (!r->hasOutput)
-                return false;
-            rgba = r->output;
-            width = r->outputWidth;
-            height = r->outputHeight;
-            return true;
+            return r->output.read(rgba, width, height, seen);
         }
 
     private:
@@ -3626,7 +3620,20 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #endif
             if (makeCurrent)
                 makeCurrent();
-            const bool ok = !initThere || r->init();
+            bool contextReady = true;
+#if defined(_WIN32)
+            // GLFW leaves the worker without a current context when WGL rejects the bind.
+            contextReady = glfwGetCurrentContext() != nullptr;
+            if (!contextReady)
+            {
+                const char *description = nullptr;
+                const int code = glfwGetError(&description);
+                std::fprintf(stderr, "[native:gl] could not bind the render worker context (GLFW %d): %s\n",
+                             code, description ? description : "no GLFW error description");
+                std::fflush(stderr);
+            }
+#endif
+            const bool ok = contextReady && (!initThere || r->init());
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_started = true;
