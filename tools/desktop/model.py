@@ -12,7 +12,7 @@ from import_disc import import_disc, EXPECTED
 from language import preferences, translate as tr
 from pipeline import CompilationError, Pipeline, PROCESS_FLAGS, WINDOWS, compiler_tool
 
-VERSION = "0.9.8"
+VERSION = "0.9.9"
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 APPLICATION_ID = "io.github.GenissonEmilio.ShadowOfTheColossusPC"
 SAVE_STATES_AVAILABLE = sys.platform.startswith("linux")
@@ -160,7 +160,7 @@ class Library:
         self.player_directory.mkdir(parents=True, exist_ok=True)
         return Pipeline(self.program, self.directory, self.game_environment(), progress).prepare(boot.parent)
 
-    def launch(self, test=False, progress=lambda text: None):
+    def launch(self, test=False, progress=lambda text: None, *, attached=False):
         boot = self.disc
         executable = self.prepare_game(progress)
         from graphics import Graphics
@@ -187,7 +187,7 @@ class Library:
                 print(f"[gpu] {gpu_status}", file=output, flush=True)
             return subprocess.Popen([str(executable), str(boot)], cwd=self.player_directory,
                                     env=environment, stdout=output, stderr=subprocess.STDOUT,
-                                    start_new_session=not WINDOWS, creationflags=PROCESS_FLAGS)
+                                    start_new_session=not WINDOWS and not attached, creationflags=PROCESS_FLAGS)
 
     def install_desktop_entry(self, applications=None):
         if WINDOWS:

@@ -102,6 +102,8 @@ jobs:
           $env:PYTHONDONTWRITEBYTECODE = '1'
           & "$bin/python.exe" -X utf8 tools/linux/test_compiler.py --program $program
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$bin/python.exe" -X utf8 tools/desktop/release/test_recomplauncher.py --program $program
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & "$program/compiler/bin/ps2_recomp.exe" --help
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4

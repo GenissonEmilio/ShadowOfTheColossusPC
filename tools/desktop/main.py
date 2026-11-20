@@ -27,6 +27,10 @@ if len(sys.argv) > 1 and sys.argv[1] == "--pipeline-helper":
     helper(sys.argv[2], sys.argv[3], sys.argv[4:])
     raise SystemExit(0)
 
+if __name__ == "__main__" and sys.argv[1:2] in (["--prepare"], ["--play"]):
+    from recomp_cli import run
+    raise SystemExit(run(sys.argv[1:]))
+
 if sys.platform.startswith("linux"):
     if getattr(sys, "frozen", False):
         os.environ.pop("GTK_MODULES", None)

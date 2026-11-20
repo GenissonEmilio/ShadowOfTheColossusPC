@@ -23,6 +23,7 @@ LEGACY_PROFILES = (("2", "Alto (legado)"), ("3", "Ultra (legado)"))
 QUALITY_KEYS = {
     "quality_preset", "render_scale", "msaa", "fxaa", "texture_filter", "model_detail", "water_detail", "effect_detail",
 }
+RECOMP_VIDEO_KEYS = ("fullscreen", "screen", "window_resolution", "vsync", "upscale_fsr", "show_fps", "volume")
 
 
 class Graphics:
@@ -35,8 +36,9 @@ class Graphics:
         values = {}
         try:
             for line in self.config.read_text(encoding="utf-8").splitlines():
-                key, _, value = line.partition("=")
-                values[key] = value
+                key, separator, value = line.partition("=")
+                if separator:
+                    values[key.strip()] = value.strip()
         except OSError:
             pass
         return values
@@ -73,11 +75,19 @@ class Graphics:
             values["upscale_fsr"] = int(bool(fsr))
         self._save_settings(values, values)
 
+    def normalize_external_settings(self):
+        # An external INI writer may use `key = value`. The runtime expects
+        # `key=value`. Preserve the native renderer's other settings and order.
+        values = self.settings()
+        external = {key: values[key] for key in RECOMP_VIDEO_KEYS if key in values}
+        if external:
+            self._save_settings(external, external)
+
     def _save_settings(self, values, replace):
         self.config.parent.mkdir(parents=True, exist_ok=True)
         try:
             lines = [line for line in self.config.read_text(encoding="utf-8").splitlines()
-                     if line.partition("=")[0] not in replace]
+                     if line.partition("=")[0].strip() not in replace]
         except OSError:
             lines = []
         lines += [f"{key}={value}" for key, value in values.items()]

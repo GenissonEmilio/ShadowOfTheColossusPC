@@ -28,6 +28,7 @@ jobs:
         run: |
           LD_LIBRARY_PATH="$PWD/artifacts/compiler/lib" artifacts/compiler/bin/ps2_recomp --help
           test -f artifacts/compiler/manifest.json
+          python3 tools/desktop/release/test_recomplauncher.py --program dist/ShadowOfTheColossusPC
       - name: Execute EE branch and IOP audio checks (no ROM)
         run: |
           # Test/analyzer setup fetches its pinned JSON dependency; execution is offline.

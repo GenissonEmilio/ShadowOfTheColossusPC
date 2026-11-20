@@ -155,6 +155,7 @@ def package(build, prefix, destination):
     copy(ROOT / "tools/windows/windows_bootstrap.py", root / "desktop/windows_bootstrap.py")
     copy(ROOT / "tools/windows/LEIA-ME.txt", root / "LEIA-ME.txt")
     copy(ROOT / "LICENSE", root / "LICENSE")
+    copy(ROOT / "recomplauncher.json", root / "recomplauncher.json")
     controller_db = ROOT / "PS2Recomp/ps2xRuntime/third_party/gamecontrollerdb"
     copy(controller_db / "gamecontrollerdb.txt", root / "desktop/assets/gamecontrollerdb.txt")
     copy(controller_db / "LICENSE", compiler / "licenses/SDL_GameControllerDB.LICENSE")

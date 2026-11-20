@@ -68,6 +68,17 @@ em paralelo, e a interface mostra o progresso. O cache é separado por versão d
 compilador/runtime e validado antes de ser reutilizado.
 Atualizações apenas da interface, shaders ou documentação preservam esse cache.
 
+### RecompLauncher
+
+Os pacotes incluem `recomplauncher.json` para configurar o jogo a partir de
+uma ISO americana SCUS-97472. O RecompLauncher chama a preparação sem abrir
+a interface do port. A tela de configurações oferece proporção, tela cheia,
+tamanho da janela, VSync, FSR 1, contador de FPS e volume.
+
+A integração usa a pasta de dados normal do port. Assim, os dois launchers
+encontram os mesmos cartões de memória, ajustes e cache de recompilação. O
+jogo abre a partir do disco importado e verifica o cache do runtime ao iniciar.
+
 Requisitos comuns: CPU x64 com SSE4.1, GPU com OpenGL 3.3, 8 GB de RAM e 15 GB
 livres. Linux requer **glibc 2.39+** (Ubuntu 24.04+, Fedora 40+). O pacote
 Windows é portátil e requer Windows 10 versão 1903 ou posterior, ou Windows 11.

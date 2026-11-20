@@ -9,6 +9,10 @@ import traceback
 
 from model import data_directory
 
+main_script = Path(__file__).with_name("main.py")
+if sys.argv[1:2] in (["--prepare"], ["--play"]):
+    runpy.run_path(str(main_script), run_name="__main__")
+
 log_directory = data_directory()
 if "--data-dir" in sys.argv:
     index = sys.argv.index("--data-dir") + 1
@@ -18,7 +22,7 @@ log_directory.mkdir(parents=True, exist_ok=True)
 log_path = log_directory / "last-launcher.log"
 with log_path.open("w", encoding="utf-8") as log, contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
     try:
-        runpy.run_path(str(Path(__file__).with_name("main.py")), run_name="__main__")
+        runpy.run_path(str(main_script), run_name="__main__")
     except Exception:
         traceback.print_exc()
         log.flush()
