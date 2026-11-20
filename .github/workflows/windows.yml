@@ -32,7 +32,7 @@ jobs:
           cmake -S PS2Recomp -B build/windows -G Ninja \
             -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS=-msse4.1 \
             -DPython3_EXECUTABLE="$(cygpath -am /ucrt64/bin/python.exe)" \
-            -DPS2X_BUILD_WINDOWS_KIT=ON -DPS2X_BUILD_STUDIO=OFF \
+            -DPS2X_BUILD_WINDOWS_KIT=ON -DPS2X_BUILD_STUDIO=OFF -DGLFW_USE_HYBRID_HPG=ON \
             -DPS2X_BUILD_ANALYZER=OFF -DPS2X_BUILD_TEST=OFF \
             -DPS2X_ENABLE_DEBUG_UI=OFF -DPS2X_ENABLE_AGRESSIVE_LOGS=OFF \
             -DPS2X_ENABLE_IOP_RPC_TRACE=OFF

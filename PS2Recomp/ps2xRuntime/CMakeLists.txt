@@ -16,7 +16,6 @@ option(PS2X_ENABLE_IOP_RPC_TRACE "Log unhandled IOP/SIF RPC trace suggestions" O
 option(PS2X_STRICT_RETURN_DIAGNOSTICS "Route generated JR $ra returns through runtime branch diagnostics" OFF)
 option(PS2X_SHOW_WINDOWS_CONSOLE "Show a console window for ps2EntryRunner on Windows release builds" ON)
 option(PS2X_ENABLE_DEBUG_UI "Build the desktop runtime debug UI" ON)
-option(PS2X_BUILD_WINDOWS_KIT "Build the native Windows desktop compilation kit" OFF)
 
 option(PS2X_ENABLE_CCACHE "Use ccache as compiler launcher when available (preferred over sccache)" ON)
 if(PS2X_ENABLE_CCACHE)
@@ -91,11 +90,6 @@ else()
 
     if(PS2X_IS_ANDROID)
         set(PLATFORM "Android" CACHE STRING "" FORCE)
-    endif()
-
-    if(WIN32 AND PS2X_BUILD_WINDOWS_KIT)
-        # The static GLFW objects export the GPU preference from the generated game.exe.
-        set(GLFW_USE_HYBRID_HPG ON)
     endif()
 
     FetchContent_Declare(
@@ -734,6 +728,7 @@ install(DIRECTORY include/
     DESTINATION include
 )
 
+option(PS2X_BUILD_WINDOWS_KIT "Build the native Windows desktop compilation kit" OFF)
 if(PS2X_BUILD_WINDOWS_KIT)
     if(NOT MINGW)
         message(FATAL_ERROR "The Windows desktop kit requires MinGW-w64")
