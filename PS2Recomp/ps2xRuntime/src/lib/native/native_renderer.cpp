@@ -259,12 +259,12 @@ namespace native_renderer
              "Máximo: sempre o mais detalhado (morros e colossos distantes perdem o contorno quadrado; mais geometria a desenhar).",
              nullptr, &Tuning::modelDetail, 0.0f, 2.0f, 1.0f, "SOTC_MODEL_DETAIL"},
             {"effect_detail", "Effect detail", "Detalhe dos efeitos",
-             "Metal (Mac) only. PS2: the effects' buffers as the PS2 has them. High: the picture reduced for depth of field, distance fog, water and the "
-             "glow by averaging all of it (at a high resolution one sample of it made far cliffs blocky and pixelated) and the mirror image on water "
-             "and floors at 512 x 512 (the PS2's: 256). Very high: the mirror at 1024. OpenGL / Vita: always the PS2's.",
-             "Só Metal (Mac). PS2: os buffers dos efeitos como no PS2. Alto: a imagem reduzida para profundidade de campo, névoa, água e brilho pela "
-             "média de toda ela (em resolução alta uma amostra só deixava os penhascos distantes quadriculados e pixelados) e a imagem espelhada na "
-             "água e no chão em 512 x 512 (a do PS2: 256). Muito alto: o espelho em 1024. OpenGL / Vita: sempre a do PS2.",
+             "PS2: the effects' buffers as the PS2 has them. High: the picture reduced for depth of field, distance fog, water and the "
+             "glow by averaging all of it (at a high resolution one sample of it made far cliffs blocky and pixelated) and, on Metal, the mirror image on water "
+             "and floors at 512 x 512 (the PS2's: 256). Very high: the mirror at 1024 (Metal). OpenGL: the averaging only; Vita: always the PS2's.",
+             "PS2: os buffers dos efeitos como no PS2. Alto: a imagem reduzida para profundidade de campo, névoa, água e brilho pela "
+             "média de toda ela (em resolução alta uma amostra só deixava os penhascos distantes quadriculados e pixelados) e, no Metal, a imagem espelhada na "
+             "água e no chão em 512 x 512 (a do PS2: 256). Muito alto: o espelho em 1024 (Metal). OpenGL: só a média; Vita: sempre a do PS2.",
              nullptr, &Tuning::effectDetail, 0.0f, 2.0f, 1.0f, "SOTC_EFFECT_DETAIL"},
             {"bloom", "Bloom", "Bloom", "The glow around bright light and sky.", "O brilho em volta da luz forte e do céu.",
              &Tuning::bloom, nullptr, 0, 1, 1, "SOTC_BLOOM_SCALE"},
@@ -411,7 +411,7 @@ namespace native_renderer
             const std::string key = item.key;
             item.quality = key == "quality_preset" || key == "render_scale" || key == "msaa" || key == "texture_filter" || key == "model_detail" ||
                            key == "effect_detail";
-            if (key == "msaa" || key == "effect_detail")
+            if (key == "msaa")
                 item.backends = 1;
             if (key == "bloom_rounds" || key == "bloom_spread" || key == "dbg_haze_source" || key == "dbg_water_source" || key == "dbg_redraw" ||
                 key == "dbg_gpu_skin" || key == "dbg_render_thread")
