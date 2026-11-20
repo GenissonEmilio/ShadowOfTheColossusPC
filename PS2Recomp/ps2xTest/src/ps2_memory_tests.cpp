@@ -1515,6 +1515,7 @@ void register_ps2_memory_tests()
             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u),
                      "write VIF1 CHCR STR|CHAIN|TTE should succeed");
             mem.processPendingTransfers();
+            mem.syncVu1();
 
             t.Equals(mem.vif1_regs.itops, 0x66u, "scratchpad tag should update ITOPS through TTE");
             t.IsTrue((mem.readIORegister(kVif1Ch + 0x00u) & 0x100u) == 0u,
