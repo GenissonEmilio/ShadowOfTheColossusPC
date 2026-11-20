@@ -21,11 +21,23 @@ with tempfile.TemporaryDirectory(prefix='sotc-compiler-check-') as t:
 #include "ps2_runtime.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
 extern const uint32_t g_ps2RecompiledFunctionTableBase = 0;
 extern const uint32_t g_ps2RecompiledFunctionTableEnd = 0x01000000;
 extern const uint32_t g_ps2RecompiledFunctionTableSlotCount = 0x00400000;
 PS2Runtime::RecompiledFunction g_ps2RecompiledFunctionTable[0x00400000] = {};
 void original_test_function(uint8_t* ram, R5900Context* ctx, PS2Runtime* runtime) {
+#if defined(_WIN32)
+    if (std::getenv("SOTC_TEST_EXCEPTION_LOG")) {
+        SetErrorMode(SEM_NOGPFAULTERRORBOX);
+        const ULONG_PTR information[] = {0, 0x1234};
+        RaiseException(EXCEPTION_ACCESS_VIOLATION, EXCEPTION_NONCONTINUABLE, 2, information);
+    }
+#endif
     ram[0x1000] = 42;
     runtime->dispatchGuestBranch(ram, ctx, 0x100100, 0x100000, 0x100008,
                                  PS2Runtime::GuestBranchKind::IndirectCall, "fixture");
@@ -62,6 +74,29 @@ struct InstallFixture {
     disc.mkdir()
     write_elf(disc / BOOT, 0x100000,
               [('.text', 0x100000, 4, struct.pack('<I', 0), 6)])
+    if os.name == "nt":
+        import winreg
+        from gpu import prefer_windows_gpu
+
+        crash = subprocess.run([str(result), str(disc / BOOT)], cwd=stage,
+                               env=dict(pipeline.env, PS2X_MODULE_CAPTURE="1", SOTC_TEST_EXCEPTION_LOG="1"),
+                               capture_output=True, text=True, errors="replace", timeout=15)
+        assert crash.returncode & 0xffffffff == 0xc0000005, crash
+        assert "[crash] 0xc0000005" in crash.stderr and "access=0x0 target=0x1234" in crash.stderr, crash.stderr
+        # Scope to the disposable fixture's absolute path in the runner's hive.
+        registry_path = r"Software\Microsoft\DirectX\UserGpuPreferences"
+        filename = str(result.resolve())
+        assert "requested high performance" in prefer_windows_gpu(result)
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, registry_path, 0,
+                            winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE) as key:
+            try:
+                assert winreg.QueryValueEx(key, filename) == ("GpuPreference=2;", winreg.REG_SZ)
+                winreg.SetValueEx(key, filename, 0, winreg.REG_SZ, "GpuPreference=1;")
+                assert "kept existing" in prefer_windows_gpu(result)
+                assert winreg.QueryValueEx(key, filename)[0] == "GpuPreference=1;"
+            finally:
+                winreg.DeleteValue(key, filename)
+        print("Windows exception logging and per-executable GPU preference passed")
     pipeline.env.pop('DISPLAY', None)
     pipeline.env.pop('WAYLAND_DISPLAY', None)
     try:

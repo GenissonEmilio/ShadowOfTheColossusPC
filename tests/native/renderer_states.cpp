@@ -33,6 +33,7 @@ int main(int argc, char **) {
     native_renderer::tuning().renderThread = true; native_renderer::tuning().asyncBuilds = false;
     const float clip[] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     unsigned frameNumber = 0;
+    uint64_t presentationRevision = 0;
     auto frame = [&](uint8_t r, uint8_t g, uint8_t b) {
         using V = native_renderer::Vertex;
         V vertices[] = {{-1,-1,0,0,0,1,0,0,r,g,b,128}, {1,-1,0,0,0,1,1,0,r,g,b,128}, {1,1,0,0,0,1,1,1,r,g,b,128},
@@ -53,7 +54,12 @@ int main(int argc, char **) {
         native_renderer::endFrame(64, 64);
         std::string error; check(native_renderer::stateBarrier(error), error);
         std::vector<uint8_t> pixels; uint32_t w = 0, h = 0;
-        check(native_renderer::latestFrame(pixels, w, h) && w == 64 && h == 64, "finished frame readback");
+        using native_renderer::FrameRead;
+        check(native_renderer::readFrame(pixels, w, h, presentationRevision) == FrameRead::Updated && w == 64 && h == 64,
+              "finished frame readback");
+        std::vector<uint8_t> untouched;
+        check(native_renderer::readFrame(untouched, w, h, presentationRevision) == FrameRead::Unchanged && untouched.empty(),
+              "the presentation context can keep the last texture without copying the same frame again");
         return pixels;
     };
     frame(220, 20, 10); frame(180, 50, 20);
