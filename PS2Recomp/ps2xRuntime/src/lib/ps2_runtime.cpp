@@ -500,14 +500,10 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
                                                    &sourceFbp,
                                                    &usedPreferredDisplaySource))
     {
-        Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, MAGENTA);
-        UpdateTexture(tex, blank.data);
-        UnloadImage(blank);
-        outWidth = FB_WIDTH;
-        outHeight = DEFAULT_DISPLAY_HEIGHT;
-        s_lastWidth = outWidth;
-        s_lastHeight = outHeight;
-        s_hasUploadedFrame = true;
+        // Until the GS has a frame, the initial black texture is enough.
+        // A missed presentation can also leave the last good picture in place.
+        outWidth = s_lastWidth ? s_lastWidth : FB_WIDTH;
+        outHeight = s_lastHeight ? s_lastHeight : DEFAULT_DISPLAY_HEIGHT;
         return;
     }
 
@@ -2893,7 +2889,7 @@ void PS2Runtime::run()
     }
 
     // A blank image to use as a framebuffer
-    Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
+    Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLACK);
     Texture2D frameTex = LoadTextureFromImage(blank);
     UnloadImage(blank);
 
@@ -2901,6 +2897,10 @@ void PS2Runtime::run()
     // overlay, the debug UI and the settings menu.
     // Set while the native renderer's GL picture is shown: GL textures are y-up.
     bool hostFrameFlipY = false;
+    double fpsWindowStart = GetTime();
+    uint64_t lastFpsChains = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
+    int gameFps = 0;
+    bool sampledGameFrame = false;
     std::function<void(const Texture2D &, uint32_t, uint32_t)> drawHostFrame = [&](const Texture2D &shown, uint32_t presentWidth, uint32_t presentHeight)
     {
             BeginDrawing();
@@ -2941,20 +2941,19 @@ void PS2Runtime::run()
                 dstHeight};
             DrawTexturePro(shown, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
 #endif
-            if (hostmenu::settings().showFps.load(std::memory_order_relaxed))
+            // FPS overlay: game frames = display lists sent to VIF1 per second.
+            // Sample while hidden too, so enabling the overlay shows the current rate.
+            const double now = GetTime();
+            if (now - fpsWindowStart >= 1.0)
             {
-                // FPS overlay: game frames = display lists sent to VIF1 per second.
-                static double windowStart = GetTime();
-                static uint64_t lastChains = 0;
-                static int gameFps = 0;
-                const double now = GetTime();
-                if (now - windowStart >= 1.0)
-                {
-                    const uint64_t chains = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
-                    gameFps = chains >= lastChains ? static_cast<int>((chains - lastChains) / (now - windowStart) + 0.5) : 0;
-                    lastChains = chains;
-                    windowStart = now;
-                }
+                const uint64_t chains = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
+                sampledGameFrame |= chains > lastFpsChains;
+                gameFps = chains >= lastFpsChains ? static_cast<int>((chains - lastFpsChains) / (now - fpsWindowStart) + 0.5) : 0;
+                lastFpsChains = chains;
+                fpsWindowStart = now;
+            }
+            if (sampledGameFrame && video.showFps.load(std::memory_order_relaxed))
+            {
                 const std::string fpsText = "game " + std::to_string(gameFps) + " fps | host " + std::to_string(GetFPS()) + " fps";
                 DrawRectangle(8, GetScreenHeight() - 30, MeasureText(fpsText.c_str(), 20) + 12, 26, Color{0, 0, 0, 160});
                 DrawText(fpsText.c_str(), 14, GetScreenHeight() - 27, 20, Color{120, 255, 120, 255});

@@ -1498,6 +1498,29 @@ void register_ps2_memory_tests()
                      "qwc-zero compact VIF1 chain should clear the STR bit after drain");
         });
 
+        tc.Run("VIF1 DMA transfers VIFcodes from a scratchpad tag alias", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kTagOffset = 0x100u;
+            uint8_t *scratchpad = mem.getScratchpad();
+            writeDmaTag(scratchpad, kTagOffset, makeDmaTag(0u, 7u, 0u, false));
+            const uint32_t itopCmd = makeVifCmd(0x04u, 0u, 0x66u);
+            std::memcpy(scratchpad + kTagOffset + 12u, &itopCmd, sizeof(itopCmd));
+
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, PS2_SCRATCHPAD_ALIAS_BASE + kTagOffset),
+                     "write VIF1 TADR scratchpad alias should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u),
+                     "write VIF1 CHCR STR|CHAIN|TTE should succeed");
+            mem.processPendingTransfers();
+
+            t.Equals(mem.vif1_regs.itops, 0x66u, "scratchpad tag should update ITOPS through TTE");
+            t.IsTrue((mem.readIORegister(kVif1Ch + 0x00u) & 0x100u) == 0u,
+                     "scratchpad tag should clear the STR bit after drain");
+        });
+
         tc.Run("VIF1 DMA chain transfers REF tag high bytes when TTE is enabled", [](TestCase &t)
         {
             PS2Memory mem;

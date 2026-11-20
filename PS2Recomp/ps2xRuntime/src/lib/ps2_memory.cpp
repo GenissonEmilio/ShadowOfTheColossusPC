@@ -1785,25 +1785,16 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         }
                     };
 
-                    auto appendVifTagData = [&](uint32_t localTagAddr)
+                    auto appendVifTagData = [&](const uint8_t *tag)
                     {
-                        uint32_t tagPhys = 0u;
-                        const bool tagScratch = isScratchpad(localTagAddr);
-                        tagPhys = translateAddress(localTagAddr);
-
-                        const uint8_t *localBase = tagScratch ? m_scratchpad : m_rdram;
-                        const uint32_t localMax = tagScratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
-                        if (tagPhys + 16u > localMax)
-                            return;
-
                         // CHCR.TTE sends the DMAtag's upper 64 bits to the channel before
                         // the tag payload. VIF chains use those bytes for two VIFcodes.
                         if (walker)
-                            walker->feed(localBase + tagPhys + 8u, 8u);
+                            walker->feed(tag + 8u, 8u);
                         else if (compactor)
-                            compactor->feed(localBase + tagPhys + 8u, 8u);
+                            compactor->feed(tag + 8u, 8u);
                         else
-                            chainBuf.insert(chainBuf.end(), localBase + tagPhys + 8u, localBase + tagPhys + 16u);
+                            chainBuf.insert(chainBuf.end(), tag + 8u, tag + 16u);
                     };
 
                     const bool isVifChannel =
@@ -1815,7 +1806,6 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
                     while (tagsProcessed < kMaxChainTags)
                     {
-                        const uint32_t currentTagAddr = tagAddr;
                         const bool tagInSPR = isScratchpad(tagAddr);
                         uint32_t physTag = 0;
                         try
@@ -1919,7 +1909,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         }
 
                         if (transferTagData)
-                            appendVifTagData(currentTagAddr);
+                            appendVifTagData(tp);
 
                         if (hasPayload)
                             appendData(dataAddr, tagQwc);

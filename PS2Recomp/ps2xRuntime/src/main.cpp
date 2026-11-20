@@ -22,6 +22,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <atomic>
 #include <charconv>
 #include <cstring>
 #include <string_view>
@@ -38,14 +39,13 @@
 namespace
 {
 #if defined(_WIN32)
-    LONG WINAPI logWindowsAccessViolation(EXCEPTION_POINTERS *exception) noexcept
-    {
-        const auto *record = exception->ExceptionRecord;
-        if (record->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
-            return EXCEPTION_CONTINUE_SEARCH;
+    constexpr unsigned firstChanceLogLimit = 8;
+    static_assert(std::atomic<unsigned>::is_always_lock_free);
+    std::atomic<unsigned> firstChanceLogs{0};
 
-        // Bypass buffered stdio and heap allocation. Keep Windows' normal
-        // unhandled-exception behavior, including any configured crash dump.
+    void writeWindowsAccessViolation(const EXCEPTION_RECORD &record, std::string_view phase) noexcept
+    {
+        // Bypass buffered stdio and heap allocation in exception callbacks.
         char line[256];
         char *next = line;
         const auto append = [&](std::string_view text) {
@@ -55,22 +55,53 @@ namespace
         const auto number = [&](uintptr_t value) {
             next = std::to_chars(next, line + sizeof(line), value, 16).ptr;
         };
-        append("[crash] 0xc0000005 thread=0x");
+        append("[crash] 0xc0000005 phase=");
+        append(phase);
+        append(" thread=0x");
         number(GetCurrentThreadId());
         append(" instruction=0x");
-        number(reinterpret_cast<uintptr_t>(record->ExceptionAddress));
-        if (record->NumberParameters >= 2)
+        number(reinterpret_cast<uintptr_t>(record.ExceptionAddress));
+        if (record.NumberParameters >= 2)
         {
             append(" access=0x");
-            number(record->ExceptionInformation[0]);
+            number(record.ExceptionInformation[0]);
             append(" target=0x");
-            number(record->ExceptionInformation[1]);
+            number(record.ExceptionInformation[1]);
         }
         append("\r\n");
         DWORD written = 0;
         const HANDLE output = GetStdHandle(STD_ERROR_HANDLE);
         if (output && output != INVALID_HANDLE_VALUE)
             WriteFile(output, line, static_cast<DWORD>(next - line), &written, nullptr);
+    }
+
+    LONG WINAPI logFirstChanceWindowsAccessViolation(EXCEPTION_POINTERS *exception) noexcept
+    {
+        const auto &record = *exception->ExceptionRecord;
+        if (record.ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
+            return EXCEPTION_CONTINUE_SEARCH;
+
+        // A first-chance exception can be handled later. Limit these records
+        // for the whole process, including when multiple threads fault.
+        unsigned count = firstChanceLogs.load(std::memory_order_relaxed);
+        while (count < firstChanceLogLimit)
+        {
+            if (firstChanceLogs.compare_exchange_weak(count, count + 1, std::memory_order_relaxed))
+            {
+                writeWindowsAccessViolation(record, "first-chance");
+                break;
+            }
+        }
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    LONG WINAPI logUnhandledWindowsAccessViolation(EXCEPTION_POINTERS *exception) noexcept
+    {
+        const auto &record = *exception->ExceptionRecord;
+        if (record.ExceptionCode == EXCEPTION_ACCESS_VIOLATION)
+            writeWindowsAccessViolation(record, "unhandled");
+
+        // Preserve Windows' unhandled-exception processing and crash dumps.
         return EXCEPTION_CONTINUE_SEARCH;
     }
 #endif
@@ -234,7 +265,8 @@ int main(int argc, char *argv[])
 #endif
     setupTerminateLogger();
 #if defined(_WIN32)
-    SetUnhandledExceptionFilter(logWindowsAccessViolation);
+    AddVectoredExceptionHandler(1, logFirstChanceWindowsAccessViolation);
+    SetUnhandledExceptionFilter(logUnhandledWindowsAccessViolation);
 #endif
 
     try

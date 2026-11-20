@@ -82,7 +82,11 @@ struct InstallFixture {
                                env=dict(pipeline.env, PS2X_MODULE_CAPTURE="1", SOTC_TEST_EXCEPTION_LOG="1"),
                                capture_output=True, text=True, errors="replace", timeout=15)
         assert crash.returncode & 0xffffffff == 0xc0000005, crash
-        assert "[crash] 0xc0000005" in crash.stderr and "access=0x0 target=0x1234" in crash.stderr, crash.stderr
+        crash_lines = [line for line in crash.stderr.splitlines()
+                       if line.startswith("[crash] 0xc0000005 ") and line.endswith("access=0x0 target=0x1234")]
+        assert len(crash_lines) == 2, crash.stderr
+        assert "phase=first-chance " in crash_lines[0], crash.stderr
+        assert crash_lines[0].replace("phase=first-chance ", "phase=unhandled ") == crash_lines[1], crash.stderr
         # Scope to the disposable fixture's absolute path in the runner's hive.
         registry_path = r"Software\Microsoft\DirectX\UserGpuPreferences"
         filename = str(result.resolve())

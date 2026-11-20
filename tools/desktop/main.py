@@ -855,6 +855,10 @@ class Launcher:
         self.fsr = Gtk.CheckButton(label=tr("Ativar upscaling AMD FSR 1"))
         self.fsr.set_active(fsr)
         panel.pack_start(self.fsr, False, False, 0)
+        self.show_fps = Gtk.CheckButton(label=tr("Mostrar FPS"))
+        self.show_fps.set_active(self.graphics.fps_enabled())
+        self.show_fps.connect("toggled", self.save_fps)
+        panel.pack_start(self.show_fps, False, False, 0)
         panel.pack_start(label(tr("Perfil gráfico"), "muted"), False, False, 0)
         self.quality_profile = style(Gtk.ComboBoxText(), "graphics-select")
         for profile_id, name in GRAPHICS_PROFILES + LEGACY_PROFILES:
@@ -905,6 +909,29 @@ class Launcher:
                                        window=self.window_resolution.get_active(), fsr=self.fsr.get_active())
         except OSError as exc:
             self.error(tr("Não foi possível salvar a imagem"),str(exc))
+
+    def save_fps(self, checkbox):
+        if self.busy or self.process or getattr(self, "syncing_display", False):
+            return
+        try:
+            self.graphics.save_fps(checkbox.get_active())
+        except OSError as exc:
+            self.refresh_graphics()
+            self.error(tr("Não foi possível salvar a imagem"), str(exc))
+
+    def refresh_graphics(self):
+        fullscreen, mode = self.graphics.display()
+        window, fsr = self.graphics.upscaling()
+        self.syncing_display = True
+        try:
+            self.fullscreen.set_active(int(fullscreen))
+            self.aspect.set_active(mode)
+            self.window_resolution.set_active(window)
+            self.fsr.set_active(fsr)
+            self.show_fps.set_active(self.graphics.fps_enabled())
+            self.quality_profile.set_active_id(self.graphics.quality_profile())
+        finally:
+            self.syncing_display = False
 
     def save_quality_profile(self, combo):
         if self.busy or self.process or getattr(self, "syncing_display", False):
@@ -1264,6 +1291,8 @@ class Launcher:
 
     def navigate(self,name):
         changed = name != self.stack.get_visible_child_name()
+        if name == "graphics":
+            self.refresh_graphics()
         self.stack.set_visible_child_name(name)
         if changed:
             adjustment = self.page_scroller.get_vadjustment()
@@ -1418,13 +1447,7 @@ class Launcher:
         self.process=None; self.choose_button.set_sensitive(True)
         self.display_panel.set_sensitive(True); self.video_panel.set_sensitive(True)
         self.play_button.set_label(tr("▶   Iniciar jogo")); self.set_ready()
-        fullscreen, mode = self.graphics.display()
-        window, fsr = self.graphics.upscaling()
-        self.syncing_display = True
-        self.fullscreen.set_active(int(fullscreen)); self.aspect.set_active(mode)
-        self.window_resolution.set_active(window); self.fsr.set_active(fsr)
-        self.quality_profile.set_active_id(self.graphics.quality_profile())
-        self.syncing_display = False
+        self.refresh_graphics()
         if code:
             self.failed=True
             self.update_status(tr("O jogo encerrou com um erro."),True)

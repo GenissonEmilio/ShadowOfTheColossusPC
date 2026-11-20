@@ -79,6 +79,11 @@ A integração usa a pasta de dados normal do port. Assim, os dois launchers
 encontram os mesmos cartões de memória, ajustes e cache de recompilação. O
 jogo abre a partir do disco importado e verifica o cache do runtime ao iniciar.
 
+Para atualizar pela biblioteca do RecompLauncher, abra a aba **Atualizações**.
+O catálogo oferece as versões aprovadas para cada plataforma. Para baixar
+automaticamente novas versões aprovadas, ative **Atualizar automaticamente**
+em **Gerenciar**. A primeira configuração usa uma imagem de disco `.iso`.
+
 Requisitos comuns: CPU x64 com SSE4.1, GPU com OpenGL 3.3, 8 GB de RAM e 15 GB
 livres. Linux requer **glibc 2.39+** (Ubuntu 24.04+, Fedora 40+). O pacote
 Windows é portátil e requer Windows 10 versão 1903 ou posterior, ou Windows 11.
@@ -94,6 +99,8 @@ gráficos do Windows.
 
 O `last-game.log` informa a GPU ativa em `Renderer:`. As linhas `[stats]`
 mostram o ritmo do jogo, da janela e os envios de quadros novos à GPU.
+Para ligar ou desligar o contador na tela, use **Gráficos → Mostrar FPS** no
+launcher, **F1 → Vídeo → Mostrar FPS** no jogo ou **FPS display** no RecompLauncher.
 
 A seção **Sobre** cria um atalho no menu de aplicativos. Os dados ficam em
 `~/.local/share/ShadowOfTheColossusPC` (ou `XDG_DATA_HOME`) no Linux e em

@@ -37,7 +37,6 @@ def run(arguments):
             print("progress 1 Ready to play", flush=True)
             return 0
 
-        graphics.normalize_external_settings()
         process = library.launch(attached=True)
         status = process.wait()
         if WINDOWS:

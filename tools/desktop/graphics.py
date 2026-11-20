@@ -55,6 +55,12 @@ class Graphics:
         window = values.get("window_resolution", "0")
         return int(window) if window in modes else 0, values.get("upscale_fsr") == "1"
 
+    def fps_enabled(self):
+        return self.settings().get("show_fps", "1") == "1"
+
+    def save_fps(self, enabled):
+        self._save_settings({"show_fps": int(bool(enabled))}, ("show_fps",))
+
     def quality_profile(self):
         values = self.settings()
         profile = values.get("quality_preset")
