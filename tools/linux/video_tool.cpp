@@ -73,7 +73,7 @@ int main(int argc, char **argv)
                 EndDrawing();
             }
             const Rectangle r = desktop_video::destination(GetScreenWidth(), GetScreenHeight(), 320, 240, mode);
-            report << "{\"name\":" << quoted(name) << ",\"fullscreen\":" << (IsWindowFullscreen() ? "true" : "false")
+            report << "{\"name\":" << quoted(name) << ",\"fullscreen\":" << (desktop_video::isFullscreen() ? "true" : "false")
                    << ",\"width\":" << GetRenderWidth() << ",\"height\":" << GetRenderHeight()
                    << ",\"x\":" << r.x << ",\"y\":" << r.y << ",\"picture_width\":" << r.width
                    << ",\"picture_height\":" << r.height

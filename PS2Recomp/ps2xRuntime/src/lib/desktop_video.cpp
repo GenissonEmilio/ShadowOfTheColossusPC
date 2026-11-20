@@ -1,6 +1,7 @@
 #include "runtime/desktop_video.h"
 #if defined(__linux__) && !defined(__ANDROID__)
 #include "rlgl.h"
+#include "GLFW/glfw3.h"
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -15,6 +16,7 @@ namespace
     int windowWidth = 1024, windowHeight = 720;
     Vector2 windowPosition{};
     int restoreFrames = 0;
+    bool fullscreen = false;
 }
 
 Rectangle destination(int width, int height, int sourceWidth, int sourceHeight, int mode)
@@ -41,30 +43,36 @@ Rectangle destination(int width, int height, int sourceWidth, int sourceHeight, 
 
 void setFullscreen(bool enabled)
 {
-    if (enabled == IsWindowFullscreen()) return;
+    if (enabled == fullscreen) return;
+    GLFWwindow *window = static_cast<GLFWwindow *>(GetWindowHandle());
     if (enabled)
     {
         restoreFrames = 0;
         windowWidth = GetScreenWidth(); windowHeight = GetScreenHeight();
         windowPosition = GetWindowPosition();
+        int count = 0;
+        GLFWmonitor **monitors = glfwGetMonitors(&count);
         const int monitor = GetCurrentMonitor();
-        const int nativeWidth = GetMonitorWidth(monitor), nativeHeight = GetMonitorHeight(monitor);
-        // ToggleFullscreen alone retains the old 1024x720 video mode.
-        // Attach before resizing, so a window near a monitor boundary cannot
-        // accidentally select its neighbour after the size changes.
-        ToggleFullscreen();
-        SetWindowSize(nativeWidth, nativeHeight);
+        const GLFWvidmode *mode = monitor >= 0 && monitor < count ? glfwGetVideoMode(monitors[monitor]) : nullptr;
+        if (!mode) return;
+        // Fullscreen at the monitor's current video mode: no mode switch (raylib's
+        // ToggleFullscreen asked for the window's size and the monitor changed
+        // to its 59.97 Hz mode), and the window manager sees a fullscreen
+        // window (panels and docks hide).
+        glfwSetWindowMonitor(window, monitors[monitor], 0, 0, mode->width, mode->height, mode->refreshRate);
     }
     else
     {
-        ToggleFullscreen();
-        SetWindowSize(windowWidth, windowHeight);
-        SetWindowPosition(static_cast<int>(windowPosition.x), static_cast<int>(windowPosition.y));
+        glfwSetWindowMonitor(window, nullptr, static_cast<int>(windowPosition.x), static_cast<int>(windowPosition.y),
+                             windowWidth, windowHeight, GLFW_DONT_CARE);
         // X11 window managers may apply their decorations after this resize.
         // Reapply the content size once those asynchronous events have arrived.
         restoreFrames = 3;
     }
+    fullscreen = enabled;
 }
+
+bool isFullscreen() { return fullscreen; }
 
 bool shaderActive() { return shader.id != 0; }
 
