@@ -324,6 +324,16 @@ visible = scroll_probe.translate_coordinates(viewport, 0, 0)
 assert adjustment.get_value() > 0 and visible is not None
 assert 0 <= visible[1] <= viewport.get_allocated_height() - scroll_probe.get_allocated_height(), visible
 page.remove(scroll_probe)
+launcher.gamepad_action(launcher.window, 'next')
+assert launcher.stack.get_visible_child_name() == 'textures'
+settle(lambda: not launcher.stack.get_transition_running(), 'textures layout did not settle')
+assert launcher.window.get_focus().is_ancestor(launcher.texture_panel)
+launcher.texture_export.grab_focus()
+export_before = launcher.texture_export.get_active()
+launcher.gamepad_action(launcher.window, 'confirm')
+assert launcher.texture_mods.preferences()[1] == (not export_before)
+launcher.gamepad_action(launcher.window, 'confirm')
+assert launcher.texture_mods.preferences()[1] == export_before
 launcher.gamepad_action(launcher.window,'next');assert launcher.stack.get_visible_child_name()=='controls'
 launcher.gamepad_action(launcher.window,'back');assert launcher.stack.get_visible_child_name()=='home'
 called=[];launcher.play_button.set_sensitive(True)
