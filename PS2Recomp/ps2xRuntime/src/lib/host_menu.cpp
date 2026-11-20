@@ -92,6 +92,7 @@ namespace
             {"Delete", "Excluir"},
             {"Cancel", "Cancelar"},
             {"Confirm", "Confirmar"},
+            {"Arrows", "Setas"},
             {"Overwrite this state?", "Substituir este estado?"},
             {"Load this state?", "Carregar este estado?"},
             {"Delete this state?", "Excluir este estado?"},
@@ -129,6 +130,7 @@ namespace
             {"Fit (4:3)", "Ajustar (4:3)"},
             {"Stretch", "Esticar"},
             {"Sharp (whole scale)", "Nítido (escala inteira)"},
+            {"Widescreen (16:9)", "Tela larga (16:9)"},
             {"Automatic", "Automático"},
             {"Confirm again to return", "Confirme de novo para sair"},
             {"L/R: tab   D-pad: choose   X: change   Triangle: help   O: close",
@@ -146,10 +148,10 @@ namespace
              "Desligar ganha alguns quadros por segundo; parte da névoa e das bordas fica mais dura."},
             {"Shows the game's frame rate in the corner of the screen.",
              "Mostra a taxa de quadros do jogo no canto da tela."},
-            {"Fit keeps the original 4:3 picture with bars on the sides. Stretch fills the screen. "
-             "Sharp uses the largest whole multiple of the original size, so every pixel has the same size.",
-             "Ajustar mantém a imagem original 4:3 com faixas nas laterais. Esticar preenche a tela. "
-             "Nítido usa o maior múltiplo inteiro do tamanho original, então todo pixel tem o mesmo tamanho."},
+            {"Fit keeps the original 4:3 view. Widescreen expands the view to 16:9. Both add bars when needed. "
+             "Stretch fills the screen. Sharp uses the largest whole multiple of the original size.",
+             "Ajustar mantém a visão original em 4:3. Tela larga amplia a visão para 16:9. Ambos usam faixas quando necessário. "
+             "Esticar preenche a tela. Nítido usa o maior múltiplo inteiro do tamanho original."},
             {"Volume of the game's sound and music.", "Volume do som e da música do jogo."},
             {"Language of this menu. Automatic follows the system language.",
              "Idioma deste menu. Automático segue o idioma do sistema."},
@@ -203,8 +205,8 @@ namespace
          "Turning it off gains a few frames per second; some mist and edges look harder."},
         {kShowFps, "Show FPS", "Shows the game's frame rate in the corner of the screen."},
         {kScreen, "Screen",
-         "Fit keeps the original 4:3 picture with bars on the sides. Stretch fills the screen. "
-         "Sharp uses the largest whole multiple of the original size, so every pixel has the same size."},
+         "Fit keeps the original 4:3 view. Widescreen expands the view to 16:9. Both add bars when needed. "
+         "Stretch fills the screen. Sharp uses the largest whole multiple of the original size."},
 #ifdef PS2X_DESKTOP_VIDEO
         {kVSync, "VSync", "Synchronizes frame presentation with the monitor to reduce tearing."},
         {kFullscreen, "Fullscreen", "Uses the current monitor's resolution in fullscreen. F11 also toggles this."},
@@ -360,8 +362,8 @@ namespace
 #endif
         case kScreen:
         {
-            static const char *modes[] = {"Fit (4:3)", "Stretch", "Sharp (whole scale)"};
-            return T(modes[std::clamp(g_settings.screenMode.load(), 0, 2)]);
+            static const char *modes[kScreenModeCount] = {"Fit (4:3)", "Stretch", "Sharp (whole scale)", "Widescreen (16:9)"};
+            return T(modes[std::clamp(g_settings.screenMode.load(), 0, kScreenModeCount - 1)]);
         }
         case kVolume:
         {
@@ -423,7 +425,7 @@ namespace
             break;
         case kUpscaleFsr: g_settings.upscaleFsr = !g_settings.upscaleFsr; break;
 #endif
-        case kScreen: g_settings.screenMode = (g_settings.screenMode + 3 + dir) % 3; break;
+        case kScreen: g_settings.screenMode = (g_settings.screenMode + kScreenModeCount + dir) % kScreenModeCount; break;
         case kVolume: g_settings.volume = std::clamp(g_settings.volume + dir, 0, 10); break;
         case kLanguage: g_settings.language = (g_settings.language + 3 + dir) % 3; break;
         case kQuit:
@@ -539,20 +541,22 @@ namespace
 
     enum class HintRow { Menu, States, Back };
 
-    bool xboxPrompts()
+    bool drawInputHints(HintRow row, int x, int y, int width, int fontSize, Color color)
     {
-        return desktop_input::prompts().style == desktop_input::PromptStyle::Xbox;
-    }
-
-    void drawXboxHints(HintRow row, int x, int y, int width, int fontSize, Color color)
-    {
+        using desktop_input::PromptStyle;
+        const auto style = desktop_input::prompts().style;
+        if (style == PromptStyle::PlayStation)
+            return false;
+        const bool keyboard = style == PromptStyle::Keyboard;
         struct Hint { const char *button; const char *action; Color badge; };
         const Color neutral{55, 67, 82, 255}, green{29, 111, 60, 255}, yellow{145, 99, 24, 255}, red{151, 47, 56, 255};
         auto draw = [&](std::initializer_list<Hint> hints)
         {
-            auto badgeWidth = [](const Hint &hint, int size)
+            auto badgeWidth = [&](const Hint &hint, int size)
             {
-                return hint.button[1] == '\0' ? size + 4 : MeasureText(hint.button, size) + 8;
+                if (!hint.button) return size;
+                if (!keyboard && hint.button[1] == '\0') return size + 4;
+                return MeasureText(hint.button, size) + 8;
             };
             auto hintWidth = [&](const Hint &hint, int size)
             {
@@ -571,21 +575,42 @@ namespace
             {
                 const int badge = badgeWidth(hint, fontSize);
                 const int height = fontSize + 4;
-                if (hint.button[1] == '\0')
+                if (!hint.button)
+                {
+                    const Color outline{240, 236, 226, 255}, selected{255, 198, 91, 255};
+                    DrawRectangleRounded({float(x), float(y), float(badge), float(height)}, 0.65f, 5, outline);
+                    DrawRectangleRounded({float(x + 1), float(y + 1), float(badge - 2), float(height - 2)}, 0.65f, 5, hint.badge);
+                    DrawRectangleRounded({float(x + 2), float(y + 2), float(badge / 2 - 2), float(height / 2 - 2)}, 0.35f, 4, selected);
+                    DrawRectangle(x + 1, y + height / 2, badge - 2, 1, outline);
+                    DrawRectangle(x + badge / 2, y + 1, 1, height / 2, outline);
+                }
+                else if (!keyboard && hint.button[1] == '\0')
                     DrawCircle(x + badge / 2, y + height / 2, height / 2.0f, hint.badge);
                 else
+                {
                     DrawRectangleRounded({float(x), float(y), float(badge), float(height)}, 0.45f, 5, hint.badge);
-                DrawText(hint.button, x + (badge - MeasureText(hint.button, fontSize)) / 2, y + 2, fontSize, WHITE);
+                    if (keyboard)
+                        DrawRectangle(x + 3, y + height - 2, badge - 6, 1, Color{193, 186, 175, 255});
+                }
+                if (hint.button)
+                    DrawText(hint.button, x + (badge - MeasureText(hint.button, fontSize)) / 2, y + 2, fontSize, WHITE);
                 if (hint.action)
                     DrawText(T(hint.action), x + badge + 4, y + 2, fontSize, color);
                 x += hintWidth(hint, fontSize) + fontSize / 2;
             }
         };
-        if (row == HintRow::Back)
+        const char *activate = row == HintRow::States ? "Confirm" : "Change";
+        if (keyboard && row == HintRow::Back)
+            draw({{"H", nullptr, neutral}, {"Backspace", "Back", neutral}});
+        else if (keyboard)
+            draw({{"Q/E", "Tabs", neutral}, {T("Arrows"), "Choose", neutral},
+                  {"Enter", nullptr, neutral}, {nullptr, activate, neutral}, {"H", "Help", neutral}, {"F1", "Close", neutral}});
+        else if (row == HintRow::Back)
             draw({{"Y", nullptr, yellow}, {"B", "Back", red}});
         else
             draw({{"LB/RB", "Tabs", neutral}, {"D-pad", "Choose", neutral},
-                  {"A", row == HintRow::States ? "Confirm" : "Change", green}, {"Y", "Help", yellow}, {"B", "Close", red}});
+                  {"A", activate, green}, {"Y", "Help", yellow}, {"B", "Close", red}});
+        return true;
     }
 
     void drawStates(int boxX, int boxY, int boxW, int boxH, int listY, int size, int small)
@@ -599,9 +624,7 @@ namespace
                 ? "Estados retomam a sessão exatamente no ponto salvo e são compatíveis com a mesma versão do núcleo e do jogo. F5 salva no espaço rápido; F8 carrega esse espaço diretamente. Use os cinco espaços manuais para manter outros pontos. Carregar pelo menu, substituir e excluir pedem confirmação. O cartão de memória continua separado: se ele mudar, estados anteriores podem deixar de ser compatíveis."
                 : "States resume the session at its saved position and require the same core and game version. F5 saves the quick slot; F8 loads it directly. Keep other positions in the five manual slots. Menu loads, overwrites and deletions require confirmation. The memory card stays separate: changing it can make an older state incompatible.";
             drawWrapped(help, boxX + pad, listY + size * 2, boxW - 2 * pad, small, text, small / 3);
-            if (xboxPrompts())
-                drawXboxHints(HintRow::Back, boxX + pad, boxY + boxH - size * 3 / 2, boxW - 2 * pad, small, dim);
-            else
+            if (!drawInputHints(HintRow::Back, boxX + pad, boxY + boxH - size * 3 / 2, boxW - 2 * pad, small, dim))
                 DrawText(T("Triangle / O: back"), boxX + pad, boxY + boxH - size * 3 / 2, small, dim);
             return;
         }
@@ -662,9 +685,7 @@ namespace
                                        : "Q/E: tabs  Arrows: slot/action  Enter/click: select  H: help  F1: close";
         int hintSize = small;
         while (hintSize > 8 && MeasureText(hint, hintSize) > boxW - 2 * pad) --hintSize;
-        if (xboxPrompts())
-            drawXboxHints(HintRow::States, boxX + pad, boxY + boxH - size, boxW - 2 * pad, hintSize, dim);
-        else
+        if (!drawInputHints(HintRow::States, boxX + pad, boxY + boxH - size, boxW - 2 * pad, small, dim))
             DrawText(hint, boxX + pad, boxY + boxH - size, hintSize, dim);
 
         if (g_stateConfirm)
@@ -719,7 +740,7 @@ void load()
             continue;
         if (!std::strcmp(key, "exact_alpha")) g_settings.exactAlpha = value != 0;
         else if (!std::strcmp(key, "show_fps")) g_settings.showFps = value != 0;
-        else if (!std::strcmp(key, "screen")) g_settings.screenMode = std::clamp(value, 0, 2);
+        else if (!std::strcmp(key, "screen")) g_settings.screenMode = value >= 0 && value < kScreenModeCount ? value : kScreenFit;
         else if (!std::strcmp(key, "fullscreen")) g_settings.fullscreen = value != 0;
 #ifdef PS2X_DESKTOP_VIDEO
         else if (!std::strcmp(key, "vsync")) g_settings.vsync = value != 0;
@@ -955,9 +976,7 @@ void draw(int screenWidth, int screenHeight)
     {
         DrawText(renderer ? rendererLabel(g_item) : T(tab.items[g_item].label), boxX + pad, listY, size, accent);
         drawWrapped(renderer ? rendererHelp(g_item) : T(tab.items[g_item].help), boxX + pad, listY + size * 2, boxW - 2 * pad, small, text, small / 2);
-        if (xboxPrompts())
-            drawXboxHints(HintRow::Back, boxX + pad, boxY + boxH - size * 3 / 2, boxW - 2 * pad, small, dim);
-        else
+        if (!drawInputHints(HintRow::Back, boxX + pad, boxY + boxH - size * 3 / 2, boxW - 2 * pad, small, dim))
             DrawText(T("Triangle / O: back"), boxX + pad, boxY + boxH - size * 3 / 2, small, dim);
         return;
     }
@@ -1001,11 +1020,8 @@ void draw(int screenWidth, int screenHeight)
             helpSize -= 2;
         drawWrapped(help, boxX + pad, helpY, boxW - 2 * pad, helpSize, dim, helpSize / 3);
     }
-    if (xboxPrompts())
-    {
-        drawXboxHints(HintRow::Menu, boxX + pad, boxY + boxH - size * 3 / 2, boxW - 2 * pad, small, dim);
+    if (drawInputHints(HintRow::Menu, boxX + pad, boxY + boxH - size * 3 / 2, boxW - 2 * pad, small, dim))
         return;
-    }
 #ifdef PS2X_DESKTOP_VIDEO
     const char *hint = portuguese() ? "Q/E: abas  Setas: item  Enter/clique: mudar  H: ajuda  F1: fechar"
                                    : "Q/E: tabs  Arrows: item  Enter/click: change  H: help  F1: close";

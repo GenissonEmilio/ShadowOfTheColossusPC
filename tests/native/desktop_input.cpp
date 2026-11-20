@@ -98,6 +98,25 @@ void testPromptAtlas()
         for (int x = 0; x < 128; ++x)
             if (x < 60 || x >= 79 || y < 20 || y >= 38)
                 assert(std::equal(&remapped[(128 * y + x) * 4], &remapped[(128 * y + x) * 4] + 4, &painted[(128 * y + x) * 4]));
+
+    // All primary mouse buttons use the same shell with a distinct lit region.
+    const std::array<uint8_t, 4> selected{255, 198, 91, 23};
+    const auto lit = [&](const auto &pixels, int x, int y) {
+        return std::equal(selected.begin(), selected.end(), &pixels[(128 * y + x) * 4]);
+    };
+    for (int button : {MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT, MOUSE_BUTTON_MIDDLE}) {
+        profile.codes[static_cast<size_t>(Control::Attack)] = -(button + 1);
+        remapped = source;
+        sotc_button_prompts::apply(remapped.data(), remapped.size(), profile);
+        assert(lit(remapped, 66, 24) == (button == MOUSE_BUTTON_LEFT));
+        assert(lit(remapped, 72, 24) == (button == MOUSE_BUTTON_RIGHT));
+        assert(lit(remapped, 69, 24) == (button == MOUSE_BUTTON_MIDDLE));
+    }
+    // A middle button in a 6-pixel movement cell retains the highlighted wheel.
+    profile.codes[static_cast<size_t>(Control::MoveUp)] = -(MOUSE_BUTTON_MIDDLE + 1);
+    remapped = source;
+    sotc_button_prompts::apply(remapped.data(), remapped.size(), profile);
+    assert(lit(remapped, 88, 21));
     profile.style = PromptStyle::PlayStation;
     sotc_button_prompts::apply(remapped.data(), remapped.size(), profile);
     assert(remapped != source);

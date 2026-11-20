@@ -9,6 +9,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[2]/"tools/desktop"))
 from graphics import Graphics
 from gpu import nvidia_environment, prefer_discrete_gpu, switcheroo_environment
 from model import Library
+from texture_mods import TextureMods
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/"tools/linux"))
 from compiler_key import compiler_key
 
@@ -31,6 +32,16 @@ class GraphicsTests(unittest.TestCase):
             self.assertIn(expected,text)
         self.graphics.save_display(False,0)
         self.assertEqual(Graphics(self.library).display(),(False,0))
+
+    def test_widescreen_round_trips_with_fullscreen_and_window_settings(self):
+        self.assertEqual(self.graphics.display(), (True, 0))
+        self.graphics.save_display(False, 3, window=4, fsr=True)
+        graphics = Graphics(self.library)
+        self.assertEqual(graphics.display(), (False, 3))
+        self.assertEqual(graphics.upscaling(), (4, True))
+        graphics.save_display(True, 3)
+        self.assertEqual(graphics.display(), (True, 3))
+        self.assertEqual(graphics.upscaling(), (4, True))
 
     def test_quality_profile_replaces_overrides_but_preserves_other_settings(self):
         self.assertEqual(self.graphics.quality_profile(), "1")
@@ -149,6 +160,28 @@ class GraphicsTests(unittest.TestCase):
         })
         (sys_device / "boot_vga").write_text("1\n")
         self.assertEqual(nvidia_environment(drm), {})
+
+    def test_texture_mod_selection_is_atomic_and_deactivates_without_deleting_files(self):
+        mods = TextureMods(self.library)
+        pack = self.folder / "HD textures"
+        pack.mkdir()
+        image = pack / "0400123456789abc.png"
+        # Header metadata is checked during selection and the native decoder checks the PNG.
+        image.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR" + b"\x00\x00\x00\x02" * 2 + bytes(16))
+        mods.set_pack(pack)
+        mods.set_export(True)
+        self.assertEqual(mods.environment(), {
+            "SOTC_TEXTURE_MOD_DIR": str(pack), "SOTC_TEXTURE_EXPORT_DIR": str(mods.exports),
+        })
+        self.assertTrue(mods.exports.is_dir())
+        with self.assertRaises(ValueError):
+            mods.set_pack(self.folder)
+        self.assertEqual(mods.preferences(), (pack, True))
+        mods.set_pack(None)
+        self.assertEqual(mods.preferences(), (None, True))
+        self.assertTrue(image.is_file())
+        mods.set_export(False)
+        self.assertEqual(mods.environment()["SOTC_TEXTURE_EXPORT_DIR"], "")
 
     def test_gui_update_keeps_cache_but_runtime_and_pipeline_changes_invalidate_it(self):
         root=self.folder/"compiler"

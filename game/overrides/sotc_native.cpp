@@ -22,6 +22,7 @@
 // Not yet: the second texture and mip levels.
 
 #include "sotc_button_prompts.h"
+#include "sotc_texture_mods.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/desktop_input.h"
@@ -771,46 +772,71 @@ namespace sotc_native
             if (checked % 200u == 0u)
                 std::fprintf(stderr, "[tex-check] %llu textures, %llu mismatches\n", (unsigned long long)checked, (unsigned long long)mismatched);
         }
-        // SOTC_TEXDUMP_DIR=<dir> (debugging): level 0 of every decoded texture, raw RGBA.
-        static const char *dumpDir = std::getenv("SOTC_TEXDUMP_DIR");
-        const auto finish = [key, width, height, header, psm, prompts = buttonAtlas ? g_buttonPrompts : desktop_input::PromptProfile{}]
-            (std::vector<uint8_t> &rgba, uint32_t decoded)
+        const auto decode = [src, key, width, height, header, psm, buttonAtlas,
+                             prompts = buttonAtlas ? g_buttonPrompts : desktop_input::PromptProfile{}]
+            (sotc_texture_mods::Texture &texture)
         {
-            sotc_button_prompts::apply(rgba.data(), rgba.size(), prompts);
-            if (dumpDir)
+            const auto &replacementDir = sotc_texture_mods::replacements();
+            const auto &exportDir = sotc_texture_mods::dumps();
+            const bool replace = !buttonAtlas && !replacementDir.empty();
+            const bool exportOriginal = !buttonAtlas && !exportDir.empty();
+            static const char *rawDump = std::getenv("SOTC_TEXDUMP_DIR");
+            static const bool mipmaps = std::getenv("SOTC_NATIVE_NOMIPS") == nullptr;
+            const auto applyReplacement = [&]
             {
+                return replace && sotc_texture_mods::load(
+                    sotc_texture_mods::texturePath(replacementDir, key), width, height, mipmaps, texture);
+            };
+            if (!exportOriginal && !rawDump && applyReplacement())
+                return true;
+            if (!decodeTexture(*src, texture.pixels, texture.levels) || !texture.levels)
+                return false;
+            texture.width = width;
+            texture.height = height;
+            if (exportOriginal)
+                sotc_texture_mods::dump(exportDir, key, width, height, texture.pixels.data());
+            if (buttonAtlas)
+                sotc_button_prompts::apply(texture.pixels.data(), texture.pixels.size(), prompts);
+            if (rawDump)
+            {
+                // Keep the existing address-based RGBA capture for diagnostics.
                 char path[512];
-                std::snprintf(path, sizeof(path), "%s/nat_%08x_psm%02x_%ux%u.rgba", dumpDir, header, psm, width, height);
+                std::snprintf(path, sizeof(path), "%s/nat_%08x_psm%02x_%ux%u.rgba", rawDump, header, psm, width, height);
                 if (FILE *f = std::fopen(path, "wb"))
                 {
-                    std::fwrite(rgba.data(), 1, static_cast<size_t>(width) * height * 4u, f);
+                    std::fwrite(texture.pixels.data(), 1, static_cast<size_t>(width) * height * 4u, f);
                     std::fclose(f);
                 }
             }
-            native_renderer::uploadTexture(key, width, height, rgba.data(), decoded);
+            if (exportOriginal || rawDump)
+                applyReplacement();
+            return true;
         };
-        // On the worker: decoded there, uploaded at the next frame's start.
-        auto out = std::make_shared<std::pair<std::vector<uint8_t>, uint32_t>>();
+        const auto finish = [key](const sotc_texture_mods::Texture &texture)
+        {
+            native_renderer::uploadTexture(key, texture.width, texture.height, texture.pixels.data(), texture.levels);
+        };
+        // Decode on the worker and upload on the render thread.
+        auto out = std::make_shared<sotc_texture_mods::Texture>();
         auto ok = std::make_shared<bool>(false);
         // The small button atlas is needed in this frame when a device changes.
-        if (!buttonAtlas && !changedInPlace && native_renderer::buildAsync({key}, [src, out, ok] { *ok = decodeTexture(*src, out->first, out->second); },
+        if (!buttonAtlas && !changedInPlace && native_renderer::buildAsync({key}, [decode, out, ok] { *ok = decode(*out); },
                                         [out, ok, finish]
                                         {
                                             if (*ok)
-                                                finish(out->first, out->second);
+                                                finish(*out);
                                         }))
         {
             if (decodeStart)
                 native_renderer::frameCounters().decodeUs += native_renderer::nowUs() - decodeStart;
             return key;
         }
-        static std::vector<uint8_t> rgba;
-        uint32_t decoded = 0;
-        if (!decodeTexture(*src, rgba, decoded))
+        static sotc_texture_mods::Texture texture;
+        if (!decode(texture))
             return 0;
         if (decodeStart)
             native_renderer::frameCounters().decodeUs += native_renderer::nowUs() - decodeStart;
-        finish(rgba, decoded);
+        finish(texture);
         return key;
     }
 

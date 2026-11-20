@@ -2575,6 +2575,12 @@ namespace ps2_stubs
 }
 
 namespace ps2_stubs {
+    bool mpegPlaybackActive()
+    {
+        std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+        return !g_mpeg_stub_state.playbackByMpeg.empty();
+    }
+
     bool captureMpegState(std::vector<uint8_t> &out, std::string &error)
     {
         std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);

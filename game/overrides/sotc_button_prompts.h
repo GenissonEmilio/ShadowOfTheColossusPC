@@ -112,9 +112,9 @@ namespace sotc_button_prompts
         if (code >= KEY_KP_0 && code <= KEY_KP_9) return "KP" + std::to_string(code - KEY_KP_0);
         switch (code) {
         case KEY_NULL: return "-";
-        case KEY_SPACE: return "SPC";
+        case KEY_SPACE: return "SPACE";
         case KEY_ESCAPE: return "ESC";
-        case KEY_ENTER: return "ENT";
+        case KEY_ENTER: return "ENTER";
         case KEY_TAB: return "TAB";
         case KEY_BACKSPACE: return "BKSP";
         case KEY_INSERT: return "INS";
@@ -210,36 +210,60 @@ namespace sotc_button_prompts
 
         void text(Cell area, const std::string &label, Pixel ink) const
         {
-            const int nominalWidth = static_cast<int>(label.size()) * 4 - 1;
-            const int width = std::min(2 * nominalWidth, area.width);
-            const int height = std::min(area.height, width >= 2 * nominalWidth ? 10 : 7);
-            const int x = area.x + (area.width - width) / 2, y = area.y + (area.height - height) / 2;
-            for (int i = 0; i < width; ++i) {
-                const int column = i * nominalWidth / width;
-                const auto glyph = letter(label[column / 4]);
-                for (int j = 0; j < height; ++j)
-                    if ((4 >> (column % 4)) & glyph[j * 5 / height])
-                        std::copy(ink.begin(), ink.end(), at(x + i, y + j));
+            if (label.empty()) return;
+            const int count = static_cast<int>(label.size());
+            const int nominalWidth = count * 4 - 1;
+            const int scale = area.width >= 2 * nominalWidth && area.height >= 10 ? 2 : 1;
+            const int gap = area.width >= nominalWidth ? scale : 0;
+            const int width = scale * count * 3 + gap * (count - 1);
+            if (width > area.width || area.height < 5) return;
+
+            const int x = area.x + (area.width - width) / 2;
+            const int y = area.y + (area.height - 5 * scale) / 2;
+            for (int i = 0; i < count; ++i) {
+                const auto glyph = letter(label[i]);
+                for (int row = 0; row < 5; ++row)
+                    for (int column = 0; column < 3; ++column)
+                        if ((4 >> column) & glyph[row])
+                            fill({x + i * (3 * scale + gap) + column * scale,
+                                  y + row * scale, scale, scale}, ink);
             }
         }
 
-        void mouse(Cell area, int button, Pixel ink) const
+        void mouse(Cell area, int button, uint8_t alpha) const
         {
-            if (area.width < (button <= 3 ? 7 : 12) || area.height < 10) {
-                text(area, "M" + std::to_string(button), ink);
-                return;
-            }
-            const int x = area.x + (area.width - (button <= 3 ? 7 : 12)) / 2;
-            const int y = area.y + (area.height - 10) / 2;
-            fill({x + 1, y, 5, 1}, ink);
-            fill({x, y + 1, 1, 8}, ink);
-            fill({x + 6, y + 1, 1, 8}, ink);
-            fill({x + 1, y + 9, 5, 1}, ink);
-            fill({x + 1, y + 4, 5, 1}, ink);
-            if (button <= 3)
-                fill({x + (button == 1 ? 1 : button == 2 ? 4 : 3), y + 1, button == 3 ? 1 : 2, 3}, ink);
-            else
-                text({x + 8, y, 4, 10}, std::to_string(button), ink);
+            constexpr const char *shape[]{
+                "...XXXXX...", "..XLLXRRX..", ".XLLLCRRRX.", "XLLLLCRRRRX",
+                "XLLLLCRRRRX", "XLLLLCRRRRX", "XLLLLXRRRRX", "XXXXXXXXXXX",
+                "XoooooooooX", "XoooooooooX", "XoooooooooX", "XoooooooooX",
+                ".XoooooooX.", "..XXXXXXX..", "...XXXXX...",
+            };
+            constexpr int shapeWidth = 11, shapeHeight = std::size(shape);
+            const int height = std::min(shapeHeight, area.height);
+            const bool sideButton = button >= 4;
+            const bool badge = sideButton && area.width >= 15;
+            // An odd sample width retains the center wheel in small cells.
+            const int width = std::min(shapeWidth, (area.width - (badge ? 4 : 0) - 1) / 2 * 2 + 1);
+            const int x = area.x + (area.width - width - (badge ? 4 : 0)) / 2;
+            const int y = area.y + (area.height - height) / 2;
+            const Pixel ink{240, 236, 226, alpha}, body{41, 42, 45, alpha};
+            const Pixel wheel{115, 110, 101, alpha}, selected{255, 198, 91, alpha};
+            const char active = button == 1 ? 'L' : button == 2 ? 'R' : 'C';
+            for (int row = 0; row < height; ++row)
+                for (int column = 0; column < width; ++column) {
+                    const char part = shape[(2 * row + 1) * shapeHeight / (2 * height)]
+                                           [(2 * column + 1) * shapeWidth / (2 * width)];
+                    if (part == '.') continue;
+                    const Pixel &color = !sideButton && part == active ? selected :
+                        part == 'X' ? ink : part == 'C' ? wheel : body;
+                    fill({x + column, y + row, 1, 1}, color);
+                }
+            if (badge)
+                text({x + width, y, 4, height}, std::to_string(button), selected);
+            else if (sideButton && height < 8)
+                text({x, y, width, height}, std::to_string(button), selected);
+            else if (sideButton)
+                text({x, y + height / 2 - 1, width, (height + 1) / 2 + 1}, std::to_string(button), selected);
         }
 
         void arrow(Cell area, int code, Pixel ink) const
@@ -260,9 +284,18 @@ namespace sotc_button_prompts
         void key(Cell area, int code, uint8_t alpha) const
         {
             if (!alpha) return;
+            if (code < 0) {
+                mouse(area, -code, alpha);
+                return;
+            }
+            if (area.width < 9 || area.height < 9) {
+                fill(area, {51, 49, 49, alpha});
+                label(area, code, alpha);
+                return;
+            }
             fill({area.x, area.y + 1, area.width, area.height - 2}, {30, 30, 32, alpha});
-            fill({area.x + 1, area.y, area.width - 2, area.height - 1}, {97, 97, 102, alpha});
-            fill({area.x + 1, area.y + 1, area.width - 2, area.height - 3}, {49, 49, 54, alpha});
+            fill({area.x + 1, area.y, area.width - 2, area.height - 1}, {193, 186, 175, alpha});
+            fill({area.x + 1, area.y + 1, area.width - 2, area.height - 3}, {51, 49, 49, alpha});
             label({area.x + 1, area.y + 1, area.width - 2, area.height - 3}, code, alpha);
         }
 
@@ -270,9 +303,19 @@ namespace sotc_button_prompts
         {
             if (!alpha) return;
             const Pixel ink{254, 254, 254, alpha};
-            if (code < 0) mouse(area, -code, ink);
+            if (code < 0) mouse(area, -code, alpha);
             else if (code >= KEY_RIGHT && code <= KEY_UP) arrow(area, code, ink);
-            else text(area, keyLabel(code), ink);
+            else {
+                auto name = keyLabel(code);
+                if (area.width < 15) {
+                    if (code == KEY_SPACE) name = "SPC";
+                    if (code == KEY_ENTER) name = "ENT";
+                }
+                // Direction clusters have only six pixels per binding.
+                if (static_cast<int>(name.size()) * 3 > area.width)
+                    name.resize(area.width / 3);
+                text(area, name, ink);
+            }
         }
 
         void replace(Cell area, int code) const { key(area, code, clear(area)); }

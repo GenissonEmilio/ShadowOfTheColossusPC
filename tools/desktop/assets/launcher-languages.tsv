@@ -273,3 +273,21 @@ Resistência infinita	Infinite grip	Resistencia infinita	スタミナ無限
 Desligadas por padrão. As assistências são aplicadas na próxima abertura do jogo.	Off by default. Assists apply the next time you launch the game.	Desactivadas por defecto. Las ayudas se aplican al volver a iniciar el juego.	初期設定では無効です。アシストは次回起動時に反映されます。
 Setas mover · Enter confirmar · Esc voltar	Arrows move · Enter confirm · Esc back	Flechas mover · Enter confirmar · Esc volver	矢印キーで移動 · Enter で決定 · Esc で戻る
 Edição PAL europeia detectada (SCES-53326). O suporte a essa edição está pendente; esta versão recompila somente o disco USA SCUS-97472.	European PAL edition detected (SCES-53326). Support for this edition is pending; this version recompiles only the USA SCUS-97472 disc.	Edición PAL europea detectada (SCES-53326). La compatibilidad está pendiente; esta versión solo recompila el disco USA SCUS-97472.	欧州 PAL 版（SCES-53326）が検出されました。この版への対応は保留中です。現在は北米版 SCUS-97472 のみ再コンパイルできます。
+Texturas	Textures	Texturas	テクスチャ
+Mods de textura	Texture mods	Mods de texturas	テクスチャ MOD
+Pacote de texturas	Texture pack	Paquete de texturas	テクスチャパック
+Selecione a pasta que contém os PNGs nomeados pelo código do port. As mudanças valem na próxima abertura do jogo.	Select a folder containing PNGs named with the port’s texture IDs. Changes take effect the next time the game starts.	Selecciona una carpeta con PNG nombrados con los identificadores del port. Los cambios se aplican la próxima vez que se inicia el juego.	ポートのテクスチャ ID をファイル名にした PNG のフォルダーを選んでください。変更は次回起動時に反映されます。
+Selecionar pasta…	Select folder…	Seleccionar carpeta…	フォルダーを選択…
+Desativar pacote	Disable pack	Desactivar paquete	パックを無効にする
+Criar um mod	Create a mod	Crear un mod	MOD を作成する
+Exporte os PNGs originais, edite as imagens e mantenha os nomes e a proporção. Cada sessão exporta até 512 MiB.	Export the original PNGs, edit them, and keep their filenames and aspect ratios. Each session can export up to 512 MiB.	Exporta los PNG originales, edítalos y conserva sus nombres y proporciones. Cada sesión puede exportar hasta 512 MiB.	元の PNG を書き出して編集し、ファイル名と縦横比を維持してください。1 回のプレイで最大 512 MiB を書き出せます。
+Exportar texturas durante o jogo	Export textures during gameplay	Exportar texturas mientras juegas	プレイ中にテクスチャを書き出す
+Abrir pasta de exportação ↗	Open export folder ↗	Abrir carpeta de exportación ↗	書き出しフォルダーを開く ↗
+Selecionar pasta de texturas	Select texture folder	Seleccionar carpeta de texturas	テクスチャフォルダーを選択
+Ativar pacote	Enable pack	Activar paquete	パックを有効にする
+O pacote de texturas não foi ativado	Texture pack could not be enabled	No se pudo activar el paquete de texturas	テクスチャパックを有効にできませんでした
+Pasta indisponível: {name}	Folder unavailable: {name}	Carpeta no disponible: {name}	フォルダーを利用できません: {name}
+Texturas originais	Original textures	Texturas originales	元のテクスチャ
+Escolha uma pasta com texturas PNG nomeadas pelo código do port.	Choose a folder with PNGs named with the port’s texture IDs.	Elige una carpeta con PNG nombrados con los identificadores del port.	ポートのテクスチャ ID をファイル名にした PNG のフォルダーを選んでください。
+Widescreen 16:9 · câmera ampliada	Widescreen 16:9 · wider view	Pantalla panorámica 16:9 · vista ampliada	ワイド 16:9 · 広い視野
+F11 alterna entre janela e tela cheia. Widescreen amplia a visão lateral e preserva o quadro 16:9 em outras proporções.	F11 toggles fullscreen. Widescreen expands the view horizontally and keeps a 16:9 frame on other displays.	F11 activa o desactiva la pantalla completa. El modo panorámico amplía la vista lateral y conserva el marco 16:9 en otras pantallas.	F11 で全画面を切り替えます。ワイドモードでは横方向の視野が広がり、他の画面比率でも 16:9 の表示領域を維持します。

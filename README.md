@@ -138,9 +138,11 @@ os saves persistentes.
 
 
 Na aba **Gráficos**, escolha **Tela cheia · resolução do monitor** para usar o
-monitor atual por inteiro. **Original 4:3** preserva a proporção e deixa faixas
-nas laterais de telas largas; **Esticar** preenche toda a tela. F11 alterna entre
-tela cheia e janela e salva a preferência. O menu F1 também ajusta a proporção.
+monitor atual por inteiro. **Widescreen 16:9** amplia a visão lateral com
+a projeção original do jogo. Em monitores ultrawide, o quadro 16:9 fica
+centralizado com faixas laterais. **Original 4:3**, **Esticar** e **Pixels**
+também estão disponíveis. Use **F11** para alternar a tela cheia e
+**F1 → Vídeo** para mudar a proporção durante o jogo.
 
 Em **Gráficos → Perfil gráfico**, escolha **Original**, **Equilibrado**,
 **Aprimorado** ou **Ultra**. Os perfis ajustam a resolução interna, o FXAA, a
@@ -166,6 +168,21 @@ Filtros são aplicados à imagem do jogo antes do menu e do contador de FPS.
 Shaders modificam a imagem final; não criam texturas HD nem aumentam a resolução
 da geometria. Presets ReShade `.fx` e RetroArch `.slangp` não são compatíveis
 diretamente. Veja [o formato e exemplos](docs/SHADERS.md).
+
+## Mods de textura
+
+Na aba **Texturas**, escolha a pasta que contém os PNGs do pacote. Se o pacote
+vier compactado, extraia-o primeiro e selecione a pasta onde estão as imagens.
+A seleção vale na próxima abertura do jogo. **Desativar pacote** volta às
+texturas originais e mantém os arquivos do mod.
+
+Para criar um pacote, ative **Exportar texturas durante o jogo**, visite as
+áreas que quer modificar e use **Abrir pasta de exportação**. Cada textura
+nativa compatível gera um PNG com um nome de 16 dígitos hexadecimais. Mantenha
+o nome e a proporção da imagem ao editar. O port aceita PNGs de até 4096 px em
+cada dimensão, recria os mipmaps e usa a textura original se o PNG não puder
+ser carregado. Os nomes são gerados pelo port. Cada sessão pode exportar até
+512 MiB de novas imagens.
 
 ## Controles
 

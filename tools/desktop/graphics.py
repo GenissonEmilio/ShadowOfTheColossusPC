@@ -13,6 +13,7 @@ WINDOW_RESOLUTIONS = (
     (640, 480), (800, 600), (1024, 720), (1280, 720),
     (1600, 900), (1920, 1080), (2560, 1440), (3840, 2160),
 )
+SCREEN_MODE_COUNT = 4  # matches hostmenu::ScreenMode
 
 # IDs are persisted by native_renderer::Tuning. Keep the older IDs readable.
 GRAPHICS_PROFILES = (
@@ -43,7 +44,8 @@ class Graphics:
     def display(self):
         values = self.settings()
         mode = values.get("screen", "0")
-        return values.get("fullscreen", "1") == "1", int(mode) if mode in ("0", "1", "2") else 0
+        modes = tuple(str(index) for index in range(SCREEN_MODE_COUNT))
+        return values.get("fullscreen", "1") == "1", int(mode) if mode in modes else 0
 
     def upscaling(self):
         values = self.settings()
@@ -64,7 +66,7 @@ class Graphics:
             self._save_settings({"quality_preset": profile}, QUALITY_KEYS)
 
     def save_display(self, fullscreen, mode, *, window=None, fsr=None):
-        values = {"fullscreen": int(bool(fullscreen)), "screen": max(0, min(2, int(mode)))}
+        values = {"fullscreen": int(bool(fullscreen)), "screen": max(0, min(SCREEN_MODE_COUNT - 1, int(mode)))}
         if window is not None:
             values["window_resolution"] = max(0, min(len(WINDOW_RESOLUTIONS), int(window)))
         if fsr is not None:

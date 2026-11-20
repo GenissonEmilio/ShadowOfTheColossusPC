@@ -19,6 +19,7 @@ from gamepad import Gamepad
 from language import LANGUAGES, PREFERENCES, PROMPTS, activate, preferences, translate as tr
 from launcher_audio import LauncherAudio
 from pipeline import CompilationError
+from texture_mods import TextureMods
 from updates import RateLimitedError, check_for_update, confirm_startup, restart_with_update, stage_update
 
 if len(sys.argv) > 1 and sys.argv[1] == "--pipeline-helper":
@@ -146,6 +147,7 @@ class Launcher:
         self.last_input_style = "keyboard"
         activate(self.preferences["language"])
         self.graphics = Graphics(self.library)
+        self.texture_mods = TextureMods(self.library)
         self.feedback = LauncherAudio(self.library.program, enabled=self.preferences["ui_sounds"])
         self.presentation_fullscreen = self.preferences["launcher_fullscreen"]
         self.busy = False; self.process = None; self.closing = False; self.failed = False
@@ -191,7 +193,8 @@ class Launcher:
         self.stack.set_transition_type(Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
         self.stack.set_transition_duration(220)
         self.stack.set_hhomogeneous(False); self.stack.set_vhomogeneous(False)
-        for key, title in (("home", "Início"), ("graphics", "Gráficos"), ("controls", "Controles"),
+        for key, title in (("home", "Início"), ("graphics", "Gráficos"), ("textures", "Texturas"),
+                           ("controls", "Controles"),
                            ("settings", "Configurações"), ("about", "Sobre o port")):
             button = style(FocusButton(label=tr(title)), "nav")
             button.connect("clicked", lambda _, name=key: self.navigate(name))
@@ -212,6 +215,7 @@ class Launcher:
         self.home_page = self.home()
         self.stack.add_named(self.home_page, "home")
         self.stack.add_named(self.graphics_page(),"graphics")
+        self.stack.add_named(self.textures_page(), "textures")
         self.stack.add_named(self.controls(),"controls")
         self.stack.add_named(self.settings_page(),"settings")
         self.stack.add_named(self.about(),"about")
@@ -338,7 +342,8 @@ class Launcher:
         self.menu_panel.set_size_request(290, -1)
         self.menu_panel.pack_start(label("Shadow of the Colossus", "panel-title"), False, False, 16)
         self.menu_buttons = {}
-        for name, title in (("home", "Início"), ("graphics", "Gráficos"), ("controls", "Controles"),
+        for name, title in (("home", "Início"), ("graphics", "Gráficos"), ("textures", "Texturas"),
+                           ("controls", "Controles"),
                             ("settings", "Configurações"), ("about", "Sobre o port")):
             button = style(FocusButton(label=tr(title)), "menu-item")
             button.get_child().set_xalign(0)
@@ -830,7 +835,8 @@ class Launcher:
         self.fullscreen.set_active(int(fullscreen))
         panel.pack_start(self.fullscreen,False,False,0)
         self.aspect = style(Gtk.ComboBoxText(),"graphics-select")
-        for text in (tr("Original 4:3 · preservar proporção"), tr("Esticar · preencher a tela"), tr("Pixels · escala inteira")):
+        for text in (tr("Original 4:3 · preservar proporção"), tr("Esticar · preencher a tela"), tr("Pixels · escala inteira"),
+                     tr("Widescreen 16:9 · câmera ampliada")):
             self.aspect.append_text(text)
         self.aspect.set_active(mode)
         panel.pack_start(self.aspect,False,False,0)
@@ -860,7 +866,7 @@ class Launcher:
         self.fsr.connect("toggled", self.save_graphics)
         self.fullscreen.connect("changed", self.save_graphics)
         self.aspect.connect("changed", self.save_graphics)
-        panel.pack_start(label(tr("F11 alterna entre janela e tela cheia durante o jogo.\nOriginal mantém faixas laterais em monitores largos. Esticar ocupa toda a tela."),"muted",wrap=True),False,False,0)
+        panel.pack_start(label(tr("F11 alterna entre janela e tela cheia. Widescreen amplia a visão lateral e preserva o quadro 16:9 em outras proporções."),"muted",wrap=True),False,False,0)
         page.pack_start(panel,False,False,0)
         panel = box(spacing=15,classes=("panel","graphics-panel"))
         panel.pack_start(label(tr("Shaders e filtros"), "panel-title"),False,False,0)
@@ -922,6 +928,88 @@ class Launcher:
             self.graphics.clear(); self.refresh_shader()
         except OSError as exc:
             self.error(tr("Não foi possível desativar o shader"),str(exc))
+
+    def textures_page(self):
+        page = box(spacing=18)
+        page.pack_start(label(tr("Mods de textura"), "section-title"), False, False, 0)
+        panel = self.texture_panel = box(spacing=14, classes=("panel", "graphics-panel"))
+        panel.pack_start(label(tr("Pacote de texturas"), "panel-title"), False, False, 0)
+        panel.pack_start(label(tr("Selecione a pasta que contém os PNGs nomeados pelo código do port. As mudanças valem na próxima abertura do jogo."),
+                               "muted", wrap=True), False, False, 0)
+        self.texture_status = label("", "status", wrap=True)
+        panel.pack_start(self.texture_status, False, False, 0)
+        actions = box(Gtk.Orientation.HORIZONTAL, 10)
+        choose = style(FocusButton(label=tr("Selecionar pasta…")), "secondary")
+        choose.connect("clicked", self.choose_texture_pack)
+        actions.pack_start(choose, False, False, 0)
+        self.texture_clear = style(FocusButton(label=tr("Desativar pacote")), "secondary")
+        self.texture_clear.connect("clicked", self.clear_texture_pack)
+        actions.pack_start(self.texture_clear, False, False, 0)
+        panel.pack_start(actions, False, False, 0)
+        panel.pack_start(Gtk.Separator(), False, False, 0)
+        panel.pack_start(label(tr("Criar um mod"), "panel-title"), False, False, 0)
+        panel.pack_start(label(tr("Exporte os PNGs originais, edite as imagens e mantenha os nomes e a proporção. Cada sessão exporta até 512 MiB."),
+                               "muted", wrap=True), False, False, 0)
+        self.texture_export = Gtk.CheckButton(label=tr("Exportar texturas durante o jogo"))
+        self.texture_export.set_active(self.texture_mods.preferences()[1])
+        self.texture_export.connect("toggled", self.toggle_texture_export)
+        panel.pack_start(self.texture_export, False, False, 0)
+        folder = style(FocusButton(label=tr("Abrir pasta de exportação ↗")), "link")
+        folder.set_halign(Gtk.Align.START)
+        folder.connect("clicked", self.open_texture_exports)
+        panel.pack_start(folder, False, False, 0)
+        page.pack_start(panel, False, False, 0)
+        self.refresh_texture_pack()
+        return page
+
+    def choose_texture_pack(self, *_):
+        dialog = Gtk.FileChooserDialog(title=tr("Selecionar pasta de texturas"), parent=self.window,
+                                       action=Gtk.FileChooserAction.SELECT_FOLDER)
+        dialog.add_buttons(tr("Cancelar"), Gtk.ResponseType.CANCEL, tr("Ativar pacote"), Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        self.configure_file_chooser(dialog)
+        folder = dialog.get_filename() if dialog.run() == Gtk.ResponseType.OK else None
+        dialog.destroy()
+        if folder:
+            try:
+                self.texture_mods.set_pack(folder)
+                self.refresh_texture_pack()
+            except (OSError, ValueError, RuntimeError) as exc:
+                self.error(tr("O pacote de texturas não foi ativado"), str(exc))
+
+    def refresh_texture_pack(self):
+        folder, _ = self.texture_mods.preferences()
+        if folder:
+            text = tr("Ativo: {name}") if folder.is_dir() else tr("Pasta indisponível: {name}")
+            self.texture_status.set_text(text.format(name=folder.name))
+            self.texture_status.set_tooltip_text(str(folder))
+        else:
+            self.texture_status.set_text(tr("Texturas originais"))
+            self.texture_status.set_tooltip_text(None)
+        self.texture_clear.set_sensitive(folder is not None)
+
+    def clear_texture_pack(self, *_):
+        try:
+            self.texture_mods.set_pack(None)
+            self.refresh_texture_pack()
+        except OSError as exc:
+            self.error(tr("Não foi possível salvar as configurações"), str(exc))
+
+    def toggle_texture_export(self, button):
+        try:
+            self.texture_mods.set_export(button.get_active())
+        except OSError as exc:
+            button.handler_block_by_func(self.toggle_texture_export)
+            button.set_active(self.texture_mods.preferences()[1])
+            button.handler_unblock_by_func(self.toggle_texture_export)
+            self.error(tr("Não foi possível salvar as configurações"), str(exc))
+
+    def open_texture_exports(self, *_):
+        try:
+            self.texture_mods.exports.mkdir(parents=True, exist_ok=True)
+            self.open_desktop_path(self.texture_mods.exports)
+        except OSError as exc:
+            self.error(tr("Não foi possível abrir a pasta"), str(exc))
 
     def settings_page(self):
         page = box(spacing=18)
@@ -1224,8 +1312,9 @@ class Launcher:
         self.refresh_prepare_controls()
 
     def refresh_prepare_controls(self):
-        self.compile_button.set_sensitive(bool(self.library.disc) and not
-            (self.busy or self.process or self.controller_process))
+        idle = not (self.busy or self.process or self.controller_process)
+        self.compile_button.set_sensitive(bool(self.library.disc) and idle)
+        self.texture_panel.set_sensitive(idle)
 
     def compile_game(self, *_):
         if self.library.disc:
@@ -1488,7 +1577,7 @@ def main():
     parser.add_argument("--test-game",action="store_true",help=argparse.SUPPRESS)
     parser.add_argument("--install-shortcut",action="store_true",help=argparse.SUPPRESS)
     parser.add_argument("--no-update-check",action="store_true",help=argparse.SUPPRESS)
-    parser.add_argument("--page",choices=("home","graphics","controls","settings","about"),default="home",help=argparse.SUPPRESS)
+    parser.add_argument("--page",choices=("home","graphics","textures","controls","settings","about"),default="home",help=argparse.SUPPRESS)
     args=parser.parse_args()
     if args.install_shortcut:
         print(Library(args.data_dir).install_desktop_entry()); return 0

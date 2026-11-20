@@ -20,6 +20,7 @@ namespace fixture
     std::vector<std::pair<savestates::Action, int>> requests;
     struct Text { std::string value; int x, y, size; };
     std::vector<Text> drawn;
+    int mouseHints = 0;
     int width = 1024, height = 768;
     double clock = 0;
     desktop_input::PromptStyle promptStyle = desktop_input::PromptStyle::PlayStation;
@@ -47,7 +48,8 @@ extern "C"
     void DrawText(const char *text, int x, int y, int size, Color)
     { fixture::drawn.push_back({text, x, y, size}); }
     void DrawRectangle(int, int, int, int, Color) {}
-    void DrawRectangleRounded(Rectangle, float, int, Color) {}
+    void DrawRectangleRounded(Rectangle, float, int, Color color)
+    { fixture::mouseHints += color.r == 255 && color.g == 198 && color.b == 91; }
     void DrawCircle(int, int, float, Color) {}
     bool CheckCollisionPointRec(Vector2 point, Rectangle box)
     { return point.x >= box.x && point.x < box.x + box.width && point.y >= box.y && point.y < box.y + box.height; }
@@ -86,6 +88,7 @@ namespace fixture
     {
         clock += 1.0 / 60.0;
         drawn.clear();
+        mouseHints = 0;
         hostmenu::update();
         hostmenu::draw(width, height);
         std::memset(keyPress, 0, sizeof(keyPress));
@@ -147,7 +150,14 @@ int main()
     promptStyle = desktop_input::PromptStyle::Xbox;
     frame(); assert(xboxHints());
     promptStyle = desktop_input::PromptStyle::Keyboard;
-    frame(); assert(!xboxHints());
+    const auto contains = [](const char *value) {
+        return std::any_of(drawn.begin(), drawn.end(), [value](const auto &text) { return text.value == value; });
+    };
+    frame(); assert(!xboxHints() && contains("Enter") && contains("Setas") && mouseHints == 1);
+    key(KEY_H);
+    assert(hostmenu::g_help && contains("Backspace") && mouseHints == 0);
+    key(KEY_BACKSPACE);
+    assert(!hostmenu::g_help);
     key(KEY_ENTER);
     assert(requests.size() == 1 && requests.back() == std::make_pair(savestates::Action::Save, 0));
     stored[0] = {true, 64u * 1024u * 1024u, "01/11 12:34:56"};

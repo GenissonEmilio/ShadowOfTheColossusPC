@@ -154,10 +154,11 @@ Rectangle destination(int width, int height, int sourceWidth, int sourceHeight, 
     const float w = static_cast<float>(std::max(1, width));
     const float h = static_cast<float>(std::max(1, height));
     float dw = w, dh = h;
-    if (mode == hostmenu::kScreenFit)
+    if (mode == hostmenu::kScreenFit || mode == hostmenu::kScreenWidescreen)
     {
-        dw = std::min(w, h * (4.0f / 3.0f));
-        dh = dw * 0.75f;
+        const float aspect = mode == hostmenu::kScreenWidescreen ? hostmenu::kWidescreenAspect : hostmenu::kOriginalAspect;
+        dw = std::min(w, h * aspect);
+        dh = std::min(h, w / aspect);
     }
     else if (mode == hostmenu::kScreenInteger)
     {

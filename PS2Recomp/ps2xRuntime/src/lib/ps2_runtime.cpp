@@ -2897,7 +2897,7 @@ void PS2Runtime::run()
     Texture2D frameTex = LoadTextureFromImage(blank);
     UnloadImage(blank);
 
-    // One host frame: the game picture (4:3 / stretch / integer), the FPS
+    // One host frame: the game picture (4:3 / stretch / integer / 16:9), the FPS
     // overlay, the debug UI and the settings menu.
     // Set while the native renderer's GL picture is shown: GL textures are y-up.
     bool hostFrameFlipY = false;
@@ -2905,17 +2905,21 @@ void PS2Runtime::run()
     {
             BeginDrawing();
             ClearBackground(BLACK);
+            auto &video = hostmenu::settings();
+            int screenMode = video.screenMode.load(std::memory_order_relaxed);
+            if (screenMode == hostmenu::kScreenWidescreen &&
+                (!video.widescreenActive.load(std::memory_order_relaxed) || ps2_stubs::mpegPlaybackActive()))
+                screenMode = hostmenu::kScreenFit;
 #ifdef PS2X_DESKTOP_VIDEO
             desktop_video::draw(shown, std::max(1u, presentWidth), std::max(1u, presentHeight), hostFrameFlipY,
-                                hostmenu::settings().screenMode, hostmenu::settings().upscaleFsr, native_renderer::tuning().fxaa);
+                                screenMode, video.upscaleFsr, native_renderer::tuning().fxaa);
 #else
             const float srcWidth = static_cast<float>(std::max<uint32_t>(1u, presentWidth));
             const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight));
             const float screenWidth = static_cast<float>(GetScreenWidth());
             const float screenHeight = static_cast<float>(GetScreenHeight());
-            // The PS2 picture is 4:3 whatever its pixel size (512x448, 640x448...).
-            const float aspect = 4.0f / 3.0f;
-            const int screenMode = hostmenu::settings().screenMode.load(std::memory_order_relaxed);
+            // The guest framebuffer dimensions are independent of its display aspect.
+            const float aspect = screenMode == hostmenu::kScreenWidescreen ? hostmenu::kWidescreenAspect : hostmenu::kOriginalAspect;
             float dstWidth = std::min(screenWidth, screenHeight * aspect);
             float dstHeight = dstWidth / aspect;
             if (screenMode == hostmenu::kScreenStretch)

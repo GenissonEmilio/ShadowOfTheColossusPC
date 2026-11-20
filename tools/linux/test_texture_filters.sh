@@ -12,3 +12,9 @@ g++ -std=c++20 -O1 -ffunction-sections -fdata-sections \
   "$kit/lib/libps2_runtime.a" "$kit/lib/libraylib.a" \
   -lGL -lX11 -pthread -ldl -lm -o "$out/check"
 xvfb-run -a timeout --kill-after=2s 20s "$out/check"
+# PNG texture mods need no display, disc data or GL context.
+g++ -std=c++20 -O1 -Igame/overrides -I"$kit/source/raylib" \
+  tests/native/texture_mods.cpp "$kit/lib/libraylib.a" \
+  -lGL -lX11 -pthread -ldl -lm -o "$out/check-mods"
+mkdir -p "$out/dumped"
+"$out/check-mods" "$out/dumped"

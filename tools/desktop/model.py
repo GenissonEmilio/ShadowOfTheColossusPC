@@ -12,7 +12,7 @@ from import_disc import import_disc, EXPECTED
 from language import preferences, translate as tr
 from pipeline import CompilationError, Pipeline, PROCESS_FLAGS, WINDOWS, compiler_tool
 
-VERSION = "0.9.6"
+VERSION = "0.9.7"
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 APPLICATION_ID = "io.github.GenissonEmilio.ShadowOfTheColossusPC"
 SAVE_STATES_AVAILABLE = sys.platform.startswith("linux")
@@ -166,6 +166,8 @@ class Library:
         graphics = Graphics(self)
         graphics.save_display(*graphics.display())
         environment = self.game_environment(test)
+        from texture_mods import TextureMods
+        environment.update(TextureMods(self).environment())
         if sys.platform.startswith("linux"):
             from gpu import prefer_discrete_gpu
             prefer_discrete_gpu(environment)

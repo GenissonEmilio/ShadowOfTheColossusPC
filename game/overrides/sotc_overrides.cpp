@@ -21,6 +21,7 @@
 #include <string>
 
 void installSotcNative(PS2Runtime &runtime); // sotc_native.cpp
+namespace sotc_widescreen { void install(PS2Runtime &runtime); }
 #include "sotc_decomp.h"
 #include "decomp_ground_support.h"
 #include "sotc_assists.h"
@@ -881,7 +882,10 @@ namespace
         installCallTracing(runtime);
         installCensus(runtime);
         if (!std::getenv("PS2X_MODULE_CAPTURE"))
+        {
             installSotcNative(runtime);
+            sotc_widescreen::install(runtime);
+        }
         sysnative::install(runtime);
         sotc_decomp::install(runtime);
         sotc_ground_support::installGroundSupport(runtime);

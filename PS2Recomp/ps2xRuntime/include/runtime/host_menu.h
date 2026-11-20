@@ -14,13 +14,19 @@ namespace hostmenu
         kScreenFit = 0,     // keep the 4:3 picture, black bars
         kScreenStretch = 1, // fill the screen
         kScreenInteger = 2, // largest whole multiple (sharp pixels)
+        kScreenWidescreen = 3, // the game's widescreen projection, fitted at 16:9
+        kScreenModeCount,
     };
+
+    inline constexpr float kOriginalAspect = 4.0f / 3.0f;
+    inline constexpr float kWidescreenAspect = 16.0f / 9.0f;
 
     struct Settings
     {
         std::atomic<bool> exactAlpha{true}; // GPU renderer: alpha-fail pass
         std::atomic<bool> showFps{true};
         std::atomic<int> screenMode{kScreenFit};
+        std::atomic<bool> widescreenActive{false}; // the game has applied its wide projection
         std::atomic<bool> fullscreen{false};
         std::atomic<int> volume{10};   // 0..10
         std::atomic<int> language{0};  // 0 auto, 1 Portuguese, 2 English
