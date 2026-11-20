@@ -150,3 +150,4 @@ Shadow of the Colossus pertence à Sony / Team Ico. Projeto não oficial, sem
 vínculo com os titulares. Créditos completos da base estão na documentação Celosia.
 
 [![Verified developer on RecompStore](https://recompstore.com/assets/press/verified-dark.svg)](https://recompstore.com/dev/genissonemilio)
+[![Get it on RecompLauncher](https://recomplauncher.com/assets/press/launcher/badge-dark.svg)](https://recomplauncher.com/game/shadowofthecolossuspc)
