@@ -109,7 +109,9 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
         static const float deadZone = []
         {
             const char *env = std::getenv("PS2X_STICK_DEADZONE");
-            const float v = env ? static_cast<float>(std::atof(env)) : 0.18f;
+            // The game has a dead zone of its own on the PS2's bytes: a wide
+            // one here too ate the small tilts (fine steering, slow walking).
+            const float v = env ? static_cast<float>(std::atof(env)) : 0.08f;
             return std::clamp(v, 0.0f, 0.9f);
         }();
         auto shape = [](float &x, float &y)
