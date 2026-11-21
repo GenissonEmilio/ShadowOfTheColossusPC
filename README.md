@@ -112,8 +112,8 @@ high performance for the compiled `game.exe` and respects an existing preference
 in Windows graphics settings.
 
 The active GPU appears in `last-game.log` under `Renderer:`. The `[stats]`
-lines show game timing, window presentation rate, and uploads of new frames
-to the GPU. Toggle the on-screen counter with **Graphics → Show FPS** in the
+lines show game timing, window presentation rate, generated frames, and uploads
+of new game frames to the GPU. Toggle the on-screen counter with **Graphics → Show FPS** in the
 launcher, **F1 → Video → Show FPS** during play, or **FPS display** in RecompLauncher.
 
 Open **About** to create a shortcut in your applications menu. The data location
@@ -188,6 +188,10 @@ upscales the image from the internal resolution to the display area.
 
 **F1 → Video → VSync** synchronizes frame presentation with the monitor to reduce
 tearing. VSync is enabled by default and can be changed during play.
+
+Enable **F1 → Video → Frame generation (2x)** to interpolate between consecutive
+game frames when the display has time to show both. The game simulation keeps
+its original rate. Frame generation is off by default and adds presentation latency.
 
 **Import shader…** copies a **GLSL 330** post-processing fragment shader (`.frag`,
 `.fs`, or `.glsl`) and compiles it with your graphics driver. The launcher keeps
