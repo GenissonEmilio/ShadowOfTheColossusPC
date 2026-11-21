@@ -1454,9 +1454,10 @@ class Launcher:
         self.display_panel.set_sensitive(False); self.video_panel.set_sensitive(False)
         def worker():
             try:
+                launch_options = {} if roam_boss is None else {"roam_boss": roam_boss}
                 process = self.library.launch(self.args.test_game,
                                               lambda text: GLib.idle_add(self.update_status, text),
-                                              roam_boss=roam_boss)
+                                              **launch_options)
                 GLib.idle_add(self.game_started,process,None)
             except Exception as exc:
                 GLib.idle_add(self.game_started,None,str(exc))
