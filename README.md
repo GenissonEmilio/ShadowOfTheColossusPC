@@ -356,3 +356,6 @@ release package to use the graphical launcher.
 
 Shadow of the Colossus belongs to Sony / Team Ico. This is an unofficial project.
 Full upstream credits are available in the Celosia documentation.
+
+[![Verified developer on RecompStore](https://recompstore.com/assets/press/verified-dark.svg)](https://recompstore.com/dev/genissonemilio)
+[![Get it on RecompLauncher](https://recomplauncher.com/assets/press/launcher/badge-dark.svg)](https://recomplauncher.com/game/shadowofthecolossuspc)
