@@ -3079,6 +3079,21 @@ void PS2Runtime::run()
 
     uint64_t tick = 0;
     uint64_t nativeFrameUploads = 0;
+    uint64_t hostFrames = 0;
+    uint64_t lastHostFrames = 0;
+#if !(defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
+    Texture2D nativeTex{};
+    std::vector<uint8_t> nativePixels;
+    uint64_t nativeRevision = 0;
+#endif
+#ifdef PS2X_DESKTOP_VIDEO
+    Texture2D previousNativeTex{};
+    Texture2D midpoint{};
+    double previousNativeArrival = -1.0;
+    uint64_t previousNativeSlot = 0;
+    uint64_t realFrameSlot = 0;
+    uint64_t generatedFrames = 0;
+#endif
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
     {
 #ifdef PS2X_DESKTOP_VIDEO
@@ -3165,20 +3180,61 @@ void PS2Runtime::run()
         });
         uint32_t presentWidth = FB_WIDTH;
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
+#ifndef PS2X_DESKTOP_VIDEO
         UploadFrame(frameTex, this, presentWidth, presentHeight);
+#endif
 #if !(defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
         // The native renderer's picture at its own size (it may draw larger
         // than the PS2's 512 x 448), filtered: not through the GS's display.
-        static Texture2D nativeTex{};
-        static std::vector<uint8_t> nativePixels;
-        static uint64_t nativeRevision = 0;
         bool nativeOnScreen = false;
-        if (native_renderer::shown())
+        const bool nativeRequested = native_renderer::shown();
+#ifdef PS2X_DESKTOP_VIDEO
+        const bool interpolationEnabled = nativeRequested && hostmenu::settings().frameGeneration &&
+                                          !hostmenu::isOpen() && !savestates::busy();
+        if (!interpolationEnabled)
+        {
+            previousNativeArrival = -1.0;
+            realFrameSlot = 0;
+            midpoint = {};
+        }
+        // Finish presenting the current pair before reading another frame.
+        // The midpoint and endpoint each hold for about half a game frame.
+        const bool presentingPair = realFrameSlot != 0;
+        if (presentingPair && hostFrames >= realFrameSlot)
+        {
+            midpoint = {};
+            realFrameSlot = 0;
+        }
+        uint64_t midpointSlots = 0;
+#endif
+        if (nativeRequested)
         {
             uint32_t nw = 0, nh = 0;
+#ifdef PS2X_DESKTOP_VIDEO
+            const uint64_t lastRevision = nativeRevision;
+            const auto frameRead = presentingPair ? native_renderer::FrameRead::Unchanged :
+                native_renderer::readFrame(nativePixels, nw, nh, nativeRevision);
+#else
             const auto frameRead = native_renderer::readFrame(nativePixels, nw, nh, nativeRevision);
+#endif
             if (frameRead == native_renderer::FrameRead::Updated && nw && nh && nativePixels.size() >= static_cast<size_t>(nw) * nh * 4u)
             {
+#ifdef PS2X_DESKTOP_VIDEO
+                if (interpolationEnabled)
+                {
+                    const double arrived = GetTime();
+                    const double period = arrived - previousNativeArrival;
+                    const uint64_t slots = hostFrames - previousNativeSlot;
+                    // Require spare refreshes and consecutive game frames.
+                    // Reset across stalls and keep up with a 15 fps source.
+                    if (previousNativeArrival >= 0.0 && nativeRevision == lastRevision + 1u &&
+                        slots >= 2u && period >= 0.019 && period <= 0.080)
+                        midpointSlots = slots / 2u;
+                    previousNativeArrival = arrived;
+                    previousNativeSlot = hostFrames;
+                    std::swap(nativeTex, previousNativeTex);
+                }
+#endif
                 // The display shows colour only (the PS2's CRTC ignores alpha):
                 // drawn blended over black, the picture's alpha darkened it.
                 for (size_t i = 3; i < static_cast<size_t>(nw) * nh * 4u; i += 4)
@@ -3205,6 +3261,24 @@ void PS2Runtime::run()
                 nativeOnScreen = true;
             }
         }
+#ifdef PS2X_DESKTOP_VIDEO
+        // The native texture already contains the complete picture. Latching
+        // the fallback here drains the GS worker and can upload the same
+        // picture a second time.
+        if (!nativeOnScreen)
+            UploadFrame(frameTex, this, presentWidth, presentHeight);
+        if (!nativeOnScreen)
+            previousNativeArrival = -1.0;
+        if (nativeOnScreen && midpointSlots != 0)
+        {
+            midpoint = desktop_video::interpolate(previousNativeTex, nativeTex);
+            if (midpoint.id)
+            {
+                realFrameSlot = hostFrames + midpointSlots;
+                ++generatedFrames;
+            }
+        }
+#endif
         const Texture2D &shownTex = nativeOnScreen ? nativeTex : (g_directFrame.id ? g_directFrame : frameTex);
         // F9: the same moment twice, for comparing: the emulated picture (the
         // native one hidden for a few frames so the GS draws), the native one,
@@ -3248,7 +3322,6 @@ void PS2Runtime::run()
         static const bool statsEnabled = std::getenv("PS2X_STATS") != nullptr;
 #endif
         static double nextStats = 5.0;
-        static uint64_t hostFrames = 0;
         ++hostFrames; // host loop iterations: frames actually shown in the window
         if (statsEnabled && GetTime() >= nextStats)
         {
@@ -3276,12 +3349,14 @@ void PS2Runtime::run()
                 std::cerr << line << std::endl;
             }
             static uint64_t lastStatChains = 0;
-            static uint64_t lastHostFrames = 0;
             const uint64_t statChains = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
             std::cerr << "[stats] t=" << static_cast<int>(GetTime())
                       << " gameFps=" << (statChains - lastStatChains) / 5.0
                       << " shownFps=" << ps2_stats::presentedFrames.exchange(0) / 5.0
                       << " hostFps=" << (hostFrames - lastHostFrames) / 5.0
+#ifdef PS2X_DESKTOP_VIDEO
+                      << " generatedFps=" << std::exchange(generatedFrames, uint64_t{0}) / 5.0
+#endif
                       << " nativeUploads=" << std::exchange(nativeFrameUploads, uint64_t{0})
                       << " frames=" << statChains
                       << []
@@ -3558,7 +3633,16 @@ void PS2Runtime::run()
             std::this_thread::sleep_for(std::chrono::milliseconds(4));
         }
 #else
-        drawHostFrame(shownTex, presentWidth, presentHeight);
+#ifdef PS2X_DESKTOP_VIDEO
+        if (midpoint.id)
+        {
+            hostFrameFlipY = true; // The midpoint comes from an OpenGL framebuffer.
+            drawHostFrame(midpoint, presentWidth, presentHeight);
+            hostFrameFlipY = false;
+        }
+        else
+#endif
+            drawHostFrame(shownTex, presentWidth, presentHeight);
 #endif
 #ifdef PS2X_DESKTOP_VIDEO
         if (IsKeyPressed(KEY_F11))
@@ -3596,7 +3680,11 @@ void PS2Runtime::run()
         m_debugUiInitialized = false;
     }
     UnloadTexture(frameTex);
+#if !(defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
+    if (nativeTex.id) UnloadTexture(nativeTex);
+#endif
 #ifdef PS2X_DESKTOP_VIDEO
+    if (previousNativeTex.id) UnloadTexture(previousNativeTex);
     desktop_video::shutdown();
 #endif
     CloseWindow();

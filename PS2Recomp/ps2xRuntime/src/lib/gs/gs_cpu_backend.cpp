@@ -3412,14 +3412,20 @@ PresentationFrame GSCpuBackend::Present(const GSPresentationRequest &request)
             frame.sourceFbp = frame.displayFbp;
             frame.vsyncTick = request.vsyncTick;
             frame.pixels.assign(static_cast<size_t>(kHostFrameWidth) * kHostFrameHeight * 4u, 0u);
+            // The horizontal map is identical on every row. Keep the
+            // division out of the copy loop on high internal resolutions.
+            std::array<uint32_t, kHostFrameWidth> sourceColumns;
+            for (uint32_t x = 0; x < width; ++x)
+                sourceColumns[x] = x * nw / width;
             for (uint32_t y = 0; y < height; ++y)
             {
                 const uint32_t sy = y * nh / height;
+                const uint8_t *src = native.data() + static_cast<size_t>(sy) * nw * 4u;
+                uint8_t *dst = frame.pixels.data() + static_cast<size_t>(y) * kHostFrameWidth * 4u;
                 for (uint32_t x = 0; x < width; ++x)
                 {
-                    const uint32_t sx = x * nw / width;
-                    std::memcpy(&frame.pixels[(static_cast<size_t>(y) * kHostFrameWidth + x) * 4u], &native[(static_cast<size_t>(sy) * nw + sx) * 4u], 4);
-                    frame.pixels[(static_cast<size_t>(y) * kHostFrameWidth + x) * 4u + 3u] = 255u; // colour only, as the PS2's CRTC shows it
+                    std::memcpy(dst + x * 4u, src + sourceColumns[x] * 4u, 4u);
+                    dst[x * 4u + 3u] = 255u; // the CRTC shows colour only
                 }
             }
             return frame;

@@ -20,6 +20,7 @@ namespace desktop_video
     void setWindowResolution(int resolution);
     void setFullscreen(bool enabled);
     void updatePresentation(bool vsync, bool cap30);
+Texture2D interpolate(Texture2D previous, Texture2D current);
     bool loadShader(const char *path, std::string &error);
     bool shaderActive();
     bool fxaaAvailable();

@@ -60,6 +60,11 @@ namespace native_renderer
 #else
         applyPreset(d, kPresetMedium);
 #endif
+#ifdef PS2X_DESKTOP_VIDEO
+        // Submit the real frame and let the EE build the next while GL
+        // draws it. The backend still waits before reusing frame resources.
+        d.renderThread = true;
+#endif
 #if defined(__vita__)
         // Copies of the picture made mid-frame came out white in Vita3K when
         // the picture was taken up again after them: drawn again instead, so

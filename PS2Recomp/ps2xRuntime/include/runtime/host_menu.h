@@ -34,6 +34,7 @@ namespace hostmenu
         std::atomic<bool> vsync{true};
         std::atomic<int> windowResolution{0};
         std::atomic<bool> upscaleFsr{false};
+        std::atomic<bool> frameGeneration{false};
 #endif
     };
 

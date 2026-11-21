@@ -112,6 +112,9 @@ namespace
             {"Fullscreen", "Tela cheia"},
             {"Window resolution", "Resolução da janela"},
             {"FSR 1 upscaling", "Upscaling FSR 1"},
+            {"Frame generation (2x)", "Geração de quadros (2x)"},
+            {"Adds an interpolated frame when the display has room. The game still runs at its base frame rate.",
+             "Gera um quadro intermediário quando há tempo para exibi-lo. O jogo mantém sua taxa de quadros base."},
             {"Uses the current monitor's resolution in fullscreen. F11 also toggles this.",
              "Usa a resolução do monitor atual em tela cheia. F11 também alterna o modo."},
             {"Selects the game window size. Automatic lets you resize it freely. Fullscreen uses the monitor resolution.",
@@ -179,6 +182,7 @@ namespace
         kFullscreen,
         kWindowResolution,
         kUpscaleFsr,
+        kFrameGeneration,
 #endif
         kVolume,
         kLanguage,
@@ -215,6 +219,8 @@ namespace
         {kUpscaleFsr, "FSR 1 upscaling",
          "Uses AMD FSR 1 to upscale the game picture when it is smaller than the display area. "
          "Lower the resolution in Quality to reduce rendering load. Sharp mode uses whole-pixel scaling."},
+        {kFrameGeneration, "Frame generation (2x)",
+         "Adds an interpolated frame when the display has room. The game still runs at its base frame rate."},
 #endif
     };
     const Item kSoundItems[] = {
@@ -352,6 +358,7 @@ namespace
         case kVSync: return T(g_settings.vsync ? "On" : "Off");
         case kFullscreen: return T(g_settings.fullscreen ? "On" : "Off");
         case kUpscaleFsr: return T(g_settings.upscaleFsr ? "On" : "Off");
+        case kFrameGeneration: return T(g_settings.frameGeneration ? "On" : "Off");
         case kWindowResolution:
         {
             const int resolution = g_settings.windowResolution.load();
@@ -393,6 +400,7 @@ namespace
 #ifdef PS2X_DESKTOP_VIDEO
         std::fprintf(f, "vsync=%d\nwindow_resolution=%d\nupscale_fsr=%d\n", g_settings.vsync ? 1 : 0,
                      g_settings.windowResolution.load(), g_settings.upscaleFsr ? 1 : 0);
+        std::fprintf(f, "frame_generation=%d\n", g_settings.frameGeneration ? 1 : 0);
 #endif
         const native_renderer::Tuning &t = native_renderer::tuning();
         for (const native_renderer::TuningItem &item : native_renderer::tuningItems())
@@ -424,6 +432,7 @@ namespace
                 % desktop_video::kWindowResolutionCount;
             break;
         case kUpscaleFsr: g_settings.upscaleFsr = !g_settings.upscaleFsr; break;
+        case kFrameGeneration: g_settings.frameGeneration = !g_settings.frameGeneration; break;
 #endif
         case kScreen: g_settings.screenMode = (g_settings.screenMode + kScreenModeCount + dir) % kScreenModeCount; break;
         case kVolume: g_settings.volume = std::clamp(g_settings.volume + dir, 0, 10); break;
@@ -747,6 +756,7 @@ void load()
         else if (!std::strcmp(key, "window_resolution"))
             g_settings.windowResolution = std::clamp(value, 0, desktop_video::kWindowResolutionCount - 1);
         else if (!std::strcmp(key, "upscale_fsr")) g_settings.upscaleFsr = value != 0;
+        else if (!std::strcmp(key, "frame_generation")) g_settings.frameGeneration = value != 0;
 #endif
         else if (!std::strcmp(key, "volume")) g_settings.volume = std::clamp(value, 0, 10);
         else if (!std::strcmp(key, "language")) g_settings.language = std::clamp(value, 0, 2);

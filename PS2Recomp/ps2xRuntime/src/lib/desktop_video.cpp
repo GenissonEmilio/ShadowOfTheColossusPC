@@ -2,6 +2,7 @@
 #ifdef PS2X_DESKTOP_VIDEO
 #include "desktop_antialias.h"
 #include "desktop_fsr.h"
+#include "desktop_interpolation.h"
 #include "runtime/host_menu.h"
 #include "rlgl.h"
 #include <algorithm>
@@ -57,7 +58,7 @@ namespace
             if (shader.id) UnloadShader(shader);
             *this = {};
         }
-    } easu, rcas, area, fxaaShader;
+    } easu, rcas, area, fxaaShader, motionShader, midpointShader;
 
     struct Pass
     {
@@ -105,6 +106,8 @@ namespace
             filter = wanted;
         }
     };
+
+    Target motionField, midpointFrame;
 
     std::array<Target, 3> targets;
     bool overTargetBudget = false;
@@ -247,6 +250,43 @@ void updatePresentation(bool vsync, bool cap30)
         frameLimit = limit;
         SetTargetFPS(limit);
     }
+}
+
+Texture2D interpolate(Texture2D previous, Texture2D current)
+{
+    if (!previous.id || !current.id || previous.width != current.width || previous.height != current.height ||
+        !motionShader.initialize(kFrameMotionFragment, "frame generation motion", true) ||
+        !midpointShader.initialize(kFrameMidpointFragment, "frame generation resolve", true))
+        return {};
+
+    const int columns = (current.width + 15) / 16, rows = (current.height + 15) / 16;
+    if (midpointFrame.width != current.width || midpointFrame.height != current.height)
+    {
+        midpointFrame.release();
+        motionField.release();
+    }
+    if (!motionField.prepare(columns, rows) || !midpointFrame.prepare(current.width, current.height))
+        return {};
+    motionField.setFilter(TEXTURE_FILTER_BILINEAR);
+    midpointFrame.setFilter(TEXTURE_FILTER_BILINEAR);
+
+    const float size[] = {static_cast<float>(current.width), static_cast<float>(current.height)};
+    const Rectangle source{0, 0, size[0], size[1]};
+    const auto drawTo = [&](const BuiltinShader &program, const Target &target, bool resolve) {
+        BeginTextureMode(target.frame);
+        BeginShaderMode(program.shader);
+        SetShaderValue(program.shader, program.sourceSize, size, SHADER_UNIFORM_VEC2);
+        SetShaderValueTexture(program.shader, GetShaderLocation(program.shader, "previousFrame"), previous);
+        if (resolve)
+            SetShaderValueTexture(program.shader, GetShaderLocation(program.shader, "motionField"), motionField.frame.texture);
+        DrawTexturePro(current, source, {0, 0, static_cast<float>(target.width), static_cast<float>(target.height)},
+                       {0, 0}, 0, WHITE);
+        EndShaderMode();
+        EndTextureMode();
+    };
+    drawTo(motionShader, motionField, false);
+    drawTo(midpointShader, midpointFrame, true);
+    return midpointFrame.frame.texture;
 }
 
 bool shaderActive() { return shader.id != 0; }
@@ -394,6 +434,10 @@ void shutdown()
     rcas.release();
     area.release();
     fxaaShader.release();
+    motionShader.release();
+    midpointShader.release();
+    motionField.release();
+    midpointFrame.release();
     for (auto &target : targets) target.release();
     overTargetBudget = false;
     windowResolution = 0;
