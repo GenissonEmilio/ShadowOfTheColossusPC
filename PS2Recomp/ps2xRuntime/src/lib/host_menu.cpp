@@ -1,5 +1,6 @@
 #include "runtime/host_menu.h"
 #include "runtime/native_tuning.h"
+#include "runtime/ps2_pad.h"
 
 #include "raylib.h"
 
@@ -20,12 +21,14 @@ namespace hostmenu
 namespace
 {
     Settings g_settings;
-    bool g_open = false;
+    std::atomic<bool> g_open{false};
     bool g_help = false;
     bool g_quit = false;
     bool g_quitArmed = false; // "Quit game" needs a second Cross
-    bool g_holdBlock = false; // a button pressed in the menu is still held
+    std::atomic<bool> g_holdBlock{false}; // a button pressed in the menu is still held
     int g_tab = 0, g_item = 0;
+    Rectangle g_tabRects[7]{};
+    std::vector<std::pair<Rectangle, int>> g_rowRects;
     double g_lastSelect = -1.0;
 
 #if defined(PLATFORM_VITA)
@@ -81,14 +84,14 @@ namespace
             {"Screen", "Tela"},
             {"Volume", "Volume"},
             {"Language", "Idioma"},
-            {"Quit game", "Sair do jogo"},
+            {"Return to launcher", "Voltar ao launcher"},
             {"On", "Ligado"},
             {"Off", "Desligado"},
             {"Fit (4:3)", "Ajustar (4:3)"},
             {"Stretch", "Esticar"},
             {"Sharp (whole scale)", "Nítido (escala inteira)"},
             {"Automatic", "Automático"},
-            {"Press X again to quit", "Aperte X de novo para sair"},
+            {"Confirm again to return", "Confirme de novo para sair"},
             {"L/R: tab   D-pad: choose   X: change   Triangle: help   O: close",
              "L/R: aba   Direcional: escolher   X: mudar   Triângulo: ajuda   O: fechar"},
             {"Triangle / O: back", "Triângulo / O: voltar"},
@@ -157,7 +160,7 @@ namespace
     };
     const Item kSystemItems[] = {
         {kLanguage, "Language", "Language of this menu. Automatic follows the system language."},
-        {kQuit, "Quit game", "Closes the game. Unsaved progress is lost."},
+        {kQuit, "Return to launcher", "Closes the game. Unsaved progress is lost."},
     };
     // The Quality, Renderer and Debug tabs list native_renderer::tuningItems()
     // (the same list as the Mac's F10 panel), each with a last "Defaults" row:
@@ -264,7 +267,7 @@ namespace
             static const char *langs[] = {"Automatic", "Português", "English"};
             return T(langs[std::clamp(g_settings.language.load(), 0, 2)]);
         }
-        case kQuit: return g_quitArmed ? T("Press X again to quit") : "";
+        case kQuit: return g_quitArmed ? T("Confirm again to return") : "";
         }
         return "";
     }
@@ -330,19 +333,19 @@ namespace
     {
         std::memcpy(g_prev, g_down, sizeof(g_down));
         std::memset(g_down, 0, sizeof(g_down));
-        const int pad = 0;
-        if (IsGamepadAvailable(pad))
+        const auto pad = ps2pad::readGamepad();
+        if (pad.index >= 0)
         {
-            g_down[kUp] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_FACE_UP) || GetGamepadAxisMovement(pad, GAMEPAD_AXIS_LEFT_Y) < -0.6f;
-            g_down[kDown] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_FACE_DOWN) || GetGamepadAxisMovement(pad, GAMEPAD_AXIS_LEFT_Y) > 0.6f;
-            g_down[kLeft] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_FACE_LEFT) || GetGamepadAxisMovement(pad, GAMEPAD_AXIS_LEFT_X) < -0.6f;
-            g_down[kRight] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_FACE_RIGHT) || GetGamepadAxisMovement(pad, GAMEPAD_AXIS_LEFT_X) > 0.6f;
-            g_down[kCross] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_RIGHT_FACE_DOWN);
-            g_down[kCircle] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT);
-            g_down[kTriangle] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_RIGHT_FACE_UP);
-            g_down[kL1] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_TRIGGER_1);
-            g_down[kR1] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_RIGHT_TRIGGER_1);
-            g_down[kSelect] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_MIDDLE_LEFT);
+            g_down[kUp] = pad.buttons[GAMEPAD_BUTTON_LEFT_FACE_UP] || pad.axes[GAMEPAD_AXIS_LEFT_Y] < -0.6f;
+            g_down[kDown] = pad.buttons[GAMEPAD_BUTTON_LEFT_FACE_DOWN] || pad.axes[GAMEPAD_AXIS_LEFT_Y] > 0.6f;
+            g_down[kLeft] = pad.buttons[GAMEPAD_BUTTON_LEFT_FACE_LEFT] || pad.axes[GAMEPAD_AXIS_LEFT_X] < -0.6f;
+            g_down[kRight] = pad.buttons[GAMEPAD_BUTTON_LEFT_FACE_RIGHT] || pad.axes[GAMEPAD_AXIS_LEFT_X] > 0.6f;
+            g_down[kCross] = pad.buttons[GAMEPAD_BUTTON_RIGHT_FACE_DOWN];
+            g_down[kCircle] = pad.buttons[GAMEPAD_BUTTON_RIGHT_FACE_RIGHT];
+            g_down[kTriangle] = pad.buttons[GAMEPAD_BUTTON_RIGHT_FACE_UP];
+            g_down[kL1] = pad.buttons[GAMEPAD_BUTTON_LEFT_TRIGGER_1];
+            g_down[kR1] = pad.buttons[GAMEPAD_BUTTON_RIGHT_TRIGGER_1];
+            g_down[kSelect] = pad.buttons[GAMEPAD_BUTTON_MIDDLE_LEFT];
         }
         // Keyboard: arrows, Enter = Cross, Backspace = Circle, H = help, Q/E = tabs.
         g_down[kUp] |= IsKeyDown(KEY_UP);
@@ -451,6 +454,7 @@ bool inputBlocked() { return g_open || g_holdBlock; }
 
 void update()
 {
+    ps2pad::pollGamepads();
     readButtons();
     if (g_holdBlock && !anyDown())
         g_holdBlock = false;
@@ -489,6 +493,26 @@ void update()
         close();
         return;
     }
+    bool mouseActivate = false;
+#if defined(__linux__) && !defined(__ANDROID__)
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        const Vector2 pointer = GetMousePosition();
+        for (int i = 0; i < kTabCount; ++i) {
+            if (CheckCollisionPointRec(pointer, g_tabRects[i])) {
+                g_tab = i; g_item = 0; g_quitArmed = false;
+                return;
+            }
+        }
+        for (const auto &row : g_rowRects) {
+            if (CheckCollisionPointRec(pointer, row.first)) {
+                if (g_item != row.second) g_quitArmed = false;
+                g_item = row.second;
+                mouseActivate = true;
+                break;
+            }
+        }
+    }
+#endif
     const Tab &tab = kTabs[g_tab];
     if (pressed(kL1) || pressed(kR1))
     {
@@ -508,7 +532,7 @@ void update()
     if (isTuningTab(g_tab))
     {
         g_tabNow = g_tab;
-        const int dir = (pressed(kCross) || pressed(kRight)) ? 1 : (pressed(kLeft) ? -1 : 0);
+        const int dir = (mouseActivate || pressed(kCross) || pressed(kRight)) ? 1 : (pressed(kLeft) ? -1 : 0);
         if (dir != 0)
         {
             const int k = tuningIndex(g_item);
@@ -523,7 +547,7 @@ void update()
         return;
     }
     const ItemId id = tab.items[g_item].id;
-    if (pressed(kCross) || pressed(kRight))
+    if (mouseActivate || pressed(kCross) || pressed(kRight))
         change(id, +1);
     else if (pressed(kLeft) && id != kQuit)
         change(id, -1);
@@ -549,6 +573,7 @@ void draw(int screenWidth, int screenHeight)
     DrawRectangle(boxX, boxY, boxW, 2, accent);
     DrawText(T("SETTINGS"), boxX + pad, boxY + pad * 2 / 3, size, accent);
 
+    g_rowRects.clear();
     // Tabs (smaller when they do not fit the box)
     int tabX = boxX + pad;
     const int tabY = boxY + pad * 2;
@@ -571,6 +596,7 @@ void draw(int screenWidth, int screenHeight)
     {
         const char *label = T(kTabs[i].label);
         const int w = MeasureText(label, tabSize);
+        g_tabRects[i] = Rectangle{float(tabX - size/3), float(tabY - size/4), float(w + size*2/3), float(size*3/2)};
         if (i == g_tab)
             DrawRectangle(tabX - size / 3, tabY + size + size / 4, w + size * 2 / 3, 2, accent);
         DrawText(label, tabX, tabY, tabSize, i == g_tab ? text : dim);
@@ -610,6 +636,7 @@ void draw(int screenWidth, int screenHeight)
         for (int i = first; i < count && i < first + rows; ++i)
         {
             const int y = listY + (i - first) * size * 3 / 2;
+            g_rowRects.push_back({Rectangle{float(boxX + pad/2), float(y - size/4), float(boxW - pad), float(size*3/2)}, i});
             if (i == g_item)
                 DrawRectangle(boxX + pad / 2, y - size / 4, boxW - pad, size * 3 / 2, highlight);
             DrawText(renderer ? rendererLabel(i) : T(tab.items[i].label), boxX + pad, y, size, i == g_item ? text : dim);
@@ -629,6 +656,12 @@ void draw(int screenWidth, int screenHeight)
             helpSize -= 2;
         drawWrapped(help, boxX + pad, helpY, boxW - 2 * pad, helpSize, dim, helpSize / 3);
     }
+#if defined(__linux__) && !defined(__ANDROID__)
+    const char *hint = portuguese() ? "Q/E: abas  Setas: item  Enter/clique: mudar  H: ajuda  F1: fechar"
+                                   : "Q/E: tabs  Arrows: item  Enter/click: change  H: help  F1: close";
+    DrawText(hint, boxX + pad, boxY + boxH - size * 3 / 2, small, dim);
+#else
     DrawText(T("L/R: tab   D-pad: choose   X: change   Triangle: help   O: close"), boxX + pad, boxY + boxH - size * 3 / 2, small, dim);
+#endif
 }
 }

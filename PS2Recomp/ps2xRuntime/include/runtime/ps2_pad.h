@@ -4,6 +4,20 @@
 #include <cstddef>
 #include <cstdint>
 
+namespace ps2pad
+{
+    struct GamepadState {
+        int index = -1;
+        bool buttons[32] = {};
+        float axes[8] = {};
+    };
+    // Poll on the window thread; the guest reads a synchronized copy.
+    void pollGamepads();
+    GamepadState readGamepad();
+    // Shared by the game and the host menu; reconnects and non-zero slots work.
+    int activeGamepad();
+}
+
 class PSPadBackend
 {
 public:
