@@ -59,7 +59,7 @@ cards are outside the count. Results apply to the Linux versions listed.
 
 [Validation criteria and test history](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/blob/v1.0.0/docs/CAMPAIGN-VALIDATION.md)
 
-<img width="1109" height="751" alt="Shadow of the Colossus PC screenshot" src="https://github.com/user-attachments/assets/856dbfab-25f1-40a2-95b1-1b8060d062c9" />
+<img width="1172" height="807" alt="image" src="https://github.com/user-attachments/assets/d18109b2-af2e-4947-a7b2-74f1a5ad8160" />
 
 ## Play
 
