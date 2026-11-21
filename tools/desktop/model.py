@@ -16,6 +16,8 @@ VERSION = "1.0.0"
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 APPLICATION_ID = "io.github.GenissonEmilio.ShadowOfTheColossusPC"
 SAVE_STATES_AVAILABLE = sys.platform.startswith("linux")
+COLOSSI = ("Valus", "Quadratus", "Gaius", "Phaedra", "Avion", "Barba", "Hydrus", "Kuromori",
+           "Basaran", "Dirge", "Celosia", "Pelagia", "Phalanx", "Cenobia", "Argus", "Malus")
 
 
 def assets_directory():
@@ -88,6 +90,7 @@ class Library:
             environment["LD_LIBRARY_PATH"] = original_ld
         environment["SOTC_NATIVE"] = "1"
         environment["SOTC_NATIVE_GL"] = "1"
+        environment.pop("SOTC_FREE_ROAM_BOSS", None)
         selected_preferences = preferences(self.directory)
         environment["SOTC_BUTTON_PROMPTS"] = selected_preferences["button_prompts"]
         environment["SOTC_INFINITE_HEALTH"] = "1" if selected_preferences["infinite_health"] else "0"
@@ -160,7 +163,9 @@ class Library:
         self.player_directory.mkdir(parents=True, exist_ok=True)
         return Pipeline(self.program, self.directory, self.game_environment(), progress).prepare(boot.parent)
 
-    def launch(self, test=False, progress=lambda text: None, *, attached=False):
+    def launch(self, test=False, progress=lambda text: None, *, attached=False, roam_boss=None):
+        if roam_boss is not None and (type(roam_boss) is not int or not 1 <= roam_boss <= len(COLOSSI)):
+            raise ValueError("Invalid free roam colossus")
         boot = self.disc
         executable = self.prepare_game(progress)
         from graphics import Graphics
@@ -168,6 +173,11 @@ class Library:
         graphics.normalize_external_settings()
         graphics.save_display(*graphics.display())
         environment = self.game_environment(test)
+        if roam_boss is not None:
+            profile = self.player_directory / "free-roam" / str(roam_boss)
+            environment.update(SOTC_FREE_ROAM_BOSS=str(roam_boss),
+                               PS2X_MEMCARD_DIR=str(profile / "memcards"),
+                               PS2X_STATE_DIR=str(profile / "savestates"))
         from texture_mods import TextureMods
         environment.update(TextureMods(self).environment())
         gpu_status = None

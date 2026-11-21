@@ -59,6 +59,19 @@ cards are outside the count. Results apply to the Linux versions listed.
 
 [Validation criteria and test history](docs/CAMPAIGN-VALIDATION.md)
 
+## Free roam preview
+
+Open **Free roam (preview)** on the launcher's home page, select a colossus
+or choose **Random colossus**, then select **New Game** in the game. Wander
+starts at the shrine and the selected colossus becomes the first target.
+Each selection has its own memory card and save states under
+`player/free-roam/<number>`. To resume one, select the same colossus and
+load its save.
+
+The preview uses each colossus's original arena and the existing campaign
+routes. Some routes still depend on campaign progress. Spawning colossi in
+other locations and random encounters during exploration are pending.
+
 <img width="1109" height="751" alt="Shadow of the Colossus PC screenshot" src="https://github.com/user-attachments/assets/856dbfab-25f1-40a2-95b1-1b8060d062c9" />
 
 ## Play

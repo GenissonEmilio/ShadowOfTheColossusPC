@@ -292,3 +292,9 @@ Texturas originais	Original textures	Texturas originales	元のテクスチャ
 Escolha uma pasta com texturas PNG nomeadas pelo código do port.	Choose a folder with PNGs named with the port’s texture IDs.	Elige una carpeta con PNG nombrados con los identificadores del port.	このポートのテクスチャ ID の PNG があるフォルダーを選んでください。
 Widescreen 16:9 · câmera ampliada	Widescreen 16:9 · wider view	Pantalla panorámica 16:9 · vista ampliada	ワイド 16:9 · ワイドカメラ
 F11 alterna entre janela e tela cheia. Widescreen amplia a visão lateral e preserva o quadro 16:9 em outras proporções.	F11 toggles fullscreen. Widescreen expands the view horizontally and keeps a 16:9 frame on other displays.	F11 activa o desactiva la pantalla completa. El modo panorámico amplía la vista lateral y conserva el marco 16:9 en otras pantallas.	F11 で全画面を切り替えます。ワイドモードでは左右をより多く表示し、画面の比率に合わせて 16:9 を維持します。
+Exploração livre (prévia)…	Free roam (preview)…	Exploración libre (vista previa)…	自由探索（プレビュー）…
+Exploração livre (prévia)	Free roam (preview)	Exploración libre (vista previa)	自由探索（プレビュー）
+Abrir sessão	Start session	Iniciar sesión	セッションを開始
+Sortear colosso	Random colossus	Coloso aleatorio	ランダムな巨像
+Escolha um colosso e selecione New Game no jogo. O encontro usa a arena original e pode depender dos acessos da campanha.	Choose a colossus and select New Game in the game. Encounters use their original arenas and some routes may require campaign progress.	Elige un coloso y selecciona New Game en el juego. Los encuentros usan sus arenas originales y algunas rutas pueden requerir avanzar en la campaña.	巨像を選び、ゲーム内で New Game を選択します。巨像は本来の闘技場に出現し、一部のルートにはキャンペーンの進行が必要です。
+Cada colosso tem seu próprio cartão de memória e estados de jogo.	Each colossus has its own memory card and save states.	Cada coloso tiene su propia tarjeta de memoria y estados de guardado.	巨像ごとにメモリーカードとステートセーブが分かれています。

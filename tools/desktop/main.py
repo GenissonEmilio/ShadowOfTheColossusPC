@@ -7,13 +7,14 @@ import ctypes
 import json
 import math
 import os
+import random
 import subprocess
 from pathlib import Path
 import sys
 import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from model import Library, SAVE_STATES_AVAILABLE, VERSION, assets_directory, atomic_json, program_directory
+from model import COLOSSI, Library, SAVE_STATES_AVAILABLE, VERSION, assets_directory, atomic_json, program_directory
 from graphics import GRAPHICS_PROFILES, LEGACY_PROFILES, Graphics, WINDOW_RESOLUTIONS
 from gamepad import Gamepad
 from language import LANGUAGES, PREFERENCES, PROMPTS, activate, preferences, translate as tr
@@ -730,6 +731,10 @@ class Launcher:
         inner.pack_end(self.choose_button,False,False,0); self.drop.add(inner)
         panel.pack_start(self.drop,False,False,0)
         self.progress = Gtk.ProgressBar(); panel.pack_start(self.progress,False,False,0)
+        self.roam_button = style(FocusButton(label=tr("Exploração livre (prévia)…")), "secondary")
+        self.roam_button.set_halign(Gtk.Align.START)
+        self.roam_button.connect("clicked", self.choose_free_roam)
+        panel.pack_start(self.roam_button, False, False, 0)
         library.pack_start(panel_outer, False, False, 0)
         page.pack_start(library, False, False, 0)
         page.pack_start(self.updates_panel(), False, False, 0)
@@ -1347,6 +1352,7 @@ class Launcher:
     def refresh_prepare_controls(self):
         idle = not (self.busy or self.process or self.controller_process)
         self.compile_button.set_sensitive(bool(self.library.disc) and idle)
+        self.roam_button.set_sensitive(bool(self.library.disc) and idle)
         self.texture_panel.set_sensitive(idle)
 
     def compile_game(self, *_):
@@ -1408,7 +1414,37 @@ class Launcher:
             elif self.args.screenshot: GLib.timeout_add(500,self.capture_and_exit)
         return False
 
-    def play(self,*_):
+    def choose_free_roam(self, *_):
+        if self.busy or self.process or self.controller_process or not self.library.disc:
+            return
+        dialog = style(Gtk.Dialog(title=tr("Exploração livre (prévia)"),
+                                  transient_for=self.window, modal=True), "controller-dialog")
+        dialog.set_default_size(540, -1)
+        dialog.add_button(tr("Cancelar"), Gtk.ResponseType.CANCEL)
+        dialog.add_button(tr("Abrir sessão"), Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        content = box(spacing=12, margin=20)
+        content.pack_start(label(tr("Escolha um colosso e selecione New Game no jogo. O encontro usa a arena original e pode depender dos acessos da campanha."), "muted", wrap=True),
+                           False, False, 0)
+        selection = Gtk.ComboBoxText()
+        selection.append_text(tr("Sortear colosso"))
+        for number, name in enumerate(COLOSSI, 1):
+            selection.append_text(f"{number:02d} · {name}")
+        selection.set_active(0)
+        content.pack_start(selection, False, False, 0)
+        content.pack_start(label(tr("Cada colosso tem seu próprio cartão de memória e estados de jogo."), "small", wrap=True),
+                           False, False, 0)
+        dialog.get_content_area().add(content)
+        self.connect_dialog_feedback(dialog)
+        dialog.show_all()
+        controller_focus.grab(selection)
+        accepted = dialog.run() == Gtk.ResponseType.OK
+        selected = selection.get_active()
+        dialog.destroy()
+        if accepted:
+            self.play(roam_boss=selected or random.randint(1, len(COLOSSI)))
+
+    def play(self, *_, roam_boss=None):
         if self.busy or self.process or self.controller_process: return False
         self.gamepad.suspend()
         self.busy=True; self.play_button.set_sensitive(False); self.choose_button.set_sensitive(False)
@@ -1418,7 +1454,9 @@ class Launcher:
         self.display_panel.set_sensitive(False); self.video_panel.set_sensitive(False)
         def worker():
             try:
-                process=self.library.launch(self.args.test_game,lambda text: GLib.idle_add(self.update_status,text))
+                process = self.library.launch(self.args.test_game,
+                                              lambda text: GLib.idle_add(self.update_status, text),
+                                              roam_boss=roam_boss)
                 GLib.idle_add(self.game_started,process,None)
             except Exception as exc:
                 GLib.idle_add(self.game_started,None,str(exc))
