@@ -169,7 +169,7 @@ saves.
 
 ## Full screen and shaders
 
-<img width="1109" height="751" alt="Shadow of the Colossus PC graphics screenshot" src="https://github.com/user-attachments/assets/f4dfb9da-b702-46d1-b79a-d151fa18b36a" />
+<img width="1172" height="807" alt="image" src="https://github.com/user-attachments/assets/3814964c-d53b-4899-9490-69edd722dd77" />
 
 In **Graphics**, choose **Fullscreen · monitor resolution** to fill the current
 monitor. **Widescreen 16:9** expands the original view horizontally. On an
