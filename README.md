@@ -169,7 +169,7 @@ saves.
 
 ## Full screen and shaders
 
-<img width="1172" height="807" alt="image" src="https://github.com/user-attachments/assets/3814964c-d53b-4899-9490-69edd722dd77" />
+<img width="1282" height="774" alt="image" src="https://github.com/user-attachments/assets/e07df3fd-04f2-4dbd-af32-0faa8ec42773" />
 
 In **Graphics**, choose **Fullscreen · monitor resolution** to fill the current
 monitor. **Widescreen 16:9** expands the original view horizontally. On an
