@@ -95,6 +95,10 @@ class RecompLauncherTests(unittest.TestCase):
                 atomic_json(compiler.work / "complete.json",
                             {"sha256": hashlib.sha256(executable.read_bytes()).hexdigest()})
                 library.state = {"disc": str(boot)}
+                environment = library.game_environment(boot=boot)
+                self.assertEqual(environment["SOTC_NATIVE"], "0" if name == PAL_BOOT else "1")
+                if name == PAL_BOOT:
+                    self.assertEqual(environment.get("PS2X_GS_HW"), "1")
                 with (patch.object(library, "validated_disc", return_value=identify_disc(disc)),
                       patch.object(Pipeline, "helper", side_effect=AssertionError("cached game must not compile"))):
                     self.assertEqual(library.prepare_game(), executable)

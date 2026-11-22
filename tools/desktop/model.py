@@ -98,6 +98,7 @@ class Library:
         environment["SOTC_NATIVE_GL"] = "1"
         if pal:
             environment["PS2X_NATIVE_IOP_BOOT"] = "0"
+            environment.setdefault("PS2X_GS_HW", "1")
         selected_preferences = preferences(self.directory)
         environment["SOTC_BUTTON_PROMPTS"] = selected_preferences["button_prompts"]
         environment["SOTC_INFINITE_HEALTH"] = "1" if selected_preferences["infinite_health"] else "0"

@@ -10,7 +10,7 @@ extents of the European data archive. It copies them into the local `NICO.DAT`
 that the game uses for sector reads. The compilation cache is separate from the
 North American edition.
 
-PAL uses the compatibility graphics path and the video mode selected in the
+PAL uses the OpenGL compatibility renderer and the video mode selected in the
 original game. Use the memory card to save progress. Features that rely on the
 North American native renderer and runtime hooks, including frame generation,
 quick save states, and the dedicated assist patches, remain edition-specific.
