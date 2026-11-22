@@ -15,6 +15,8 @@ import time
 import threading
 
 BOOT = "SCUS_974.72"
+PAL_BOOT = "SCES_533.26"
+BOOT_CONFIGS = {BOOT: "scus", PAL_BOOT: "sces"}
 MODULES = ("KERNEL", "MANAGER", "GAMECORE")
 WINDOWS = os.name == "nt"
 PROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if WINDOWS else 0
@@ -73,14 +75,18 @@ def helper(source, name, arguments):
 
 
 class Pipeline:
-    def __init__(self, program, data, environment, progress=lambda s: None):
+    def __init__(self, program, data, environment, progress=lambda s: None, *, boot_name=BOOT):
         self.program, self.data = Path(program), Path(data)
         self.env, self.progress = environment, progress
         self.bundle = self.program / "compiler"
         self.source = self.bundle / "source"
         self.manifest = json.loads((self.bundle / "manifest.json").read_text())
         self.build_id = self.manifest["build_id"]
+        self.boot_name = boot_name
+        self.boot_config = BOOT_CONFIGS[boot_name]
         self.work = self.data / "builds" / self.build_id
+        if boot_name == PAL_BOOT:
+            self.work /= "SCES-53326"
         self.work.mkdir(parents=True, exist_ok=True)
         self.log = self.data / "last-prepare.log"
 
@@ -206,11 +212,13 @@ class Pipeline:
         partial.unlink(missing_ok=True)
         env = dict(self.env, PS2X_MODULE_CAPTURE="1", PS2X_DUMP_RAM_ON_MISSING=str(output),
                    PS2X_GS_HW="0", PS2X_GS_GPU="0", PS2X_MEMCARD_DIR=str(self.work / "capture-memcards"))
+        if self.boot_name == PAL_BOOT:
+            env.update(SOTC_NATIVE="0", PS2X_NATIVE_IOP_BOOT="0")
         started = time.monotonic()
         with self.log.open("a", encoding="utf-8") as stream:
             print(f"\n[capture] {name}: starting {executable}", file=stream, flush=True)
             try:
-                with subprocess.Popen([str(executable), str(disc / BOOT)], cwd=self.work, env=env,
+                with subprocess.Popen([str(executable), str(disc / self.boot_name)], cwd=self.work, env=env,
                                       stdout=stream, stderr=subprocess.STDOUT, creationflags=PROCESS_FLAGS) as process:
                     try:
                         code = process.wait(timeout=180)
@@ -238,8 +246,11 @@ class Pipeline:
             final = self.work / "gamecore" / executable_name("game")
             stamp = self.work / "complete.json"
             if final.is_file() and stamp.is_file():
-                manifest = json.loads(stamp.read_text())
-                if manifest.get("sha256") == hashlib.sha256(final.read_bytes()).hexdigest():
+                try:
+                    manifest = json.loads(stamp.read_text())
+                except (OSError, ValueError):
+                    manifest = None
+                if isinstance(manifest, dict) and manifest.get("sha256") == hashlib.sha256(final.read_bytes()).hexdigest():
                     self.progress(tr("Compilação já pronta. Reutilizando o cache…"))
                     return final
             self.log.write_text("Local static recompilation — "+self.build_id+"\n", encoding="utf-8")
@@ -247,10 +258,11 @@ class Pipeline:
             boot.mkdir(exist_ok=True)
             symbols = self.work / "symbols.txt"
             self.helper("symbols",[disc / "KERNEL.XFF",symbols])
-            self.helper("funcmap_elf",[disc / BOOT,symbols,boot / "functions.csv"])
-            config = (self.source / "game/scus.toml").read_text()
+            disc_boot = disc / self.boot_name
+            self.helper("funcmap_elf",[disc_boot,symbols,boot / "functions.csv"])
+            config = (self.source / "game" / (self.boot_config + ".toml")).read_text()
             import re
-            boot_path = Path(os.path.relpath(disc / BOOT, boot)).as_posix() if WINDOWS else str(disc / BOOT)
+            boot_path = Path(os.path.relpath(disc_boot, boot)).as_posix() if WINDOWS else str(disc_boot)
             config = re.sub(r'^input = .*$', lambda _: "input = " + json.dumps(boot_path, ensure_ascii=False),
                             config, flags=re.M)
             (boot / "config.toml").write_text(config, encoding="utf-8")
@@ -265,9 +277,17 @@ class Pipeline:
                 folder.mkdir(exist_ok=True)
                 specs = [f"{os.path.relpath(xff, folder)}@auto@{os.path.relpath(ram, folder)}"
                          for xff, ram in captures]
-                self.helper("build_elf",[folder,disc / BOOT,symbols,*specs], cwd=folder)
-                self.helper("gen_config",[folder,boot / "config.toml"])
+                self.helper("build_elf",[folder,disc_boot,symbols,*specs], cwd=folder)
+                config_args = [folder, boot / "config.toml"]
+                if self.boot_name == PAL_BOOT:
+                    config_args.append(self.boot_config)
+                self.helper("gen_config",config_args)
                 self.progress(tr("Recompilando {name} para {system}…").format(name=module, system="Windows" if WINDOWS else "Linux"))
                 executable = self.stage(folder)
-            stamp.write_text(json.dumps({"build_id":self.build_id,"sha256":hashlib.sha256(final.read_bytes()).hexdigest()})+"\n")
+            pending = stamp.with_suffix(".tmp")
+            try:
+                pending.write_text(json.dumps({"build_id":self.build_id,"sha256":hashlib.sha256(final.read_bytes()).hexdigest()})+"\n")
+                pending.replace(stamp)
+            finally:
+                pending.unlink(missing_ok=True)
             return final

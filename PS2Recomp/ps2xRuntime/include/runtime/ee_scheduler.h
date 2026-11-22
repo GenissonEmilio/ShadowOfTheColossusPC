@@ -354,6 +354,8 @@ public:
     int setIrqHandlerEnabled(bool dmac, int id, bool enabled);
     int setIrqCauseEnabled(bool dmac, uint32_t cause, bool enabled);
     void dispatchIrq(bool dmac, uint32_t cause);
+    void setGsVideoMode(uint32_t mode);
+    [[nodiscard]] bool palVideoMode() const noexcept { return m_palVideoMode.load(std::memory_order_relaxed); }
     void setVSyncFlag(uint32_t flagAddress, uint32_t tickAddress);
     [[nodiscard]] uint64_t currentVSyncTick() const noexcept;
     uint32_t setGsVSyncCallback(uint32_t callback, uint32_t gp, uint32_t sp);
@@ -432,6 +434,7 @@ private:
     [[nodiscard]] static bool eventCondition(uint32_t current, uint32_t requested, uint32_t mode);
     static int waitObjectId(const EeWaitState &wait);
     void writeGuestU32(uint32_t address, uint32_t value);
+    [[nodiscard]] std::chrono::microseconds vblankPeriod() const noexcept;
     void waitForEvent();
     void scheduleEvent(uint64_t deadlineCycle, std::chrono::steady_clock::time_point hostDeadline, EeEvent event);
     void updateNextDeadline();
@@ -502,6 +505,7 @@ private:
     uint64_t m_eventSequence = 0;
     uint64_t m_invocationSequence = 0;
     uint64_t m_vsyncTick = 0;
+    std::atomic<bool> m_palVideoMode{false};
     uint32_t m_vsyncFlagAddress = 0;
     uint32_t m_vsyncTickAddress = 0;
     uint32_t m_gsVSyncCallback = 0;

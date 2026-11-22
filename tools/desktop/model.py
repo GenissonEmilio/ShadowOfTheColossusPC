@@ -8,14 +8,15 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-from import_disc import import_disc, EXPECTED
+from import_disc import PROFILES, import_disc, validate_disc
 from language import preferences, translate as tr
-from pipeline import CompilationError, Pipeline, PROCESS_FLAGS, WINDOWS, compiler_tool
+from pipeline import CompilationError, PAL_BOOT, Pipeline, PROCESS_FLAGS, WINDOWS, compiler_tool
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 APPLICATION_ID = "io.github.GenissonEmilio.ShadowOfTheColossusPC"
 SAVE_STATES_AVAILABLE = sys.platform.startswith("linux")
+SERIAL_BY_BOOT = {profile.boot: profile.serial for profile in PROFILES.values()}
 
 
 def assets_directory():
@@ -77,7 +78,12 @@ class Library:
     def player_directory(self):
         return self.directory / "player"
 
-    def game_environment(self, test=False):
+    @property
+    def is_pal(self):
+        boot = self.disc
+        return boot is not None and boot.name == PAL_BOOT
+
+    def game_environment(self, test=False, *, boot=None):
         environment = dict(os.environ)
         original_ld = environment.get("LD_LIBRARY_PATH_ORIG")
         for name in ("LD_LIBRARY_PATH", "LD_LIBRARY_PATH_ORIG", "GI_TYPELIB_PATH", "GTK_DATA_PREFIX",
@@ -86,8 +92,12 @@ class Library:
             environment.pop(name, None)
         if original_ld:
             environment["LD_LIBRARY_PATH"] = original_ld
-        environment["SOTC_NATIVE"] = "1"
+        boot = boot or self.disc
+        pal = boot is not None and boot.name == PAL_BOOT
+        environment["SOTC_NATIVE"] = "0" if pal else "1"
         environment["SOTC_NATIVE_GL"] = "1"
+        if pal:
+            environment["PS2X_NATIVE_IOP_BOOT"] = "0"
         selected_preferences = preferences(self.directory)
         environment["SOTC_BUTTON_PROMPTS"] = selected_preferences["button_prompts"]
         environment["SOTC_INFINITE_HEALTH"] = "1" if selected_preferences["infinite_health"] else "0"
@@ -95,7 +105,10 @@ class Library:
         environment["PS2X_GS_THREADS"] = "2"
         environment.setdefault("PS2X_STATS", "1")
         environment["PS2X_MEMCARD_DIR"] = str(self.player_directory / "memcards")
-        environment["PS2X_STATE_DIR"] = str(self.player_directory / "savestates")
+        states = self.player_directory / "savestates"
+        if pal:
+            states /= SERIAL_BY_BOOT[PAL_BOOT]
+        environment["PS2X_STATE_DIR"] = str(states)
         if WINDOWS:
             binary = self.program / "compiler/toolchain/bin"
             environment["PATH"] = str(binary) + os.pathsep + environment.get("PATH", "")
@@ -122,43 +135,45 @@ class Library:
         stamp = f"{source}\0{source.stat().st_size}\0{source.stat().st_mtime_ns}"
         identifier = hashlib.sha256(stamp.encode()).hexdigest()[:20]
         destination = self.directory / "discs" / identifier
-        boot = destination / "SCUS_974.72"
         progress(tr("Lendo e validando o disco…"))
-        if not self.valid_extracted(destination):
+        profile = self.validated_disc(destination)
+        if profile:
+            boot = destination / profile.boot
+        else:
             if destination.exists():
                 shutil.rmtree(destination)
             boot = import_disc(source, destination)
         self.directory.mkdir(parents=True, exist_ok=True)
         self.player_directory.mkdir(parents=True, exist_ok=True)
         try:
-            executable = Pipeline(self.program, self.directory, self.game_environment(), progress).prepare(destination)
+            executable = Pipeline(self.program, self.directory, self.game_environment(boot=boot),
+                                  progress, boot_name=boot.name).prepare(destination)
         except subprocess.CalledProcessError as exc:
             raise CompilationError(tr("A compilação não terminou. Consulte {path}").format(path=self.directory / "last-prepare.log")) from exc
-        state = {"disc": str(boot.relative_to(self.directory)), "name": source.name, "serial": "SCUS-97472", "executable": str(executable)}
+        state = {"disc": str(boot.relative_to(self.directory)), "name": source.name,
+                 "serial": SERIAL_BY_BOOT[boot.name], "executable": str(executable)}
         atomic_json(self.config, state)
         self.state = state
         return boot
 
-    def valid_extracted(self, directory):
+    def validated_disc(self, directory):
         try:
-            for name,(size,digest) in EXPECTED.items():
-                path = directory / name
-                if path.stat().st_size != size or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
-                    return False
-            return (directory / "NICO.DAT").stat().st_size == 2667340678
-        except OSError:
-            return False
+            return validate_disc(directory)
+        except (OSError, ValueError):
+            return None
 
     def verify(self):
         boot = self.disc
-        if not boot or not self.valid_extracted(boot.parent):
+        profile = self.validated_disc(boot.parent) if boot else None
+        if not profile or boot.name != profile.boot:
             raise ValueError(tr("Escolha sua ROM para continuar. Os arquivos locais estão ausentes ou incompletos."))
         return boot
 
     def prepare_game(self, progress=lambda text: None):
         boot = self.verify()
         self.player_directory.mkdir(parents=True, exist_ok=True)
-        return Pipeline(self.program, self.directory, self.game_environment(), progress).prepare(boot.parent)
+        return Pipeline(self.program, self.directory, self.game_environment(boot=boot),
+                        progress, boot_name=boot.name).prepare(boot.parent)
 
     def launch(self, test=False, progress=lambda text: None, *, attached=False):
         boot = self.disc

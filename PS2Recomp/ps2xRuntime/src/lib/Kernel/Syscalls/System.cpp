@@ -6,11 +6,12 @@ namespace ps2_syscalls
     void GsSetCrt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         int interlaced = getRegU32(ctx, 4); // $a0 - 0=non-interlaced, 1=interlaced
-        int videoMode = getRegU32(ctx, 5);  // $a1 - 0=NTSC, 1=PAL, 2=VESA, 3=HiVision
+        uint32_t videoMode = getRegU32(ctx, 5); // $a1: 0x02 = NTSC, 0x03 = PAL
         int frameMode = getRegU32(ctx, 6);  // $a2 - 0=field, 1=frame
 
         if (runtime)
         {
+            runtime->eeScheduler().setGsVideoMode(videoMode);
             auto &gs = runtime->memory().gs();
             const uint64_t smode2 =
                 (static_cast<uint64_t>(interlaced) & 0x1ull) |

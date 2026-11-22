@@ -18,6 +18,7 @@ void register_ps2_sif_rpc_tests();
 void register_ps2_sif_dma_tests();
 void register_ps2_recompiler_tests();
 void register_ps2_runtime_expansion_tests();
+void register_pal_video_timing_tests();
 void reset_ps2_test_function_table();
 bool write_signed_branch_execution_fixture(const std::string &directory);
 
@@ -29,6 +30,9 @@ int main(int argc, char **argv)
         return write_signed_branch_execution_fixture(argv[2]) ? 0 : 1;
 
     MiniTest::BeforeEach(reset_ps2_test_function_table);
+    register_pal_video_timing_tests();
+    if (argc == 2 && std::string(argv[1]) == "--pal-video-timing")
+        return MiniTest::Run();
 
     register_code_generator_tests();
     register_r5900_decoder_tests();

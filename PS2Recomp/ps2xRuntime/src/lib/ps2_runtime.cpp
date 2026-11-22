@@ -446,7 +446,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     // A frame drawn over three vsyncs stays three refreshes, like on a TV.
     static double s_clock = -1.0;
     static double s_clockTime = 0.0;
-    constexpr double kVsyncRate = 59.94;
+    const double vsyncRate = rt->eeScheduler().palVideoMode() ? 50.0 : 59.94;
     constexpr double kLatencyVsyncs = 2.0;
     const double now = GetTime();
     const double goal = static_cast<double>(rt->memory().gs().vsyncTick.load(std::memory_order_acquire)) - kLatencyVsyncs;
@@ -454,7 +454,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
         s_clock = goal;
     else
     {
-        s_clock += (now - s_clockTime) * kVsyncRate;
+        s_clock += (now - s_clockTime) * vsyncRate;
         s_clock += (goal - s_clock) * 0.05;
         s_clock = std::min(s_clock, goal + 1.0);
     }

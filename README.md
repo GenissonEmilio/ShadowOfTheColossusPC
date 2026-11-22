@@ -1,7 +1,8 @@
 # Shadow of the Colossus PC
 
-An independent PC port of the **North American PS2 edition (SCUS-97472)** with a
-Linux and Windows launcher, a local recompiler, and a native OpenGL renderer.
+An independent PC port of the **North American SCUS-97472** and
+**European PAL SCES-53326** PS2 editions with a Linux and Windows launcher
+and a local recompiler. See the [PAL compatibility details](docs/PAL-SUPPORT.md).
 Built on [Celosia](https://github.com/HenryKun55/celosia) and
 [PS2Recomp](https://github.com/ran-j/PS2Recomp).
 
@@ -66,7 +67,8 @@ cards are outside the count. Results apply to the Linux versions listed.
 1. Download the package for your system from [Releases](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases).
 2. Extract the entire package and open `ShadowOfTheColossusPC` on Linux or
    `ShadowOfTheColossusPC.exe` on Windows.
-3. Choose your North American disc image (`.iso`, `.7z`, `.zip`, or `.rar`).
+3. Choose your SCUS-97472 (USA) or SCES-53326 (PAL) disc image
+   (`.iso`, `.7z`, `.zip`, or `.rar`).
 4. Wait for the first build. On later launches, select **Play**.
 
 Use **Compile / update** next to **Play** to prepare a build in the background
@@ -84,7 +86,7 @@ documentation reuse the existing build.
 ### RecompLauncher
 
 The packages include `recomplauncher.json` so RecompLauncher can set up the
-port from a North American SCUS-97472 ISO. RecompLauncher runs preparation
+port from a SCUS-97472 or SCES-53326 ISO. RecompLauncher runs preparation
 in the background. Its settings cover aspect ratio, full screen, window size,
 VSync, FSR 1, FPS display, and volume.
 
@@ -257,9 +259,9 @@ are independent options. Both are off by default and take effect on the next
 launch. They prevent normal health or grip depletion. Wander’s maximum health
 and grip and the game’s scripted events are retained. [Assist scope and tests](docs/ASSISTS.md)
 
-Support for the **European PAL edition (SCES-53326)** is pending until a disc
-can be recompiled and tested. The launcher recognizes the edition and reports
-its status. [PAL support](docs/PAL-SUPPORT.md)
+The **European PAL edition (SCES-53326)** uses the compatibility renderer
+and its own recompilation cache. Save progress on the memory card during
+PAL play. [PAL compatibility details](docs/PAL-SUPPORT.md)
 
 | Keyboard | PS2 control |
 | --- | --- |

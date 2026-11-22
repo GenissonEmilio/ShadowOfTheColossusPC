@@ -24,7 +24,7 @@ shutil.copy2(ROOT / 'artifacts/third-party-sources.tar.gz',OUT / 'third-party-so
                                   encoding="utf-8")
 (OUT / 'LEIA-ME.txt').write_text('''Shadow of the Colossus PC — Linux x86_64
 
-Abra ShadowOfTheColossusPC e escolha seu disco ISO/7Z/ZIP/RAR USA SCUS-97472.
+Abra ShadowOfTheColossusPC e escolha seu disco ISO/7Z/ZIP/RAR SCUS-97472 (USA) ou SCES-53326 (PAL).
 A primeira preparação recompila o jogo localmente, com até duas tarefas.
 A preparação pode demorar; a janela mostra o progresso. Depois é só jogar.
 O pacote contém o compilador. Não é necessário instalar Docker ou um SDK.
@@ -49,7 +49,6 @@ Configurações > Ícones dos botões no jogo: Automático, PlayStation, Xbox ou
 Automático acompanha o último dispositivo usado durante a partida. O teclado segue seu perfil.
 Configurações > Assistências: vida infinita e resistência infinita, desligadas por padrão.
 O modo e as assistências escolhidos valem na próxima abertura do jogo.
-O suporte à edição PAL SCES-53326 permanece pendente de recompilação e validação.
 No launcher: direcional/analógico navega, A/X confirma, B/Círculo volta,
 LB/RB trocam de página e Start inicia o jogo preparado. Esquerda/direita ajusta.
 Os sigilos dos colossos brilham com a espada equipada.
@@ -86,7 +85,9 @@ Artes do launcher: _internal/assets/ARTWORK.md (origem e prompts das adaptaçõe
 Shadow of the Colossus pertence a Sony / Team Ico. Projeto independente.
 ''',encoding='utf-8')
 for p in OUT.rglob('*'):
-    if p.is_file() and (p.suffix.lower() in ('.iso','.7z','.rar','.xff','.elf','.ps2','.sotcstate') or p.name in ('NICO.DAT','SCUS_974.72') or p.name.startswith('func_') or p.name=='complete.json'):
+    if p.is_file() and (p.suffix.lower() in ('.iso','.7z','.rar','.xff','.elf','.ps2','.sotcstate')
+                        or p.name.lower().rstrip('.') in ('nico.dat','scus_974.72','sces_533.26','xab','xac','xad','xae','complete.json')
+                        or p.name.startswith('func_')):
         raise ValueError('Unexpected game-derived file in package: '+str(p))
 archive=ROOT / 'dist' / f'{NAME}-{VERSION}-linux-x86_64.tar.gz'
 with tarfile.open(archive,'w:gz',compresslevel=6) as t:t.add(OUT,arcname=NAME)

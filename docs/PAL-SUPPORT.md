@@ -1,12 +1,16 @@
-# Edição PAL
+# European PAL edition
 
-O launcher e o runtime deste port usam a edição USA SCUS-97472. A edição
-europeia/australiana SCES-53326 v1.00 tem executável `SCES_533.26` e permanece
-pendente até haver uma cópia dessa edição para validação.
+The launcher accepts the European SCES-53326 v1.00 disc alongside the North
+American SCUS-97472 edition. Select the ISO or its 7Z, ZIP, or RAR archive in
+the launcher. RecompLauncher Easy Setup takes the ISO.
 
-A recompilação PAL requer seu próprio perfil, com verificação do executável e
-dos módulos `KERNEL`, `MANAGER` e `GAMECORE`, captura ou relocação dos módulos
-e revisão dos endereços das intervenções nativas. O teste precisa cobrir boot,
-seleção de vídeo e idioma, campanha, memory card e save states. O [port PAL
-independente de LightVelox](https://github.com/LightVelox/sotc-vibe-pc) documenta
-a edição e o método usado no Windows.
+The importer checks the boot identifier in `SYSTEM.CNF`, verifies the boot
+ELF and the KERNEL, MANAGER, and GAMECORE modules, and checks the five contiguous
+extents of the European data archive. It copies them into the local `NICO.DAT`
+that the game uses for sector reads. The compilation cache is separate from the
+North American edition.
+
+PAL uses the compatibility graphics path and the video mode selected in the
+original game. Use the memory card to save progress. Features that rely on the
+North American native renderer and runtime hooks, including frame generation,
+quick save states, and the dedicated assist patches, remain edition-specific.

@@ -42,7 +42,8 @@ namespace
     constexpr uint32_t WEF_OR = 0x01u;
     constexpr uint32_t WEF_CLEAR = 0x10u;
     constexpr uint32_t WEF_CLEAR_ALL = 0x20u;
-    constexpr auto kVBlankPeriod = std::chrono::microseconds(16667);
+    constexpr auto kNtscVBlankPeriod = std::chrono::microseconds(16667);
+    constexpr auto kPalVBlankPeriod = std::chrono::microseconds(20000);
     constexpr auto kVBlankDuration = std::chrono::microseconds(500);
     constexpr uint64_t kAlarmTickMicroseconds = 64u;
     constexpr uint32_t kDebugPublishDispatchInterval = 4096u;
@@ -61,7 +62,6 @@ namespace
         return std::chrono::seconds(wholeSeconds) + std::chrono::nanoseconds(remainingNanoseconds);
     }
 
-    constexpr uint64_t kVBlankPeriodCycles = microsecondsToEeCycles(16667u);
     constexpr uint64_t kVBlankDurationCycles = microsecondsToEeCycles(500u);
     constexpr uint64_t kAlarmTickCycles = microsecondsToEeCycles(kAlarmTickMicroseconds);
 
@@ -157,6 +157,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_eventSequence = 0;
     m_invocationSequence = 0;
     m_vsyncTick = 0;
+    m_palVideoMode.store(false, std::memory_order_relaxed);
     m_vsyncFlagAddress = 0;
     m_vsyncTickAddress = 0;
     m_gsVSyncCallback = 0;
@@ -178,8 +179,8 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     main.status = EeThreadStatus::Ready;
     m_threads.emplace(main.id, std::move(main));
     m_readyQueues[0].push_back(kMainThreadId);
-    scheduleEvent(m_eeCycle + kVBlankPeriodCycles,
-                  std::chrono::steady_clock::now() + kVBlankPeriod,
+    scheduleEvent(m_eeCycle + microsecondsToEeCycles(vblankPeriod().count()),
+                  std::chrono::steady_clock::now() + vblankPeriod(),
                   EeEvent{EeEventType::VBlankStart, 0, 0});
     publishSnapshot();
 }
@@ -1454,6 +1455,20 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
     }
 }
 
+void EeScheduler::setGsVideoMode(uint32_t mode)
+{
+    // SCES-53326 lets the player switch between NTSC and PAL. The existing
+    // North American profile always uses its original scheduler cadence.
+    constexpr uint32_t kGsModePal = 0x03u;
+    const bool pal = mode == kGsModePal && PS2Runtime::getIoPaths().elfPath.filename() == "SCES_533.26";
+    m_palVideoMode.store(pal, std::memory_order_relaxed);
+}
+
+std::chrono::microseconds EeScheduler::vblankPeriod() const noexcept
+{
+    return palVideoMode() ? kPalVBlankPeriod : kNtscVBlankPeriod;
+}
+
 void EeScheduler::setVSyncFlag(uint32_t flagAddress, uint32_t tickAddress)
 {
     assertExecutor();
@@ -2080,8 +2095,9 @@ void EeScheduler::processDueDeadlines()
                 scheduleEvent(scheduled.deadlineCycle + kVBlankDurationCycles,
                               scheduled.hostDeadline + kVBlankDuration,
                               EeEvent{EeEventType::VBlankEnd, 0, m_vsyncTick + 1u});
-                scheduleEvent(scheduled.deadlineCycle + kVBlankPeriodCycles,
-                              scheduled.hostDeadline + kVBlankPeriod,
+                const auto period = vblankPeriod();
+                scheduleEvent(scheduled.deadlineCycle + microsecondsToEeCycles(period.count()),
+                              scheduled.hostDeadline + period,
                               EeEvent{EeEventType::VBlankStart, 0, 0});
             }
             processEvent(scheduled.event);
@@ -2358,7 +2374,8 @@ void EeScheduler::syncCyclesToHostClock()
     {
         uint64_t lag = hostCycles - m_eeCycle;
         // Never replay more than two frames at once; forget older lag instead.
-        const uint64_t maxLag = 2u * kVBlankPeriodCycles;
+        const uint64_t periodCycles = microsecondsToEeCycles(vblankPeriod().count());
+        const uint64_t maxLag = 2u * periodCycles;
         if (lag > maxLag)
         {
             m_hostClockBase += std::chrono::microseconds((lag - maxLag) * 1000000ull / kEeClockHz);
@@ -2366,7 +2383,7 @@ void EeScheduler::syncCyclesToHostClock()
         }
         while (lag != 0u)
         {
-            const uint64_t step = std::min<uint64_t>(lag, kVBlankPeriodCycles);
+            const uint64_t step = std::min(lag, periodCycles);
             accountCycles(static_cast<uint32_t>(step));
             lag -= step;
         }

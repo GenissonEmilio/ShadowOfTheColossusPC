@@ -1,7 +1,7 @@
 Shadow of the Colossus PC — Windows x86_64
 
 Extraia a pasta inteira e abra ShadowOfTheColossusPC.exe.
-Escolha a imagem ISO, ZIP, RAR ou 7Z do seu disco USA SCUS-97472.
+Escolha a imagem ISO, ZIP, RAR ou 7Z do seu disco USA SCUS-97472 ou PAL SCES-53326.
 A preparação compila o jogo no seu computador e salva o executável para
 as próximas sessões. O pacote já contém o compilador e as bibliotecas.
 

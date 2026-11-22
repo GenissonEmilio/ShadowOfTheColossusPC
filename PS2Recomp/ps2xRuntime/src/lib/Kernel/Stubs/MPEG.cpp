@@ -703,13 +703,16 @@ namespace ps2_stubs
         }
 
         uint64_t decodedFrameIntervalQ32(const MpegPlaybackState &playback,
-                                         const MpegDecodedFrame &frame)
+                                         const MpegDecodedFrame &frame,
+                                         bool pal)
         {
             const uint64_t base = playback.pictureIntervalQ32 != 0u
                                       ? playback.pictureIntervalQ32
                                       : kDefaultPictureIntervalQ32;
             const uint64_t fields = static_cast<uint64_t>(2 + std::max(0, frame.repeatPict));
-            return std::max(kPictureClockOne, (base * fields + 1u) / 2u);
+            const uint64_t interval = (base * fields + 1u) / 2u;
+            // Convert the stored NTSC-based interval to PAL's 50 fields/s.
+            return std::max(kPictureClockOne, pal ? (interval * 1001u + 600u) / 1200u : interval);
         }
 
         constexpr uint64_t kMpegPtsWrap = 1ull << 33u;
@@ -732,19 +735,19 @@ namespace ps2_stubs
             return static_cast<int64_t>(delta);
         }
 
-        uint64_t mpegPtsDeltaToVSyncQ32(uint64_t delta90k)
+        uint64_t mpegPtsDeltaToVSyncQ32(uint64_t delta90k, bool pal)
         {
-            // 90 kHz MPEG clock -> NTSC field clock (60000/1001 Hz):
-            // fields = pts * 60000 / (90000 * 1001) = pts * 2 / 3003.
-            constexpr uint64_t kPtsDivisor = 3003u;
-            const uint64_t whole = delta90k / kPtsDivisor;
-            const uint64_t remainder = delta90k % kPtsDivisor;
-            const uint64_t wholeQ32 = whole * 2u * kPictureClockOne;
-            const uint64_t remainderQ32 = ((remainder * 2u * kPictureClockOne) + kPtsDivisor / 2u) / kPtsDivisor;
+            // Convert a 90 kHz MPEG timestamp into PAL or NTSC fields.
+            const uint64_t multiplier = pal ? 1u : 2u;
+            const uint64_t divisor = pal ? 1800u : 3003u;
+            const uint64_t whole = delta90k / divisor;
+            const uint64_t remainder = delta90k % divisor;
+            const uint64_t wholeQ32 = whole * multiplier * kPictureClockOne;
+            const uint64_t remainderQ32 = (remainder * multiplier * kPictureClockOne + divisor / 2u) / divisor;
             return wholeQ32 + remainderQ32;
         }
 
-        uint64_t presentationTickForFrame(MpegPlaybackState &playback, const MpegDecodedFrame &frame, uint64_t currentTickQ32)
+        uint64_t presentationTickForFrame(MpegPlaybackState &playback, const MpegDecodedFrame &frame, uint64_t currentTickQ32, bool pal)
         {
             if (frame.pts90k < 0)
             {
@@ -765,10 +768,10 @@ namespace ps2_stubs
             const int64_t delta = mpegPtsDelta90k(playback.firstPresentedPts90k, frame.pts90k);
             if (delta >= 0)
             {
-                return playback.ptsPresentationBaseTickQ32 + mpegPtsDeltaToVSyncQ32(static_cast<uint64_t>(delta));
+                return playback.ptsPresentationBaseTickQ32 + mpegPtsDeltaToVSyncQ32(static_cast<uint64_t>(delta), pal);
             }
 
-            const uint64_t backwards = mpegPtsDeltaToVSyncQ32(static_cast<uint64_t>(-delta));
+            const uint64_t backwards = mpegPtsDeltaToVSyncQ32(static_cast<uint64_t>(-delta), pal);
             return playback.ptsPresentationBaseTickQ32 > backwards
                        ? playback.ptsPresentationBaseTickQ32 - backwards
                        : 0u;
@@ -2329,8 +2332,9 @@ namespace ps2_stubs
                 const uint64_t currentTick = runtime->eeScheduler().currentVSyncTick();
                 const uint64_t currentTickQ32 = currentTick << 32u;
                 const MpegDecodedFrame &nextFrame = playback.decodedFrames.front();
-                const uint64_t frameIntervalQ32 = decodedFrameIntervalQ32(playback, nextFrame);
-                uint64_t presentationTargetQ32 = presentationTickForFrame(playback, nextFrame, currentTickQ32);
+                const bool pal = runtime->eeScheduler().palVideoMode();
+                const uint64_t frameIntervalQ32 = decodedFrameIntervalQ32(playback, nextFrame, pal);
+                uint64_t presentationTargetQ32 = presentationTickForFrame(playback, nextFrame, currentTickQ32, pal);
 
                 if (currentTickQ32 > presentationTargetQ32 && currentTickQ32 - presentationTargetQ32 >= frameIntervalQ32)
                 {

@@ -798,6 +798,9 @@ namespace ps2_stubs
                 return;
             }
 
+            if (runtime)
+                runtime->eeScheduler().setGsVideoMode(omode);
+
             g_gparam.interlace = static_cast<uint8_t>(interlace & 0x1);
             g_gparam.omode = static_cast<uint8_t>(omode & 0xFF);
             g_gparam.ffmode = static_cast<uint8_t>(ffmode & 0x1);
@@ -805,7 +808,8 @@ namespace ps2_stubs
             uint64_t pmode = makePmode(1, 0, 0, 0, 0, 0x80);
             uint64_t smode2 = (interlace & 0x1) | ((ffmode & 0x1) << 1);
             uint64_t dispfb = makeDispFb(0, 10, 0, 0, 0);
-            uint64_t display = makeDisplay(0, 0, 0, 0, 639, 447);
+            const bool pal = runtime && runtime->eeScheduler().palVideoMode();
+            uint64_t display = makeDisplay(0, 0, 0, 0, 639, pal ? 511 : 447);
             uint64_t bgcolor = 0ULL;
 
             if (runtime)

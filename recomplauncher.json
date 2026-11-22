@@ -4,8 +4,8 @@
   "repo": "GenissonEmilio/ShadowOfTheColossusPC",
   "game": {
     "kind": "iso",
-    "label": "Shadow of the Colossus USA PS2 disc image (SCUS-97472)",
-    "check": { "iso9660": "SCUS_974.72" }
+    "label": "Shadow of the Colossus PS2 disc image (SCUS-97472 USA or SCES-53326 PAL)",
+    "check": { "iso9660": "NICO.DAT" }
   },
   "prepare": {
     "program": ["ShadowOfTheColossusPC.exe", "ShadowOfTheColossusPC"],
@@ -123,7 +123,7 @@
   },
   "looks": { "graphics": "opengl", "lines": 448 },
   "exit_codes": {
-    "65": "Select the USA SCUS-97472 disc in Easy Setup and prepare the game again.",
+    "65": "Select the SCUS-97472 (USA) or SCES-53326 (PAL) disc in Easy Setup and prepare the game again.",
     "74": "The port could not prepare or start the game. Check last-prepare.log in the Logs folder."
   }
 }

@@ -11,15 +11,16 @@ from unittest.mock import Mock, patch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools/desktop"))
 from graphics import RECOMP_VIDEO_KEYS, Graphics
+from import_disc import identify_disc
 from model import Library, atomic_json
-from pipeline import BOOT, Pipeline, executable_name
+from pipeline import BOOT, PAL_BOOT, Pipeline, executable_name
 from recomp_cli import run
 
 
 class RecompLauncherTests(unittest.TestCase):
     def test_profile_uses_real_settings_and_shared_data_path(self):
         profile = json.loads((ROOT / "recomplauncher.json").read_text())
-        self.assertEqual(profile["game"]["check"]["iso9660"], BOOT)
+        self.assertEqual(profile["game"]["check"]["iso9660"], "NICO.DAT")
         self.assertEqual(profile["start"]["program"], profile["prepare"]["program"])
         profile_path = "{local}/ShadowOfTheColossusPC"
         self.assertEqual(profile["start"]["args"], ["--play", "--data-dir", profile_path])
@@ -43,6 +44,7 @@ class RecompLauncherTests(unittest.TestCase):
             boot = library.directory / "discs" / source_id / BOOT
             boot.parent.mkdir(parents=True)
             boot.touch()
+            (boot.parent / "SYSTEM.CNF").write_text(f"BOOT2 = cdrom0:\\{BOOT};1\n")
             build_id = "v098-test-cache"
             atomic_json(library.program / "compiler/manifest.json", {"build_id": build_id, "link_inputs": []})
             work = library.directory / "builds" / build_id
@@ -55,7 +57,7 @@ class RecompLauncherTests(unittest.TestCase):
             graphics.config.write_text("render_scale=2.500\nfullscreen = 0\nscreen = 3\nvsync = 0\nvolume = 7\n")
             output = io.StringIO()
             with (patch("recomp_cli.Library", return_value=library),
-                  patch.object(library, "valid_extracted", return_value=True),
+                  patch.object(library, "validated_disc", return_value=identify_disc(boot.parent)),
                   patch.object(Pipeline, "helper", side_effect=AssertionError("cached game must not compile")),
                   patch("model.import_disc", side_effect=AssertionError("existing disc must not import twice")),
                   patch("model.subprocess.Popen", return_value=Mock(wait=Mock(return_value=0))) as play,
@@ -73,3 +75,29 @@ class RecompLauncherTests(unittest.TestCase):
             for line in ("fullscreen=0", "screen=3", "vsync=0", "volume=7"):
                 self.assertIn(line + "\n", contents)
             self.assertEqual(game.read_bytes(), b"previously compiled fixture")
+
+    def test_pal_and_usa_keep_distinct_cached_games(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            library = Library(root / "data", root / "program")
+            atomic_json(library.program / "compiler/manifest.json", {"build_id": "kit", "link_inputs": []})
+            games = []
+            for name in (BOOT, PAL_BOOT):
+                disc = root / name
+                disc.mkdir()
+                boot = disc / name
+                boot.touch()
+                (disc / "SYSTEM.CNF").write_text(f"BOOT2 = cdrom0:\\{name};1\n")
+                compiler = Pipeline(library.program, library.directory, {}, boot_name=name)
+                executable = compiler.work / "gamecore" / executable_name("game")
+                executable.parent.mkdir(parents=True)
+                executable.write_text(name)
+                atomic_json(compiler.work / "complete.json",
+                            {"sha256": hashlib.sha256(executable.read_bytes()).hexdigest()})
+                library.state = {"disc": str(boot)}
+                with (patch.object(library, "validated_disc", return_value=identify_disc(disc)),
+                      patch.object(Pipeline, "helper", side_effect=AssertionError("cached game must not compile"))):
+                    self.assertEqual(library.prepare_game(), executable)
+                games.append(executable)
+            self.assertEqual(games[0].parents[1], library.directory / "builds/kit")
+            self.assertNotEqual(games[0], games[1])

@@ -28,13 +28,14 @@ A atualização falhou	The update failed	La actualización falló	更新に失�
 Controle: direcional/analógico · A/✕ confirmar · B/○ voltar\nLB/RB páginas · Start jogar/aceitar · ←/→ ajustar	Controller: D-pad/stick · A/✕ confirm · B/○ back\nLB/RB switch pages · Start play/accept · ←/→ adjust	Mando: cruceta/palanca · A/✕ confirmar · B/○ volver\nLB/RB cambiar de página · Start jugar/aceptar · ←/→ ajustar	コントローラー: 十字キーまたはスティック · A/✕ 決定 · B/○ 戻る\nLB/RB ページ切替 · Start 開始・決定 · ←/→ 調整
 Seu jogo	Your game	Tu juego	ゲーム
 Selecione sua ROM	Select your disc image	Selecciona la imagen del disco	ディスクイメージを選択
-ISO, RAR, ZIP ou 7Z · edição americana	ISO, RAR, ZIP or 7Z · North American edition	ISO, RAR, ZIP o 7Z · edición norteamericana	ISO、RAR、ZIP、7Z · 北米版
+ISO, RAR, ZIP ou 7Z · edições USA e PAL	ISO, RAR, ZIP or 7Z · USA and PAL editions	ISO, RAR, ZIP o 7Z · ediciones USA y PAL	ISO、RAR、ZIP、7Z · 北米版と PAL 版
 Escolher arquivo…	Choose file…	Elegir archivo…	ファイルを選択…
 Seu arquivo fica apenas neste computador.	Your file stays on this computer.	Tu archivo se queda en este equipo.	ファイルはこの PC にのみ保存されます。
 ▶   Iniciar jogo	▶   Play	▶   Jugar	▶   ゲームを開始
 Abrir Shadow of the Colossus nativamente no PC	Launch Shadow of the Colossus natively on PC	Abre Shadow of the Colossus de forma nativa en tu PC	『ワンダと巨像』を PC で起動します
 Dica: você também pode arrastar o arquivo para a área acima.	You can also drag the file into the area above.	También puedes arrastrar el archivo a la zona superior.	上の領域にファイルをドラッグすることもできます。
 Durante o jogo: F5 salva rápido · F8 carrega · F1 gerencia estados.	In game: F5 quick save · F8 quick load · F1 manage saved states.	En el juego: F5 guardado rápido · F8 carga rápida · F1 gestionar estados.	プレイ中: F5 クイックセーブ · F8 クイックロード · F1 ステート管理。
+Na edição PAL, salve no cartão de memória.	In the PAL edition, save to the memory card.	En la edición PAL, guarda en la tarjeta de memoria.	PAL 版ではメモリーカードにセーブしてください。
 Controles	Controls	Controles	操作
 Teclado e mouse ou controle USB/Bluetooth.\nF1 abre o menu, libera o cursor e oferece Voltar ao launcher. Esc pausa o jogo.	Use a keyboard and mouse or a USB/Bluetooth controller.\nF1 opens settings, releases the cursor and lets you return to the launcher. Esc pauses the game.	Usa teclado y ratón o un mando USB/Bluetooth.\nF1 abre los ajustes, libera el cursor y permite volver al iniciador. Esc pausa el juego.	キーボードとマウス、または USB/Bluetooth コントローラーを使えます。\nF1 でメニューを開き、カーソルの解放やランチャーへの復帰ができます。Esc で一時停止します。
 Personalizar teclado e mouse…	Customize keyboard and mouse…	Personalizar teclado y ratón…	キーボードとマウスを設定…
@@ -110,7 +111,7 @@ Não foi possível abrir o modelo	Could not open the template	No se pudo abrir l
 Sobre o port	About the port	Acerca de la adaptación	この移植版について
 Escolha seu disco uma vez. Nas próximas sessões, é só clicar em jogar.	Select your disc once. After that, press Play to start.	Elige el disco una vez. Después, basta con pulsar Jugar.	ディスクを一度選ぶと、次回から「ゲームを開始」で遊べます。
 SUA ROM	YOUR DISC IMAGE	IMAGEN DEL DISCO	ディスクイメージ
-Compatível com a edição americana SCUS-97472. ISO e RAR/ZIP/7Z são preparados na pasta do aplicativo. A primeira preparação recompila seu disco localmente; depois o cache é reutilizado. Sua ROM original não é alterada.	Supports the North American SCUS-97472 edition. ISO and RAR/ZIP/7Z files are prepared in your data folder. The first preparation recompiles your disc on this PC. Later sessions reuse the cache. Your original file is preserved.	Compatible con la edición norteamericana SCUS-97472. Los ISO y RAR/ZIP/7Z se preparan en tu carpeta de datos. La primera preparación recompila el disco en este PC. Las siguientes sesiones reutilizan la caché. El archivo original se conserva.	北米版 SCUS-97472 に対応。ISO、RAR、ZIP、7Z をデータフォルダーで準備します。初回は PC 上でディスクを再コンパイルし、以降はキャッシュを使います。元のファイルは保持されます。
+Compatível com SCUS-97472 (USA) e SCES-53326 (PAL). A primeira preparação compila seu disco localmente. Os próximos acessos reutilizam o cache da edição.	Supports SCUS-97472 (USA) and SCES-53326 (PAL). First-time setup compiles your disc locally. Later launches reuse the build for that edition.	Compatible con SCUS-97472 (EE. UU.) y SCES-53326 (PAL). La primera preparación compila el disco localmente. Después se reutiliza la compilación de esa edición.	北米版 SCUS-97472 とSCES-53326 (PAL) に対応しています。初回はディスクをローカルでコンパイルし、次回からは版ごとのキャッシュを使います。
 CRÉDITOS	CREDITS	CRÉDITOS	クレジット
 Interface: GenissonEmilio, baseada no launcher de ForbiddenMemoriesPC.\nBase nativa: HenryKun55 / Celosia (GPL-3.0).\nRecompilador/runtime: ran-j / PS2Recomp e colaboradores.\nReferência PS2: Tenkaichi3Decomp; launcher: ForbiddenMemoriesPC / CrashBandicootPC.\nShadow of the Colossus pertence a seus respectivos titulares.	Interface: GenissonEmilio, based on the ForbiddenMemoriesPC launcher.\nNative base: HenryKun55 / Celosia (GPL-3.0).\nRecompiler and runtime: ran-j / PS2Recomp and contributors.\nPS2 reference: Tenkaichi3Decomp. Launcher references: ForbiddenMemoriesPC / CrashBandicootPC.\nShadow of the Colossus belongs to its respective rights holders.	Interfaz: GenissonEmilio, basada en el iniciador de ForbiddenMemoriesPC.\nBase nativa: HenryKun55 / Celosia (GPL-3.0).\nRecompilador y entorno de ejecución: ran-j / PS2Recomp y colaboradores.\nReferencia PS2: Tenkaichi3Decomp. Referencias del iniciador: ForbiddenMemoriesPC / CrashBandicootPC.\nShadow of the Colossus pertenece a sus respectivos titulares.	インターフェース: GenissonEmilio、ForbiddenMemoriesPC をベースに作成。\nネイティブ基盤: HenryKun55 / Celosia (GPL-3.0)。\n再コンパイラーとランタイム: ran-j / PS2Recomp とその貢献者。\nPS2 の参考: Tenkaichi3Decomp。ランチャーの参考: ForbiddenMemoriesPC / CrashBandicootPC。\n『ワンダと巨像』の権利は各権利者に帰属します。
 ＋  Adicionar ao menu de aplicativos	＋  Add to the applications menu	＋  Añadir al menú de aplicaciones	＋  アプリメニューに追加
@@ -120,6 +121,7 @@ Selecionar ROM	Select disc image	Seleccionar imagen de disco	ディスクイメ�
 Escolha um arquivo deste computador.	Choose a file on this computer.	Elige un archivo de este equipo.	この PC にあるファイルを選択してください。
 Confira o arquivo escolhido	Check the selected file	Revisa el archivo seleccionado	選択したファイルを確認してください
 SCUS-97472  ·  Edição americana validada	SCUS-97472  ·  North American edition verified	SCUS-97472  ·  Edición norteamericana validada	SCUS-97472  ·  北米版を確認済み
+SCES-53326  ·  Edição europeia PAL	SCES-53326  ·  European PAL edition	SCES-53326  ·  Edición europea PAL	SCES-53326  ·  PAL 版
 ●  Pronto para jogar	●  Ready to play	●  Listo para jugar	●  プレイできます
 Trocar ROM…	Change disc image…	Cambiar imagen de disco…	ディスクイメージを変更…
 Preparando seu jogo…	Preparing your game…	Preparando el juego…	ゲームを準備中…
@@ -246,12 +248,13 @@ Escolha um cartão PS2 formatado de 8 MB no formato PCSX2 (.ps2, 8.650.752 bytes
 Ainda não existe um cartão. Salve no jogo ou importe seu cartão primeiro.	No memory card yet. Save in game or import your memory card first.	Aún no hay tarjeta. Guarda en el juego o importa tu tarjeta primero.	メモリーカードがありません。ゲーム内でセーブするか、カードを読み込んでください。
 Escolha outra pasta para exportar uma cópia.	Choose another folder for the exported copy.	Elige otra carpeta para exportar la copia.	書き出すコピーには別のフォルダーを選択してください。
 Não foi possível abrir o aplicativo padrão deste computador.\nO arquivo continua disponível em:\n{path}	Could not open this computer's default application.\nThe file is still available at:\n{path}	No se pudo abrir la aplicación predeterminada de este equipo.\nEl archivo sigue disponible en:\n{path}	この PC の既定のアプリを開けませんでした。\nファイルの場所:\n{path}
-Escolha ISO, ZIP, RAR ou 7Z do Shadow of the Colossus USA.	Choose an ISO, ZIP, RAR or 7Z of Shadow of the Colossus (USA).	Elige un ISO, ZIP, RAR o 7Z de Shadow of the Colossus (USA).	北米版『ワンダと巨像』の ISO、ZIP、RAR、7Z を選択してください。
+Escolha ISO, ZIP, RAR ou 7Z do Shadow of the Colossus.	Choose a Shadow of the Colossus ISO, ZIP, RAR or 7Z.	Elige un ISO, ZIP, RAR o 7Z de Shadow of the Colossus.	『ワンダと巨像』の ISO、ZIP、RAR、7Z を選択してください。
 Há arquivos compactados demais dentro de outros arquivos.	The archive has too many nested archives.	El archivo contiene demasiados archivos comprimidos anidados.	アーカイブの入れ子が多すぎます。
 Escolha uma imagem DVD ISO com setores de 2048 bytes.	Choose a DVD ISO image with 2048-byte sectors.	Elige una imagen de DVD ISO con sectores de 2048 bytes.	セクターが 2048 バイトの DVD ISO イメージを選択してください。
-Edição incompatível. É necessário SCUS-97472 (USA).	Unsupported edition. SCUS-97472 (USA) is required.	Edición incompatible. Se requiere SCUS-97472 (USA).	このエディションには対応していません。北米版 SCUS-97472 が必要です。
+O arquivo SYSTEM.CNF está ausente ou inválido.	SYSTEM.CNF is missing or invalid.	SYSTEM.CNF no está o no es válido.	SYSTEM.CNF が見つからないか、無効です。
+Edição incompatível. Use SCUS-97472 (USA) ou SCES-53326 (PAL).	Unsupported edition. Use SCUS-97472 (USA) or SCES-53326 (PAL).	Edición incompatible. Usa SCUS-97472 (USA) o SCES-53326 (PAL).	このエディションには対応していません。北米版 SCUS-97472 またはPAL 版 SCES-53326 を使用してください。
 {name}: edição incompatível ou arquivo modificado.	{name}: unsupported edition or modified file.	{name}: edición incompatible o archivo modificado.	{name}: 未対応のエディションまたは変更されたファイルです。
-Os dados NICO.DAT estão ausentes ou incompatíveis.	NICO.DAT is missing or incompatible.	NICO.DAT no está o es incompatible.	NICO.DAT が存在しないか、非対応です。
+{name}: dados de disco ausentes ou incompatíveis.	{name}: disc data is missing or incompatible.	{name}: los datos del disco faltan o son incompatibles.	{name}: ディスクデータが見つからないか、非対応です。
 Diretórios ISO profundos demais.	The ISO directory structure is too deep.	La estructura de directorios de la ISO es demasiado profunda.	ISO のディレクトリ階層が深すぎます。
 ISO truncada.	The ISO is truncated.	La ISO está incompleta.	ISO が途中で切れています。
 Esperado exatamente um disco; encontrados {count}.	Expected one disc image, found {count}.	Se esperaba una imagen de disco y se encontraron {count}.	ディスクイメージが 1 つ必要ですが、{count} 個見つかりました。
@@ -273,7 +276,6 @@ Vida infinita	Infinite health	Salud infinita	体力無限
 Resistência infinita	Infinite grip	Resistencia infinita	スタミナ無限
 Desligadas por padrão. As assistências são aplicadas na próxima abertura do jogo.	Off by default. Assists apply the next time you launch the game.	Desactivadas por defecto. Las ayudas se aplican al volver a iniciar el juego.	初期設定では無効です。アシストは次回起動時に反映されます。
 Setas mover · Enter confirmar · Esc voltar	Arrows move · Enter confirm · Esc back	Flechas mover · Enter confirmar · Esc volver	矢印キーで移動 · Enter で決定 · Esc で戻る
-Edição PAL europeia detectada (SCES-53326). O suporte a essa edição está pendente; esta versão recompila somente o disco USA SCUS-97472.	European PAL edition detected (SCES-53326). Support for this edition is pending; this version recompiles only the USA SCUS-97472 disc.	Edición PAL europea detectada (SCES-53326). La compatibilidad está pendiente; esta versión solo recompila el disco USA SCUS-97472.	欧州 PAL 版（SCES-53326）が検出されました。この版への対応は保留中です。現在は北米版 SCUS-97472 のみ再コンパイルできます。
 Texturas	Textures	Texturas	テクスチャ
 Mods de textura	Texture mods	Mods de texturas	テクスチャ MOD
 Pacote de texturas	Texture pack	Paquete de texturas	テクスチャパック

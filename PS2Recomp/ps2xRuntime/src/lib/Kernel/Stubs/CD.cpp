@@ -12,8 +12,7 @@ namespace ps2_stubs
         constexpr uint32_t kCdStreamBlocking = 1u;
         constexpr uint32_t kDvdSectorsPerSecondX1 = 675u;
         constexpr uint32_t kDvdSectorsPerSecondX4 = kDvdSectorsPerSecondX1 * 4u;
-        constexpr uint64_t kNtScFieldsPerSecondNumerator = 60000u;
-        constexpr uint64_t kNtScFieldsPerSecondDenominator = 1001u;
+        constexpr uint64_t kStreamUnitsPerSecond = 60000u;
 
         struct CdStreamTimingState
         {
@@ -36,6 +35,13 @@ namespace ps2_stubs
         uint64_t currentCdStreamTick(PS2Runtime *runtime)
         {
             return runtime != nullptr ? runtime->eeScheduler().currentVSyncTick() : 0u;
+        }
+
+        uint64_t cdStreamUnitsPerTick(PS2Runtime *runtime)
+        {
+            // 60000/1001 Hz in NTSC and 60000/1200 Hz in PAL.
+            const uint64_t fieldPeriodUnits = runtime->eeScheduler().palVideoMode() ? 1200u : 1001u;
+            return g_cdStreamTiming.sectorsPerSecond * fieldPeriodUnits;
         }
 
         uint32_t dvdStreamSectorsPerSecond(uint8_t spindleControl)
@@ -90,11 +96,10 @@ namespace ps2_stubs
             const uint64_t elapsedTicks = tick - g_cdStreamTiming.lastVSyncTick;
             g_cdStreamTiming.lastVSyncTick = tick;
 
-            // 59.94 Hz field clock: sectors = fields * sectors/s * 1001 / 60000.
-            const uint64_t unitsPerTick = static_cast<uint64_t>(g_cdStreamTiming.sectorsPerSecond) * kNtScFieldsPerSecondDenominator;
+            const uint64_t unitsPerTick = cdStreamUnitsPerTick(runtime);
             const uint64_t accumulated = g_cdStreamTiming.productionRemainder + elapsedTicks * unitsPerTick;
-            const uint64_t elapsedProduction = accumulated / kNtScFieldsPerSecondNumerator;
-            g_cdStreamTiming.productionRemainder = accumulated % kNtScFieldsPerSecondNumerator;
+            const uint64_t elapsedProduction = accumulated / kStreamUnitsPerSecond;
+            g_cdStreamTiming.productionRemainder = accumulated % kStreamUnitsPerSecond;
             if (elapsedProduction == 0u)
             {
                 return;
@@ -149,16 +154,16 @@ namespace ps2_stubs
         uint64_t cdStreamWakeTickForSectors(PS2Runtime *runtime, uint32_t sectorsNeeded)
         {
             const uint64_t now = currentCdStreamTick(runtime);
-            if (sectorsNeeded == 0u || g_cdStreamTiming.sectorsPerSecond == 0u)
+            if (!runtime || sectorsNeeded == 0u || g_cdStreamTiming.sectorsPerSecond == 0u)
             {
                 return now;
             }
 
-            const uint64_t requiredUnits = static_cast<uint64_t>(sectorsNeeded) * kNtScFieldsPerSecondNumerator;
+            const uint64_t requiredUnits = static_cast<uint64_t>(sectorsNeeded) * kStreamUnitsPerSecond;
             const uint64_t remainingUnits = requiredUnits > g_cdStreamTiming.productionRemainder
                                                 ? requiredUnits - g_cdStreamTiming.productionRemainder
                                                 : 0u;
-            const uint64_t unitsPerTick = static_cast<uint64_t>(g_cdStreamTiming.sectorsPerSecond) * kNtScFieldsPerSecondDenominator;
+            const uint64_t unitsPerTick = cdStreamUnitsPerTick(runtime);
             const uint64_t ticks = std::max<uint64_t>(1u, (remainingUnits + unitsPerTick - 1u) / unitsPerTick);
             return now + ticks;
         }

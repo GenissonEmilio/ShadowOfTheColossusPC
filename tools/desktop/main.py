@@ -722,7 +722,7 @@ class Launcher:
         self.file_title.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         self.file_title.set_max_width_chars(45)
         info.pack_start(self.file_title,False,False,0)
-        self.file_subtitle = label(tr("ISO, RAR, ZIP ou 7Z · edição americana"), "muted", wrap=True)
+        self.file_subtitle = label(tr("ISO, RAR, ZIP ou 7Z · edições USA e PAL"), "muted", wrap=True)
         info.pack_start(self.file_subtitle,False,False,0)
         inner.pack_start(info,True,True,0)
         self.choose_button = style(FocusButton(label=tr("Escolher arquivo…")),"secondary")
@@ -735,8 +735,16 @@ class Launcher:
         page.pack_start(self.updates_panel(), False, False, 0)
         self.drop.set_tooltip_text(tr("Dica: você também pode arrastar o arquivo para a área acima."))
         if SAVE_STATES_AVAILABLE:
-            page.pack_start(label(tr("Durante o jogo: F5 salva rápido · F8 carrega · F1 gerencia estados."), "small", wrap=True),False,False,0)
+            self.save_hint = label("", "small", wrap=True)
+            self.update_save_hint()
+            page.pack_start(self.save_hint,False,False,0)
         return page
+
+    def update_save_hint(self):
+        if SAVE_STATES_AVAILABLE:
+            message = ("Na edição PAL, salve no cartão de memória." if self.library.is_pal
+                       else "Durante o jogo: F5 salva rápido · F8 carrega · F1 gerencia estados.")
+            self.save_hint.set_text(tr(message))
 
     def controls(self):
         page=box(spacing=18)
@@ -1278,7 +1286,7 @@ class Launcher:
         page.pack_start(label(tr("Sobre o port"),"section-title"),False,False,0)
         page.pack_start(label(tr("Escolha seu disco uma vez. Nas próximas sessões, é só clicar em jogar."),"hero-subtitle",wrap=True),False,False,0)
         page.pack_start(label(tr("SUA ROM"), "eyebrow"),False,False,0)
-        page.pack_start(label(tr("Compatível com a edição americana SCUS-97472. ISO e RAR/ZIP/7Z são preparados na pasta do aplicativo. A primeira preparação recompila seu disco localmente; depois o cache é reutilizado. Sua ROM original não é alterada."),"muted",wrap=True),False,False,0)
+        page.pack_start(label(tr("Compatível com SCUS-97472 (USA) e SCES-53326 (PAL). A primeira preparação compila seu disco localmente. Os próximos acessos reutilizam o cache da edição."),"muted",wrap=True),False,False,0)
         page.pack_start(label(tr("CRÉDITOS"), "eyebrow"),False,False,0)
         page.pack_start(label(tr("Interface: GenissonEmilio, baseada no launcher de ForbiddenMemoriesPC.\nBase nativa: HenryKun55 / Celosia (GPL-3.0).\nRecompilador/runtime: ran-j / PS2Recomp e colaboradores.\nReferência PS2: Tenkaichi3Decomp; launcher: ForbiddenMemoriesPC / CrashBandicootPC.\nShadow of the Colossus pertence a seus respectivos titulares."),"muted",wrap=True),False,False,0)
         install=style(Gtk.Button(label=tr("＋  Adicionar ao menu de aplicativos")),"secondary")
@@ -1337,7 +1345,10 @@ class Launcher:
 
     def set_ready(self):
         self.file_title.set_text(self.library.state.get("name","Shadow of the Colossus"))
-        self.file_subtitle.set_text(tr("SCUS-97472  ·  Edição americana validada"))
+        subtitle = ("SCES-53326  ·  Edição europeia PAL" if self.library.is_pal
+                    else "SCUS-97472  ·  Edição americana validada")
+        self.file_subtitle.set_text(tr(subtitle))
+        self.update_save_hint()
         self.status.set_text(tr("●  Pronto para jogar"))
         self.status.get_style_context().add_class("ready")
         self.play_button.set_sensitive(True)
@@ -1456,10 +1467,12 @@ class Launcher:
             directory = self.library.directory / "game-test"
             captures = sorted(directory.glob("frame_*.png"))
             log = (self.library.directory / "last-game.log").read_text(errors="replace")
-            result = {"scope":"boot and native renderer; campaign not covered",
-                      "native_opengl":"[native] OpenGL renderer up" in log,
-                      "gamecore":"GAMECORE entered" in log, "captures":len(captures)}
-            result["passed"] = result["native_opengl"] and result["gamecore"] and bool(captures)
+            result = {"scope": "boot and presentation", "pal": self.library.is_pal,
+                      "native_opengl": "[native] OpenGL renderer up" in log,
+                      "gamecore": "GAMECORE entered" in log, "captures": len(captures)}
+            reached_frame = "[exit] game frame " in log
+            renderer_ready = self.library.is_pal or (result["native_opengl"] and result["gamecore"])
+            result["passed"] = reached_frame and renderer_ready and bool(captures)
             (directory / "report.json").write_text(json.dumps(result,indent=2)+"\n")
             self.failed |= not result["passed"]
             GLib.timeout_add(500,self.capture_and_exit)
@@ -1493,7 +1506,7 @@ class Launcher:
         location = label(str(cards.directory), "muted", wrap=True)
         location.set_selectable(True)
         panel.pack_start(location, False, False, 0)
-        if SAVE_STATES_AVAILABLE:
+        if SAVE_STATES_AVAILABLE and not self.library.is_pal:
             panel.pack_start(label(tr("Estados rápidos: F5 salva e F8 carrega durante o jogo.\n"
                                    "No menu F1 → Estados, escolha o slot rápido ou um dos cinco slots manuais.\n"
                                    "Estados exigem a mesma versão do runtime e do disco. Continue salvando também nos altares."), "muted", wrap=True), False, False, 0)

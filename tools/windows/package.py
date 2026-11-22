@@ -195,7 +195,8 @@ def package(build, prefix, destination):
     versions = run("pacman", "-Q", *(UCRT_PACKAGE + name for name in (*COMPILER_PACKAGES, "ffmpeg")))
     fingerprint = hashlib.sha256(versions.encode("utf-8"))
     helpers = ("tools/desktop/pipeline.py", "tools/build_elf.py", "tools/elfmini.py",
-               "tools/funcmap_elf.py", "tools/gen_config.py", "tools/xff.py", "game/scus.toml")
+               "tools/funcmap_elf.py", "tools/gen_config.py", "tools/xff.py",
+               "game/scus.toml", "game/sces.toml")
     for relative in ("bin/ps2_recomp.exe", "lib/utf8.o", *link_inputs,
                      *("source/" + helper for helper in helpers)):
         fingerprint.update(bytes.fromhex(sha256(compiler / relative)))
@@ -212,7 +213,9 @@ def package(build, prefix, destination):
             if not path.is_file():
                 continue
             if (path.suffix.casefold() in {".iso", ".7z", ".rar", ".xff", ".elf", ".ps2", ".sotcstate"}
-                or path.name.casefold() in {"nico.dat", "scus_974.72", "complete.json"}
+                or path.name.casefold().rstrip(".") in {
+                    "nico.dat", "scus_974.72", "sces_533.26", "xab", "xac", "xad", "xae", "complete.json"
+                }
                 or path.name.startswith(("func_", "vu1rec_"))):
                 raise ValueError(f"Unexpected game-derived file in package: {path}")
             output.write(path, path.relative_to(destination).as_posix())

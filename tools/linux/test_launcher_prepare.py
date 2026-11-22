@@ -47,6 +47,7 @@ def probe(out):
     boot = data / 'discs' / 'fixture' / 'SCUS_974.72'
     boot.parent.mkdir(parents=True)
     boot.write_bytes(b'synthetic boot file')
+    (boot.parent / 'SYSTEM.CNF').write_bytes(b'BOOT2 = cdrom0:\\SCUS_974.72;1\n')
     model.atomic_json(data / 'launcher.json', {'disc': str(boot.relative_to(data)), 'name': 'fixture.iso'})
     executable = data / 'fixture-game'
     executable.touch()
@@ -81,7 +82,8 @@ def probe(out):
     main_thread = threading.get_ident()
 
     class Compiler:
-        def __init__(self, program, directory, environment, progress):
+        def __init__(self, program, directory, environment, progress, *, boot_name):
+            assert boot_name == boot.name
             self.progress = progress
 
         def prepare(self, disc):
@@ -103,7 +105,8 @@ def probe(out):
 
     app = Launcher(args)
     GLib.source_remove(app.gamepad_timer)
-    app.library.valid_extracted = lambda path: path == boot.parent
+    from import_disc import identify_disc
+    app.library.validated_disc = lambda path: identify_disc(path) if path == boot.parent else None
     app.error = lambda *error: errors.append(error)
     app.window.present = lambda: focus_requests.append(True)
     original_pipeline, model.Pipeline = model.Pipeline, Compiler
