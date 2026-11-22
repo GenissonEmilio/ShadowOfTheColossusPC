@@ -182,7 +182,7 @@ jobs:
                   executable = work / 'gamecore/game.exe'
                   executable.parent.mkdir(parents=True)
                   executable.write_bytes(b'prior Windows cache fixture')
-                  marker = executable.with_name('complete.json')
+                  marker = work / 'complete.json'
                   marker.write_text(json.dumps({'sha256': hashlib.sha256(executable.read_bytes()).hexdigest()}))
                   before = [path.stat().st_mtime_ns for path in (executable, marker)]
                   pipeline = Pipeline(program, data, os.environ, boot_name=edition)
