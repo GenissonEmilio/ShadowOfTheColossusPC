@@ -5,6 +5,16 @@ on:
   pull_request:
     paths-ignore: ['docs/**', 'README.md', '.recomp.json']
   workflow_dispatch:
+    inputs:
+      compiler_version:
+        description: 'Prior published version (e.g. v1.2.0) for a launcher-only package'
+        type: string
+      compiler_sha256:
+        description: 'SHA-256 of the prior published Windows ZIP'
+        type: string
+      compiler_build_id:
+        description: 'build_id from the prior published Windows compiler manifest'
+        type: string
 permissions:
   contents: read
 concurrency:
@@ -14,6 +24,10 @@ jobs:
   windows:
     runs-on: windows-2022
     timeout-minutes: 75
+    env:
+      COMPILER_VERSION: ${{ inputs.compiler_version }}
+      COMPILER_SHA256: ${{ inputs.compiler_sha256 }}
+      COMPILER_BUILD_ID: ${{ inputs.compiler_build_id }}
     defaults:
       run:
         shell: msys2 {0}
@@ -27,7 +41,28 @@ jobs:
           pacboy: >-
             gcc:p cmake:p ninja:p pkgconf:p ffmpeg:p zlib:p
             python:p python-gobject:p python-cairo:p gtk3:p SDL2:p libarchive:p
-      - name: Build ROM-free native runtime and launcher
+      - name: Download the prior published Windows compiler kit
+        if: ${{ env.COMPILER_VERSION != '' || env.COMPILER_SHA256 != '' || env.COMPILER_BUILD_ID != '' }}
+        shell: pwsh
+        run: |
+          if ($env:COMPILER_VERSION -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$' -or
+              $env:COMPILER_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+              $env:COMPILER_BUILD_ID -cnotmatch '^[0-9a-f]{24}$') {
+            throw 'Provide the prior version, lowercase ZIP SHA-256 and compiler build_id together'
+          }
+          $version = $env:COMPILER_VERSION.TrimStart('v')
+          $zip = "ShadowOfTheColossusPC-$version-windows-x86_64.zip"
+          $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:COMPILER_VERSION/$zip"
+          Invoke-WebRequest -Uri $url -OutFile (Join-Path $env:RUNNER_TEMP 'sotc-previous-windows.zip')
+      - name: Check that the prior compiler inputs are unchanged
+        if: ${{ env.COMPILER_VERSION != '' }}
+        run: |
+          git fetch --no-tags --depth=1 origin "refs/tags/$COMPILER_VERSION"
+          git diff --exit-code FETCH_HEAD HEAD -- PS2Recomp game \
+            tools/build_elf.py tools/elfmini.py tools/funcmap_elf.py tools/gen_config.py tools/xff.py \
+            tools/desktop/pipeline.py tools/linux/input_tool.cpp tools/linux/video_tool.cpp \
+            tools/windows/CMakeLists.txt tools/windows/utf8.rc tools/windows/utf8.manifest
+      - name: Configure the native Windows build
         run: |
           cmake -S PS2Recomp -B build/windows -G Ninja \
             -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS=-msse4.1 \
@@ -36,11 +71,22 @@ jobs:
             -DPS2X_BUILD_ANALYZER=OFF -DPS2X_BUILD_TEST=OFF \
             -DPS2X_ENABLE_DEBUG_UI=OFF -DPS2X_ENABLE_AGRESSIVE_LOGS=OFF \
             -DPS2X_ENABLE_IOP_RPC_TRACE=OFF
-          cmake --build build/windows --parallel 2 --target \
-            ps2_recomp sotc-windows-base sotc-video-tool sotc-input-tool ShadowOfTheColossusPC
+      - name: Build the native launcher and any required compiler targets
+        run: |
+          targets=(ShadowOfTheColossusPC)
+          if [[ -z "$COMPILER_VERSION" ]]; then
+            targets+=(ps2_recomp sotc-windows-base sotc-video-tool sotc-input-tool)
+          fi
+          cmake --build build/windows --parallel 2 --target "${targets[@]}"
       - name: Package native launcher and compiler
         run: |
-          /ucrt64/bin/python.exe -X utf8 tools/windows/package.py --build build/windows --prefix /ucrt64 --destination dist/windows
+          reuse=()
+          if [[ -n "$COMPILER_VERSION" ]]; then
+            reuse+=(--reuse-compiler "$(cygpath -am "$RUNNER_TEMP")/sotc-previous-windows.zip"
+                    --compiler-sha256 "$COMPILER_SHA256" --compiler-build-id "$COMPILER_BUILD_ID")
+          fi
+          /ucrt64/bin/python.exe -X utf8 tools/windows/package.py \
+            --build build/windows --prefix /ucrt64 --destination dist/windows "${reuse[@]}"
       - name: Relocate package outside the source tree
         id: relocated
         shell: pwsh
@@ -106,6 +152,46 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & "$program/compiler/bin/ps2_recomp.exe" --help
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Reuse valid Windows cache fixtures from the prior build ID
+        if: ${{ !cancelled() && steps.relocated.outcome == 'success' && env.COMPILER_VERSION != '' }}
+        shell: pwsh
+        run: |
+          $program = Join-Path $env:SOTC_TEST_ROOT 'ShadowOfTheColossusPC'
+          $prefix = Join-Path $program 'compiler/toolchain'
+          $env:PATH = "$prefix/bin;$env:SystemRoot\System32;$env:SystemRoot"
+          $env:PYTHONHOME = $prefix
+          $env:PYTHONDONTWRITEBYTECODE = '1'
+          @'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import sys
+          import tempfile
+
+          program = Path(sys.argv[1])
+          sys.path.insert(0, str(program / 'desktop'))
+          from pipeline import BOOT, PAL_BOOT, Pipeline
+
+          with tempfile.TemporaryDirectory(prefix='sotc prior cache ') as folder:
+              data = Path(folder)
+              for edition in (BOOT, PAL_BOOT):
+                  work = data / 'builds' / os.environ['COMPILER_BUILD_ID']
+                  if edition == PAL_BOOT:
+                      work /= 'SCES-53326'
+                  executable = work / 'gamecore/game.exe'
+                  executable.parent.mkdir(parents=True)
+                  executable.write_bytes(b'prior Windows cache fixture')
+                  marker = executable.with_name('complete.json')
+                  marker.write_text(json.dumps({'sha256': hashlib.sha256(executable.read_bytes()).hexdigest()}))
+                  before = [path.stat().st_mtime_ns for path in (executable, marker)]
+                  pipeline = Pipeline(program, data, os.environ, boot_name=edition)
+                  assert pipeline.prepare(data / 'disc fixture') == executable
+                  assert all(path.stat().st_mtime_ns == timestamp for path, timestamp in zip((executable, marker), before))
+                  assert not pipeline.log.exists()
+                  print(f'Reused unchanged {edition} cache for {pipeline.build_id}')
+          '@ | & "$prefix/bin/python.exe" -X utf8 - $program
+          if ($LASTEXITCODE -ne 0) { throw 'Prior Windows cache reuse failed' }
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:

@@ -163,3 +163,13 @@ progressbar progress { background: #e3bd78; border: none; border-radius: 2px; }
 .menu-shade { background-color: rgba(0, 0, 0, 0.65); }
 .side-menu { background-color: #25251b; border-right: 1px solid #8c764b; padding: 20px; }
 .menu-item { min-height: 24px; padding: 8px 14px; }
+
+.more-options-popup {
+    margin: 18px 24px;
+    background-color: #1b1b14;
+    border: 1px solid #a38b57;
+    border-radius: 7px;
+    box-shadow: 0 9px 36px alpha(#000000, 0.55);
+}
+.more-options-popup > viewport { background-color: #1b1b14; border: none; }
+.more-options-heading { padding: 15px 18px 0; }

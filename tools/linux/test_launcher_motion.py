@@ -160,19 +160,19 @@ def probe(out):
         settle(lambda: not app.menu_open and not app.menu_overlay.get_mapped() and not app.menu_revealer.get_mapped(),
                'Clicking the dimmed background did not close the side menu')
         click(window, app.more_button)
-        assert app.stack.get_visible_child_name() == 'more', 'Pointer click did not open More Options'
-        assert app.nav['more'].is_visible()
-        settle(lambda: app.more_button.activation > 0, 'Pointer click did not animate activation')
-        settle(lambda: not app.stack.get_transition_running() and not app.masthead.get_child_revealed(),
-               'More Options did not finish its transition')
-        assert app.more_options.reset_button in controller_focus.focusables(app.stack)
+        assert app.more_open and app.stack.get_visible_child_name() == 'home'
+        assert 'more' not in app.nav and 'more' not in app.menu_buttons
+        assert not app.content_root.is_sensitive()
+        assert not app.more_popup.get_child_revealed(), 'Pop-up skipped its opening animation'
+        settle(app.more_popup.get_child_revealed, 'More Options did not finish opening')
+        assert app.more_options.reset_button in controller_focus.focusables(app.more_popup)
         assert not app.more_options.verify_button.is_sensitive(), 'Verify enabled with no disc'
-        click(window, app.nav['controls'])
-        assert app.stack.get_visible_child_name() == 'controls', 'Pointer click did not switch pages'
-        settle(lambda: not app.stack.get_transition_running(), 'Controls transition did not finish')
-        click(window, app.nav['home'])
-        assert app.stack.get_visible_child_name() == 'home', 'Pointer click did not return home'
-        settle(app.masthead.get_child_revealed, 'Home title did not reveal again')
+        assert window.get_focus().is_ancestor(app.more_options.page)
+        assert app.choose_button not in controller_focus.focusables(window)
+        click(window, app.more_shade, (15, app.more_shade.get_allocated_height() // 2))
+        settle(lambda: not app.more_open and not app.more_popup.get_mapped(),
+               'Clicking the background did not close More Options')
+        assert window.get_focus() == app.more_button
 
         app.choose_button.grab_focus()
         assert key(window, Gdk.KEY_F1), 'The launcher did not handle the menu shortcut'
@@ -227,15 +227,27 @@ def probe(out):
             'Reduced motion still animated the menu closing'
         controller_focus.grab(app.more_button)
         assert key(window, Gdk.KEY_Return)
-        assert app.stack.get_visible_child_name() == 'more' and not app.stack.get_transition_running()
+        assert app.more_open and app.more_popup.get_child_revealed()
+        assert app.stack.get_visible_child_name() == 'home'
         assert app.more_button.activation == 0 and not app.more_button._tick
         assert key(window, Gdk.KEY_Escape)
-        assert app.stack.get_visible_child_name() == 'home' and window.get_focus() == app.more_button
+        assert not app.more_popup.get_mapped() and window.get_focus() == app.more_button
+        click(window, app.more_button)
+        settled_allocation(app.more_options.close_button)
+        click(window, app.more_options.close_button)
+        settle(lambda: not app.more_popup.get_mapped(), 'Closed pop-up is still mapped')
+        assert not app.more_open and window.get_focus() == app.more_button
 
         # Preferences reached through actual pointer hit testing, including the
         # toggles below a scroll boundary. Verify the resulting game process
         # environment rather than only the selected widgets.
+        settled_allocation(app.nav['settings'])
         click(window, app.nav['settings'])
+        settled_allocation(app.more_button)
+        click(window, app.more_button)
+        assert app.more_open and app.stack.get_visible_child_name() == 'settings'
+        assert key(window, Gdk.KEY_Escape)
+        assert app.stack.get_visible_child_name() == 'settings'
         assert app.preferences['button_prompts'] == 'auto'
         app.last_input_style = 'xbox'
         assert 'LB/RB' in app.controller_hint_text()

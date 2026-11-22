@@ -58,9 +58,10 @@ try:
     assert app.update_status_label.get_text() == 'Versão 0.4.2 disponível.'
     assert app.check_button.is_ancestor(app.navigation_rail) and app.check_button.is_visible()
     assert app.update_button.is_ancestor(app.status_strip)
-    app.navigate('more')
-    assert not app.check_button.is_visible() and app.update_button.is_visible()
-    app.navigate('home')
+    app.set_more_options_open(True)
+    assert app.stack.get_visible_child_name() == 'home' and not app.update_button.is_sensitive()
+    app.set_more_options_open(False)
+    assert app.check_button.is_visible() and app.update_button.is_sensitive()
 
     app.check_button.clicked()
     settle(lambda: app.update_status_label.get_text() == 'O launcher já está atualizado.')

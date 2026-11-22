@@ -13,9 +13,15 @@ class MoreOptions:
         self.launcher = launcher
         self.verifying = False
         self.verification_disc = None
-        self.page = box(spacing=18, classes=("more-options-page",))
-        self.page.pack_start(label(tr("Mais opções"), "section-title"), False, False, 0)
-        panel = box(classes=("panel", "more-options-panel"))
+        self.page = box(spacing=9, classes=("more-options-page",))
+        heading = box(Gtk.Orientation.HORIZONTAL, spacing=16, classes=("more-options-heading",))
+        heading.pack_start(label(tr("Mais opções"), "section-title"), True, True, 0)
+        self.close_button = style(FocusButton(label=tr("Fechar")), "secondary")
+        self.close_button.set_valign(Gtk.Align.CENTER)
+        self.close_button.connect("clicked", lambda *_: launcher.set_more_options_open(False))
+        heading.pack_start(self.close_button, False, False, 0)
+        self.page.pack_start(heading, False, False, 0)
+        panel = self.actions = box(classes=("more-options-panel",))
         self.page.pack_start(panel, False, False, 0)
         actions = Gtk.SizeGroup(mode=Gtk.SizeGroupMode.HORIZONTAL)
 

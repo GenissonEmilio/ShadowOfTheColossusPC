@@ -302,9 +302,15 @@ launcher.gamepad_action(launcher.window,'up')
 assert launcher.window.get_focus() == launcher.nav['settings']
 launcher.more_button.grab_focus()
 launcher.gamepad_action(launcher.window, 'confirm')
-assert launcher.stack.get_visible_child_name() == 'more'
+assert launcher.more_open and launcher.stack.get_visible_child_name() == 'home'
+settle(launcher.more_popup.get_child_revealed, 'More Options did not finish opening')
+assert launcher.window.get_focus().is_ancestor(launcher.more_options.page)
+launcher.gamepad_action(launcher.window, 'down')
+assert launcher.window.get_focus() == launcher.more_options.reset_button
+launcher.gamepad_action(launcher.window, 'next')
+assert launcher.more_open and launcher.stack.get_visible_child_name() == 'home'
 launcher.gamepad_action(launcher.window, 'back')
-assert launcher.stack.get_visible_child_name() == 'home'
+assert not launcher.more_open and launcher.stack.get_visible_child_name() == 'home'
 assert launcher.window.get_focus() == launcher.more_button
 launcher.gamepad_action(launcher.window,'next')
 assert launcher.stack.get_visible_child_name()=='graphics'

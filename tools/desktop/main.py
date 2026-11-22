@@ -71,7 +71,7 @@ def style(widget, *names):
 PAGES = (
     ("home", "Início", "⌂"), ("graphics", "Gráficos", "▥"), ("textures", "Texturas", "▧"),
     ("controls", "Controles", "⌘"), ("settings", "Configurações", "⚙"),
-    ("more", "Mais opções", "◇"), ("about", "Sobre o port", "i"),
+    ("about", "Sobre o port", "i"),
 )
 
 
@@ -152,6 +152,8 @@ class Launcher:
         self.update_timer = None
         self.menu_open = False
         self.menu_restore_focus = None
+        self.more_open = False
+        self.more_restore_focus = None
         provider = Gtk.CssProvider(); provider.load_from_path(str(assets_directory() / "style.css"))
         Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         settings = Gtk.Settings.get_default()
@@ -215,17 +217,16 @@ class Launcher:
         self.stack.add_named(self.textures_page(), "textures")
         self.stack.add_named(self.controls(), "controls")
         self.stack.add_named(self.settings_page(), "settings")
-        self.more_options = MoreOptions(self, box=box, label=label, style=style)
-        self.stack.add_named(self.more_options.page, "more")
         self.stack.add_named(style(self.about(), "about-page"), "about")
         root.pack_start(stage, True, True, 0)
         root.pack_end(self.build_footer(), False, False, 0)
         root.pack_end(self.build_status_strip(), False, False, 0)
         self.build_menu()
+        self.build_more_popup()
         self.connect_feedback(self.shell)
         self.window.connect("set-focus", self.focus_feedback)
         self.window.show_all()
-        self.navigate(args.page)
+        self.navigate("home" if args.page == "more" else args.page)
         self.set_presentation(self.presentation_fullscreen)
         self.progress.hide()
         if self.library.disc:
@@ -235,6 +236,8 @@ class Launcher:
             self.status.set_text(tr("Escolha sua ROM para começar."))
         self.refresh_prepare_controls()
         self.focus_gamepad_page()
+        if args.page == "more":
+            self.set_more_options_open(True)
         target = Gtk.TargetEntry.new("text/uri-list",0,0)
         self.drop.drag_dest_set(Gtk.DestDefaults.ALL,[target],Gdk.DragAction.COPY)
         self.drop.connect("drag-data-received", self.dropped)
@@ -285,6 +288,9 @@ class Launcher:
 
     def presentation_key(self, _window, event):
         self.last_input_style = "keyboard"
+        if self.more_open and event.keyval in (Gdk.KEY_Escape, Gdk.KEY_F1):
+            self.set_more_options_open(False)
+            return True
         if event.keyval == Gdk.KEY_F11:
             self.toggle_presentation()
             return True
@@ -483,6 +489,15 @@ class Launcher:
         target.set_focus_visible(True)
         is_main = target == self.window
         focus = controller_focus.focus_widget(target)
+        if is_main and self.more_open:
+            if action in ("back", "menu"):
+                self.set_more_options_open(False)
+            elif focus is not None and focus.is_ancestor(self.more_options.page):
+                if action == "confirm":
+                    self.confirm_gamepad_focus(target, focus)
+                elif action in ("up", "down", "left", "right"):
+                    controller_focus.move(target, focus, action, scope=self.more_options.page)
+            return
         if is_main and action == "menu":
             self.toggle_menu()
             return
@@ -504,11 +519,8 @@ class Launcher:
                 page = self.stack.get_visible_child_name()
                 if page != "home":
                     self.feedback.play("back")
-                    self.navigate(self.more_origin if page == "more" else "home")
-                    if page == "more":
-                        controller_focus.grab(self.more_button)
-                    else:
-                        self.focus_gamepad_page()
+                    self.navigate("home")
+                    self.focus_gamepad_page()
                 elif self.presentation_fullscreen:
                     self.feedback.play("back")
                     self.toggle_presentation()
@@ -740,7 +752,7 @@ class Launcher:
         strip.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL), False, False, 0)
         self.more_button = style(FocusButton(label=tr("Mais opções") + "  ›"), "secondary", "strip-action")
         self.more_button.set_valign(Gtk.Align.CENTER)
-        self.more_button.connect("clicked", self.open_more_options)
+        self.more_button.connect("clicked", lambda *_: self.set_more_options_open(True))
         strip.pack_start(self.more_button, False, False, 0)
         return strip
 
@@ -759,12 +771,68 @@ class Launcher:
         self.update_save_hint()
         return footer
 
-    def open_more_options(self, *_):
-        if self.stack.get_visible_child_name() == "more":
-            self.navigate(self.more_origin)
+    def build_more_popup(self):
+        self.more_options = MoreOptions(self, box=box, label=label, style=style)
+        self.more_popup = Gtk.Revealer()
+        self.more_popup.set_no_show_all(True)
+        self.more_popup.set_transition_type(Gtk.RevealerTransitionType.CROSSFADE)
+        self.more_popup.set_transition_duration(180)
+        self.more_popup.set_halign(Gtk.Align.FILL)
+        self.more_popup.set_valign(Gtk.Align.FILL)
+
+        layer = Gtk.Overlay()
+        shade = self.more_shade = style(Gtk.EventBox(), "menu-shade")
+        shade.connect("button-press-event", self.dismiss_more_options)
+        layer.add(shade)
+        scroll = self.more_scroller = style(Gtk.ScrolledWindow(), "more-options-popup")
+        scroll.set_halign(Gtk.Align.CENTER)
+        scroll.set_valign(Gtk.Align.CENTER)
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_propagate_natural_width(True)
+        scroll.set_propagate_natural_height(True)
+        scroll.set_max_content_width(720)
+        scroll.set_max_content_height(530)
+        scroll.add(self.more_options.page)
+        layer.add_overlay(scroll)
+        self.more_popup.add(layer)
+        layer.show_all()
+        self.more_popup.connect("notify::child-revealed", self.hide_closed_more_options)
+        self.shell.add_overlay(self.more_popup)
+
+    def dismiss_more_options(self, _, event):
+        if event.button == 1:
+            self.set_more_options_open(False)
+        return True
+
+    def hide_closed_more_options(self, popup, *_):
+        if not self.more_open and not popup.get_child_revealed():
+            popup.hide()
+
+    def set_more_options_open(self, opened):
+        if opened == self.more_open:
+            return
+        if opened:
+            self.set_menu_open(False)
+            self.more_restore_focus = self.window.get_focus() or self.more_button
+        self.more_open = opened
+        self.content_root.set_sensitive(not opened)
+        if opened:
+            self.more_options.refresh()
+            self.more_popup.set_sensitive(True)
+            self.more_popup.show()
+            adjustment = self.more_scroller.get_vadjustment()
+            adjustment.set_value(adjustment.get_lower())
+            self.more_popup.set_reveal_child(True)
+            self.window.set_focus_visible(True)
+            first = next(controller_focus.focusables(self.more_options.actions), self.more_options.close_button)
+            controller_focus.grab(first)
         else:
-            self.navigate("more")
-            self.focus_gamepad_page()
+            self.more_popup.set_sensitive(False)
+            self.more_popup.set_reveal_child(False)
+            self.hide_closed_more_options(self.more_popup)
+            if self.more_restore_focus.get_mapped() and self.more_restore_focus.is_sensitive():
+                controller_focus.grab(self.more_restore_focus)
+        self.feedback.play("confirm" if opened else "back")
 
     def update_save_hint(self):
         if SAVE_STATES_AVAILABLE:
@@ -1321,20 +1389,13 @@ class Launcher:
         return page
 
     def navigate(self,name):
-        previous = self.stack.get_visible_child_name()
-        changed = name != previous
-        if name == "more" and changed:
-            self.more_origin = previous or "home"
+        changed = name != self.stack.get_visible_child_name()
         if name == "graphics":
             self.refresh_graphics()
-        if name == "more":
-            self.more_options.refresh()
         self.stack.set_visible_child_name(name)
         at_home = name == "home"
         self.masthead.set_reveal_child(at_home)
         self.check_button.set_visible(at_home)
-        context = self.more_button.get_style_context()
-        (context.add_class if name == "more" else context.remove_class)("active")
         if changed:
             for scroll in (self.page_scroller, self.navigation_rail.get_ancestor(Gtk.ScrolledWindow)):
                 adjustment = scroll.get_vadjustment()
@@ -1401,6 +1462,7 @@ class Launcher:
 
     def compile_game(self, *_):
         if self.library.disc:
+            self.set_more_options_open(False)
             return self.prepare()
         return False
 
@@ -1656,7 +1718,7 @@ def main():
     parser.add_argument("--test-game",action="store_true",help=argparse.SUPPRESS)
     parser.add_argument("--install-shortcut",action="store_true",help=argparse.SUPPRESS)
     parser.add_argument("--no-update-check",action="store_true",help=argparse.SUPPRESS)
-    parser.add_argument("--page", choices=tuple(key for key, *_ in PAGES), default="home", help=argparse.SUPPRESS)
+    parser.add_argument("--page", choices=tuple(key for key, *_ in PAGES) + ("more",), default="home", help=argparse.SUPPRESS)
     args=parser.parse_args()
     if args.install_shortcut:
         print(Library(args.data_dir).install_desktop_entry()); return 0

@@ -85,10 +85,44 @@ def dependency_closure(root, prefix):
                 pending.append(destination)
 
 
-def package(build, prefix, destination):
+def stage_launcher(root, build):
+    copy(exactly_one(build, f"{PRODUCT}.exe"), root / f"{PRODUCT}.exe")
+    shutil.copytree(ROOT / "tools/desktop", root / "desktop",
+                    ignore=shutil.ignore_patterns("release", "__pycache__", "*.pyc"))
+    copy(ROOT / "tools/windows/windows_bootstrap.py", root / "desktop/windows_bootstrap.py")
+    copy(ROOT / "tools/windows/LEIA-ME.txt", root / "LEIA-ME.txt")
+    copy(ROOT / "LICENSE", root / "LICENSE")
+    copy(ROOT / "recomplauncher.json", root / "recomplauncher.json")
+    controller_db = ROOT / "PS2Recomp/ps2xRuntime/third_party/gamecontrollerdb"
+    copy(controller_db / "gamecontrollerdb.txt", root / "desktop/assets/gamecontrollerdb.txt")
+
+
+def reuse_compiler(root, archive, expected_hash, expected_build_id):
+    if sha256(archive) != expected_hash:
+        raise ValueError(f"Previous Windows package SHA-256 mismatch: {archive}")
+    with zipfile.ZipFile(archive) as source:
+        release = json.loads(source.read(f"{PRODUCT}/release.json"))
+        manifest = json.loads(source.read(f"{PRODUCT}/compiler/manifest.json"))
+        if release["platform"] != PLATFORM or manifest["build_id"] != expected_build_id:
+            raise ValueError("Previous Windows package platform or compiler build_id mismatch")
+        files = [info for info in source.infolist() if info.filename.startswith(f"{PRODUCT}/compiler/")]
+        source.extractall(root.parent, files)
+    print(f"Reused compiler build_id {expected_build_id} from {archive.name}", flush=True)
+
+
+def package(build, prefix, destination, previous=None):
     destination.mkdir(parents=True, exist_ok=True)
     root = destination / PRODUCT
     root.mkdir()
+    stage_launcher(root, build)
+    if previous:
+        reuse_compiler(root, *previous)
+    else:
+        stage_compiler(build, prefix, root)
+    write_archive(root)
+
+
+def stage_compiler(build, prefix, root):
     compiler = root / "compiler"
     compiler.mkdir()
     kit = compiler / "toolchain"
@@ -99,7 +133,6 @@ def package(build, prefix, destination):
     if extra:
         raise ValueError(f"Generated runner files must be outside the source tree: {extra}")
 
-    copy(exactly_one(build, f"{PRODUCT}.exe"), root / f"{PRODUCT}.exe")
     for executable in ("ps2_recomp", "sotc-video-tool", "sotc-input-tool"):
         copy(exactly_one(build, executable + ".exe"), compiler / "bin" / (executable + ".exe"))
     link_inputs = []
@@ -150,14 +183,7 @@ def package(build, prefix, destination):
         if source.is_file():
             copy(source, kit / "bin" / library)
 
-    shutil.copytree(ROOT / "tools/desktop", root / "desktop",
-                    ignore=shutil.ignore_patterns("release", "__pycache__", "*.pyc"))
-    copy(ROOT / "tools/windows/windows_bootstrap.py", root / "desktop/windows_bootstrap.py")
-    copy(ROOT / "tools/windows/LEIA-ME.txt", root / "LEIA-ME.txt")
-    copy(ROOT / "LICENSE", root / "LICENSE")
-    copy(ROOT / "recomplauncher.json", root / "recomplauncher.json")
     controller_db = ROOT / "PS2Recomp/ps2xRuntime/third_party/gamecontrollerdb"
-    copy(controller_db / "gamecontrollerdb.txt", root / "desktop/assets/gamecontrollerdb.txt")
     copy(controller_db / "LICENSE", compiler / "licenses/SDL_GameControllerDB.LICENSE")
     fsr_license = ROOT / "PS2Recomp/ps2xRuntime/third_party/amd-fsr/LICENSE"
     if fsr_license.is_file():
@@ -203,9 +229,13 @@ def package(build, prefix, destination):
     (compiler / "manifest.json").write_text(json.dumps({
         "build_id": fingerprint.hexdigest()[:24], "link_inputs": link_inputs,
     }) + "\n", encoding="utf-8")
+
+
+def write_archive(root):
     (root / "release.json").write_text(json.dumps({
         "version": VERSION, "platform": PLATFORM,
     }) + "\n", encoding="utf-8")
+    destination = root.parent
     archive = destination / f"{PRODUCT}-{VERSION}-{PLATFORM}.zip"
     with zipfile.ZipFile(archive, "x", compression=zipfile.ZIP_DEFLATED,
                          compresslevel=5, strict_timestamps=False) as output:
@@ -228,5 +258,11 @@ if __name__ == "__main__":
     parser.add_argument("--build", type=Path, required=True)
     parser.add_argument("--prefix", type=Path, required=True)
     parser.add_argument("--destination", type=Path, required=True)
+    parser.add_argument("--reuse-compiler", type=Path)
+    parser.add_argument("--compiler-sha256")
+    parser.add_argument("--compiler-build-id")
     args = parser.parse_args()
-    package(args.build.resolve(), args.prefix.resolve(), args.destination.resolve())
+    previous = (args.reuse_compiler, args.compiler_sha256, args.compiler_build_id)
+    if any(previous) and not all(previous):
+        parser.error("--reuse-compiler, --compiler-sha256 and --compiler-build-id must be supplied together")
+    package(args.build.resolve(), args.prefix.resolve(), args.destination.resolve(), previous if all(previous) else None)
