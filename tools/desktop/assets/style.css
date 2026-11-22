@@ -1,70 +1,165 @@
-* { font-family: 'DejaVu Sans', 'SotC Launcher Japanese', sans-serif; font-size: 14px; }
-window { background: #111a19; color: #f6f2e9; }
-headerbar { background: #111a19; color: #f0e7d3; border: none; box-shadow: none; min-height: 34px; }
-headerbar button { background: transparent; color: #b9b4aa; border: none; box-shadow: none; }
-.top-bar { background: #1a2524; border-bottom: 1px solid #364642; padding: 9px 24px; }
-.build-label { color: #aebfba; font-size: 12px; padding: 0 4px; }
-.small { font-size: 12px; color: #a5b2b1; }
-.eyebrow { font-size: 10px; letter-spacing: 2px; font-weight: bold; color: #9fbca5; }
-.nav { background: #222e2b; border: 1px solid #34433d; box-shadow: none; color: #d5e1dc; padding: 10px 12px; border-radius: 8px; min-height: 23px; }
-.nav:hover { background: #354641; color: #fff4dc; }
-.nav.active { background: #394940; border-color: #697b60; color: #fff2d3; box-shadow: inset 0 -2px 0 #ceab6c; }
-.nav label { font-size: 14px; font-weight: bold; }
-.launcher-root, .main-scroll, .main-scroll > viewport, .main-content { background-color: #111a19; }
-.main-scroll, .main-scroll > viewport { border: none; box-shadow: none; }
-.main-content { padding: 17px 24px; }
-.update-panel { padding: 12px 17px; }
-.update-panel .play { padding: 11px 16px; }
-.hero { background: #26332b; border: 1px solid #516155; border-radius: 14px; }
-.hero-title { font-family: 'DejaVu Serif'; font-size: 43px; font-weight: bold; color: #f6e3b5; }
-.hero-subtitle { color: #d1cec1; font-size: 14px; }
-.panel { background: #1b2726; border: 1px solid #364744; border-radius: 12px; }
-.panel-title { font-size: 19px; font-weight: bold; color: #efeee9; }
-.muted { color: #b3c1be; font-size: 13px; }
-.drop-zone { background: #14201f; border: 1px dashed #526763; border-radius: 10px; }
-.drop-zone:drop(active) { background: #293b32; border-color: #edca88; }
-.file-title { font-weight: bold; color: #f0ebdc; font-size: 16px; }
-.secondary { background: #2a3835; color: #f0ede3; border: 1px solid #50635e; box-shadow: none; border-radius: 8px; padding: 11px 19px; min-height: 22px; font-weight: bold; }
-.secondary:hover { background: #3d4e45; border-color: #c1ab7a; }
-.secondary.active { border-color: #cda76d; }
-.secondary:disabled { color: #88958f; border-color: #354742; }
-.play { background: linear-gradient(to right, #d9b56c, #efcf89); border: 1px solid #f1d699; color: #211a10; border-radius: 9px; padding: 13px 40px; min-height: 25px; font-size: 16px; font-weight: bold; box-shadow: 0 3px 18px alpha(#d9b56c, 0.14); }
-.play:hover { background: #f9dfa0; }
-.play:disabled { background: #28342f; color: #9eaaa1; border-color: #475750; box-shadow: none; }
-.status { font-size: 13px; color: #e7cf9f; }
-.ready { color: #8bd0a6; }
-.error { color: #f19892; }
-.footer { background: #1a2524; border-top: 1px solid #364642; padding: 8px 24px; }
-.footer-action { border: 1px solid transparent; box-shadow: none; background: transparent; color: #ecdfbf; padding: 8px 13px; border-radius: 7px; min-height: 24px; }
-.footer-action:hover { background: #344440; border-color: #59695e; color: #fff4d6; }
-.input-hint { font-size: 12px; color: #c5d0cc; }
-.link { background: transparent; border: none; box-shadow: none; color: #b6a37d; padding: 5px 0; }
-.link:hover { color: #f4d78c; }
-.section-title { font-family: 'DejaVu Serif', 'SotC Launcher Japanese', serif; font-size: 30px; font-weight: bold; color: #f2deb2; }
-.key { background: #282b37; border: 1px solid #444753; border-bottom-width: 3px; border-radius: 5px; padding: 8px 12px; color: #eee3cb; font-weight: bold; }
-progressbar trough { min-height: 4px; background: #282b36; border: none; border-radius: 2px; }
-progressbar progress { background: #d9b56c; border: none; border-radius: 2px; }
-tooltip { background: #232632; color: #f0e5cf; border: 1px solid #5e5036; }
-button:focus, combobox:focus button, treeview:focus, entry:focus, scale:focus {
-    outline: 3px solid #f2d392; outline-offset: -3px;
+* {
+    font-family: 'DejaVu Sans', 'SotC Launcher Japanese', sans-serif;
+    font-size: 14px;
 }
-.nav:focus, .footer-action:focus, .secondary:focus, .graphics-select button:focus { background: #3d5548; color: #fff6de; }
-.play:focus { outline-color: #58421f; }
-dialog { background: #182422; }
-.graphics-panel { padding: 20px; }
-.graphics-select button { background: #283932; color: #edf1e9; border: 1px solid #566c5c; border-radius: 8px; padding: 10px 15px; min-height: 22px; box-shadow: none; }
-.graphics-select button:hover { background: #385144; }
-.sound-option { padding: 8px 10px; }
-.sound-option:focus { background: #34483d; }
-.picture-mode .hero-title { font-size: 55px; }
-.picture-mode .nav label, .picture-mode .play { font-size: 18px; }
-.picture-mode .status, .picture-mode .footer-action, .picture-mode .input-hint { font-size: 15px; }
-.picture-mode .nav { min-height: 32px; }
-.picture-mode .footer-action { min-height: 30px; }
-.action-card { min-height: 36px; }
-.menu-shade { background-color: rgba(0, 0, 0, 0.68); }
-.side-menu { background-color: #1a2926; border-right: 1px solid #657763; padding: 24px 20px; }
-.side-menu .panel-title { font-size: 21px; }
-.menu-item { background: #253933; color: #e9eee7; border: 1px solid transparent; border-radius: 9px; padding: 14px 18px; min-height: 27px; box-shadow: none; }
-.menu-item:hover, .menu-item:focus { background: #425a47; border-color: #d6be85; color: #fff3d3; }
-.picture-mode .action-card { min-height: 48px; }
+
+window { background: #151611; color: #f3ead5; }
+.launcher-header {
+    background: linear-gradient(to right, #161913, #343326);
+    color: #e6dcc1;
+    border: none;
+    border-bottom: 1px solid #514d3c;
+    box-shadow: none;
+    min-height: 38px;
+}
+headerbar button { background: transparent; color: #ddd1b6; border: none; box-shadow: none; }
+.brand-title { font-family: 'DejaVu Serif', Georgia, serif; font-size: 16px; }
+.build-label { color: #dcceb0; font-size: 12px; padding: 0 6px; }
+
+.launcher-root, .main-scroll, .main-scroll > viewport, .main-content,
+.rail-scroll, .rail-scroll > viewport { background-color: transparent; }
+.main-scroll, .main-scroll > viewport, .rail-scroll, .rail-scroll > viewport {
+    border: none;
+    box-shadow: none;
+}
+.scene-content { padding: 13px 24px 6px; }
+.main-content { padding: 9px 14px; }
+.navigation-rail { min-width: 216px; padding: 8px 6px; }
+.launcher-masthead { padding: 14px 8px 5px; color: #f0e4c8; }
+.masthead-prefix, .masthead-title {
+    font-family: 'DejaVu Serif', Georgia, serif;
+    font-weight: bold;
+    text-shadow: 0 3px 10px #14150e;
+}
+.masthead-prefix { font-size: 15px; letter-spacing: 5px; }
+.masthead-title { font-size: 72px; letter-spacing: 1px; }
+.picture-mode .masthead-title { font-size: 94px; }
+.picture-mode .navigation-rail { min-width: 260px; }
+
+.nav, .menu-item, .secondary, .footer-action, .play {
+    color: #f0e5cd;
+    box-shadow: none;
+    background-image: linear-gradient(to bottom, rgba(52, 48, 35, 0.9), rgba(26, 26, 19, 0.96));
+    border: 1px solid #746746;
+    border-radius: 5px;
+    transition: background-color 150ms ease-out, border-color 150ms ease-out,
+                color 150ms ease-out, box-shadow 150ms ease-out;
+}
+.nav { min-height: 30px; padding: 6px 13px; }
+.nav label { font-family: 'DejaVu Serif', Georgia, 'SotC Launcher Japanese', serif; font-size: 17px; }
+.nav .rail-icon { font-family: 'DejaVu Sans', 'SotC Launcher Japanese', sans-serif; font-size: 16px; color: #dfcca2; }
+.nav:hover, .menu-item:hover, .secondary:hover, .footer-action:hover {
+    background-image: linear-gradient(to bottom, #5c5033, #353120);
+    border-color: #c3a96d;
+}
+.nav.active, .secondary.active { border-color: #d7be86; }
+.nav.active { box-shadow: inset 3px 0 #cfb172; }
+.nav:focus, .menu-item:focus, .nav.primary-action:focus {
+    background-image: linear-gradient(to right, #76613b, #4a4029);
+    color: #fff0c9;
+    border-color: #e6ce91;
+    box-shadow: inset 3px 0 #f1d99e, 0 0 10px alpha(#ecd28d, 0.34);
+}
+.nav.primary-action {
+    min-height: 35px;
+    background-image: linear-gradient(to right, #664e29, #3f3523);
+    border-color: #d1af68;
+    font-weight: bold;
+}
+.nav.primary-action:hover { background-image: linear-gradient(to right, #8b713e, #57482a); }
+.nav:active, .menu-item:active, .secondary:active, .footer-action:active {
+    background-image: linear-gradient(to bottom, #a58a52, #6b542e);
+    color: #fff6dc;
+}
+.nav:disabled, .secondary:disabled, .play:disabled {
+    background-image: none;
+    background-color: #2b2b22;
+    color: #c0b59c;
+    border-color: #5b5541;
+    box-shadow: none;
+}
+
+.status-strip {
+    margin: 4px 24px 12px;
+    padding: 8px 12px;
+    border: 1px solid #8b7b56;
+    border-radius: 5px;
+    background-image: linear-gradient(to bottom, rgba(41, 39, 29, 0.96), rgba(20, 22, 16, 0.98));
+}
+.status-strip separator { background-color: #6d6246; min-width: 1px; }
+.disc-status { padding: 1px 4px; }
+.strip-title, .file-title { font-family: 'DejaVu Serif', Georgia, 'SotC Launcher Japanese', serif; color: #f3e6c9; }
+.file-title { font-size: 15px; }
+.drop-zone { border: 1px solid transparent; border-radius: 4px; }
+.drop-zone:drop(active) { background-color: rgba(121, 98, 50, .6); border-color: #e8cd8a; }
+.update-panel { padding: 0 4px; }
+.status { font-size: 13px; color: #f0d5a0; }
+.ready { color: #a6dcb2; }
+.error { color: #f7a59a; }
+.small, .muted { font-size: 13px; color: #d0c6ae; }
+
+.footer {
+    background-color: rgba(15, 17, 13, .94);
+    border-top: 1px solid #605637;
+    padding: 4px 24px;
+}
+.input-hint { font-size: 12px; color: #e3d6b9; }
+.footer-action { background-image: none; background-color: transparent; border-color: transparent; padding: 4px 11px; }
+.secondary, .play { padding: 8px 13px; min-height: 24px; }
+.strip-action { min-height: 23px; padding: 5px 9px; }
+.play {
+    background-image: linear-gradient(to right, #cba46a, #e6cd96);
+    color: #2c2315;
+    border-color: #f2dda8;
+    font-weight: bold;
+}
+.play:hover { background-image: linear-gradient(to right, #e6c386, #f6dca3); }
+
+.section-title, .panel-title {
+    font-family: 'DejaVu Serif', Georgia, 'SotC Launcher Japanese', serif;
+    font-weight: bold;
+    color: #f7ead1;
+}
+.section-title { font-size: 29px; text-shadow: 0 2px 6px #171710; }
+.panel-title { font-size: 17px; }
+.panel, .about-page {
+    background-color: rgba(27, 27, 20, .96);
+    border: 1px solid #74684c;
+    border-radius: 5px;
+}
+.about-page { padding: 20px; }
+.eyebrow { font-size: 11px; letter-spacing: 1px; font-weight: bold; color: #dbcda7; }
+.hero-subtitle { color: #e5dcc5; }
+.graphics-panel { padding: 18px; }
+.graphics-select button, .key {
+    background: #393629;
+    color: #f3e8cf;
+    border: 1px solid #756749;
+    border-radius: 5px;
+    padding: 8px 13px;
+    min-height: 22px;
+    box-shadow: none;
+}
+.graphics-select button:hover { background: #4b402b; }
+.sound-option { padding: 7px 10px; }
+.sound-option:focus { background-color: #4e4128; }
+.link { background: transparent; border: none; box-shadow: none; color: #e0c893; padding: 5px 0; }
+.link:hover { color: #ffe5a3; }
+button:focus, combobox:focus button, treeview:focus, entry:focus, scale:focus {
+    outline: 2px solid #f0d594;
+    outline-offset: -3px;
+}
+.nav:focus, .menu-item:focus { outline: none; }
+.play:focus { outline-color: #49351a; }
+dialog, tooltip { background: #28261d; color: #f0e4c7; }
+progressbar trough { min-height: 4px; background: #3e392d; border: none; border-radius: 2px; }
+progressbar progress { background: #e3bd78; border: none; border-radius: 2px; }
+
+.more-options-panel { padding: 7px 18px; }
+.more-options-row { padding: 10px 0; border-bottom: 1px solid rgba(154, 136, 93, .36); }
+.more-options-row:last-child { border-bottom: none; }
+.more-options-icon { color: #e0c895; font-size: 20px; }
+.more-options-action { min-width: 82px; }
+.menu-shade { background-color: rgba(0, 0, 0, 0.65); }
+.side-menu { background-color: #25251b; border-right: 1px solid #8c764b; padding: 20px; }
+.menu-item { min-height: 24px; padding: 8px 14px; }

@@ -294,3 +294,24 @@ Texturas originais	Original textures	Texturas originales	元のテクスチャ
 Escolha uma pasta com texturas PNG nomeadas pelo código do port.	Choose a folder with PNGs named with the port’s texture IDs.	Elige una carpeta con PNG nombrados con los identificadores del port.	このポートのテクスチャ ID の PNG があるフォルダーを選んでください。
 Widescreen 16:9 · câmera ampliada	Widescreen 16:9 · wider view	Pantalla panorámica 16:9 · vista ampliada	ワイド 16:9 · ワイドカメラ
 F11 alterna entre janela e tela cheia. Widescreen amplia a visão lateral e preserva o quadro 16:9 em outras proporções.	F11 toggles fullscreen. Widescreen expands the view horizontally and keeps a 16:9 frame on other displays.	F11 activa o desactiva la pantalla completa. El modo panorámico amplía la vista lateral y conserva el marco 16:9 en otras pantallas.	F11 で全画面を切り替えます。ワイドモードでは左右をより多く表示し、画面の比率に合わせて 16:9 を維持します。
+Mais opções	More Options	Más opciones	追加オプション
+Compilação local	Local compilation	Compilación local	ローカルコンパイル
+Arquivos do disco	Disc files	Archivos del disco	ディスクファイル
+Confere os arquivos já importados do disco selecionado.	Checks the files imported from the selected disc.	Comprueba los archivos importados del disco seleccionado.	選択中のディスクから読み込んだファイルを確認します。
+Verificar arquivos	Verify files	Verificar archivos	ファイルを確認
+Verificando os arquivos do disco…	Verifying disc files…	Verificando los archivos del disco…	ディスクファイルを確認中…
+Arquivos do disco verificados.	Disc files verified.	Archivos del disco verificados.	ディスクファイルの確認が完了しました。
+Preparação do jogo	Game preparation	Preparación del juego	ゲームの準備
+Veja os detalhes da última compilação local.	See details from the latest local build.	Consulta los detalles de la última compilación local.	前回のローカルコンパイルの詳細を確認できます。
+Abrir log da preparação	Open build log	Abrir registro de compilación	コンパイルログを開く
+Execução do jogo	Game session	Sesión de juego	ゲームの実行
+Veja as mensagens da última execução do jogo.	See messages from the latest game session.	Consulta los mensajes de la última sesión de juego.	前回ゲームを起動したときのメッセージを確認できます。
+Abrir log do jogo	Open game log	Abrir registro del juego	ゲームログを開く
+Cartão de memória	Memory card	Tarjeta de memoria	メモリーカード
+Importe seu cartão de PS2 ou exporte uma cópia.	Import your PS2 memory card or export a copy.	Importa tu tarjeta de memoria de PS2 o exporta una copia.	PS2 のメモリーカードを読み込むか、コピーを書き出します。
+Preferências da interface	Interface preferences	Preferencias de la interfaz	インターフェース設定
+Restaura os sons e o modo de exibição do launcher.	Resets launcher sounds and display mode.	Restablece los sonidos y el modo de visualización del lanzador.	ランチャーのサウンドと表示モードを初期設定に戻します。
+Restaurar preferências da interface?	Reset interface preferences?	¿Restablecer las preferencias de la interfaz?	インターフェース設定を初期設定に戻しますか?
+Os sons serão ativados e o launcher sairá da tela cheia.	Sounds will be enabled and the launcher will exit fullscreen.	Se activarán los sonidos y el lanzador saldrá del modo de pantalla completa.	サウンドが有効になり、ランチャーは全画面表示を終了します。
+Preferências da interface restauradas.	Interface preferences restored.	Preferencias de la interfaz restablecidas.	インターフェース設定を初期設定に戻しました。
+Sair	Exit	Salir	終了

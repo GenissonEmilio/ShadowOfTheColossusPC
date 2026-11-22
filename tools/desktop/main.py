@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
-import math
 import os
 import subprocess
 from pathlib import Path
@@ -60,12 +59,20 @@ import cairo
 
 import controller_focus
 from motion import FocusButton
+from more_options import MoreOptions
 
 
 def style(widget, *names):
     for name in names:
         widget.get_style_context().add_class(name)
     return widget
+
+
+PAGES = (
+    ("home", "Início", "⌂"), ("graphics", "Gráficos", "▥"), ("textures", "Texturas", "▧"),
+    ("controls", "Controles", "⌘"), ("settings", "Configurações", "⚙"),
+    ("more", "Mais opções", "◇"), ("about", "Sobre o port", "i"),
+)
 
 
 def label(text, *names, wrap=False):
@@ -83,63 +90,43 @@ def box(orientation=Gtk.Orientation.VERTICAL, spacing=0, margin=0, classes=()):
 
 
 class Artwork(Gtk.DrawingArea):
-    """Responsive illustration with transparent artwork for the brand."""
+    """Draw the launcher artwork at the window's aspect ratio."""
+
     _images = {}
 
     def __init__(self, small=False):
         super().__init__()
         self.small = small
-        self.set_size_request(48 if small else 0, 64 if small else 260)
-        name = "icon.png" if small else "hero.png"
+        if small:
+            self.set_size_request(36, 36)
+        name = "icon.png" if small else "launcher-landscape.jpg"
         if name not in self._images:
-            self._images[name] = GdkPixbuf.Pixbuf.new_from_file(
-                str(assets_directory() / name))
+            self._images[name] = GdkPixbuf.Pixbuf.new_from_file(str(assets_directory() / name))
         self.picture = self._images[name]
         self.connect("draw", self.draw)
-        self.get_accessible().set_name(
-            tr("Wander erguendo a espada sobre um colosso de olhos azuis"))
 
-    def draw(self, widget, cr):
+    def draw(self, _, cr):
         w, h = self.get_allocated_width(), self.get_allocated_height()
         iw, ih = self.picture.get_width(), self.picture.get_height()
+        scale = min(w / iw, h / ih) if self.small else max(w / iw, h / ih)
         cr.save()
-        if self.small:
-            scale = min(w / iw, h / ih)
-            cr.translate((w - iw * scale) / 2, (h - ih * scale) / 2)
-            cr.scale(scale, scale)
-            Gdk.cairo_set_source_pixbuf(cr, self.picture, 0, 0)
-            cr.paint()
-        else:
-            radius = 13
-            for cx, cy, start in ((w-radius, radius, -math.pi/2),
-                                  (w-radius, h-radius, 0),
-                                  (radius, h-radius, math.pi/2),
-                                  (radius, radius, math.pi)):
-                cr.arc(cx, cy, radius, start, start + math.pi/2)
-            cr.close_path()
-            cr.clip()
-            # Cover without distortion. Right alignment keeps Wander and the
-            # glowing eyes visible when the user makes the window narrower.
-            scale = max(w / iw, h / ih)
-            cr.save()
-            cr.translate(w - iw * scale, (h - ih * scale) / 2)
-            cr.scale(scale, scale)
-            Gdk.cairo_set_source_pixbuf(cr, self.picture, 0, 0)
-            cr.paint()
-            cr.restore()
-            # Keep copy readable even when a narrow window crops away the
-            # quiet left half of the wide illustration.
-            shade = cairo.LinearGradient(0, 0, w * .71, 0)
-            for at, alpha in ((0, .93), (.45, .79), (1, 0)):
-                shade.add_color_stop_rgba(at, .035, .065, .058, alpha)
-            cr.set_source(shade)
-            cr.paint()
-            shade = cairo.LinearGradient(0, h * .56, 0, h)
-            shade.add_color_stop_rgba(0, .035, .065, .058, 0)
-            shade.add_color_stop_rgba(1, .035, .065, .058, .68)
-            cr.set_source(shade)
-            cr.paint()
+        x = (w - iw * scale) * (.5 if self.small else .74)
+        cr.translate(x, (h - ih * scale) / 2)
+        cr.scale(scale, scale)
+        Gdk.cairo_set_source_pixbuf(cr, self.picture, 0, 0)
+        cr.paint()
         cr.restore()
+        if not self.small:
+            shade = cairo.LinearGradient(0, 0, w, 0)
+            for at, alpha in ((0, .38), (.35, .22), (.8, 0)):
+                shade.add_color_stop_rgba(at, .035, .042, .029, alpha)
+            cr.set_source(shade)
+            cr.paint()
+            shade = cairo.LinearGradient(0, h * .62, 0, h)
+            shade.add_color_stop_rgba(0, .035, .042, .029, 0)
+            shade.add_color_stop_rgba(1, .035, .042, .029, .63)
+            cr.set_source(shade)
+            cr.paint()
         return False
 
 
@@ -171,76 +158,69 @@ class Launcher:
         settings.set_property("gtk-application-prefer-dark-theme", True)
         self.window = Gtk.Window(title="Shadow of the Colossus PC")
         self.window.set_wmclass("shadow-of-the-colossus-pc", "ShadowOfTheColossusPC")
-        self.window.set_default_size(1180, 770); self.window.set_size_request(900, 600)
+        self.window.set_default_size(1280, 750); self.window.set_size_request(900, 600)
         self.window.set_position(Gtk.WindowPosition.CENTER)
         self.window.set_icon_from_file(str(assets_directory() / "icon.png"))
         self.window.connect("delete-event", self.close)
         self.window.connect("destroy", lambda *_: self.feedback.close())
         self.window.connect("key-press-event", self.presentation_key)
         self.window.connect("button-press-event", self.pointer_input)
-        self.header = Gtk.HeaderBar()
+        self.header = style(Gtk.HeaderBar(), "launcher-header")
         self.header.set_show_close_button(True)
-        self.header.set_title("Shadow of the Colossus PC")
+        self.header.set_has_subtitle(False)
+        brand = box(Gtk.Orientation.HORIZONTAL, 8)
+        brand.pack_start(Artwork(small=True), False, False, 0)
+        brand.pack_start(label("Shadow of the Colossus PC", "brand-title"), False, False, 0)
+        self.header.pack_start(brand)
+        system = "Windows" if sys.platform == "win32" else "Linux"
+        self.header.pack_end(label(f"v{VERSION}  ·  {system}", "build-label"))
         self.window.set_titlebar(self.header)
+
         root = self.content_root = box(classes=("launcher-root",))
         self.shell = Gtk.Overlay()
-        self.shell.add(root)
+        self.shell.add(Artwork())
+        self.shell.add_overlay(root)
         self.window.add(self.shell)
-        navigation = box(Gtk.Orientation.HORIZONTAL, 20, classes=("top-bar",))
-        brand = Artwork(True)
-        brand.set_size_request(46, 44)
-        navigation.pack_start(brand, False, False, 0)
-        tabs = box(Gtk.Orientation.HORIZONTAL, 7)
-        tabs.set_homogeneous(True)
-        self.nav = {}
-        self.stack = Gtk.Stack()
-        self.stack.set_transition_type(Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
-        self.stack.set_transition_duration(220)
-        self.stack.set_hhomogeneous(False); self.stack.set_vhomogeneous(False)
-        for key, title in (("home", "Início"), ("graphics", "Gráficos"), ("textures", "Texturas"),
-                           ("controls", "Controles"),
-                           ("settings", "Configurações"), ("about", "Sobre o port")):
-            button = style(FocusButton(label=tr(title)), "nav")
-            button.connect("clicked", lambda _, name=key: self.navigate(name))
-            tabs.pack_start(button, True, True, 0)
-            self.nav[key] = button
-        navigation.pack_start(tabs, True, True, 0)
-        system = "Windows" if sys.platform == "win32" else "Linux"
-        navigation.pack_end(label(f"v{VERSION}  ·  {system}", "build-label"), False, False, 0)
-        root.pack_start(navigation, False, False, 0)
 
-        body = box(spacing=18, classes=("main-content",))
+        stage = box(spacing=4, classes=("scene-content",))
+        self.masthead = Gtk.Revealer()
+        self.masthead.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
+        self.masthead.set_transition_duration(200)
+        title = box(classes=("launcher-masthead",))
+        title.pack_start(label("SHADOW OF THE", "masthead-prefix"), False, False, 0)
+        title.pack_start(label("Colossus", "masthead-title"), False, False, 0)
+        self.masthead.add(title)
+        stage.pack_start(self.masthead, False, False, 0)
+
+        scene = box(Gtk.Orientation.HORIZONTAL, 20)
+        stage.pack_start(scene, True, True, 0)
+        scene.pack_start(self.build_rail(), False, False, 0)
+        body = box(classes=("main-content",))
         self.page_scroller = style(Gtk.ScrolledWindow(), "main-scroll")
         self.page_scroller.set_shadow_type(Gtk.ShadowType.NONE)
         self.page_scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.page_scroller.set_propagate_natural_width(True)
+        self.page_scroller.set_max_content_width(680)
+        self.page_scroller.set_halign(Gtk.Align.START)
         self.page_scroller.add(body)
-        root.pack_start(self.page_scroller, True, True, 0)
+        scene.pack_start(self.page_scroller, True, True, 0)
+        self.stack = Gtk.Stack()
+        self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self.stack.set_transition_duration(220)
+        self.stack.set_hhomogeneous(False)
+        self.stack.set_vhomogeneous(False)
         body.pack_start(self.stack, True, True, 0)
-        self.home_page = self.home()
-        self.stack.add_named(self.home_page, "home")
-        self.stack.add_named(self.graphics_page(),"graphics")
+        self.stack.add_named(Gtk.Box(), "home")
+        self.stack.add_named(self.graphics_page(), "graphics")
         self.stack.add_named(self.textures_page(), "textures")
-        self.stack.add_named(self.controls(),"controls")
-        self.stack.add_named(self.settings_page(),"settings")
-        self.stack.add_named(self.about(),"about")
-        footer = box(Gtk.Orientation.HORIZONTAL, 9, classes=("footer",))
-        self.menu_button = style(FocusButton(label=tr("Menu")), "footer-action")
-        self.menu_button.set_tooltip_text(tr("Abrir menu · F1"))
-        self.menu_button.connect("clicked", self.toggle_menu)
-        footer.pack_start(self.menu_button, False, False, 0)
-        self.gamepad_hint = label(tr("F1 abre os ajustes durante o jogo."), "input-hint", wrap=True)
-        footer.pack_start(self.gamepad_hint, True, True, 0)
-        self.saves_button = style(Gtk.Button(label=tr("Meus saves")), "footer-action")
-        self.saves_button.connect("clicked", self.open_saves)
-        footer.pack_start(self.saves_button, False, False, 0)
-        self.presentation_button = style(Gtk.Button(), "footer-action")
-        self.presentation_button.set_tooltip_text("F11")
-        self.presentation_button.connect("clicked", self.toggle_presentation)
-        footer.pack_start(self.presentation_button, False, False, 0)
-        self.exit_button = style(Gtk.Button(label=tr("Sair do launcher")), "footer-action")
-        self.exit_button.connect("clicked", self.close)
-        footer.pack_start(self.exit_button, False, False, 0)
-        root.pack_end(footer, False, False, 0)
+        self.stack.add_named(self.controls(), "controls")
+        self.stack.add_named(self.settings_page(), "settings")
+        self.more_options = MoreOptions(self, box=box, label=label, style=style)
+        self.stack.add_named(self.more_options.page, "more")
+        self.stack.add_named(style(self.about(), "about-page"), "about")
+        root.pack_start(stage, True, True, 0)
+        root.pack_end(self.build_footer(), False, False, 0)
+        root.pack_end(self.build_status_strip(), False, False, 0)
         self.build_menu()
         self.connect_feedback(self.shell)
         self.window.connect("set-focus", self.focus_feedback)
@@ -254,6 +234,7 @@ class Launcher:
             self.play_button.set_sensitive(False)
             self.status.set_text(tr("Escolha sua ROM para começar."))
         self.refresh_prepare_controls()
+        self.focus_gamepad_page()
         target = Gtk.TargetEntry.new("text/uri-list",0,0)
         self.drop.drag_dest_set(Gtk.DestDefaults.ALL,[target],Gdk.DragAction.COPY)
         self.drop.connect("drag-data-received", self.dropped)
@@ -346,9 +327,7 @@ class Launcher:
         self.menu_panel.set_size_request(290, -1)
         self.menu_panel.pack_start(label("Shadow of the Colossus", "panel-title"), False, False, 16)
         self.menu_buttons = {}
-        for name, title in (("home", "Início"), ("graphics", "Gráficos"), ("textures", "Texturas"),
-                           ("controls", "Controles"),
-                            ("settings", "Configurações"), ("about", "Sobre o port")):
+        for name, title, _icon in PAGES:
             button = style(FocusButton(label=tr(title)), "menu-item")
             button.get_child().set_xalign(0)
             button.connect("clicked", lambda _, page=name: self.menu_navigate(page))
@@ -427,7 +406,6 @@ class Launcher:
         self.presentation_fullscreen = enabled
         self.presentation_button.set_label(tr("Sair da tela cheia") if enabled else tr("Tela cheia"))
         self.header.set_visible(not enabled)
-        self.home_page.set_child_packing(self.home_library, enabled, enabled, 0, Gtk.PackType.START)
         context = self.window.get_style_context()
         if enabled:
             context.add_class("picture-mode")
@@ -523,10 +501,14 @@ class Launcher:
             self.focus_gamepad_page()
         elif action == "back":
             if is_main:
-                if self.stack.get_visible_child_name() != "home":
+                page = self.stack.get_visible_child_name()
+                if page != "home":
                     self.feedback.play("back")
-                    self.navigate("home")
-                    self.focus_gamepad_page()
+                    self.navigate(self.more_origin if page == "more" else "home")
+                    if page == "more":
+                        controller_focus.grab(self.more_button)
+                    else:
+                        self.focus_gamepad_page()
                 elif self.presentation_fullscreen:
                     self.feedback.play("back")
                     self.toggle_presentation()
@@ -685,66 +667,110 @@ class Launcher:
         self.connect_feedback(dialog)
         dialog.connect("set-focus", self.focus_feedback)
 
-    def home(self):
-        page = box(spacing=14)
-        library = self.home_library = box(spacing=14)
-        hero_outer = style(Gtk.Overlay(), "hero")
-        artwork = Artwork()
-        artwork.set_size_request(-1, 284)
-        for edge in ("top", "bottom", "start", "end"):
-            getattr(artwork, "set_margin_" + edge)(1)
-        hero_outer.add(artwork)
-        hero = box(spacing=10, margin=28)
-        hero.set_valign(Gtk.Align.END)
-        hero.pack_start(label("Shadow of the\nColossus", "hero-title", wrap=True), False, False, 0)
-        self.status = label(tr("Escolha sua ROM para começar."), "status", wrap=True)
-        hero.pack_start(self.status, False, False, 0)
-        self.play_button = style(FocusButton(label=tr("▶   Iniciar jogo")), "play")
-        style(self.play_button, "action-card")
+    def build_rail(self):
+        rail = self.navigation_rail = box(spacing=4, classes=("navigation-rail",))
+        self.play_button = style(FocusButton(label=tr("▶   Iniciar jogo")), "nav", "primary-action")
+        self.play_button.get_child().set_xalign(0)
         self.play_button.connect("clicked", self.play)
-        actions = box(Gtk.Orientation.HORIZONTAL, 12)
-        actions.pack_start(self.play_button, False, False, 0)
+        rail.pack_start(self.play_button, False, False, 0)
+        self.nav = {}
+        for key, title, icon in PAGES:
+            button = self.rail_action(title, icon, lambda _, name=key: self.navigate(name))
+            rail.pack_start(button, False, False, 0)
+            self.nav[key] = button
+        self.check_button = self.rail_action("Verificar agora", "↻", self.check_updates)
+        rail.pack_start(self.check_button, False, False, 0)
+        self.exit_button = self.rail_action("Sair", "↪", self.close)
+        rail.pack_start(self.exit_button, False, False, 0)
         self.compile_button = style(FocusButton(label=tr("Compilar / atualizar")), "secondary")
-        style(self.compile_button, "action-card")
         self.compile_button.set_tooltip_text(tr("Prepara a compilação em segundo plano. Inicie o jogo quando quiser."))
         self.compile_button.connect("clicked", self.compile_game)
-        actions.pack_start(self.compile_button, False, False, 0)
-        hero.pack_start(actions, False, False, 0)
-        hero_outer.add_overlay(hero)
-        library.pack_start(hero_outer, True, True, 0)
-        panel_outer = style(Gtk.Box(orientation=Gtk.Orientation.VERTICAL),"panel")
-        panel = box(spacing=9, margin=15)
-        panel_outer.pack_start(panel, True, True, 0)
-        self.drop = style(Gtk.EventBox(),"drop-zone")
-        inner = box(Gtk.Orientation.HORIZONTAL, 16, 13)
-        info = box(spacing=4)
+
+        scroll = style(Gtk.ScrolledWindow(), "rail-scroll")
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_propagate_natural_width(True)
+        scroll.set_shadow_type(Gtk.ShadowType.NONE)
+        scroll.add(rail)
+        return scroll
+
+    def rail_action(self, title, icon, callback):
+        button = style(FocusButton(), "nav")
+        row = box(Gtk.Orientation.HORIZONTAL, 12)
+        symbol = label(icon, "rail-icon")
+        symbol.set_width_chars(2)
+        symbol.set_xalign(.5)
+        row.pack_start(symbol, False, False, 0)
+        row.pack_start(label(tr(title), "rail-label"), True, True, 0)
+        button.add(row)
+        button.get_accessible().set_name(tr(title))
+        button.connect("clicked", callback)
+        return button
+
+    def build_status_strip(self):
+        strip = self.status_strip = box(Gtk.Orientation.HORIZONTAL, 12, classes=("status-strip",))
+        self.drop = style(Gtk.EventBox(), "drop-zone")
+        self.drop.set_tooltip_text(tr("Dica: você também pode arrastar o arquivo para a área acima."))
+        disc = box(Gtk.Orientation.HORIZONTAL, 10, classes=("disc-status",))
+        disc.pack_start(Artwork(small=True), False, False, 0)
+        info = box(spacing=2)
         self.file_title = label(tr("Selecione sua ROM"), "file-title")
         self.file_title.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
-        self.file_title.set_max_width_chars(45)
-        info.pack_start(self.file_title,False,False,0)
-        self.file_subtitle = label(tr("ISO, RAR, ZIP ou 7Z · edições USA e PAL"), "muted", wrap=True)
-        info.pack_start(self.file_subtitle,False,False,0)
-        inner.pack_start(info,True,True,0)
-        self.choose_button = style(FocusButton(label=tr("Escolher arquivo…")),"secondary")
-        self.choose_button.connect("clicked",self.choose)
-        inner.pack_end(self.choose_button,False,False,0); self.drop.add(inner)
-        panel.pack_start(self.drop,False,False,0)
-        self.progress = Gtk.ProgressBar(); panel.pack_start(self.progress,False,False,0)
-        library.pack_start(panel_outer, False, False, 0)
-        page.pack_start(library, False, False, 0)
-        page.pack_start(self.updates_panel(), False, False, 0)
-        self.drop.set_tooltip_text(tr("Dica: você também pode arrastar o arquivo para a área acima."))
-        if SAVE_STATES_AVAILABLE:
-            self.save_hint = label("", "small", wrap=True)
-            self.update_save_hint()
-            page.pack_start(self.save_hint,False,False,0)
-        return page
+        self.file_title.set_max_width_chars(23)
+        info.pack_start(self.file_title, False, False, 0)
+        self.file_subtitle = label(tr("ISO, RAR, ZIP ou 7Z · edições USA e PAL"), "small")
+        self.file_subtitle.set_ellipsize(Pango.EllipsizeMode.END)
+        self.file_subtitle.set_max_width_chars(28)
+        info.pack_start(self.file_subtitle, False, False, 0)
+        self.status = label(tr("Escolha sua ROM para começar."), "status")
+        self.status.set_ellipsize(Pango.EllipsizeMode.END)
+        self.status.set_max_width_chars(30)
+        info.pack_start(self.status, False, False, 0)
+        self.progress = Gtk.ProgressBar()
+        self.progress.set_no_show_all(True)
+        info.pack_start(self.progress, False, False, 0)
+        disc.pack_start(info, True, True, 0)
+        self.choose_button = style(FocusButton(label=tr("Escolher arquivo…")), "secondary", "strip-action")
+        self.choose_button.set_valign(Gtk.Align.CENTER)
+        self.choose_button.connect("clicked", self.choose)
+        disc.pack_start(self.choose_button, False, False, 0)
+        self.drop.add(disc)
+        strip.pack_start(self.drop, True, True, 0)
+        strip.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL), False, False, 0)
+        strip.pack_start(self.updates_panel(), True, True, 0)
+        strip.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL), False, False, 0)
+        self.more_button = style(FocusButton(label=tr("Mais opções") + "  ›"), "secondary", "strip-action")
+        self.more_button.set_valign(Gtk.Align.CENTER)
+        self.more_button.connect("clicked", self.open_more_options)
+        strip.pack_start(self.more_button, False, False, 0)
+        return strip
+
+    def build_footer(self):
+        footer = box(Gtk.Orientation.HORIZONTAL, 9, classes=("footer",))
+        self.menu_button = style(FocusButton(label=tr("Menu")), "footer-action")
+        self.menu_button.set_tooltip_text(tr("Abrir menu · F1"))
+        self.menu_button.connect("clicked", self.toggle_menu)
+        footer.pack_start(self.menu_button, False, False, 0)
+        self.gamepad_hint = label(self.controller_hint_text(), "input-hint", wrap=True)
+        footer.pack_start(self.gamepad_hint, True, True, 0)
+        self.presentation_button = style(FocusButton(), "footer-action")
+        self.presentation_button.set_tooltip_text("F11")
+        self.presentation_button.connect("clicked", self.toggle_presentation)
+        footer.pack_start(self.presentation_button, False, False, 0)
+        self.update_save_hint()
+        return footer
+
+    def open_more_options(self, *_):
+        if self.stack.get_visible_child_name() == "more":
+            self.navigate(self.more_origin)
+        else:
+            self.navigate("more")
+            self.focus_gamepad_page()
 
     def update_save_hint(self):
         if SAVE_STATES_AVAILABLE:
             message = ("Na edição PAL, salve no cartão de memória." if self.library.is_pal
                        else "Durante o jogo: F5 salva rápido · F8 carrega · F1 gerencia estados.")
-            self.save_hint.set_text(tr(message))
+            self.play_button.set_tooltip_text(tr(message))
 
     def controls(self):
         page=box(spacing=18)
@@ -1091,26 +1117,23 @@ class Launcher:
         return page
 
     def updates_panel(self):
-        panel = box(spacing=8, classes=("panel", "update-panel"))
+        panel = box(spacing=3, classes=("update-panel",))
         row = box(Gtk.Orientation.HORIZONTAL, spacing=12)
         info = box(spacing=4)
-        info.pack_start(label(tr("Atualizações"), "panel-title"), False, False, 0)
+        info.pack_start(label(tr("Atualizações"), "strip-title"), False, False, 0)
         self.update_status_label = label(tr("Versão instalada {version}").format(version=VERSION),
-                                         "muted", wrap=True)
-        self.update_status_label.set_max_width_chars(42)
+                                         "muted")
+        self.update_status_label.set_ellipsize(Pango.EllipsizeMode.END)
+        self.update_status_label.set_max_width_chars(28)
         info.pack_start(self.update_status_label, False, False, 0)
         row.pack_start(info, True, True, 0)
         self.update_progress = Gtk.ProgressBar()
         self.update_progress.set_no_show_all(True)
-        self.check_button = style(Gtk.Button(label=tr("Verificar agora")), "secondary")
-        self.check_button.set_valign(Gtk.Align.CENTER)
-        self.check_button.connect("clicked", self.check_updates)
-        self.update_button = style(Gtk.Button(label=tr("Atualizar")), "play")
+        self.update_button = style(FocusButton(label=tr("Atualizar")), "play", "strip-action")
         self.update_button.set_valign(Gtk.Align.CENTER)
         self.update_button.set_no_show_all(True)
         self.update_button.connect("clicked", self.install_update)
         row.pack_end(self.update_button, False, False, 0)
-        row.pack_end(self.check_button, False, False, 0)
         panel.pack_start(row, False, False, 0)
         panel.pack_start(self.update_progress, False, False, 0)
         return panel
@@ -1298,16 +1321,28 @@ class Launcher:
         return page
 
     def navigate(self,name):
-        changed = name != self.stack.get_visible_child_name()
+        previous = self.stack.get_visible_child_name()
+        changed = name != previous
+        if name == "more" and changed:
+            self.more_origin = previous or "home"
         if name == "graphics":
             self.refresh_graphics()
+        if name == "more":
+            self.more_options.refresh()
         self.stack.set_visible_child_name(name)
+        at_home = name == "home"
+        self.masthead.set_reveal_child(at_home)
+        self.check_button.set_visible(at_home)
+        context = self.more_button.get_style_context()
+        (context.add_class if name == "more" else context.remove_class)("active")
         if changed:
-            adjustment = self.page_scroller.get_vadjustment()
-            adjustment.set_value(adjustment.get_lower())
-        for key,button in self.nav.items():
-            context=button.get_style_context()
-            (context.add_class if key==name else context.remove_class)("active")
+            for scroll in (self.page_scroller, self.navigation_rail.get_ancestor(Gtk.ScrolledWindow)):
+                adjustment = scroll.get_vadjustment()
+                adjustment.set_value(adjustment.get_lower())
+        for key, button in self.nav.items():
+            button.set_visible(not at_home or key in ("settings", "about"))
+            context = button.get_style_context()
+            (context.add_class if key == name else context.remove_class)("active")
 
     def choose(self,*_):
         dialog=Gtk.FileChooserDialog(title=tr("Escolha sua ROM de Shadow of the Colossus"),parent=self.window,
@@ -1338,6 +1373,7 @@ class Launcher:
 
     def update_status(self,text,error=False):
         self.status.set_text(text)
+        self.status.set_tooltip_text(text)
         context=self.status.get_style_context()
         context.remove_class("ready"); context.remove_class("error")
         if error: context.add_class("error")
@@ -1345,11 +1381,13 @@ class Launcher:
 
     def set_ready(self):
         self.file_title.set_text(self.library.state.get("name","Shadow of the Colossus"))
+        self.file_title.set_tooltip_text(self.file_title.get_text())
         subtitle = ("SCES-53326  ·  Edição europeia PAL" if self.library.is_pal
                     else "SCUS-97472  ·  Edição americana validada")
         self.file_subtitle.set_text(tr(subtitle))
+        self.file_subtitle.set_tooltip_text(self.file_subtitle.get_text())
         self.update_save_hint()
-        self.status.set_text(tr("●  Pronto para jogar"))
+        self.update_status(tr("●  Pronto para jogar"))
         self.status.get_style_context().add_class("ready")
         self.play_button.set_sensitive(True)
         self.choose_button.set_label(tr("Trocar ROM…"))
@@ -1359,6 +1397,7 @@ class Launcher:
         idle = not (self.busy or self.process or self.controller_process)
         self.compile_button.set_sensitive(bool(self.library.disc) and idle)
         self.texture_panel.set_sensitive(idle)
+        self.more_options.refresh()
 
     def compile_game(self, *_):
         if self.library.disc:
@@ -1617,7 +1656,7 @@ def main():
     parser.add_argument("--test-game",action="store_true",help=argparse.SUPPRESS)
     parser.add_argument("--install-shortcut",action="store_true",help=argparse.SUPPRESS)
     parser.add_argument("--no-update-check",action="store_true",help=argparse.SUPPRESS)
-    parser.add_argument("--page",choices=("home","graphics","textures","controls","settings","about"),default="home",help=argparse.SUPPRESS)
+    parser.add_argument("--page", choices=tuple(key for key, *_ in PAGES), default="home", help=argparse.SUPPRESS)
     args=parser.parse_args()
     if args.install_shortcut:
         print(Library(args.data_dir).install_desktop_entry()); return 0

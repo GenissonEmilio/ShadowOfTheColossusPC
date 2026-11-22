@@ -56,14 +56,11 @@ try:
     assert calls == [main.VERSION], calls
     assert app.update_button.get_label() == 'Atualizar para 0.4.2'
     assert app.update_status_label.get_text() == 'Versão 0.4.2 disponível.'
-    home = app.stack.get_child_by_name('home')
-    def section(widget):
-        while widget.get_parent() != home:
-            widget = widget.get_parent()
-            assert widget is not None, 'Update controls must be on Home'
-        return widget
-    sections = home.get_children()
-    assert sections.index(section(app.update_button)) == sections.index(section(app.play_button)) + 1
+    assert app.check_button.is_ancestor(app.navigation_rail) and app.check_button.is_visible()
+    assert app.update_button.is_ancestor(app.status_strip)
+    app.navigate('more')
+    assert not app.check_button.is_visible() and app.update_button.is_visible()
+    app.navigate('home')
 
     app.check_button.clicked()
     settle(lambda: app.update_status_label.get_text() == 'O launcher já está atualizado.')

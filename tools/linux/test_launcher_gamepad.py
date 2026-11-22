@@ -295,10 +295,17 @@ launcher.navigate('home')
 settle(lambda: not launcher.stack.get_transition_running()
        and launcher.choose_button.get_allocated_height() > 1, 'home layout did not settle')
 launcher.focus_gamepad_page();assert launcher.window.get_focus() == launcher.choose_button
+launcher.nav['settings'].grab_focus()
 launcher.gamepad_action(launcher.window,'down')
-assert launcher.window.get_focus() is not None and launcher.window.get_focus() != launcher.choose_button
+assert launcher.window.get_focus() == launcher.nav['about']
 launcher.gamepad_action(launcher.window,'up')
-assert launcher.window.get_focus() == launcher.choose_button and launcher.choose_button.has_focus()
+assert launcher.window.get_focus() == launcher.nav['settings']
+launcher.more_button.grab_focus()
+launcher.gamepad_action(launcher.window, 'confirm')
+assert launcher.stack.get_visible_child_name() == 'more'
+launcher.gamepad_action(launcher.window, 'back')
+assert launcher.stack.get_visible_child_name() == 'home'
+assert launcher.window.get_focus() == launcher.more_button
 launcher.gamepad_action(launcher.window,'next')
 assert launcher.stack.get_visible_child_name()=='graphics'
 launcher.fullscreen.grab_focus();launcher.fullscreen.set_active(0)
