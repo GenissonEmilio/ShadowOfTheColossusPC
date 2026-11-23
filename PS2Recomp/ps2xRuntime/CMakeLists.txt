@@ -63,6 +63,8 @@ set(PS2X_IS_ANDROID OFF)
 if(ANDROID)
     set(PS2X_IS_ANDROID ON)
 endif()
+option(SOTC_HAS_GAME "Include the generated Shadow of the Colossus runner" OFF)
+option(SOTC_ANDROID_CAPTURE_MODULES "Capture relocated guest code in an Android development build" OFF)
 
 option(PS2X_VITA_CREATE_PACKAGE "Create Vita eboot/vpk targets" ON)
 set(PS2X_VITA_APP_NAME "PS2 Retro X" CACHE STRING "Display name for the Vita bubble")
@@ -101,6 +103,12 @@ else()
         GIT_PROGRESS TRUE
     )
     FetchContent_MakeAvailable(raylib)
+
+    if(PS2X_IS_ANDROID)
+        set(RAYLIB_SOURCE_DIR "${raylib_SOURCE_DIR}")
+        include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/RaylibAndroidLifecycle.cmake")
+        unset(RAYLIB_SOURCE_DIR)
+    endif()
 
     if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_ANDROID)
         FetchContent_Declare(
@@ -292,7 +300,7 @@ else()
     target_link_libraries(ps2_host_backend INTERFACE raylib)
 
     if(PS2X_IS_ANDROID)
-        target_link_libraries(ps2_host_backend INTERFACE log android)
+        target_link_libraries(ps2_host_backend INTERFACE log android EGL GLESv3)
     endif()
 endif()
 
@@ -392,6 +400,21 @@ elseif(WIN32)
         "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CopyFfmpegDlls.cmake"
         CACHE INTERNAL
         "Script used to stage FFmpeg runtime DLLs beside executables")
+elseif(PS2X_IS_ANDROID)
+    set(PS2X_ANDROID_FFMPEG_ROOT "" CACHE PATH "FFmpeg Android arm64-v8a install prefix (static libraries)")
+    if(NOT EXISTS "${PS2X_ANDROID_FFMPEG_ROOT}/include/libavcodec/avcodec.h")
+        message(FATAL_ERROR "Set PS2X_ANDROID_FFMPEG_ROOT to the arm64-v8a FFmpeg install prefix")
+    endif()
+    add_library(ffmpeg INTERFACE)
+    target_include_directories(ffmpeg INTERFACE "${PS2X_ANDROID_FFMPEG_ROOT}/include")
+    foreach(component IN ITEMS avcodec swscale avutil)
+        set(archive "${PS2X_ANDROID_FFMPEG_ROOT}/lib/lib${component}.a")
+        if(NOT EXISTS "${archive}")
+            message(FATAL_ERROR "FFmpeg archive missing: ${archive}")
+        endif()
+        target_link_libraries(ffmpeg INTERFACE "${archive}")
+    endforeach()
+    target_link_libraries(ffmpeg INTERFACE m z)
 else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET GLOBAL
@@ -521,10 +544,14 @@ target_sources(ps2_runtime PRIVATE
 # the source tree by pointing this at their own directories.
 set(PS2X_RUNNER_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/src/runner" CACHE STRING "Directories with ps2EntryRunner sources")
 set(RUNNER_SRC_FILES)
-foreach(runner_dir IN LISTS PS2X_RUNNER_DIRS)
-    file(GLOB runner_dir_files CONFIGURE_DEPENDS "${runner_dir}/*.cpp")
-    list(APPEND RUNNER_SRC_FILES ${runner_dir_files})
-endforeach()
+if(PS2X_IS_ANDROID AND NOT SOTC_HAS_GAME)
+    list(APPEND RUNNER_SRC_FILES "${CMAKE_CURRENT_SOURCE_DIR}/src/runner/register_functions.cpp")
+else()
+    foreach(runner_dir IN LISTS PS2X_RUNNER_DIRS)
+        file(GLOB runner_dir_files CONFIGURE_DEPENDS "${runner_dir}/*.cpp")
+        list(APPEND RUNNER_SRC_FILES ${runner_dir_files})
+    endforeach()
+endif()
 
 set(RUNNER_MAIN_CPP "${CMAKE_CURRENT_SOURCE_DIR}/src/runner/main.cpp")
 set(ROOT_MAIN_CPP "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
@@ -541,6 +568,26 @@ if(PS2X_IS_ANDROID)
     )
 
     target_link_options(ps2EntryRunner PRIVATE "-Wl,--undefined=ANativeActivity_onCreate")
+    target_compile_definitions(ps2EntryRunner PRIVATE SOTC_HAS_GAME=$<BOOL:${SOTC_HAS_GAME}>)
+    if(SOTC_ANDROID_CAPTURE_MODULES)
+        if(NOT SOTC_HAS_GAME)
+            message(FATAL_ERROR "SOTC_ANDROID_CAPTURE_MODULES requires the generated runner")
+        endif()
+        target_compile_definitions(ps2EntryRunner PRIVATE SOTC_ANDROID_CAPTURE_MODULES=1)
+    elseif(SOTC_HAS_GAME)
+        # Guest functions are selected by the linked dispatch table. Keep them
+        # local to this library so Android does not resolve them through the PLT.
+        set_target_properties(ps2EntryRunner PROPERTIES
+            CXX_VISIBILITY_PRESET hidden
+            VISIBILITY_INLINES_HIDDEN YES
+        )
+    endif()
+    # Hand-written overrides contain file-local helpers with repeated names.
+    foreach(source IN LISTS RUNNER_SRC_FILES)
+        if(source MATCHES "/overrides/[^/]*\\.cpp$")
+            set_source_files_properties("${source}" PROPERTIES SKIP_UNITY_BUILD_INCLUSION TRUE)
+        endif()
+    endforeach()
 else()
     add_executable(ps2EntryRunner
         ${RUNNER_SRC_FILES}
@@ -560,12 +607,13 @@ if(PS2X_ENABLE_RUNNER_PCH)
         "${CMAKE_CURRENT_SOURCE_DIR}/include/ps2_runtime.h"
     )
 
-    foreach(PS2X_RUNNER_GENERATED_HEADER IN ITEMS
-        "${CMAKE_CURRENT_SOURCE_DIR}/include/ps2_recompiled_functions.h"
-        "${CMAKE_CURRENT_SOURCE_DIR}/include/ps2_recompiled_stubs.h")
-        if(EXISTS "${PS2X_RUNNER_GENERATED_HEADER}")
-            list(APPEND PS2X_RUNNER_PCH_HEADERS "${PS2X_RUNNER_GENERATED_HEADER}")
-        endif()
+    foreach(header IN ITEMS ps2_recompiled_functions.h ps2_recompiled_stubs.h)
+        foreach(dir IN LISTS PS2X_RUNNER_DIRS ITEMS "${CMAKE_CURRENT_SOURCE_DIR}/include")
+            if(EXISTS "${dir}/${header}")
+                list(APPEND PS2X_RUNNER_PCH_HEADERS "${dir}/${header}")
+                break()
+            endif()
+        endforeach()
     endforeach()
 
     list(APPEND PS2X_RUNNER_PCH_HEADERS
@@ -704,7 +752,7 @@ if(PS2X_IS_VITA)
 endif()
 
 if(PS2X_IS_ANDROID)
-    target_sources(ps2EntryRunner PRIVATE src/lib/ps2_android_runtime.cpp)
+    target_sources(ps2_runtime PRIVATE src/lib/ps2_android_runtime.cpp)
 endif()
 
 install(TARGETS ps2_runtime ps2EntryRunner

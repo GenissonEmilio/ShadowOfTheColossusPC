@@ -27,7 +27,7 @@
 extern "C" unsigned int _pthread_stack_default_user; // ps2_vita_runtime.cpp
 #endif
 
-#if defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__)) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
+#if defined(__APPLE__) || defined(__linux__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
 #define PS2X_NATIVE_GL 1
 #endif
 
@@ -668,7 +668,7 @@ namespace
 
     bool wantGl()
     {
-#if defined(__vita__) || (defined(__linux__) && !defined(__ANDROID__))
+#if defined(__vita__) || defined(__linux__)
         return true;
 #else
         const char *gl = std::getenv("SOTC_NATIVE_GL");
@@ -723,6 +723,17 @@ namespace native_renderer
         backend();
 #endif
     }
+
+#if defined(__ANDROID__)
+    void shutdownGl()
+    {
+        g_shown.store(false, std::memory_order_relaxed);
+        delete g_backend;
+        g_backend = nullptr;
+        g_tried = false;
+        g_glMakeCurrent = {};
+    }
+#endif
     void setPresentHook(std::function<void(uint32_t, uint32_t, uint32_t)> hook) { g_presentHook = std::move(hook); }
 
     bool available()
@@ -1103,11 +1114,33 @@ namespace native_renderer
             u.staticMeshes = u.staticBytes = u.frameMeshes = u.frameBytes = u.textures = u.textureBytes = u.draws = 0;
         }
     }
-    void setShown(bool shown) { g_shown.store(shown, std::memory_order_relaxed); }
-    bool shown() { return g_shown.load(std::memory_order_relaxed); }
+    void setShown(bool shown) { g_shown.store(shown, std::memory_order_release); }
+    bool shown() { return g_shown.load(std::memory_order_acquire); }
     bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height)
     {
         // Not backend(): the presenting thread must not create it.
         return g_backend && g_backend->latestFrame(rgba, width, height);
     }
+
+#if defined(__ANDROID__)
+    bool detail::androidFrameStatsEnabled()
+    {
+        static const bool enabled = []
+        {
+            const char *value = std::getenv("SOTC_ANDROID_FRAME_STATS");
+            return value && value[0] == '1';
+        }();
+        return enabled;
+    }
+
+    detail::AndroidFrameStats detail::androidFrameStats()
+    {
+        return g_backend ? g_backend->androidFrameStats() : AndroidFrameStats{};
+    }
+
+    bool detail::copyFrameIfNew(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height, uint64_t &serial)
+    {
+        return g_backend && g_backend->copyFrameIfNew(rgba, width, height, serial);
+    }
+#endif
 }

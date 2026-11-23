@@ -11,6 +11,18 @@ namespace native_renderer::detail
 {
     void setInEmulator(bool emulator); // the backend's probe (native_renderer::inEmulator)
 
+#if defined(__ANDROID__)
+    struct AndroidFrameStats
+    {
+        uint64_t submitted = 0, handoffUs = 0;
+        uint64_t rendered = 0, renderUs = 0;
+        uint64_t published = 0, readbackUs = 0;
+    };
+    bool androidFrameStatsEnabled();
+    AndroidFrameStats androidFrameStats();
+    bool copyFrameIfNew(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height, uint64_t &serial);
+#endif
+
     class Backend
     {
     public:
@@ -63,6 +75,10 @@ namespace native_renderer::detail
         // last one stays on screen (holdIncomplete). Backends that cannot: no-op.
         virtual void holdFrame() {}
         virtual bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height) = 0;
+#if defined(__ANDROID__)
+        virtual bool copyFrameIfNew(std::vector<uint8_t> &, uint32_t &, uint32_t &, uint64_t &) { return false; }
+        virtual AndroidFrameStats androidFrameStats() { return {}; }
+#endif
         // A backend that draws on a thread of its own: returns once every
         // frame handed over is drawn.
         virtual void finishFrames() {}

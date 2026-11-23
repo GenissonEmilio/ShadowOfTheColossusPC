@@ -13,5 +13,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = 'PS2Recomp'
+rootProject.name = 'ShadowOfTheColossusAndroid'
 include ':app'

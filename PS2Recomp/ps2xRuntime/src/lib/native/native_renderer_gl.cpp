@@ -14,13 +14,18 @@
 #include "native_backend.h"
 #include "runtime/native_tuning.h"
 
-#if defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__)) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
+#if defined(__APPLE__) || defined(__linux__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
 
-#if defined(__APPLE__)
+#if defined(__ANDROID__)
+#include <EGL/egl.h>
+#include <GLES3/gl3.h>
+#include <GLES2/gl2ext.h>
+#include <malloc.h>
+#elif defined(__APPLE__)
 #define GL_SILENCE_DEPRECATION
 #include <OpenGL/gl3.h>
 #include <malloc/malloc.h>
-#elif defined(__linux__) && !defined(__ANDROID__)
+#elif defined(__linux__)
 #define GL_GLEXT_PROTOTYPES 1
 #include <GL/gl.h>
 #include <GL/glext.h>
@@ -59,14 +64,18 @@ extern "C" unsigned int _newlib_heap_size_user;      // ps2_vita_runtime.cpp
 namespace
 {
     constexpr float kNearW = 0.1f;
+#if defined(__ANDROID__)
+    // GL_EXT_depth_clamp and GL_NV_depth_clamp use the same enum value.
+    constexpr GLenum kGlesDepthClamp = 0x864F;
+#endif
 
     // The host heap in use (the Vita's newlib heap, 160 MB; the Mac's malloc
     // zones): the memory log and the eviction under pressure read it.
     uint64_t heapUsed()
     {
-#if defined(PS2X_NATIVE_VITA)
+#if defined(PS2X_NATIVE_VITA) || defined(__ANDROID__)
         return mallinfo().uordblks;
-#elif defined(__linux__) && !defined(__ANDROID__)
+#elif defined(__linux__)
         return mallinfo2().uordblks;
 #else
         malloc_statistics_t stats{};
@@ -103,9 +112,7 @@ namespace
     }
 
 #if !defined(PS2X_NATIVE_VITA)
-    // ---- GLSL (macOS) ----
-    const char *kMainVertex = R"(#version 330 core
-layout(location = 0) in vec3 aPos;
+    const char *kMainVertex = R"(layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec4 aColor;
 layout(location = 3) in vec2 aUV;
@@ -113,6 +120,9 @@ uniform vec4 uClip[4], uDirections[4], uColours[4]; // matrix columns
 uniform vec4 uMisc;  // lit, opacity, uv offset
 uniform vec4 uFogB;  // size, vertex fog, base
 uniform vec4 uFogC;  // scale, lod K, lod scale, max lod
+#ifdef GL_ES
+uniform bool uClampShadowDepth;
+#endif
 out vec4 vUV;        // uv, w, fog x w (the fog factor is linear on the screen, as the GS's)
 out vec4 vColor;
 out vec4 vScreen;    // clip x, y, w
@@ -121,6 +131,10 @@ void main()
     vec4 c = uClip[0] * aPos.x + uClip[1] * aPos.y + uClip[2] * aPos.z + uClip[3];
     // Depth from w, near plane at w = 0.1: depth = 1 - 0.1 / w.
     gl_Position = vec4(c.x, c.y, c.w - 0.2, c.w);
+#ifdef GL_ES
+    if (uClampShadowDepth && c.w > 0.0)
+        gl_Position.z = max(gl_Position.z, -c.w);
+#endif
     float fog = uFogB.z > 0.5 ? clamp(uFogB.w + uFogC.x / max(c.w, 1e-3), 0.0, 255.0) / 255.0 : 1.0;
     vUV = vec4(aUV + uMisc.zw, c.w, fog * c.w);
     vColor = aColor / 128.0;
@@ -142,8 +156,7 @@ void main()
 }
 )";
 
-    const char *kMainFragment = R"(#version 330 core
-in vec4 vUV;
+    const char *kMainFragment = R"(in vec4 vUV;
 in vec4 vColor;
 in vec4 vScreen;
 uniform sampler2D uTex, uBackground, uReflection, uRefraction;
@@ -214,8 +227,7 @@ void main()
 )";
 
     // Full-screen passes: a triangle over the screen, uv 0..1 (y up).
-    const char *kQuadVertex = R"(#version 330 core
-layout(location = 0) in vec2 aPos;
+    const char *kQuadVertex = R"(layout(location = 0) in vec2 aPos;
 uniform vec4 uQuad; // blur copy: scale, angle, offset (NDC); scale 0: plain
 out vec2 vUV;
 void main()
@@ -232,8 +244,7 @@ void main()
 }
 )";
 
-    const char *kQuadFragment = R"(#version 330 core
-in vec2 vUV;
+    const char *kQuadFragment = R"(in vec2 vUV;
 uniform sampler2D uSrc, uSrc2, uDepth;
 uniform int uMode;
 uniform vec4 uA, uB, uC;
@@ -594,6 +605,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     {
         GLuint mainProgram = 0, quadProgram = 0;
         GLuint skinProgram = 0; // the main program posing a skinned mesh's bind pose first (0: not built)
+#if defined(__ANDROID__)
+        bool hasDepthClamp = false;
+        GLint shadowDepthLocation = -1;
+#endif
 #if defined(PS2X_NATIVE_VITA)
         GLuint quadPrograms[12] = {}; // by mode (8 and 11: the bloom mask's, see kQuadFragment)
 #endif
@@ -808,7 +823,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         std::mutex outputMutex;
         std::vector<uint8_t> output;
         uint32_t outputWidth = 0, outputHeight = 0;
-        bool hasOutput = false;
+        uint64_t outputSerial = 0;
+#if defined(__ANDROID__)
+        uint64_t readbackUs = 0;
+#endif
 
         static GLuint compile(GLenum type, const char *source)
         {
@@ -816,7 +834,17 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             type = type == GL_VERTEX_SHADER ? GL_CG_VERTEX_SHADER_EXT : GL_CG_FRAGMENT_SHADER_EXT;
 #endif
             GLuint shader = glCreateShader(type);
+#if defined(PS2X_NATIVE_VITA)
             glShaderSource(shader, 1, &source, nullptr);
+#else
+#if defined(__ANDROID__)
+            constexpr const char *version = "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n";
+#else
+            constexpr const char *version = "#version 330 core\n";
+#endif
+            const char *parts[] = {version, source};
+            glShaderSource(shader, 2, parts, nullptr);
+#endif
             glCompileShader(shader);
             GLint ok = 0;
             glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
@@ -932,6 +960,22 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 
         bool init()
         {
+#if defined(__ANDROID__)
+            if (eglGetCurrentContext() == EGL_NO_CONTEXT)
+                return false;
+            GLint extensionCount = 0;
+            glGetIntegerv(GL_NUM_EXTENSIONS, &extensionCount);
+            for (GLint i = 0; i < extensionCount; ++i)
+            {
+                const auto *extension = reinterpret_cast<const char *>(glGetStringi(GL_EXTENSIONS, i));
+                if (extension && (std::strcmp(extension, "GL_EXT_depth_clamp") == 0 ||
+                                  std::strcmp(extension, "GL_NV_depth_clamp") == 0))
+                {
+                    hasDepthClamp = true;
+                    break;
+                }
+            }
+#endif
             mainProgram = program(kMainVertex, kMainFragment, {"aPos", "aNormal", "aColor", "aUV"});
 #if defined(PS2X_NATIVE_VITA)
             for (int mode : {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11})
@@ -951,6 +995,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #endif
             if (!mainProgram || !quadProgram)
                 return false;
+#if defined(__ANDROID__)
+            shadowDepthLocation = glGetUniformLocation(mainProgram, "uClampShadowDepth");
+#endif
 #if !defined(PS2X_NATIVE_VITA)
             glGenVertexArrays(1, &vao);
             glBindVertexArray(vao);
@@ -1658,7 +1705,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     glClearColor(fog.colour[0], fog.colour[1], fog.colour[2], 1.0f);
                 else
                     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-#if defined(PS2X_NATIVE_VITA)
+#if defined(PS2X_NATIVE_VITA) || defined(__ANDROID__)
                 glClearDepthf(1.0f);
 #else
                 glClearDepth(1.0);
@@ -1828,11 +1875,21 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     glStencilFuncSeparate(GL_FRONT_AND_BACK, GL_ALWAYS, 0, 0xFF);
                     glStencilOpSeparate(GL_FRONT, GL_KEEP, GL_KEEP, GL_INCR_WRAP);
                     glStencilOpSeparate(GL_BACK, GL_KEEP, GL_KEEP, GL_DECR_WRAP);
-#if !defined(PS2X_NATIVE_VITA)
+#if defined(__ANDROID__)
+                    if (hasDepthClamp)
+                        glEnable(kGlesDepthClamp);
+                    else
+                        glUniform1i(shadowDepthLocation, GL_TRUE);
+#elif !defined(PS2X_NATIVE_VITA)
                     glEnable(GL_DEPTH_CLAMP); // the GS does not cut at the near plane
 #endif
                     drawMesh(mesh->second, firstVertex);
-#if !defined(PS2X_NATIVE_VITA)
+#if defined(__ANDROID__)
+                    if (hasDepthClamp)
+                        glDisable(kGlesDepthClamp);
+                    else
+                        glUniform1i(shadowDepthLocation, GL_FALSE);
+#elif !defined(PS2X_NATIVE_VITA)
                     glDisable(GL_DEPTH_CLAMP);
 #endif
                     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
@@ -2399,7 +2456,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // Read back, top row first (the GL picture is y-up).
         std::vector<uint8_t> pixels(static_cast<size_t>(w) * h * 4u);
         glBindFramebuffer(GL_FRAMEBUFFER, color.fbo);
+#if defined(__ANDROID__)
+        const bool measureReadback = native_renderer::detail::androidFrameStatsEnabled();
+        const uint64_t readbackStart = measureReadback ? native_renderer::nowUs() : 0;
+#endif
         glReadPixels(0, 0, static_cast<GLsizei>(w), static_cast<GLsizei>(h), GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+#if defined(__ANDROID__)
+        const uint64_t elapsedReadback = measureReadback ? native_renderer::nowUs() - readbackStart : 0;
+#endif
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         std::lock_guard<std::mutex> lock(outputMutex);
         output.resize(pixels.size());
@@ -2408,7 +2472,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             std::memcpy(output.data() + static_cast<size_t>(y) * row, pixels.data() + static_cast<size_t>(h - 1u - y) * row, row);
         outputWidth = w;
         outputHeight = h;
-        hasOutput = true;
+        ++outputSerial;
+#if defined(__ANDROID__)
+        readbackUs += elapsedReadback;
+#endif
     }
 
     // The game thread's side of the renderer (every Backend call) and the
@@ -2451,6 +2518,18 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             m_startUs = native_renderer::nowUs();
         }
 
+        ~GlBackend() override
+        {
+            {
+                std::lock_guard lock(m_mutex);
+                m_stopping = true;
+            }
+            m_work.notify_all();
+            if (m_worker.joinable())
+                m_worker.join();
+            delete r;
+        }
+
         // Starts the render thread. makeCurrent: called there first (macOS:
         // the context becomes that thread's); initThere: the renderer is
         // built there too (else it was, on the caller: the Vita's CG compiler
@@ -2462,7 +2541,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             const unsigned int stackDefault = _pthread_stack_default_user;
             _pthread_stack_default_user = 512u * 1024u;
 #endif
-            std::thread([this, makeCurrent = std::move(makeCurrent), initThere] { loop(makeCurrent, initThere); }).detach();
+            m_worker = std::thread([this, makeCurrent = std::move(makeCurrent), initThere]
+            {
+                loop(makeCurrent, initThere);
+#if defined(__ANDROID__)
+                eglReleaseThread();
+#endif
+            });
 #if defined(PS2X_NATIVE_VITA)
             _pthread_stack_default_user = stackDefault;
 #endif
@@ -2587,7 +2672,12 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         void endFrame(uint32_t width, uint32_t height) override
         {
             const bool timed = native_renderer::tuning().frameLog;
-            const uint64_t start = timed ? native_renderer::nowUs() : 0u;
+#if defined(__ANDROID__)
+            const bool diagnostic = native_renderer::detail::androidFrameStatsEnabled();
+#else
+            constexpr bool diagnostic = false;
+#endif
+            const uint64_t start = (timed || diagnostic) ? native_renderer::nowUs() : 0u;
             std::unique_lock<std::mutex> lock(m_mutex);
             waitIdle(lock);
             // The render thread waits: what it holds changes hands. What the
@@ -2631,12 +2721,20 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             const bool threaded = native_renderer::tuning().renderThread;
             if (!threaded)
                 waitIdle(lock);
+            const uint64_t handoffUs = (timed || diagnostic) ? native_renderer::nowUs() - start : 0u;
             if (timed)
             {
                 native_renderer::FrameCounters &c = native_renderer::frameCounters();
-                c.waitUs += native_renderer::nowUs() - start;
+                c.waitUs += handoffUs;
                 c.renderThread = threaded;
             }
+#if defined(__ANDROID__)
+            if (diagnostic)
+            {
+                ++m_androidFrameStats.submitted;
+                m_androidFrameStats.handoffUs += handoffUs;
+            }
+#endif
         }
         void finishFrames() override
         {
@@ -2647,16 +2745,37 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         void holdFrame() override { m_rec.hold = true; }
         bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height) override
         {
+            uint64_t serial = 0;
+            return copyFrameIfNew(rgba, width, height, serial);
+        }
+
+#if defined(__ANDROID__)
+        native_renderer::detail::AndroidFrameStats androidFrameStats() override
+        {
+            std::scoped_lock lock(m_mutex, r->outputMutex);
+            auto stats = m_androidFrameStats;
+            stats.published = r->outputSerial;
+            stats.readbackUs = r->readbackUs;
+            return stats;
+        }
+#endif
+
+    private:
+        bool copyFrameIfNew(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height, uint64_t &serial)
+#if defined(__ANDROID__)
+            override
+#endif
+        {
             std::lock_guard<std::mutex> lock(r->outputMutex);
-            if (!r->hasOutput)
+            if (serial == r->outputSerial)
                 return false;
             rgba = r->output;
             width = r->outputWidth;
             height = r->outputHeight;
+            serial = r->outputSerial;
             return true;
         }
 
-    private:
         // vitaGL is one GL for every thread: the host and this take turns.
         struct Lock
         {
@@ -2977,8 +3096,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             for (;;)
             {
                 std::unique_lock<std::mutex> lock(m_mutex);
-                while (!m_queued && m_side.empty())
+                while (!m_queued && m_side.empty() && !m_stopping)
                     m_work.wait_for(lock, kRecheck);
+                if (m_stopping)
+                    return;
                 // Flushed uploads first (they were asked for before this frame's).
                 if (!m_side.empty())
                 {
@@ -3006,6 +3127,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 const bool uploadsOnly = m_uploadsOnly; // flushUploads (SOTC_GL_FLUSH_WAIT)
                 m_uploadsOnly = false;
                 lock.unlock();
+                uint64_t renderUs = 0;
                 if (uploadsOnly)
                 {
                     Lock gl;
@@ -3020,9 +3142,17 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     if (!r->hold) // held: the last picture stays on screen
                         r->render(width, height);
                     r->evictUnused();
-                    r->stats.renderUs += (native_renderer::nowUs() - start) - (r->stats.presentUs - present);
+                    renderUs = (native_renderer::nowUs() - start) - (r->stats.presentUs - present);
+                    r->stats.renderUs += renderUs;
                 }
                 lock.lock();
+#if defined(__ANDROID__)
+                if (!uploadsOnly && native_renderer::detail::androidFrameStatsEnabled())
+                {
+                    ++m_androidFrameStats.rendered;
+                    m_androidFrameStats.renderUs += renderUs;
+                }
+#endif
                 m_busy = false;
                 m_idle.notify_all();
             }
@@ -3054,15 +3184,19 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // One condition each way. The waits also look again every few ms: in
         // Vita3K a wake-up of the newlib pthread condition got lost now and
         // then (the game thread waited on an idle render thread for good).
+        std::thread m_worker;
         std::mutex m_mutex;
         std::condition_variable m_work, m_idle; // a frame handed over; the render thread idle
+#if defined(__ANDROID__)
+        native_renderer::detail::AndroidFrameStats m_androidFrameStats;
+#endif
         static constexpr std::chrono::milliseconds kRecheck{2};
         void waitIdle(std::unique_lock<std::mutex> &lock)
         {
             while (m_queued || m_busy)
                 m_idle.wait_for(lock, kRecheck);
         }
-        bool m_started = false, m_initOk = false;
+        bool m_started = false, m_initOk = false, m_stopping = false;
         bool m_queued = false; // a frame handed over, not started yet
         bool m_busy = false;   // the render thread drawing
         bool m_uploadsOnly = false; // what is handed over is uploads alone (flushUploads, SOTC_GL_FLUSH_WAIT)
@@ -3090,7 +3224,10 @@ namespace native_renderer::detail
 #endif
         auto *backend = new GlBackend(renderer);
         if (!backend->start(std::move(makeCurrent), initThere))
-            return nullptr; // its thread has ended; the renderer is left as it is
+        {
+            delete backend;
+            return nullptr;
+        }
         return backend;
     }
 }

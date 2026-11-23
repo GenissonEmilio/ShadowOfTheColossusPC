@@ -23,7 +23,11 @@ option(PS2X_BUILD_TEST "Build ps2xTest" ON)
 option(PS2X_BUILD_STUDIO "Build ps2xStudio" ON)
 
 if(ANDROID)
+    if(NOT CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
+        message(FATAL_ERROR "Shadow of the Colossus Android requires arm64-v8a")
+    endif()
     message(STATUS "Android target detected, building runtime only")
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
     set(PS2X_BUILD_RECOMP OFF)
     set(PS2X_BUILD_ANALYZER OFF)
     set(PS2X_BUILD_TEST OFF)
@@ -59,7 +63,11 @@ if(PS2X_IS_ARM_TARGET)
     include_directories(${sse2neon_SOURCE_DIR})
     add_compile_definitions(USE_SSE2NEON)
 
-    if(PS2X_IS_AARCH64_TARGET AND APPLE)
+    if(ANDROID)
+        # Advanced SIMD/NEON is part of the Android arm64-v8a ABI.
+        # Keep the baseline ISA so optional CPU extensions remain optional.
+        message(STATUS "Android ARM64 - using the NDK's NEON defaults")
+    elseif(PS2X_IS_AARCH64_TARGET AND APPLE)
         # macOS ARM64 already uses optimal defaults
         message(STATUS "macOS ARM64 - using default compiler flags")
     elseif(PS2X_IS_AARCH64_TARGET AND MSVC)

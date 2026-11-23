@@ -40,3 +40,14 @@ celosia_settings.cfg
 *.rar
 *.elf
 *.ps2
+
+# Android output, machine paths and private game preparation
+.gradle/
+.cxx/
+**/build/
+**/local.properties
+*.apk
+*.aab
+*.keystore
+*.jks
+/private-android/

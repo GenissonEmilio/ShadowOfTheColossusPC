@@ -1,59 +1,74 @@
-plugins {
-    id 'com.android.application'
-}
+plugins { id 'com.android.application' }
 
-// Override with: gradlew assembleRelease -Pps2xBootElf=/absolute/path/on/device.elf
-def ps2xBootElf = project.findProperty('ps2xBootElf') ?: '/storage/emulated/0/Android/data/com.ps2x.runner/files/game.elf'
+def generatedDir = providers.gradleProperty('sotcGeneratedDir').orNull
+def vu1Dir = providers.gradleProperty('sotcVu1Dir').orNull
+def prebuiltDir = providers.gradleProperty('sotcPrebuiltDir').orNull
+def ffmpegRoot = providers.gradleProperty('sotcFfmpegRoot').orNull
+def captureMissing = providers.gradleProperty('sotcCaptureMissing').getOrElse('false').toBoolean()
+def sourceRoot = file('../../..')
+def runnerDirs = generatedDir == null ? file('../../ps2xRuntime/src/runner').absolutePath :
+    [file(generatedDir).absolutePath, new File(sourceRoot, 'game/overrides').absolutePath,
+     vu1Dir == null ? null : file(vu1Dir).absolutePath].findAll { it != null }.join(';')
 
 android {
-    namespace 'com.ps2x.runner'
-    compileSdk 34
+    namespace 'com.genisson.sotc'
+    compileSdk 36
+    buildToolsVersion '35.0.0'
     ndkVersion '28.2.13676358'
-
     defaultConfig {
-        applicationId 'com.ps2x.runner'
+        applicationId 'com.genisson.sotc'
         minSdk 28
-        targetSdk 34
+        targetSdk 36
         versionCode 1
-        versionName '0.1.0'
-
-        externalNativeBuild {
-            cmake {
-                arguments '-DPS2X_BUILD_RECOMP=OFF',
-                        '-DPS2X_BUILD_ANALYZER=OFF',
-                        '-DPS2X_BUILD_TEST=OFF',
-                        '-DPS2X_BUILD_STUDIO=OFF',
-                        '-DPS2X_ENABLE_SCCACHE=OFF',
-                        '-DPS2X_RUNNER_UNITY_BUILD_BATCH_SIZE=32',
-                        '-DANDROID_CPP_FEATURES=rtti exceptions',
-                        "-DPS2X_DEFAULT_BOOT_ELF=${ps2xBootElf}"
-                targets 'ps2EntryRunner'
-            }
-        }
-
-        ndk {
-            abiFilters 'arm64-v8a', 'x86_64'
-        }
-    }
-
-    externalNativeBuild {
-        cmake {
-            path '../../CMakeLists.txt'
-            version '3.22.1'
-        }
-    }
-
-    buildTypes {
-        debug {
+        versionName '0.1.0-dev'
+        testInstrumentationRunner 'com.genisson.sotc.ControlsInstrumentation'
+        buildConfigField 'boolean', 'HAS_GAME', providers.gradleProperty('sotcHasGame').getOrElse(generatedDir != null ? 'true' : 'false')
+        buildConfigField 'String', 'BOOT_SHA256', '"' + providers.gradleProperty('sotcBootSha256').getOrElse('') + '"'
+        ndk { abiFilters 'arm64-v8a' }
+        if (prebuiltDir == null) {
             externalNativeBuild {
                 cmake {
-                    arguments '-DCMAKE_BUILD_TYPE=RelWithDebInfo'
+                    arguments '-DPS2X_BUILD_RECOMP=OFF', '-DPS2X_BUILD_ANALYZER=OFF',
+                        '-DPS2X_BUILD_TEST=OFF', '-DPS2X_BUILD_STUDIO=OFF',
+                        '-DPS2X_ENABLE_DEBUG_UI=OFF', '-DPS2X_ENABLE_SCCACHE=OFF',
+                        '-DPS2X_ENABLE_CCACHE=OFF', '-DPS2X_ENABLE_AGRESSIVE_LOGS=OFF',
+                        '-DPS2X_ENABLE_IOP_RPC_TRACE=OFF', '-DANDROID_STL=c++_shared',
+                        '-DPS2X_RUNNER_UNITY_BUILD_BATCH_SIZE=8',
+                        "-DSOTC_HAS_GAME=${generatedDir == null ? 'OFF' : 'ON'}",
+                        "-DSOTC_ANDROID_CAPTURE_MODULES=${captureMissing ? 'ON' : 'OFF'}",
+                        "-DPS2X_RUNNER_DIRS=${runnerDirs.replace('\\', '/')}"
+                    targets 'ps2EntryRunner'
+                    if (ffmpegRoot != null) {
+                        arguments '-DPS2X_ENABLE_FFMPEG=ON', "-DPS2X_ANDROID_FFMPEG_ROOT=${file(ffmpegRoot).absolutePath.replace('\\', '/')}"
+                    }
                 }
             }
         }
-        release {
-            minifyEnabled false
-            signingConfig signingConfigs.debug
+    }
+    buildFeatures { buildConfig true }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+    if (prebuiltDir == null) {
+        externalNativeBuild {
+            cmake {
+                path '../../CMakeLists.txt'
+                version '3.31.6'
+                if (providers.gradleProperty('sotcBuildDir').isPresent()) {
+                    buildStagingDirectory file(providers.gradleProperty('sotcBuildDir').get())
+                }
+            }
         }
+    } else { sourceSets.main.jniLibs.srcDirs = [file(prebuiltDir)] }
+    buildTypes { release { minifyEnabled false } }
+    packaging { jniLibs { useLegacyPackaging = false } }
+    sourceSets.main.assets.srcDir(layout.buildDirectory.dir('generated/licenseAssets'))
+}
+
+tasks.register('collectLicenses', Copy) {
+    into layout.buildDirectory.dir('generated/licenseAssets/licenses')
+    from(new File(sourceRoot, 'LICENSE')) { rename { 'PS2Recomp-GPL-3.0.txt' } }
+    if (ffmpegRoot != null) {
+        from(new File(file(ffmpegRoot), 'COPYING.LGPLv2.1')) { rename { 'FFmpeg-LGPL-2.1.txt' } }
+        from(new File(file(ffmpegRoot), 'BUILD-FFMPEG.txt'))
     }
 }
+tasks.named('preBuild').configure { dependsOn 'collectLicenses' }
