@@ -19,7 +19,7 @@ namespace desktop_video
     Rectangle destination(int width, int height, int sourceWidth, int sourceHeight, int mode);
     void setWindowResolution(int resolution);
     void setFullscreen(bool enabled);
-    void updatePresentation(bool vsync, bool cap30, bool frameGeneration);
+    void updatePresentation(bool vsync, bool cap30, bool frameGeneration = false);
     Texture2D interpolate(Texture2D previous, Texture2D current);
     bool loadShader(const char *path, std::string &error);
     bool shaderActive();
