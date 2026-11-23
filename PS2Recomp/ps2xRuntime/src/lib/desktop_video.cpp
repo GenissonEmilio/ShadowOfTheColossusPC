@@ -2,6 +2,7 @@
 #ifdef PS2X_DESKTOP_VIDEO
 #include "desktop_antialias.h"
 #include "desktop_fsr.h"
+#include "desktop_frame_pacing.h"
 #include "desktop_interpolation.h"
 #include "runtime/host_menu.h"
 #include "rlgl.h"
@@ -219,7 +220,7 @@ void setFullscreen(bool enabled)
     }
 }
 
-void updatePresentation(bool vsync, bool cap30)
+void updatePresentation(bool vsync, bool cap30, bool frameGeneration)
 {
     if (restoreFrames > 0 && --restoreFrames == 0)
     {
@@ -235,7 +236,7 @@ void updatePresentation(bool vsync, bool cap30)
     }
 
     const double now = GetTime();
-    if (vsync && now >= nextRefreshCheck)
+    if ((vsync || frameGeneration) && now >= nextRefreshCheck)
     {
         refreshRate = GetMonitorRefreshRate(GetCurrentMonitor());
         if (refreshRate <= 0) refreshRate = 60;
@@ -244,7 +245,7 @@ void updatePresentation(bool vsync, bool cap30)
     // Leave headroom above the monitor clock to avoid a second limiter
     // making synchronized swaps miss refreshes. Bound the frame rate even
     // when a driver or virtual display ignores the requested swap interval.
-    const int limit = cap30 ? 30 : (vsync ? refreshRate + std::max(5, refreshRate / 10) : 60);
+    const int limit = presentationLimit(refreshRate, vsync, cap30, frameGeneration);
     if (limit != frameLimit)
     {
         frameLimit = limit;

@@ -8,6 +8,7 @@
 #include "runtime/ps2_vu1_native.h"
 #include <algorithm>
 #include <cstring>
+#include <functional>
 
 enum VIFCmd : uint8_t
 {
@@ -420,16 +421,22 @@ void Vif1Walker::feed(const uint8_t *data, uint32_t bytes)
 {
     m_bytes += bytes;
     VIFRegisters &r = m_regs;
-    uint32_t pos = 0;
+    // Resume a payload split across DMA pieces before reading any VIFcode.
+    uint32_t pos = std::min(m_skip, bytes);
+    m_skip -= pos;
+    const auto skipPayload = [&](uint32_t size)
+    {
+        const uint32_t available = bytes - pos;
+        if (size <= available)
+            pos += size;
+        else
+        {
+            m_skip = size - available;
+            pos = bytes;
+        }
+    };
     while (pos < bytes)
     {
-        if (m_skip != 0u)
-        {
-            const uint32_t n = std::min(m_skip, bytes - pos);
-            m_skip -= n;
-            pos += n;
-            continue;
-        }
         if (m_gif != 0u)
         {
             const uint32_t n = std::min(m_gif, bytes - pos);
@@ -475,10 +482,10 @@ void Vif1Walker::feed(const uint8_t *data, uint32_t bytes)
             static constexpr uint8_t kBytesPerVector[16] = {4, 2, 1, 1, 8, 4, 2, 1, 12, 6, 3, 2, 16, 8, 4, 2};
             ++m_unpack;
             const uint32_t cl = r.cycle & 0xFFu, wl = (r.cycle >> 8) & 0xFFu;
-            if (wl <= cl || wl <= 1u)
-                m_skip = ((num == 0u ? 256u : num) * kBytesPerVector[opcode & 0xFu] + 3u) & ~3u;
-            else
-                m_skip = unpackDataBytes(opcode, num, r.cycle);
+            const uint32_t size = (wl <= cl || wl <= 1u)
+                                      ? ((num == 0u ? 256u : num) * kBytesPerVector[opcode & 0xFu] + 3u) & ~3u
+                                      : unpackDataBytes(opcode, num, r.cycle);
+            skipPayload(size);
             continue;
         }
         switch (opcode)
@@ -529,7 +536,7 @@ void Vif1Walker::feed(const uint8_t *data, uint32_t bytes)
             m_want = 16u;
             break;
         case VIF_MPG:
-            m_skip = (num == 0u ? 256u : num) * 8u;
+            skipPayload((num == 0u ? 256u : num) * 8u);
             break;
         case VIF_DIRECT:
         case VIF_DIRECTHL:
@@ -774,9 +781,12 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 uint32_t copyBytes = mpgBytes;
                 if (destAddr + copyBytes > PS2_VU1_CODE_SIZE)
                     copyBytes = PS2_VU1_CODE_SIZE - destAddr;
-                if (pos + copyBytes <= sizeBytes)
+                uint8_t *dest = m_vu1Code + destAddr;
+                // Games can upload the same microprogram for consecutive draws.
+                // Reuse the cached decoding and flag analysis while the code matches.
+                if (copyBytes <= sizeBytes - pos && std::memcmp(dest, data + pos, copyBytes) != 0)
                 {
-                    std::memcpy(m_vu1Code + destAddr, data + pos, copyBytes);
+                    std::memcpy(dest, data + pos, copyBytes);
                     markVU1CodeModified();
                 }
             }
@@ -900,6 +910,50 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 vuAddr = (vuAddr + (vif1_regs.tops & 0x3FFu)) & 0x3FFu;
 
             const bool zeroExtend = (imm & 0x4000u) != 0u;
+
+            // Plain V3-32 positions and V4-32 vectors can be copied directly
+            // when the write cycle only reads data, with no fill or row operations.
+            if ((opcode == 0x68u || opcode == 0x6Cu) && cl >= wl && (vif1_regs.mode == 0u || vif1_regs.mode == 3u) &&
+                m_vu1Data && totalBytes <= sizeBytes - pos)
+            {
+                const uint8_t *src = data + pos;
+                const std::less<const uint8_t *> before;
+                // Keep per-vector semantics if the input stream is in VU1 memory.
+                if (!before(src, m_vu1Data + PS2_VU1_DATA_SIZE) || !before(m_vu1Data, src + totalBytes))
+                {
+                    if (opcode == 0x6Cu && cl == wl)
+                    {
+                        const uint32_t destOff = vuAddr * 16u;
+                        const uint32_t firstBytes = std::min(totalBytes, PS2_VU1_DATA_SIZE - destOff);
+                        std::memcpy(m_vu1Data + destOff, src, firstBytes);
+                        if (firstBytes < totalBytes)
+                            std::memcpy(m_vu1Data, src + firstBytes, totalBytes - firstBytes);
+                    }
+                    else
+                    {
+                        uint32_t destVec = vuAddr;
+                        uint32_t cyclePos = 0;
+                        for (uint32_t i = 0; i < writeVectorCount; ++i)
+                        {
+                            uint8_t *dst = m_vu1Data + destVec * 16u;
+                            if (opcode == 0x68u)
+                                std::memcpy(dst, src, 12u); // V3-32 leaves W intact.
+                            else
+                                std::memcpy(dst, src, 16u);
+                            src += bytesPerVector;
+                            ++destVec;
+                            if (++cyclePos == wl)
+                            {
+                                cyclePos = 0;
+                                destVec += cl - wl;
+                            }
+                            destVec &= 0x3FFu;
+                        }
+                    }
+                    pos += totalBytes;
+                    continue;
+                }
+            }
 
             if (m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
             {

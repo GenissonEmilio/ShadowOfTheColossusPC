@@ -4,6 +4,9 @@
 #include "runtime/native_tuning.h"
 #include "runtime/ps2_pad.h"
 #include "runtime/state_manager.h"
+#ifdef PS2X_DESKTOP_VIDEO
+#include "runtime/native_renderer.h"
+#endif
 
 #include "raylib.h"
 
@@ -113,8 +116,11 @@ namespace
             {"Window resolution", "Resolução da janela"},
             {"FSR 1 upscaling", "Upscaling FSR 1"},
             {"Frame generation (2x)", "Geração de quadros (2x)"},
-            {"Adds an interpolated frame when the display has room. The game still runs at its base frame rate.",
-             "Gera um quadro intermediário quando há tempo para exibi-lo. O jogo mantém sua taxa de quadros base."},
+            {"The native renderer adds an interpolated frame when the display has room. The game keeps its base frame rate.",
+             "O renderizador nativo gera um quadro intermediário quando há tempo para exibi-lo. O jogo mantém a taxa de quadros base."},
+            {"Requires native renderer", "Requer renderizador nativo"},
+            {"Shows game frames and the video frame rate, including any generated frames.",
+             "Mostra a taxa de quadros do jogo e a taxa de vídeo, incluindo quadros gerados."},
             {"Uses the current monitor's resolution in fullscreen. F11 also toggles this.",
              "Usa a resolução do monitor atual em tela cheia. F11 também alterna o modo."},
             {"Selects the game window size. Automatic lets you resize it freely. Fullscreen uses the monitor resolution.",
@@ -207,7 +213,11 @@ namespace
         {kExactAlpha, "Exact transparency",
          "Draws the effects that use the alpha test exactly like the PS2 (clouds, mist, shadows). "
          "Turning it off gains a few frames per second; some mist and edges look harder."},
+#ifdef PS2X_DESKTOP_VIDEO
+        {kShowFps, "Show FPS", "Shows game frames and the video frame rate, including any generated frames."},
+#else
         {kShowFps, "Show FPS", "Shows the game's frame rate in the corner of the screen."},
+#endif
         {kScreen, "Screen",
          "Fit keeps the original 4:3 view. Widescreen expands the view to 16:9. Both add bars when needed. "
          "Stretch fills the screen. Sharp uses the largest whole multiple of the original size."},
@@ -220,7 +230,7 @@ namespace
          "Uses AMD FSR 1 to upscale the game picture when it is smaller than the display area. "
          "Lower the resolution in Quality to reduce rendering load. Sharp mode uses whole-pixel scaling."},
         {kFrameGeneration, "Frame generation (2x)",
-         "Adds an interpolated frame when the display has room. The game still runs at its base frame rate."},
+         "The native renderer adds an interpolated frame when the display has room. The game keeps its base frame rate."},
 #endif
     };
     const Item kSoundItems[] = {
@@ -358,7 +368,8 @@ namespace
         case kVSync: return T(g_settings.vsync ? "On" : "Off");
         case kFullscreen: return T(g_settings.fullscreen ? "On" : "Off");
         case kUpscaleFsr: return T(g_settings.upscaleFsr ? "On" : "Off");
-        case kFrameGeneration: return T(g_settings.frameGeneration ? "On" : "Off");
+        case kFrameGeneration:
+            return T(native_renderer::shown() ? (g_settings.frameGeneration ? "On" : "Off") : "Requires native renderer");
         case kWindowResolution:
         {
             const int resolution = g_settings.windowResolution.load();
@@ -432,7 +443,10 @@ namespace
                 % desktop_video::kWindowResolutionCount;
             break;
         case kUpscaleFsr: g_settings.upscaleFsr = !g_settings.upscaleFsr; break;
-        case kFrameGeneration: g_settings.frameGeneration = !g_settings.frameGeneration; break;
+        case kFrameGeneration:
+            if (!native_renderer::shown()) return;
+            g_settings.frameGeneration = !g_settings.frameGeneration;
+            break;
 #endif
         case kScreen: g_settings.screenMode = (g_settings.screenMode + kScreenModeCount + dir) % kScreenModeCount; break;
         case kVolume: g_settings.volume = std::clamp(g_settings.volume + dir, 0, 10); break;

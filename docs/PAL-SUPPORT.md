@@ -11,6 +11,8 @@ that the game uses for sector reads. The compilation cache is separate from the
 North American edition.
 
 PAL uses the OpenGL compatibility renderer and the video mode selected in the
-original game. Use the memory card to save progress. Features that rely on the
-North American native renderer and runtime hooks, including frame generation,
-quick save states, and the dedicated assist patches, remain edition-specific.
+original game. The 50/60 Hz choice controls the guest video signal. To see
+how often the game renders a new frame, open F1 and enable **Show FPS**.
+The counter shows the game's render rate and the rate of new pictures sent
+to the window. Use the memory card to save progress. Frame generation, quick
+save states, and the dedicated assist patches require the North American edition.

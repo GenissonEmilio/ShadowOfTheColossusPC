@@ -13,7 +13,7 @@
 
 namespace fixture
 {
-    bool keys[512]{}, keyPress[512]{}, mousePress = false, working = false;
+    bool keys[512]{}, keyPress[512]{}, mousePress = false, working = false, nativePicture = true;
     Vector2 pointer{};
     ps2pad::GamepadState gamepad;
     std::array<savestates::Slot, savestates::SlotCount> stored{};
@@ -69,6 +69,7 @@ namespace native_renderer
     std::string tuningValueText(const TuningItem &, bool) { return {}; }
     bool tuningApplies(const TuningItem &) { return true; }
     const char *backendName() { return "OpenGL"; }
+    bool shown() { return fixture::nativePicture; }
     void tuningStep(const TuningItem &, int) {}
     bool tuningRestore(const char *, float) { return false; }
 }
@@ -210,4 +211,15 @@ int main()
     assert(!hostmenu::quitRequested());
     key(KEY_F1); assert(!hostmenu::isOpen());
     std::puts("PASS: state slots, keyboard/gamepad/mouse, confirmations, busy guard, PT/EN bounds and fullscreen preservation");
+
+    hostmenu::settings().frameGeneration = true;
+    nativePicture = false;
+    assert(hostmenu::valueText(hostmenu::kFrameGeneration) == "Requires native renderer");
+    hostmenu::change(hostmenu::kFrameGeneration, 1);
+    assert(hostmenu::settings().frameGeneration.load());
+    nativePicture = true;
+    assert(hostmenu::valueText(hostmenu::kFrameGeneration) == "On");
+    hostmenu::change(hostmenu::kFrameGeneration, 1);
+    assert(!hostmenu::settings().frameGeneration.load());
+    std::puts("PASS: compatibility renderer reports generation unavailable and preserves the native preference");
 }
