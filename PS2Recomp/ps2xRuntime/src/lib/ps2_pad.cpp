@@ -332,6 +332,11 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
         }
         shape(lx, ly);
         shape(rx, ry);
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+        // The original camera interprets X as an orbit direction. A PC
+        // controller's horizontal camera input follows the direction of view.
+        rx = -rx;
+#endif
         auto toByte = [](float v) { return static_cast<uint8_t>(std::clamp(128.0f + v * 127.5f, 0.0f, 255.0f)); };
         data[6] = toByte(lx);
         data[7] = toByte(ly);

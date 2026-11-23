@@ -249,7 +249,15 @@ int main(int argc, char **argv)
       gamepads[2].index = 2;
       gamepads[2].buttons[GAMEPAD_BUTTON_RIGHT_FACE_UP] = true;
       gamepads[2].axes[GAMEPAD_AXIS_RIGHT_X] = 1; }
-    assert(packet(data) == 0x1000 && data[4] == 255);
+    assert(packet(data) == 0x1000 && data[4] == 0 && data[5] == 128);
+    { std::lock_guard<std::mutex> lock(gamepadMutex);
+      gamepads[2].axes[GAMEPAD_AXIS_RIGHT_X] = -1;
+      gamepads[2].axes[GAMEPAD_AXIS_LEFT_X] = 1; }
+    assert(packet(data) == 0x1000 && data[4] == 255 && data[6] == 255);
+    { std::lock_guard<std::mutex> lock(gamepadMutex);
+      gamepads[2].axes[GAMEPAD_AXIS_RIGHT_X] = 0;
+      gamepads[2].axes[GAMEPAD_AXIS_RIGHT_Y] = 1; }
+    assert(packet(data) == 0x1000 && data[4] == 128 && data[5] == 255);
     ps2pad::resetAfterStateLoad(); assert(packet(data) == 0 && data[4] == 128);
     assert(packet(data) == 0);
     { std::lock_guard<std::mutex> lock(gamepadMutex); gamepads = {}; }
