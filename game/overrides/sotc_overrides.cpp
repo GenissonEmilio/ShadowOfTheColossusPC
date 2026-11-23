@@ -20,6 +20,9 @@
 #include <string>
 
 void installSotcNative(PS2Runtime &runtime); // sotc_native.cpp
+#if defined(__ANDROID__)
+namespace sotc_widescreen { void install(PS2Runtime &runtime); }
+#endif
 #include "sotc_decomp.h"
 
 namespace
@@ -878,6 +881,9 @@ namespace
         installCallTracing(runtime);
         installCensus(runtime);
         installSotcNative(runtime);
+#if defined(__ANDROID__)
+        sotc_widescreen::install(runtime);
+#endif
         sysnative::install(runtime);
         sotc_decomp::install(runtime);
         if (std::getenv("SOTC_MATH_CHECK") && runtime.hasFunction(0x010816C0u))

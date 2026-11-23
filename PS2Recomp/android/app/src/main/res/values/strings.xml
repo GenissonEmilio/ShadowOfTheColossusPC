@@ -8,4 +8,5 @@
     <string name="launcher_controls">Controles</string>
     <string name="launcher_disc_edition">Disco de PS2 · edição americana SCUS‑97472</string>
     <string name="launcher_saves">Seus saves ficam separados dos arquivos do jogo.</string>
+    <string name="game_adaptive_widescreen">Tela cheia adaptada</string>
 </resources>

@@ -33,12 +33,12 @@ for deliberate swipes. Short, slow drags can move the camera past the game's
 
 ## Display
 
-The game starts with the complete 4:3 picture centered on the screen. Toggle
-**Tela cheia (zoom com corte)** in the diamond menu to fill the display with a
-centered zoom that preserves the game's proportions. On wider phones the zoom
-crops more of the top and bottom, including any game interface in those areas.
-The Android touch controls keep their screen positions, and the display choice
-is saved separately from the control settings.
+**Tela cheia adaptada** is enabled by default for landscape displays wider
+than 4:3. The game adapts its projection to show more of the scene horizontally
+while keeping the menu, subtitles and indicators in their original proportions.
+Prerecorded movies use their original framing. The diamond menu lets you
+switch back to the centered 4:3 view. The display choice is saved separately
+from the touch controls.
 
 ## Importing your disc
 
