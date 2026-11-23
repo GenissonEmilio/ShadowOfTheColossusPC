@@ -8,11 +8,19 @@ the game. The desktop launcher remains available separately.
 
 - Left stick: move Wander or Agro.
 - Drag an empty area on the right: camera. There is no fixed camera stick.
-- Agarrar (R1), Pular (Triangle), Atacar (Square), Ação (Circle), Agro (Cross),
-  Focar (L1), Arma (D-pad left/right), Mapa (Select), Pausa (Start).
+- Focar (L1), Arma (D-pad left/right), Mapa (Select), and Pausa (Start) retain
+  their labeled controls.
 - The diamond sigil opens touch settings. Move controls in edit mode and tap the
   sigil again to finish. Scale, opacity, sensitivity, axis inversion and positions
   persist locally. Restore controls resets the saved layout and camera options.
+
+| PlayStation button | Touch icon | Action |
+| --- | --- | --- |
+| Cross (X) | Horse head | Call Agro on foot. While mounted, press to accelerate into a gallop and hold to help maintain speed. |
+| Square | Sword | Attack with the sword. While gripping a colossus, hold to charge a stab. With the bow equipped, hold to draw and release to shoot. |
+| Circle | Sword with a glowing tip | Raise the equipped sword in sunlight. Its reflection guides you toward the next colossus and helps locate important points on a colossus. |
+| Triangle | Boot | Jump, hold for a higher jump when available, mount or dismount Agro, and leap between holds while climbing. |
+| R1 | Gripping hand | Grab fur and structures to climb or hold on when a colossus moves. |
 
 The input router tracks pointer IDs independently: gripping, moving, jumping and
 looking can be combined. Camera movement expires when a finger stops. Cancel,

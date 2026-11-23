@@ -6,7 +6,9 @@ import android.graphics.Canvas;
 import android.graphics.Insets;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.RadialGradient;
 import android.graphics.RectF;
+import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.os.Build;
 import android.os.SystemClock;
@@ -28,6 +30,8 @@ public final class TouchControlsView extends View {
     private static final int IVORY = 0xfff6e3be;
     private static final int RIM = 0xff504232;
     private static final int BRONZE_FILL = 0xed74512a;
+    private static final float SWORD_TIP_Y = -.40f;
+    private static final float SWORD_GLOW_RADIUS = .32f;
     private static final float DEFAULT_SCALE = 1;
     private static final float DEFAULT_OPACITY = .73f;
     private static final float DEFAULT_CAMERA_SENSITIVITY = 1;
@@ -36,6 +40,8 @@ public final class TouchControlsView extends View {
     private final SharedPreferences preferences;
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path path = new Path();
+    private final Shader swordGlow = new RadialGradient(0, SWORD_TIP_Y, SWORD_GLOW_RADIUS,
+            0xeeffbd4f, 0x00ffbd4f, Shader.TileMode.CLAMP);
     private final Typeface labelTypeface = Typeface.create("sans-serif-medium", Typeface.NORMAL);
 
     private final Control movement = new Control("movement", "", 0, .225f, .71f, .153f);
@@ -591,8 +597,7 @@ public final class TouchControlsView extends View {
             drawSigil(canvas);
         } else {
             canvas.translate(0, -.20f);
-            stroke(pressed ? GOLD : IVORY, visibility, .058f);
-            drawButtonSymbol(canvas, control.button, visibility);
+            drawButtonSymbol(canvas, control.button, pressed ? GOLD : IVORY, visibility);
         }
         canvas.restore();
         if (control != menu) {
@@ -601,10 +606,9 @@ public final class TouchControlsView extends View {
             paint.setTypeface(labelTypeface);
             paint.setTextAlign(Paint.Align.CENTER);
             fill(IVORY, visibility);
-            if (control.button == TouchInputState.L1 || control.button == TouchInputState.R1) {
+            if (control.button == TouchInputState.L1) {
                 paint.setTextSize(control.radius * .54f);
-                canvas.drawText(control.button == TouchInputState.L1 ? "L1" : "R1",
-                        control.x, control.y - control.radius * .03f, paint);
+                canvas.drawText("L1", control.x, control.y - control.radius * .03f, paint);
             }
             paint.setTextSize(control.radius * .365f);
             canvas.drawText(control.label, control.x, control.y + control.radius * .60f, paint);
@@ -625,25 +629,23 @@ public final class TouchControlsView extends View {
         canvas.drawArc(-.861f, -.861f, .861f, .861f, 18, 92, false, paint);
     }
 
-    private void drawButtonSymbol(Canvas canvas, int mask, float visibility) {
+    private void drawButtonSymbol(Canvas canvas, int mask, int color, float visibility) {
+        stroke(color, visibility, .058f);
         switch (mask) {
             case TouchInputState.TRIANGLE:
-                path.rewind();
-                path.moveTo(0, -.36f);
-                path.lineTo(.32f, .20f);
-                path.lineTo(-.32f, .20f);
-                path.close();
-                canvas.drawPath(path, paint);
+                drawBoot(canvas);
                 break;
             case TouchInputState.SQUARE:
-                canvas.drawRect(-.26f, -.27f, .26f, .25f, paint);
+                drawSword(canvas, color, visibility, false);
                 break;
             case TouchInputState.CIRCLE:
-                canvas.drawCircle(0, 0, .28f, paint);
+                drawSword(canvas, color, visibility, true);
                 break;
             case TouchInputState.CROSS:
-                canvas.drawLine(-.23f, -.23f, .23f, .23f, paint);
-                canvas.drawLine(.23f, -.23f, -.23f, .23f, paint);
+                drawHorseHead(canvas, color, visibility);
+                break;
+            case TouchInputState.R1:
+                drawGrippingHand(canvas);
                 break;
             case TouchInputState.LEFT:
             case TouchInputState.RIGHT:
@@ -673,12 +675,118 @@ public final class TouchControlsView extends View {
                 canvas.drawLine(-.12f, -.28f, -.12f, .15f, paint);
                 canvas.drawLine(.12f, -.18f, .12f, .25f, paint);
                 break;
-            case TouchInputState.L1:
-            case TouchInputState.R1:
-                break;
             default:
                 break;
         }
+    }
+
+    private void drawHorseHead(Canvas canvas, int color, float visibility) {
+        path.rewind();
+        path.moveTo(-.36f, .28f);
+        path.cubicTo(-.34f, .07f, -.32f, -.20f, -.18f, -.27f);
+        path.lineTo(-.17f, -.43f);
+        path.lineTo(-.03f, -.31f);
+        path.lineTo(.06f, -.41f);
+        path.lineTo(.10f, -.25f);
+        path.quadTo(.17f, -.19f, .20f, -.09f);
+        path.lineTo(.35f, .08f);
+        path.quadTo(.42f, .17f, .30f, .22f);
+        path.quadTo(.24f, .25f, .17f, .20f);
+        path.lineTo(.02f, .10f);
+        path.quadTo(-.04f, .18f, -.01f, .28f);
+        path.close();
+        path.moveTo(-.15f, -.19f);
+        path.quadTo(-.24f, -.08f, -.24f, .15f);
+        canvas.drawPath(path, paint);
+        fill(color, visibility);
+        canvas.drawCircle(.07f, -.12f, .042f, paint);
+    }
+
+    private void drawSword(Canvas canvas, int color, float visibility, boolean lit) {
+        canvas.save();
+        canvas.rotate(43);
+        if (lit) {
+            fill(GOLD, visibility);
+            paint.setShader(swordGlow);
+            canvas.drawCircle(0, SWORD_TIP_Y, SWORD_GLOW_RADIUS, paint);
+            paint.setShader(null);
+        }
+        stroke(color, visibility, .058f);
+        path.rewind();
+        path.moveTo(0, SWORD_TIP_Y);
+        path.lineTo(.096f, -.25f);
+        path.lineTo(.080f, .12f);
+        path.lineTo(-.080f, .12f);
+        path.lineTo(-.096f, -.25f);
+        path.close();
+        canvas.drawPath(path, paint);
+        canvas.drawLine(-.18f, .12f, .18f, .12f, paint);
+        canvas.drawLine(0, .12f, 0, .34f, paint);
+        canvas.drawLine(-.057f, .34f, .057f, .34f, paint);
+        if (lit) {
+            fill(GOLD, visibility);
+            path.rewind();
+            path.moveTo(0, SWORD_TIP_Y - .24f);
+            path.lineTo(.045f, SWORD_TIP_Y - .047f);
+            path.lineTo(.17f, SWORD_TIP_Y);
+            path.lineTo(.045f, SWORD_TIP_Y + .047f);
+            path.lineTo(0, SWORD_TIP_Y + .19f);
+            path.lineTo(-.045f, SWORD_TIP_Y + .047f);
+            path.lineTo(-.17f, SWORD_TIP_Y);
+            path.lineTo(-.045f, SWORD_TIP_Y - .047f);
+            path.close();
+            canvas.drawPath(path, paint);
+        }
+        canvas.restore();
+    }
+
+    private void drawBoot(Canvas canvas) {
+        path.rewind();
+        path.moveTo(-.28f, -.34f);
+        path.lineTo(.02f, -.34f);
+        path.lineTo(.04f, -.09f);
+        path.quadTo(.06f, 0, .19f, .028f);
+        path.quadTo(.39f, .043f, .39f, .18f);
+        path.lineTo(.39f, .26f);
+        path.lineTo(-.08f, .26f);
+        path.lineTo(-.12f, .22f);
+        path.lineTo(-.16f, .26f);
+        path.lineTo(-.33f, .26f);
+        path.lineTo(-.33f, .12f);
+        path.quadTo(-.27f, -.10f, -.28f, -.34f);
+        path.close();
+        canvas.drawPath(path, paint);
+        canvas.drawLine(-.29f, .15f, .38f, .15f, paint);
+        canvas.drawLine(-.11f, -.17f, .03f, -.17f, paint);
+        canvas.drawLine(-.09f, -.06f, .05f, -.06f, paint);
+    }
+
+    private void drawGrippingHand(Canvas canvas) {
+        path.rewind();
+        path.moveTo(-.14f, .32f);
+        path.lineTo(-.15f, .22f);
+        path.quadTo(-.31f, .13f, -.34f, -.06f);
+        path.quadTo(-.36f, -.17f, -.29f, -.21f);
+        path.quadTo(-.24f, -.24f, -.19f, -.19f);
+        path.quadTo(-.18f, -.33f, -.08f, -.35f);
+        path.quadTo(0, -.36f, .03f, -.31f);
+        path.quadTo(.12f, -.37f, .18f, -.28f);
+        path.quadTo(.28f, -.31f, .31f, -.21f);
+        path.quadTo(.39f, -.22f, .39f, -.10f);
+        path.quadTo(.37f, .11f, .24f, .22f);
+        path.lineTo(.23f, .32f);
+        path.close();
+        path.moveTo(-.19f, -.19f);
+        path.lineTo(-.08f, -.10f);
+        path.quadTo(.05f, -.13f, .08f, -.06f);
+        path.quadTo(.11f, .025f, -.05f, .05f);
+        path.moveTo(.03f, -.31f);
+        path.lineTo(.06f, -.18f);
+        path.moveTo(.18f, -.28f);
+        path.lineTo(.20f, -.13f);
+        path.moveTo(.31f, -.21f);
+        path.lineTo(.32f, -.10f);
+        canvas.drawPath(path, paint);
     }
 
     private void drawSigil(Canvas canvas) {
