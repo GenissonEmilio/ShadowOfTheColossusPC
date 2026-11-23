@@ -51,6 +51,8 @@ public final class ControlsInstrumentation extends Instrumentation {
             TouchControlsView view = showHud(activity, preferences, probe);
             verifyReadableLabels(view);
             tests++;
+            verifyActionLayout(view, probe);
+            tests++;
             verifySimultaneousControlsAndIdle(view, probe);
             tests++;
             verifyButtonGesture(view, probe);
@@ -130,6 +132,32 @@ public final class ControlsInstrumentation extends Instrumentation {
             check(probe.moveX > 0 && probe.cameraX == 0, "pointer index change confused the joystick with the camera");
             touch.send(MotionEvent.ACTION_CANCEL, contacts[2], contacts[0]);
             check(probe.isNeutral(), "cancellation left the joystick, camera or a button active");
+        });
+    }
+
+    private void verifyActionLayout(TouchControlsView view, Probe probe) throws Exception {
+        onMain(() -> {
+            RectF grip = view.controlBounds(TouchInputState.R1);
+            RectF action = view.controlBounds(TouchInputState.CIRCLE);
+            RectF attack = view.controlBounds(TouchInputState.SQUARE);
+            RectF agro = view.controlBounds(TouchInputState.CROSS);
+            RectF jump = view.controlBounds(TouchInputState.TRIANGLE);
+            check(grip.centerY() < action.centerY() && action.centerY() < attack.centerY()
+                            && attack.centerY() < agro.centerY() && agro.centerY() < jump.centerY(),
+                    "default action buttons are out of order from top to bottom");
+            check(agro.centerX() < action.centerX() && action.centerX() < jump.centerX()
+                            && jump.centerX() < attack.centerX() && attack.centerX() < grip.centerX(),
+                    "default action buttons are out of order from left to right");
+            int[] buttons = {TouchInputState.R1, TouchInputState.CIRCLE, TouchInputState.SQUARE,
+                    TouchInputState.CROSS, TouchInputState.TRIANGLE};
+            TouchSequence touch = new TouchSequence(view);
+            for (int button : buttons) {
+                Contact contact = Contact.at(12, view.controlBounds(button));
+                touch.send(MotionEvent.ACTION_DOWN, contact);
+                check(probe.buttons == button, "action button sent the wrong input: " + button);
+                touch.send(MotionEvent.ACTION_UP, contact);
+                check(probe.isNeutral(), "action button left its input held: " + button);
+            }
         });
     }
 

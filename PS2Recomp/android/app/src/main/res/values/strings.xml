@@ -1,3 +1,11 @@
 <resources>
     <string name="app_name">Shadow of the Colossus</string>
+    <string name="launcher_title">SHADOW\nOF THE COLOSSUS</string>
+    <string name="launcher_disc_heading">Disco do jogo</string>
+    <string name="launcher_play">Jogar</string>
+    <string name="launcher_continue">Continuar</string>
+    <string name="launcher_import">Importar meu disco</string>
+    <string name="launcher_controls">Controles</string>
+    <string name="launcher_disc_edition">Disco de PS2 · edição americana SCUS‑97472</string>
+    <string name="launcher_saves">Seus saves ficam separados dos arquivos do jogo.</string>
 </resources>
