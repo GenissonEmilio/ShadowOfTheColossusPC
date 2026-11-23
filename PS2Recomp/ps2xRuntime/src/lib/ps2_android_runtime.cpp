@@ -18,6 +18,8 @@ namespace
     ps2x::android::LaunchPaths paths;
     ps2x::android::PadInput input;
     std::atomic<bool> isPaused{false};
+    std::atomic<float> requestedAspect{0.0f};
+    std::atomic<float> activeAspect{0.0f};
 
     EGLDisplay workerDisplay = EGL_NO_DISPLAY;
     EGLSurface workerSurface = EGL_NO_SURFACE;
@@ -53,6 +55,21 @@ namespace ps2x::android
     {
         std::lock_guard lock(stateMutex);
         return input;
+    }
+
+    float requestedWidescreenAspect()
+    {
+        return requestedAspect.load(std::memory_order_relaxed);
+    }
+
+    void setActiveWidescreenAspect(float aspect)
+    {
+        activeAspect.store(aspect, std::memory_order_relaxed);
+    }
+
+    float activeWidescreenAspect()
+    {
+        return activeAspect.load(std::memory_order_relaxed);
     }
 
     bool paused()
@@ -142,6 +159,14 @@ Java_com_genisson_sotc_NativeGameActivity_nativeSetInput(JNIEnv *, jclass, jint 
     std::lock_guard lock(stateMutex);
     if (!isPaused.load(std::memory_order_relaxed))
         input = {static_cast<uint16_t>(buttons), stickAxis(lx), stickAxis(ly), stickAxis(rx), stickAxis(ry)};
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_genisson_sotc_NativeGameActivity_nativeSetWidescreen(JNIEnv *, jclass, jboolean enabled, jfloat aspect)
+{
+    requestedAspect.store(enabled != JNI_FALSE && std::isfinite(aspect) && aspect > ps2x::android::kOriginalAspect
+                              ? aspect : 0.0f,
+                          std::memory_order_relaxed);
 }
 
 extern "C" JNIEXPORT void JNICALL

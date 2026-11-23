@@ -2848,8 +2848,18 @@ void PS2Runtime::run()
             const float screenWidth = static_cast<float>(GetScreenWidth());
             const float screenHeight = static_cast<float>(GetScreenHeight());
             // The PS2 picture is 4:3 whatever its pixel size (512x448, 640x448...).
-            const float aspect = 4.0f / 3.0f;
-            const int screenMode = hostmenu::settings().screenMode.load(std::memory_order_relaxed);
+            float aspect = 4.0f / 3.0f;
+            int screenMode = hostmenu::settings().screenMode.load(std::memory_order_relaxed);
+#if defined(__ANDROID__)
+            if (const float widescreen = ps2x::android::activeWidescreenAspect(); widescreen > 0.0f)
+            {
+                // PSS movies use the original display aspect. The camera and
+                // 2D coordinates determine the aspect of the live picture.
+                if (!ps2_stubs::mpegPlaybackActive())
+                    aspect = widescreen;
+                screenMode = hostmenu::kScreenFit;
+            }
+#endif
             float dstWidth = std::min(screenWidth, screenHeight * aspect);
             float dstHeight = dstWidth / aspect;
             if (screenMode == hostmenu::kScreenStretch)

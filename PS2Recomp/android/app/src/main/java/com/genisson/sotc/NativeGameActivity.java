@@ -2,8 +2,9 @@ package com.genisson.sotc;
 
 import android.app.AlertDialog;
 import android.app.NativeActivity;
-import android.os.Bundle;
+import android.content.SharedPreferences;
 import android.graphics.PixelFormat;
+import android.os.Bundle;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowManager;
@@ -14,20 +15,26 @@ import android.widget.TextView;
 import java.io.File;
 
 public final class NativeGameActivity extends NativeActivity {
+    private static final String ADAPTIVE_WIDESCREEN = "adaptive_widescreen";
     static { System.loadLibrary("ps2EntryRunner"); }
     public static native boolean nativeHasGame();
     public static native void nativeConfigure(String disc, String bootElf, String saves, String log, int resolutionPercent);
     public static native void nativeSetInput(int buttons, float moveX, float moveY, float cameraX, float cameraY);
     public static native void nativeReleaseInput();
     public static native void nativePause(boolean paused);
+    private static native void nativeSetWidescreen(boolean enabled, float aspect);
     private TouchControlsView controls;
     private boolean editing;
     private AlertDialog menu;
     private boolean overlayAttached;
     private boolean resumed;
+    private SharedPreferences displayPreferences;
     private android.window.OnBackInvokedCallback backCallback;
 
     @Override protected void onCreate(Bundle state) {
+        displayPreferences = getSharedPreferences("sotc-display", MODE_PRIVATE);
+        android.util.DisplayMetrics metrics = getResources().getDisplayMetrics();
+        updateDisplayMode(metrics.widthPixels, metrics.heightPixels);
         String disc = getIntent().getStringExtra("disc");
         if (disc != null) {
             File saves = new File(getFilesDir(), "memcards");
@@ -43,6 +50,15 @@ public final class NativeGameActivity extends NativeActivity {
         }
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         immersive();
+        View gameWindow = getWindow().getDecorView();
+        gameWindow.addOnLayoutChangeListener((view, left, top, right, bottom,
+                oldLeft, oldTop, oldRight, oldBottom) -> {
+            int width = right - left;
+            int height = bottom - top;
+            if (width != oldRight - oldLeft || height != oldBottom - oldTop) {
+                updateDisplayMode(width, height);
+            }
+        });
         controls = new TouchControlsView(this);
         controls.setListener(new TouchControlsView.Listener() {
             @Override public void onInput(int buttons, float mx, float my, float cx, float cy) {
@@ -82,6 +98,13 @@ public final class NativeGameActivity extends NativeActivity {
                 | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
     }
 
+    private void updateDisplayMode(int width, int height) {
+        if (width > 0 && height > 0) {
+            nativeSetWidescreen(displayPreferences.getBoolean(ADAPTIVE_WIDESCREEN, true),
+                    (float) width / height);
+        }
+    }
+
     private void showMenu() {
         if (controls == null || isFinishing() || isDestroyed() || (menu != null && menu.isShowing())) return;
         controls.releaseAll();
@@ -90,6 +113,15 @@ public final class NativeGameActivity extends NativeActivity {
         content.setOrientation(LinearLayout.VERTICAL);
         int padding = (int) (20 * getResources().getDisplayMetrics().density);
         content.setPadding(padding, padding, padding, padding);
+        CheckBox widescreen = new CheckBox(this);
+        widescreen.setText(R.string.game_adaptive_widescreen);
+        widescreen.setChecked(displayPreferences.getBoolean(ADAPTIVE_WIDESCREEN, true));
+        content.addView(widescreen);
+        widescreen.setOnCheckedChangeListener((button, value) -> {
+            displayPreferences.edit().putBoolean(ADAPTIVE_WIDESCREEN, value).apply();
+            View gameWindow = getWindow().getDecorView();
+            updateDisplayMode(gameWindow.getWidth(), gameWindow.getHeight());
+        });
         slider(content, "Tamanho dos controles", controls.getControlScale(), .7f, 1.3f, controls::setControlScale);
         slider(content, "Opacidade", controls.getOpacity(), .2f, 1f, controls::setOpacity);
         slider(content, "Sensibilidade da câmera", controls.getCameraSensitivity(), .35f, 2.5f, controls::setCameraSensitivity);

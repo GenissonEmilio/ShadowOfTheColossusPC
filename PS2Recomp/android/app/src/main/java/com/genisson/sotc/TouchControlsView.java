@@ -51,11 +51,11 @@ public final class TouchControlsView extends View {
         new Control("focus", "Focar", TouchInputState.L1, .145f, .36f, .070f),
         new Control("weapon-left", "Arma", TouchInputState.LEFT, .405f, .885f, .065f),
         new Control("weapon-right", "Arma", TouchInputState.RIGHT, .592f, .885f, .065f),
-        new Control("grip", "Agarrar", TouchInputState.R1, -.154f, .249f, .081f),
-        new Control("jump", "Pular", TouchInputState.TRIANGLE, -.274f, .510f, .078f),
-        new Control("attack", "Atacar", TouchInputState.SQUARE, -.454f, .675f, .076f),
-        new Control("action", "Ação", TouchInputState.CIRCLE, -.094f, .675f, .076f),
-        new Control("agro", "Agro", TouchInputState.CROSS, -.274f, .840f, .076f),
+        new Control("grip", "Agarrar", TouchInputState.R1, -.177f, .473f, .081f),
+        new Control("jump", "Pular", TouchInputState.TRIANGLE, -.291f, .893f, .078f),
+        new Control("attack", "Atacar", TouchInputState.SQUARE, -.205f, .701f, .076f),
+        new Control("action", "Ação", TouchInputState.CIRCLE, -.392f, .619f, .076f),
+        new Control("agro", "Agro", TouchInputState.CROSS, -.511f, .819f, .076f),
         new Control("map", "Mapa", TouchInputState.SELECT, -.095f, .091f, .060f),
         new Control("pause", "Pausa", TouchInputState.START, .095f, .091f, .060f)
     };
@@ -394,7 +394,7 @@ public final class TouchControlsView extends View {
             float x = event.getX(index);
             float y = event.getY(index);
             Control control = controlAt(x, y);
-            input.pointerMove(id, x, y, event.getEventTime(), buttonOf(control), isCameraArea(x, y, control));
+            input.pointerMove(id, x, y, event.getEventTime(), buttonOf(control));
         }
     }
 

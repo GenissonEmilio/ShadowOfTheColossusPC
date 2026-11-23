@@ -7,7 +7,8 @@ the game. The desktop launcher remains available separately.
 ## Controls
 
 - Left stick: move Wander or Agro.
-- Drag an empty area on the right: camera. There is no fixed camera stick.
+- Start a drag in an empty area on the right to move the camera. The same finger
+  can cross buttons without activating them.
 - Focar (L1), Arma (D-pad left/right), Mapa (Select), and Pausa (Start) retain
   their labeled controls.
 - The diamond sigil opens touch settings. Move controls in edit mode and tap the
@@ -26,9 +27,18 @@ The input router tracks pointer IDs independently: gripping, moving, jumping and
 looking can be combined. Camera movement expires when a finger stops. Cancel,
 backgrounding and focus loss release held input. The HUD is a separate Android
 application panel, because NativeActivity owns the game surface and input queue.
-The touch camera compensates the original game's 40% radial dead zone. Its
-default axis signs follow the viewing direction; the two inversion options
-remain available independently.
+The touch camera filters small position jitter and increases the stick response
+for deliberate swipes. Short, slow drags can move the camera past the game's
+40% radial dead zone. Both axes can still be inverted independently.
+
+## Display
+
+**Tela cheia adaptada** is enabled by default for landscape displays wider
+than 4:3. The game adapts its projection to show more of the scene horizontally
+while keeping the menu, subtitles and indicators in their original proportions.
+Prerecorded movies use their original framing. The diamond menu lets you
+switch back to the centered 4:3 view. The display choice is saved separately
+from the touch controls.
 
 ## Importing your disc
 

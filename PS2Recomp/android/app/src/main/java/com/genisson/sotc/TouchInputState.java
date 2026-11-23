@@ -18,8 +18,9 @@ final class TouchInputState {
     private static final int POINTER_ID_COUNT = 32;
     private static final float MOVE_DEAD_ZONE = .12f;
     private static final long CAMERA_IDLE_MS = 48;
-    private static final float CAMERA_FULL_DEFLECTION_PER_MS = .001f;
-    private static final float CAMERA_DEAD_ZONE_WITH_MARGIN = .41f;
+    private static final float CAMERA_FULL_DEFLECTION_PER_MS = .0004f;
+    private static final float CAMERA_JITTER_FRACTION = .0008f;
+    private static final float CAMERA_DEAD_ZONE_WITH_MARGIN = .42f;
 
     private final boolean[] buttonPointers = new boolean[POINTER_ID_COUNT];
     private final int[] heldButtons = new int[POINTER_ID_COUNT];
@@ -29,13 +30,13 @@ final class TouchInputState {
     private float movementCenterY;
     private float movementRadius = 1;
     private float cameraTravelPerMs = 1;
+    private float cameraJitter = .5f;
     private float cameraSensitivity = 1;
     private float cameraSignX = -1;
     private float cameraSignY = -1;
     private float previousCameraX;
     private float previousCameraY;
     private long previousCameraTime;
-    private boolean previousCameraAllowed;
 
     int buttons;
     float moveX;
@@ -49,7 +50,9 @@ final class TouchInputState {
         this.movementCenterX = movementCenterX;
         this.movementCenterY = movementCenterY;
         this.movementRadius = Math.max(1, movementRadius);
-        cameraTravelPerMs = Math.max(1, shortSide) * CAMERA_FULL_DEFLECTION_PER_MS;
+        float screenSize = Math.max(1, shortSide);
+        cameraTravelPerMs = screenSize * CAMERA_FULL_DEFLECTION_PER_MS;
+        cameraJitter = Math.max(.5f, screenSize * CAMERA_JITTER_FRACTION);
     }
 
     void configureCamera(float sensitivity, boolean invertX, boolean invertY) {
@@ -77,20 +80,19 @@ final class TouchInputState {
             previousCameraX = x;
             previousCameraY = y;
             previousCameraTime = time;
-            previousCameraAllowed = true;
         } else {
             buttonPointers[id] = true;
         }
     }
 
-    void pointerMove(int id, float x, float y, long time, int button, boolean onCamera) {
+    void pointerMove(int id, float x, float y, long time, int button) {
         if (!validId(id)) {
             return;
         }
         if (id == movementPointer) {
             updateMovement(x, y);
         } else if (id == cameraPointer) {
-            updateCamera(x, y, time, onCamera);
+            updateCamera(x, y, time);
         } else if (buttonPointers[id]) {
             setHeldButton(id, button);
         }
@@ -144,26 +146,19 @@ final class TouchInputState {
         moveY = dy * response / distance;
     }
 
-    private void updateCamera(float x, float y, long time, boolean onCamera) {
-        if (!onCamera || !previousCameraAllowed) {
-            previousCameraX = x;
-            previousCameraY = y;
-            previousCameraTime = time;
-            previousCameraAllowed = onCamera;
-            clearCameraAxes();
-            return;
-        }
+    private void updateCamera(float x, float y, long time) {
         float dx = x - previousCameraX;
         float dy = y - previousCameraY;
-        if (dx == 0 && dy == 0) {
+        float distance = (float) Math.hypot(dx, dy);
+        if (distance < cameraJitter) {
             return;
         }
-        long elapsedMs = Math.max(8, Math.min(CAMERA_IDLE_MS, time - previousCameraTime));
-        float distance = (float) Math.hypot(dx, dy);
+        long elapsedMs = Math.max(4, Math.min(CAMERA_IDLE_MS, time - previousCameraTime));
         float speed = Math.min(1, distance * cameraSensitivity / (cameraTravelPerMs * elapsedMs));
         // The game subtracts a radial dead zone of .4 from its right stick.
-        // Leave room for conversion to the pad's 8-bit axes.
-        float deflection = CAMERA_DEAD_ZONE_WITH_MARGIN + (1 - CAMERA_DEAD_ZONE_WITH_MARGIN) * speed;
+        // Boost deliberate slow swipes while leaving room for the pad's 8-bit axes.
+        float response = speed * (2 - speed);
+        float deflection = CAMERA_DEAD_ZONE_WITH_MARGIN + (1 - CAMERA_DEAD_ZONE_WITH_MARGIN) * response;
         cameraX = (dx / distance) * deflection * cameraSignX;
         cameraY = (dy / distance) * deflection * cameraSignY;
         previousCameraX = x;

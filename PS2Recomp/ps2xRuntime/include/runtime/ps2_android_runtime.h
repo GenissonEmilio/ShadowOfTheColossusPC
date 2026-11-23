@@ -7,6 +7,8 @@
 
 namespace ps2x::android
 {
+    inline constexpr float kOriginalAspect = 4.0f / 3.0f;
+
     struct LaunchPaths
     {
         std::string discDirectory;
@@ -24,6 +26,11 @@ namespace ps2x::android
 
     LaunchPaths launchPaths();
     PadInput padInput();
+    // Zero asks for the original 4:3 presentation.
+    float requestedWidescreenAspect();
+    // Published by the guest thread once it updates the camera projection.
+    void setActiveWidescreenAspect(float aspect);
+    float activeWidescreenAspect();
     bool paused();
     std::chrono::steady_clock::duration waitWhilePaused(const std::atomic<bool> &stopRequested);
     void wakeGuest();
