@@ -7,12 +7,12 @@ Built on [Celosia](https://github.com/HenryKun55/celosia) and
 
 ## Android mobile support
 
-The **Android ARM64 development preview** runs on Android 9 or later with
+The **Android ARM64 port** runs on Android 9 or later with
 OpenGL ES 3.0. It includes a mobile launcher, customizable touch controls, a
 swipe camera, and **Adaptive fullscreen**, which shows more of the scene at
 the sides while preserving the vertical framing and interface proportions.
 
-The [Android release](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/android-v0.2.0-dev)
+The [Android release](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/android-v0.2.0)
 provides source code. To play, follow the [Android build and signing guide](PS2Recomp/android/README.md)
 and build an APK locally using your own **SCUS-97472** disc image. The title
 screen and opening shrine were checked on a physical ARM64 phone. The campaign
@@ -79,7 +79,7 @@ cards are outside the count. Results apply to the Linux versions listed.
 
 ## Play
 
-1. Download the package for your system from [Releases](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases).
+1. Download the package for your system from the [desktop release](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/v1.2.3).
 2. Extract the entire package and open `ShadowOfTheColossusPC` on Linux or
    `ShadowOfTheColossusPC.exe` on Windows.
 3. Choose your North American disc image (`.iso`, `.7z`, `.zip`, or `.rar`).
