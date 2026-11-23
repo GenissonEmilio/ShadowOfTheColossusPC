@@ -5,6 +5,11 @@ Linux and Windows launcher, a local recompiler, and a native OpenGL renderer.
 Built on [Celosia](https://github.com/HenryKun55/celosia) and
 [PS2Recomp](https://github.com/ran-j/PS2Recomp).
 
+Android ARM64 development is in [PS2Recomp/android](PS2Recomp/android/README.md),
+including the native GLES renderer, customizable touch controls and swipe camera.
+It uses the same owned North American disc. Android gameplay validation is separate
+from the desktop campaign results below.
+
 ## How it works
 
 The disc’s MIPS executable and the KERNEL, MANAGER, and GAMECORE modules are

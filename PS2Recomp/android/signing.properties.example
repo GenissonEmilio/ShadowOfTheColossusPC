@@ -1,0 +1,8 @@
+# Copy to signing.properties locally. Environment variables take precedence.
+# Keep the real file and keystore outside version control.
+# Absolute paths are recommended; relative paths resolve against PS2Recomp/android.
+storeFile=/absolute/private/path/shadow-android-release.p12
+storeType=PKCS12
+storePassword=REPLACE_LOCALLY
+keyAlias=shadow-android-release
+keyPassword=REPLACE_LOCALLY

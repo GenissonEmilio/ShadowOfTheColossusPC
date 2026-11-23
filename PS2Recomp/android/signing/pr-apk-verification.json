@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "record_date": "2026-11-23",
+  "artifact": {
+    "file_name": "ShadowOfTheColossus-Android-0.1.0-dev-arm64-pr.apk",
+    "bytes": 119886091,
+    "sha256": "85f9010e66e6947793d9bcb55ec64c6ead986f094f0be9f2b54e92ee90b37bc0",
+    "application_id": "com.genisson.sotc",
+    "version_name": "0.1.0-dev",
+    "version_code": 1,
+    "variant": "debug",
+    "android_gradle_plugin": "8.10.1",
+    "device_tested": false,
+    "native_library": {
+      "entry": "lib/arm64-v8a/libps2EntryRunner.so",
+      "sha256": "a33c16f933b157c7daa9a788967367a15dfccd3d1ee23441667241e110b42ca5"
+    }
+  },
+  "signing": {
+    "purpose": "development-only",
+    "certificate_file": "development-certificate.pem",
+    "certificate_subject": "C=US, O=Android, CN=Android Debug",
+    "certificate_sha256": "7a36cd2a366bc313eb83a20b3325f9efc7e093a55ad7853a4fd797a5d8ed000e",
+    "verified_signature_scheme_v2": true
+  },
+  "distribution": "private local APK; not included in Git or CI artifacts"
+}

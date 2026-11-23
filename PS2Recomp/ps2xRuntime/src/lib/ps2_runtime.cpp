@@ -8,6 +8,11 @@
 #include "runtime/ps2_vu1_native.h"
 #include "ps2_runtime.h"
 #include "runtime/native_renderer.h"
+#if defined(__ANDROID__)
+#include "native/native_backend.h"
+#include "runtime/ps2_android_runtime.h"
+#include <EGL/egl.h>
+#endif
 #include <filesystem>
 #include "runtime/native_tuning.h"
 #include "runtime/host_menu.h"
@@ -73,7 +78,11 @@ static constexpr uint32_t DEFAULT_FB_ADDR = (PS2_RAM_SIZE - DEFAULT_FB_SIZE - 0x
 #if defined(PLATFORM_VITA)
 static constexpr int HOST_WINDOW_WIDTH = 960;
 static constexpr int HOST_WINDOW_HEIGHT = 544;
-#elif defined(__linux__) && !defined(__ANDROID__)
+#elif defined(__ANDROID__)
+// raylib uses the native surface dimensions when both are zero.
+static constexpr int HOST_WINDOW_WIDTH = 0;
+static constexpr int HOST_WINDOW_HEIGHT = 0;
+#elif defined(__linux__)
 static constexpr int HOST_WINDOW_WIDTH = 1024;
 static constexpr int HOST_WINDOW_HEIGHT = 720;
 #else
@@ -625,15 +634,20 @@ void PS2Runtime::setDebugUiCallbacks(DebugUiCallback initCallback,
     m_debugUiUserData = userData;
 }
 
+namespace
+{
+    // Audio callbacks may still be draining the IOP's ring buffer at shutdown.
+    std::atomic<ps2x::iop::IopSubsystem *> g_spu2AudioSource{nullptr};
+}
+
 PS2Runtime::~PS2Runtime()
 {
     try
     {
         requestStop();
-        m_iopSubsystem.reset();
-        m_iopHost.reset();
-#if defined(PLATFORM_VITA) && !defined(PS2X_VITA_SDL2_SHIM)
+        g_spu2AudioSource.store(nullptr, std::memory_order_release);
         m_audioBackend.stopAll();
+#if defined(PLATFORM_VITA) && !defined(PS2X_VITA_SDL2_SHIM)
         m_audioBackend.setAudioReady(false);
 #else
         if (IsAudioDeviceReady())
@@ -642,6 +656,8 @@ PS2Runtime::~PS2Runtime()
             m_audioBackend.setAudioReady(false);
         }
 #endif
+        m_iopSubsystem.reset();
+        m_iopHost.reset();
         if (m_debugUiInitialized && m_debugUiShutdownCallback)
         {
             m_debugUiShutdownCallback(*this, m_debugUiUserData);
@@ -650,6 +666,9 @@ PS2Runtime::~PS2Runtime()
 
         if (IsWindowReady())
         {
+#if defined(__ANDROID__)
+            ps2x::android::shutdownRenderer();
+#endif
             CloseWindow();
         }
 
@@ -926,10 +945,6 @@ bool PS2Runtime::syncCoreSubsystems()
 
 namespace
 {
-    // Host audio: the IOP's SPU2 produces 48 kHz stereo into a ring buffer
-    // that raylib's audio thread drains through this callback.
-    std::atomic<ps2x::iop::IopSubsystem *> g_spu2AudioSource{nullptr};
-
     void spu2AudioCallback(void *buffer, unsigned int frames)
     {
         auto *out = static_cast<int16_t *>(buffer);
@@ -985,6 +1000,13 @@ bool PS2Runtime::initialize(const char *title)
         setenv("RESOURCE_NAME", "shadow-of-the-colossus-pc", 0);
 #endif
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
+#if defined(__ANDROID__)
+        if (!IsWindowReady() || !ps2x::android::initializeRenderer())
+        {
+            std::cerr << "Could not initialize the Android GLES renderer" << std::endl;
+            return false;
+        }
+#endif
 #if defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__))
         if (std::getenv("PS2X_GS_HW"))
         {
@@ -1396,6 +1418,11 @@ void PS2Runtime::configureIoPathsFromElf(const std::string &elfPath)
         paths.mcRoot = paths.elfDirectory / "mc0";
     }
 
+#if defined(__ANDROID__)
+    const auto androidPaths = ps2x::android::launchPaths();
+    paths.hostRoot = paths.cdRoot = androidPaths.discDirectory;
+    paths.mcRoot = androidPaths.saveDirectory;
+#endif
     setIoPaths(paths);
 }
 
@@ -2993,8 +3020,42 @@ void PS2Runtime::run()
 #endif
 
     uint64_t tick = 0;
+#if !(defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
+    Texture2D nativeTex{};
+    std::vector<uint8_t> nativePixels;
+#endif
+#if defined(__ANDROID__)
+    bool audioPaused = false;
+    float audioVolumeBeforePause = 1.0f;
+    const char *reuseOption = std::getenv("SOTC_REUSE_NATIVE_FRAME");
+    const bool reuseNativeFrame = !reuseOption || reuseOption[0] != '0';
+    uint64_t nativeFrameSerial = 0;
+    bool hadNativePicture = false;
+    const bool logAndroidFrames = native_renderer::detail::androidFrameStatsEnabled();
+    native_renderer::detail::AndroidFrameStats lastAndroidFrameStats;
+    double androidFrameWindowStart = GetTime();
+    uint64_t androidHostFrames = 0, androidUploads = 0, androidReusedFrames = 0;
+#endif
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
     {
+#if defined(__ANDROID__)
+        const bool paused = ps2x::android::paused();
+        if (paused != audioPaused && IsAudioDeviceReady())
+        {
+            if (paused)
+                audioVolumeBeforePause = GetMasterVolume();
+            SetMasterVolume(paused ? 0.0f : audioVolumeBeforePause);
+            audioPaused = paused;
+        }
+        if (paused || eglGetCurrentContext() == EGL_NO_CONTEXT)
+        {
+            PollInputEvents();
+            if (WindowShouldClose())
+                break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(8));
+            continue;
+        }
+#endif
         {
             // Renderer setting 'Cap at 30 fps': the picture shown every other
             // vblank at most (the Vita: vsync interval 2), so a game frame
@@ -3075,13 +3136,20 @@ void PS2Runtime::run()
 #if !(defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
         // The native renderer's picture at its own size (it may draw larger
         // than the PS2's 512 x 448), filtered: not through the GS's display.
-        static Texture2D nativeTex{};
-        static std::vector<uint8_t> nativePixels;
         bool nativeOnScreen = false;
+#if defined(__ANDROID__)
+        bool uploadedNativeFrame = false;
+#endif
         if (native_renderer::shown())
         {
             uint32_t nw = 0, nh = 0;
-            if (native_renderer::latestFrame(nativePixels, nw, nh) && nw && nh && nativePixels.size() >= static_cast<size_t>(nw) * nh * 4u)
+#if defined(__ANDROID__)
+            uint64_t serial = reuseNativeFrame ? nativeFrameSerial : 0u;
+            const bool newFrame = native_renderer::detail::copyFrameIfNew(nativePixels, nw, nh, serial);
+#else
+            const bool newFrame = native_renderer::latestFrame(nativePixels, nw, nh);
+#endif
+            if (newFrame && nw && nh && nativePixels.size() >= static_cast<size_t>(nw) * nh * 4u)
             {
                 // The display shows colour only (the PS2's CRTC ignores alpha):
                 // drawn blended over black, the picture's alpha darkened it.
@@ -3100,8 +3168,54 @@ void PS2Runtime::run()
                 presentWidth = nw;
                 presentHeight = nh;
                 nativeOnScreen = true;
+#if defined(__ANDROID__)
+                uploadedNativeFrame = nativeTex.id != 0;
+                nativeOnScreen = uploadedNativeFrame;
+                if (uploadedNativeFrame)
+                    nativeFrameSerial = serial;
+#endif
+            }
+#if defined(__ANDROID__)
+            else if (reuseNativeFrame && hadNativePicture && nativeTex.id)
+            {
+                // Keep drawing the last texture while the game builds the next frame.
+                presentWidth = static_cast<uint32_t>(nativeTex.width);
+                presentHeight = static_cast<uint32_t>(nativeTex.height);
+                nativeOnScreen = true;
+            }
+#endif
+        }
+#if defined(__ANDROID__)
+        hadNativePicture = nativeOnScreen;
+        if (logAndroidFrames)
+        {
+            ++androidHostFrames;
+            androidUploads += uploadedNativeFrame;
+            androidReusedFrames += nativeOnScreen && !uploadedNativeFrame;
+            const double now = GetTime();
+            const double window = now - androidFrameWindowStart;
+            if (window >= 5.0)
+            {
+                const auto stats = native_renderer::detail::androidFrameStats();
+                const auto averageMs = [](uint64_t micros, uint64_t count)
+                {
+                    return count ? static_cast<double>(micros) / (1000.0 * count) : 0.0;
+                };
+                const auto published = stats.published - lastAndroidFrameStats.published;
+                std::fprintf(stderr,
+                             "[android:frame] %.1f s | threaded=%d reuse=%d | host %.1f fps native %.1f fps | uploads %llu reused %llu | "
+                             "render %.2f ms readback %.2f ms handoff %.2f ms\n",
+                             window, native_renderer::tuning().renderThread, reuseNativeFrame, androidHostFrames / window, published / window,
+                             static_cast<unsigned long long>(androidUploads), static_cast<unsigned long long>(androidReusedFrames),
+                             averageMs(stats.renderUs - lastAndroidFrameStats.renderUs, stats.rendered - lastAndroidFrameStats.rendered),
+                             averageMs(stats.readbackUs - lastAndroidFrameStats.readbackUs, published),
+                             averageMs(stats.handoffUs - lastAndroidFrameStats.handoffUs, stats.submitted - lastAndroidFrameStats.submitted));
+                androidFrameWindowStart = now;
+                androidHostFrames = androidUploads = androidReusedFrames = 0;
+                lastAndroidFrameStats = stats;
             }
         }
+#endif
         const Texture2D &shownTex = nativeOnScreen ? nativeTex : (g_directFrame.id ? g_directFrame : frameTex);
         // F8: the same moment twice, for comparing: the emulated picture (the
         // native one hidden for a few frames so the GS draws), the native one,
@@ -3488,7 +3602,14 @@ void PS2Runtime::run()
         m_debugUiShutdownCallback(*this, m_debugUiUserData);
         m_debugUiInitialized = false;
     }
+#if defined(__ANDROID__)
+    ps2x::android::shutdownRenderer();
+#endif
     UnloadTexture(frameTex);
+#if !(defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
+    if (nativeTex.id)
+        UnloadTexture(nativeTex);
+#endif
 #if defined(__linux__) && !defined(__ANDROID__)
     desktop_video::shutdown();
 #endif

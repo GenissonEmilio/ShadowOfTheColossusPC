@@ -1,0 +1,46 @@
+name: Android
+on:
+  push:
+    branches: [main]
+    paths: ['PS2Recomp/**', 'game/overrides/**', 'tests/android/**', 'tools/android/**', '.github/workflows/android.yml']
+  pull_request:
+    paths: ['PS2Recomp/**', 'game/overrides/**', 'tests/android/**', 'tools/android/**', '.github/workflows/android.yml']
+permissions:
+  contents: read
+jobs:
+  android-runtime:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+      - name: SDK and NDK
+        run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0' 'ndk;28.2.13676358' 'cmake;3.31.6'
+      - name: Input and disc regression tests
+        run: |
+          mkdir -p /tmp/sotc-java-tests
+          javac -encoding UTF-8 -d /tmp/sotc-java-tests \
+            PS2Recomp/android/app/src/main/java/com/genisson/sotc/TouchInputState.java \
+            PS2Recomp/android/app/src/main/java/com/genisson/sotc/DiscImageImporter.java \
+            PS2Recomp/android/app/src/main/java/com/genisson/sotc/DiscRepository.java \
+            tests/android/TouchInputStateTest.java tests/android/DiscImageImporterTest.java \
+            tests/android/DiscRepositoryTest.java
+          java -cp /tmp/sotc-java-tests com.genisson.sotc.TouchInputStateTest
+          java -cp /tmp/sotc-java-tests com.genisson.sotc.DiscImageImporterTest
+          java -cp /tmp/sotc-java-tests com.genisson.sotc.DiscRepositoryTest
+      - name: Compile ARM64 runtime and Android instrumentation without game data
+        working-directory: PS2Recomp/android
+        run: bash gradlew assembleDebug assembleDebugAndroidTest lintDebug --no-daemon --max-workers=2
+      - name: Verify ROM-free APK signature and ZIP alignment
+        run: |
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs \
+            PS2Recomp/android/app/build/outputs/apk/debug/app-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 4 \
+            PS2Recomp/android/app/build/outputs/apk/debug/app-debug.apk
+      # No game or playable APK is published by this ROM-free build.

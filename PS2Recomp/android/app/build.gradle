@@ -1,59 +1,122 @@
-plugins {
-    id 'com.android.application'
-}
+plugins { id 'com.android.application' }
 
-// Override with: gradlew assembleRelease -Pps2xBootElf=/absolute/path/on/device.elf
-def ps2xBootElf = project.findProperty('ps2xBootElf') ?: '/storage/emulated/0/Android/data/com.ps2x.runner/files/game.elf'
+def generatedDir = providers.gradleProperty('sotcGeneratedDir').orNull
+def vu1Dir = providers.gradleProperty('sotcVu1Dir').orNull
+def prebuiltDir = providers.gradleProperty('sotcPrebuiltDir').orNull
+def ffmpegRoot = providers.gradleProperty('sotcFfmpegRoot').orNull
+def captureMissing = providers.gradleProperty('sotcCaptureMissing').getOrElse('false').toBoolean()
+def hasGame = providers.gradleProperty('sotcHasGame').getOrElse(generatedDir != null ? 'true' : 'false').toBoolean()
+def bootSha256 = providers.gradleProperty('sotcBootSha256').getOrElse('')
+if (hasGame && !(bootSha256 ==~ /(?i)[0-9a-f]{64}/)) {
+    throw new GradleException('A game build requires -PsotcBootSha256 with the SHA-256 of its SCUS executable.')
+}
+if (prebuiltDir != null && !new File(file(prebuiltDir), 'arm64-v8a/libps2EntryRunner.so').isFile()) {
+    throw new GradleException('sotcPrebuiltDir must contain arm64-v8a/libps2EntryRunner.so.')
+}
+def releaseProperties = new Properties()
+def releasePropertiesFile = rootProject.file('signing.properties')
+if (releasePropertiesFile.isFile()) releasePropertiesFile.withInputStream { releaseProperties.load(it) }
+def signingValue = { String propertyName, String environmentName ->
+    providers.environmentVariable(environmentName).orNull ?: releaseProperties.getProperty(propertyName)
+}
+def releaseStoreFile = signingValue('storeFile', 'SOTC_KEYSTORE_FILE')
+def releaseStorePassword = signingValue('storePassword', 'SOTC_KEYSTORE_PASSWORD')
+def releaseKeyAlias = signingValue('keyAlias', 'SOTC_KEY_ALIAS')
+def releaseKeyPassword = signingValue('keyPassword', 'SOTC_KEY_PASSWORD')
+def releaseStoreType = signingValue('storeType', 'SOTC_KEYSTORE_TYPE') ?: 'PKCS12'
+def releaseSigningReady = [releaseStoreFile, releaseStorePassword, releaseKeyAlias, releaseKeyPassword].every { it != null && !it.isBlank() }
+def sourceRoot = file('../../..')
+def runnerDirs = generatedDir == null ? file('../../ps2xRuntime/src/runner').absolutePath :
+    [file(generatedDir).absolutePath, new File(sourceRoot, 'game/overrides').absolutePath,
+     vu1Dir == null ? null : file(vu1Dir).absolutePath].findAll { it != null }.join(';')
 
 android {
-    namespace 'com.ps2x.runner'
-    compileSdk 34
+    namespace 'com.genisson.sotc'
+    compileSdk 36
+    buildToolsVersion '35.0.0'
     ndkVersion '28.2.13676358'
-
     defaultConfig {
-        applicationId 'com.ps2x.runner'
+        applicationId 'com.genisson.sotc'
         minSdk 28
-        targetSdk 34
+        targetSdk 36
         versionCode 1
-        versionName '0.1.0'
-
-        externalNativeBuild {
-            cmake {
-                arguments '-DPS2X_BUILD_RECOMP=OFF',
-                        '-DPS2X_BUILD_ANALYZER=OFF',
-                        '-DPS2X_BUILD_TEST=OFF',
-                        '-DPS2X_BUILD_STUDIO=OFF',
-                        '-DPS2X_ENABLE_SCCACHE=OFF',
-                        '-DPS2X_RUNNER_UNITY_BUILD_BATCH_SIZE=32',
-                        '-DANDROID_CPP_FEATURES=rtti exceptions',
-                        "-DPS2X_DEFAULT_BOOT_ELF=${ps2xBootElf}"
-                targets 'ps2EntryRunner'
-            }
-        }
-
-        ndk {
-            abiFilters 'arm64-v8a', 'x86_64'
-        }
-    }
-
-    externalNativeBuild {
-        cmake {
-            path '../../CMakeLists.txt'
-            version '3.22.1'
-        }
-    }
-
-    buildTypes {
-        debug {
+        versionName '0.1.0-dev'
+        testInstrumentationRunner 'com.genisson.sotc.ControlsInstrumentation'
+        buildConfigField 'boolean', 'HAS_GAME', hasGame.toString()
+        buildConfigField 'String', 'BOOT_SHA256', '"' + bootSha256 + '"'
+        ndk { abiFilters 'arm64-v8a' }
+        if (prebuiltDir == null) {
             externalNativeBuild {
                 cmake {
-                    arguments '-DCMAKE_BUILD_TYPE=RelWithDebInfo'
+                    arguments '-DPS2X_BUILD_RECOMP=OFF', '-DPS2X_BUILD_ANALYZER=OFF',
+                        '-DPS2X_BUILD_TEST=OFF', '-DPS2X_BUILD_STUDIO=OFF',
+                        '-DPS2X_ENABLE_DEBUG_UI=OFF', '-DPS2X_ENABLE_SCCACHE=OFF',
+                        '-DPS2X_ENABLE_CCACHE=OFF', '-DPS2X_ENABLE_AGRESSIVE_LOGS=OFF',
+                        '-DPS2X_ENABLE_IOP_RPC_TRACE=OFF', '-DANDROID_STL=c++_shared',
+                        '-DPS2X_RUNNER_UNITY_BUILD_BATCH_SIZE=8',
+                        "-DSOTC_HAS_GAME=${generatedDir == null ? 'OFF' : 'ON'}",
+                        "-DSOTC_ANDROID_CAPTURE_MODULES=${captureMissing ? 'ON' : 'OFF'}",
+                        "-DPS2X_RUNNER_DIRS=${runnerDirs.replace('\\', '/')}"
+                    targets 'ps2EntryRunner'
+                    if (ffmpegRoot != null) {
+                        arguments '-DPS2X_ENABLE_FFMPEG=ON', "-DPS2X_ANDROID_FFMPEG_ROOT=${file(ffmpegRoot).absolutePath.replace('\\', '/')}"
+                    }
                 }
             }
         }
+    }
+    buildFeatures { buildConfig true }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+    if (prebuiltDir == null) {
+        externalNativeBuild {
+            cmake {
+                path '../../CMakeLists.txt'
+                version '3.31.6'
+                if (providers.gradleProperty('sotcBuildDir').isPresent()) {
+                    buildStagingDirectory file(providers.gradleProperty('sotcBuildDir').get())
+                }
+            }
+        }
+    } else { sourceSets.main.jniLibs.srcDirs = [file(prebuiltDir)] }
+    signingConfigs {
+        release {
+            if (releaseSigningReady) {
+                storeFile rootProject.file(releaseStoreFile)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+                storeType releaseStoreType
+            }
+        }
+    }
+    buildTypes {
         release {
             minifyEnabled false
-            signingConfig signingConfigs.debug
+            if (releaseSigningReady) signingConfig signingConfigs.release
+        }
+    }
+    packaging { jniLibs { useLegacyPackaging = false } }
+    sourceSets.main.assets.srcDir(layout.buildDirectory.dir('generated/licenseAssets'))
+}
+
+tasks.register('collectLicenses', Copy) {
+    into layout.buildDirectory.dir('generated/licenseAssets/licenses')
+    from(new File(sourceRoot, 'LICENSE')) { rename { 'PS2Recomp-GPL-3.0.txt' } }
+    if (ffmpegRoot != null) {
+        from(new File(file(ffmpegRoot), 'COPYING.LGPLv2.1')) { rename { 'FFmpeg-LGPL-2.1.txt' } }
+        from(new File(file(ffmpegRoot), 'BUILD-FFMPEG.txt'))
+    }
+}
+tasks.named('preBuild').configure { dependsOn 'collectLicenses' }
+
+tasks.register('validateLocalReleaseSigning') {
+    doLast {
+        if (!releaseSigningReady) {
+            throw new GradleException('Release signing is required. Configure the SOTC_KEYSTORE_* / SOTC_KEY_* environment variables or private signing.properties; see signing/README.md.')
+        }
+        if (!rootProject.file(releaseStoreFile).isFile()) {
+            throw new GradleException('The configured release keystore file does not exist.')
         }
     }
 }
+tasks.matching { it.name == 'preReleaseBuild' }.configureEach { dependsOn 'validateLocalReleaseSigning' }

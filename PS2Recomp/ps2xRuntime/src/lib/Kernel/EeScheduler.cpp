@@ -5,6 +5,9 @@
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_stats.h"
 #include "runtime/ps2_thread_load.h"
+#if defined(__ANDROID__)
+#include "runtime/ps2_android_runtime.h"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -196,6 +199,18 @@ void EeScheduler::run()
 
     while (!m_stopRequested.load(std::memory_order_relaxed))
     {
+#if defined(__ANDROID__)
+        const auto pausedTime = ps2x::android::waitWhilePaused(m_stopRequested);
+        if (pausedTime != std::chrono::steady_clock::duration::zero())
+        {
+            // Resume with the same guest time and VBlank pacing.
+            std::lock_guard lock(m_eventMutex);
+            if (m_hostClockSync)
+                m_hostClockBase += pausedTime;
+            for (ScheduledEvent &event : m_deadlines)
+                event.hostDeadline += pausedTime;
+        }
+#endif
         processPendingEvents();
         if (m_stopRequested.load(std::memory_order_relaxed))
         {
@@ -426,6 +441,9 @@ void EeScheduler::requestStop()
     m_stopRequested.store(true, std::memory_order_release);
     m_checkpointPending.store(true, std::memory_order_release);
     m_eventCv.notify_all();
+#if defined(__ANDROID__)
+    ps2x::android::wakeGuest();
+#endif
 }
 
 void EeScheduler::postEvent(EeEvent event)

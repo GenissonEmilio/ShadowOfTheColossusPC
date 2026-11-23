@@ -9,6 +9,9 @@
 #include <vector>
 #include <cstdlib>
 #include "runtime/ps2_pad.h"
+#if defined(__ANDROID__)
+#include "runtime/ps2_android_runtime.h"
+#endif
 #include "runtime/ps2_stats.h"
 #include "ps2_host_backend.h"
 #include <cstring>
@@ -184,6 +187,24 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
         data[yIndex] = static_cast<uint8_t>(y < 0 ? 0x00 : (y > 0 ? 0xFF : kPadStickCenter));
     };
     setStick(6, 7, keyAxis(KEY_A, KEY_D), keyAxis(KEY_W, KEY_S));
+
+#if defined(__ANDROID__)
+    const auto touch = ps2x::android::padInput();
+    clearBit(touch.buttons);
+    const auto touchStick = [data](int xIndex, int yIndex, float x, float y)
+    {
+        if (x == 0 && y == 0)
+            return;
+        const auto axisByte = [](float axis)
+        {
+            return static_cast<uint8_t>(std::lround(128.0f + axis * (axis < 0 ? 128.0f : 127.0f)));
+        };
+        data[xIndex] = axisByte(x);
+        data[yIndex] = axisByte(y);
+    };
+    touchStick(6, 7, touch.lx, touch.ly);
+    touchStick(4, 5, touch.rx, touch.ry);
+#endif
 
     // PS2X_INPUT_SCRIPT="<sec>:<BUTTON>:<duration>;..." scripted presses for testing.
     // Besides buttons, LS_UP/LS_DOWN/LS_LEFT/LS_RIGHT push the left stick.
