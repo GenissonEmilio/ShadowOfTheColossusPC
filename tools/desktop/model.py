@@ -12,7 +12,7 @@ from import_disc import PROFILES, import_disc, validate_disc
 from language import preferences, translate as tr
 from pipeline import CompilationError, PAL_BOOT, Pipeline, PROCESS_FLAGS, WINDOWS, compiler_tool
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 APPLICATION_ID = "io.github.GenissonEmilio.ShadowOfTheColossusPC"
 SAVE_STATES_AVAILABLE = sys.platform.startswith("linux")
