@@ -2,8 +2,12 @@ package com.genisson.sotc;
 
 import android.app.AlertDialog;
 import android.app.NativeActivity;
+import android.content.SharedPreferences;
+import android.content.res.Configuration;
 import android.os.Bundle;
 import android.graphics.PixelFormat;
+import android.graphics.Point;
+import android.graphics.Rect;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowManager;
@@ -14,6 +18,7 @@ import android.widget.TextView;
 import java.io.File;
 
 public final class NativeGameActivity extends NativeActivity {
+    private static final String FULLSCREEN_ZOOM = "fullscreen_zoom";
     static { System.loadLibrary("ps2EntryRunner"); }
     public static native boolean nativeHasGame();
     public static native void nativeConfigure(String disc, String bootElf, String saves, String log, int resolutionPercent);
@@ -25,6 +30,9 @@ public final class NativeGameActivity extends NativeActivity {
     private AlertDialog menu;
     private boolean overlayAttached;
     private boolean resumed;
+    private SharedPreferences displayPreferences;
+    private int originalWindowGravity;
+    private int originalCutoutMode;
     private android.window.OnBackInvokedCallback backCallback;
 
     @Override protected void onCreate(Bundle state) {
@@ -43,6 +51,11 @@ public final class NativeGameActivity extends NativeActivity {
         }
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         immersive();
+        displayPreferences = getSharedPreferences("sotc-display", MODE_PRIVATE);
+        WindowManager.LayoutParams window = getWindow().getAttributes();
+        originalWindowGravity = window.gravity;
+        originalCutoutMode = window.layoutInDisplayCutoutMode;
+        applyDisplayMode();
         controls = new TouchControlsView(this);
         controls.setListener(new TouchControlsView.Listener() {
             @Override public void onInput(int buttons, float mx, float my, float cx, float cy) {
@@ -82,6 +95,54 @@ public final class NativeGameActivity extends NativeActivity {
                 | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
     }
 
+    private void applyDisplayMode() {
+        if (displayPreferences == null) return;
+        boolean zoom = displayPreferences.getBoolean(FULLSCREEN_ZOOM, false) && !isInMultiWindowMode();
+        WindowManager.LayoutParams window = getWindow().getAttributes();
+        int width = WindowManager.LayoutParams.MATCH_PARENT;
+        int height = WindowManager.LayoutParams.MATCH_PARENT;
+        int gravity = originalWindowGravity;
+        int cutoutMode = originalCutoutMode;
+        int flags = window.flags & ~WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
+        if (zoom) {
+            int visibleWidth;
+            int visibleHeight;
+            if (android.os.Build.VERSION.SDK_INT >= 30) {
+                Rect bounds = getWindowManager().getCurrentWindowMetrics().getBounds();
+                visibleWidth = bounds.width();
+                visibleHeight = bounds.height();
+            } else {
+                Point size = new Point();
+                getWindowManager().getDefaultDisplay().getRealSize(size);
+                visibleWidth = size.x;
+                visibleHeight = size.y;
+            }
+            if (visibleWidth <= 0 || visibleHeight <= 0) return;
+            // Give the native renderer a centered 4:3 window that covers the viewport.
+            // Android clips the overflow. The controls panel still uses the screen bounds.
+            width = Math.max(visibleWidth, (int) Math.ceil(visibleHeight * (4.0 / 3.0)));
+            height = Math.max(visibleHeight, (int) Math.ceil(visibleWidth * (3.0 / 4.0)));
+            gravity = Gravity.CENTER;
+            cutoutMode = android.os.Build.VERSION.SDK_INT >= 30
+                    ? WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                    : WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            flags |= WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
+        }
+        if (window.width == width && window.height == height && window.gravity == gravity
+                && window.layoutInDisplayCutoutMode == cutoutMode && window.flags == flags) return;
+        window.width = width;
+        window.height = height;
+        window.gravity = gravity;
+        window.layoutInDisplayCutoutMode = cutoutMode;
+        window.flags = flags;
+        getWindow().setAttributes(window);
+    }
+
+    @Override public void onConfigurationChanged(Configuration configuration) {
+        super.onConfigurationChanged(configuration);
+        applyDisplayMode();
+    }
+
     private void showMenu() {
         if (controls == null || isFinishing() || isDestroyed() || (menu != null && menu.isShowing())) return;
         controls.releaseAll();
@@ -90,6 +151,15 @@ public final class NativeGameActivity extends NativeActivity {
         content.setOrientation(LinearLayout.VERTICAL);
         int padding = (int) (20 * getResources().getDisplayMetrics().density);
         content.setPadding(padding, padding, padding, padding);
+        CheckBox zoom = new CheckBox(this);
+        zoom.setText("Tela cheia (zoom com corte)");
+        zoom.setChecked(displayPreferences.getBoolean(FULLSCREEN_ZOOM, false));
+        zoom.setEnabled(!isInMultiWindowMode());
+        content.addView(zoom);
+        zoom.setOnCheckedChangeListener((button, value) -> {
+            displayPreferences.edit().putBoolean(FULLSCREEN_ZOOM, value).apply();
+            applyDisplayMode();
+        });
         slider(content, "Tamanho dos controles", controls.getControlScale(), .7f, 1.3f, controls::setControlScale);
         slider(content, "Opacidade", controls.getOpacity(), .2f, 1f, controls::setOpacity);
         slider(content, "Sensibilidade da câmera", controls.getCameraSensitivity(), .35f, 2.5f, controls::setCameraSensitivity);

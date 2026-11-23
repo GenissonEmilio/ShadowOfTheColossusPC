@@ -394,7 +394,7 @@ public final class TouchControlsView extends View {
             float x = event.getX(index);
             float y = event.getY(index);
             Control control = controlAt(x, y);
-            input.pointerMove(id, x, y, event.getEventTime(), buttonOf(control), isCameraArea(x, y, control));
+            input.pointerMove(id, x, y, event.getEventTime(), buttonOf(control));
         }
     }
 

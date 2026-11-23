@@ -119,6 +119,10 @@ public final class ControlsInstrumentation extends Instrumentation {
             check(probe.moveX > 0 && probe.moveY > 0, "joystick did not move down and right");
             check(probe.cameraX < 0 && probe.cameraY < 0, "free swipe did not move the camera in the expected direction");
             check(Math.hypot(probe.cameraX, probe.cameraY) > .4, "free swipe stayed inside the game's dead zone");
+            contacts[2] = Contact.at(camera.id, view.controlBounds(TouchInputState.CIRCLE));
+            touch.send(MotionEvent.ACTION_MOVE, contacts);
+            check(Math.hypot(probe.cameraX, probe.cameraY) > .4 && probe.buttons == TouchInputState.R1,
+                    "camera drag stopped or pressed Action when crossing its button");
         });
         check(probe.cameraStopped.await(3, TimeUnit.SECONDS), "stationary finger kept the camera active");
         onMain(() -> {
