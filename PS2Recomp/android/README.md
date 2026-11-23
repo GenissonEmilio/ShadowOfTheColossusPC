@@ -35,8 +35,9 @@ be validated independently; compilation and HUD tests do not prove playability.
 
 ## Development build
 
-Requirements: JDK 17, Android SDK 36, build-tools 35.0.0, NDK 28.2.13676358 and SDK
-CMake 3.31.6. Set `ANDROID_HOME` or `local.properties` (not committed).
+Requirements: JDK 17, Android Gradle Plugin 8.10.1 (pinned), Gradle 8.12 (wrapper),
+Android SDK 36, build-tools 35.0.0, NDK 28.2.13676358 and SDK CMake 3.31.6.
+Set `ANDROID_HOME` or `local.properties` (not committed).
 
 ```sh
 cd PS2Recomp/android
@@ -49,8 +50,30 @@ Play button stays unavailable. It is not a playable distribution.
 Prepare generated C++ from the owned disc outside the repository using
 `tools/android/prepare_game.py --help`. That script builds and executes successive
 host runners to capture relocated modules. Existing host restrictions must be
-respected; an Android-only development capture build can obtain the missing
-module on the device with `SOTC_ANDROID_CAPTURE_MODULES=ON`.
+respected. To reuse already collected captures, pass the host recompiler and the
+private files explicitly:
+
+```sh
+python tools/android/prepare_game.py --iso /private/owned-disc.iso \
+  --work /private/work --recompiler /private/tools/ps2_recomp \
+  --captures-dir /private/captures
+```
+
+The capture directory must contain the three 32 MiB files `kernel.bin`,
+`manager.bin` and `gamecore.bin`. An Android development capture build can obtain
+the final module when the earlier generated stages are available:
+
+```sh
+./gradlew assembleDebug -PsotcCaptureMissing=true \
+  -PsotcGeneratedDir=/private/work/manager/output \
+  -PsotcBootSha256=SHA256_OF_SCUS_974_72
+```
+
+This maps to CMake's `SOTC_ANDROID_CAPTURE_MODULES=ON`. The runtime writes
+`files/capture-gamecore.bin` in app-private storage; copy it to the private capture
+directory as `gamecore.bin` before running `prepare_game.py --captures-dir`.
+Capture mode is a development stage and intentionally stops at the missing
+GAMECORE entry. It is disabled for the complete build.
 
 For a game build, pass these Gradle properties:
 
@@ -80,13 +103,20 @@ license and a record of the configure command. Pass the install directory as
 
 For Windows, invoke `gradlew.bat`. `-PsotcBuildDir=D:/short/build` avoids long native
 build paths. To package an already built library, use
-`-PsotcPrebuiltDir=/private/jniLibs -PsotcHasGame=true`; that directory must contain
+`-PsotcPrebuiltDir=/private/jniLibs`, `-PsotcHasGame=true` and
+`-PsotcBootSha256=SHA256_OF_SCUS_974_72`; that directory must contain
 `arm64-v8a/libps2EntryRunner.so` and any non-system shared dependencies. Prebuilt
 mode does not rebuild or verify native compilation flags.
+Game builds require the SCUS SHA-256 property. The app verifies that executable;
+the full `NICO.DAT` hash in the validation report is a separate, one-time check.
+
+Public development certificates, APK verification metadata and private release
+signing configuration are documented in [APK signing](signing/README.md).
 
 Generated C++, captures, disc contents, saves, local keys and APKs must remain
-outside the public repository. The CI job only builds the ROM-free harness and
-does not publish a game APK.
+outside version control. The CI job builds the ROM-free harness and runs JVM
+tests and lint. It compiles instrumentation; executing those tests needs a device.
+It does not publish a game APK.
 
 ## Tests
 

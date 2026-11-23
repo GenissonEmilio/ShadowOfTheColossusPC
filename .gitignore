@@ -50,4 +50,8 @@ celosia_settings.cfg
 *.aab
 *.keystore
 *.jks
+*.p12
+*.pfx
+*.key
+**/signing.properties
 /private-android/

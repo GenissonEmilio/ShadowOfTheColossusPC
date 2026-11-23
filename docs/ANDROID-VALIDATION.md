@@ -35,7 +35,7 @@ campaign results in the project README.
 | Main/effects/skinning GLES shader compilation | Validated statically |
 | Native EGL renderer initialization | Passed on Adreno 810 |
 | SCUS/KERNEL/MANAGER execution and GAMECORE loading | Passed on Android; real RAM captured |
-| Complete game execution | FMV, title menu, New Game and initial 3D shrine displayed |
+| Game boot and initial 3D scene | FMV, title menu, New Game and initial 3D shrine displayed |
 | Gameplay touch input | Movement, jump, pause/map and both camera directions checked |
 | Native memory-card persistence | ARM64 probe wrote 512 bytes and another process verified them in a separate synthetic card |
 | Background and return | 3D scene and HUD restored twice in the same process; held movement released |
@@ -55,12 +55,15 @@ resolution and effects. The only differences were renderer overlap and reuse
 of an unchanged presentation texture. Each row summarizes six consecutive
 five-second windows after the scene had settled.
 
-| Mode | Mean native frames/s | Range | Mean game-thread render handoff | Texture uploads per 5 s |
+| Mode | Mean renderer frames published/s | Range | Mean game-thread render handoff | Texture uploads per 5 s |
 | --- | ---: | ---: | ---: | ---: |
 | Synchronous, repeat texture uploads | 21.6 | 20.6–23.0 | 25.9 ms | 300 |
 | Parallel rendering, reuse unchanged texture | 34.0 | 33.4–36.4 | 8.7 ms | 167–182 |
 
-This is about 57% more native frames in this scene. Host presentation remained
+This is about 57% more frames published by the renderer in this scene. The raw
+six-window samples are in [the benchmark record](android-benchmark-2026-11-23.json).
+The A/B runs were sequential; device temperature and other system load were not
+controlled. Host presentation remained
 approximately 60 Hz. These measurements do not guarantee the same performance
 throughout the campaign or on other devices. Diagnostics are off by default;
 the private A/B configuration was removed after testing.
@@ -98,6 +101,36 @@ diagnostics reported nonzero amplitudes. System volume was muted, so audible
 quality was not assessed or changed. The FMV image was reviewed on the device.
 
 This is a development APK, version `0.1.0-dev`, not a campaign-complete release.
+
+## PR packaging and signing follow-up
+
+The gameplay measurements and device checks above used the original AGP 8.7.3
+APK, SHA-256 `4a809123ca2cc53d48a0b0c49d5725208a088ecdcf7173721f5c720131b66f18`.
+The PR moves to AGP 8.10.1, which supports compile/target API 36. Gradle remains
+8.12, JDK 17 and NDK 28.2.13676358. Local debug/instrumentation packaging passed;
+the new lint run reported 0 errors and 17 warnings. The local SDK property path
+was escaped correctly for the newer lint rule.
+
+The separate PR APK, SHA-256
+`85f9010e66e6947793d9bcb55ec64c6ead986f094f0be9f2b54e92ee90b37bc0`, passed
+signature, certificate, ZIP alignment and native-library hash verification.
+The packaged native library is byte-identical in both APKs. The phone was no
+longer connected for this repackaging, so device testing was not repeated and
+the original APK was preserved. Public certificate and verification metadata
+are under `PS2Recomp/android/signing`; no private key is committed.
+
+Release signing was tested with a temporary PKCS12 key: `assembleRelease`,
+signature verification and 16 KiB ZIP alignment passed. The temporary key was
+removed, and that probe APK was not installed or published. Negative checks
+rejected absent signing configuration, a missing keystore, a game build without
+its SCUS hash, and a nonexistent prebuilt library. These are packaging/configuration
+checks, not production-key provisioning or additional gameplay tests.
+
+The PR's ROM-free workflow runs the three JVM suites, compiles the ARM64 runtime
+and instrumentation APK, runs lint, and checks its debug APK signature and ZIP
+alignment. It does not execute instrumentation, load game data or certify the
+campaign. GitHub check results belong to the PR; the tables above are local and
+device evidence.
 
 Private captures, logs, generated C++ and disc files are kept outside the
 repository. The local APK is in the ignored `artifacts` directory. ROM-free CI

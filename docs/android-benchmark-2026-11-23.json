@@ -1,0 +1,174 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-23",
+  "device": {
+    "os": "Android 16",
+    "gpu": "Qualcomm Adreno 810",
+    "display_landscape": [
+      2772,
+      1280
+    ]
+  },
+  "scene": "New Game, initial shrine altar, stationary after scene settled",
+  "render_scale_percent": 100,
+  "effects_changed_between_runs": false,
+  "method": "Sequential A/B; six consecutive five-second windows per mode. Temperature and system load were not controlled.",
+  "metric": "Frames published by the native renderer; distinct from approximately 60 Hz host presentation.",
+  "artifact_sha256": "4a809123ca2cc53d48a0b0c49d5725208a088ecdcf7173721f5c720131b66f18",
+  "baseline": [
+    {
+      "window_seconds": 5.0,
+      "threaded": 0.0,
+      "reuse": 0.0,
+      "host_fps": 60.0,
+      "renderer_published_fps": 21.8,
+      "uploads": 300.0,
+      "reused": 0.0,
+      "render_ms": 25.0,
+      "readback_ms": 17.93,
+      "handoff_ms": 25.24
+    },
+    {
+      "window_seconds": 5.0,
+      "threaded": 0.0,
+      "reuse": 0.0,
+      "host_fps": 60.0,
+      "renderer_published_fps": 23.0,
+      "uploads": 300.0,
+      "reused": 0.0,
+      "render_ms": 24.97,
+      "readback_ms": 17.93,
+      "handoff_ms": 25.16
+    },
+    {
+      "window_seconds": 5.0,
+      "threaded": 0.0,
+      "reuse": 0.0,
+      "host_fps": 59.9,
+      "renderer_published_fps": 21.4,
+      "uploads": 300.0,
+      "reused": 0.0,
+      "render_ms": 26.06,
+      "readback_ms": 18.38,
+      "handoff_ms": 26.3
+    },
+    {
+      "window_seconds": 5.0,
+      "threaded": 0.0,
+      "reuse": 0.0,
+      "host_fps": 60.0,
+      "renderer_published_fps": 22.4,
+      "uploads": 300.0,
+      "reused": 0.0,
+      "render_ms": 25.32,
+      "readback_ms": 18.04,
+      "handoff_ms": 25.53
+    },
+    {
+      "window_seconds": 5.0,
+      "threaded": 0.0,
+      "reuse": 0.0,
+      "host_fps": 59.9,
+      "renderer_published_fps": 20.6,
+      "uploads": 300.0,
+      "reused": 0.0,
+      "render_ms": 26.48,
+      "readback_ms": 18.34,
+      "handoff_ms": 26.76
+    },
+    {
+      "window_seconds": 5.0,
+      "threaded": 0.0,
+      "reuse": 0.0,
+      "host_fps": 60.0,
+      "renderer_published_fps": 20.6,
+      "uploads": 300.0,
+      "reused": 0.0,
+      "render_ms": 26.38,
+      "readback_ms": 18.33,
+      "handoff_ms": 26.65
+    }
+  ],
+  "optimized": [
+    {
+      "window_seconds": 5.0,
+      "threaded": 1.0,
+      "reuse": 1.0,
+      "host_fps": 60.0,
+      "renderer_published_fps": 34.2,
+      "uploads": 171.0,
+      "reused": 129.0,
+      "render_ms": 28.69,
+      "readback_ms": 18.03,
+      "handoff_ms": 8.56
+    },
+    {
+      "window_seconds": 5.0,
+      "threaded": 1.0,
+      "reuse": 1.0,
+      "host_fps": 59.9,
+      "renderer_published_fps": 33.4,
+      "uploads": 167.0,
+      "reused": 133.0,
+      "render_ms": 29.45,
+      "readback_ms": 18.14,
+      "handoff_ms": 8.74
+    },
+    {
+      "window_seconds": 5.0,
+      "threaded": 1.0,
+      "reuse": 1.0,
+      "host_fps": 60.0,
+      "renderer_published_fps": 36.4,
+      "uploads": 182.0,
+      "reused": 118.0,
+      "render_ms": 27.17,
+      "readback_ms": 17.98,
+      "handoff_ms": 8.98
+    },
+    {
+      "window_seconds": 5.0,
+      "threaded": 1.0,
+      "reuse": 1.0,
+      "host_fps": 60.0,
+      "renderer_published_fps": 33.4,
+      "uploads": 167.0,
+      "reused": 133.0,
+      "render_ms": 29.62,
+      "readback_ms": 18.19,
+      "handoff_ms": 8.66
+    },
+    {
+      "window_seconds": 5.0,
+      "threaded": 1.0,
+      "reuse": 1.0,
+      "host_fps": 60.0,
+      "renderer_published_fps": 33.4,
+      "uploads": 167.0,
+      "reused": 133.0,
+      "render_ms": 29.42,
+      "readback_ms": 18.07,
+      "handoff_ms": 8.82
+    },
+    {
+      "window_seconds": 5.0,
+      "threaded": 1.0,
+      "reuse": 1.0,
+      "host_fps": 60.0,
+      "renderer_published_fps": 33.4,
+      "uploads": 167.0,
+      "reused": 133.0,
+      "render_ms": 29.64,
+      "readback_ms": 18.23,
+      "handoff_ms": 8.6
+    }
+  ],
+  "summary": {
+    "baseline_mean_renderer_fps": 21.633333333333336,
+    "optimized_mean_renderer_fps": 34.03333333333333,
+    "improvement_percent": 57.31895223420644,
+    "baseline_mean_handoff_ms": 25.939999999999998,
+    "optimized_mean_handoff_ms": 8.726666666666667
+  },
+  "scope": "Single-scene observation; not a campaign-wide or other-device performance guarantee."
+}

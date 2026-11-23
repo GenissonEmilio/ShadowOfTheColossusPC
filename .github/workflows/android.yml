@@ -1,6 +1,7 @@
 name: Android
 on:
   push:
+    branches: [main]
     paths: ['PS2Recomp/**', 'game/overrides/**', 'tests/android/**', 'tools/android/**', '.github/workflows/android.yml']
   pull_request:
     paths: ['PS2Recomp/**', 'game/overrides/**', 'tests/android/**', 'tools/android/**', '.github/workflows/android.yml']
@@ -32,5 +33,11 @@ jobs:
           java -cp /tmp/sotc-java-tests com.genisson.sotc.DiscRepositoryTest
       - name: Compile ARM64 runtime and Android instrumentation without game data
         working-directory: PS2Recomp/android
-        run: bash gradlew assembleDebug assembleDebugAndroidTest --no-daemon --max-workers=2
+        run: bash gradlew assembleDebug assembleDebugAndroidTest lintDebug --no-daemon --max-workers=2
+      - name: Verify ROM-free APK signature and ZIP alignment
+        run: |
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs \
+            PS2Recomp/android/app/build/outputs/apk/debug/app-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 4 \
+            PS2Recomp/android/app/build/outputs/apk/debug/app-debug.apk
       # No game or playable APK is published by this ROM-free build.

@@ -5,6 +5,26 @@ def vu1Dir = providers.gradleProperty('sotcVu1Dir').orNull
 def prebuiltDir = providers.gradleProperty('sotcPrebuiltDir').orNull
 def ffmpegRoot = providers.gradleProperty('sotcFfmpegRoot').orNull
 def captureMissing = providers.gradleProperty('sotcCaptureMissing').getOrElse('false').toBoolean()
+def hasGame = providers.gradleProperty('sotcHasGame').getOrElse(generatedDir != null ? 'true' : 'false').toBoolean()
+def bootSha256 = providers.gradleProperty('sotcBootSha256').getOrElse('')
+if (hasGame && !(bootSha256 ==~ /(?i)[0-9a-f]{64}/)) {
+    throw new GradleException('A game build requires -PsotcBootSha256 with the SHA-256 of its SCUS executable.')
+}
+if (prebuiltDir != null && !new File(file(prebuiltDir), 'arm64-v8a/libps2EntryRunner.so').isFile()) {
+    throw new GradleException('sotcPrebuiltDir must contain arm64-v8a/libps2EntryRunner.so.')
+}
+def releaseProperties = new Properties()
+def releasePropertiesFile = rootProject.file('signing.properties')
+if (releasePropertiesFile.isFile()) releasePropertiesFile.withInputStream { releaseProperties.load(it) }
+def signingValue = { String propertyName, String environmentName ->
+    providers.environmentVariable(environmentName).orNull ?: releaseProperties.getProperty(propertyName)
+}
+def releaseStoreFile = signingValue('storeFile', 'SOTC_KEYSTORE_FILE')
+def releaseStorePassword = signingValue('storePassword', 'SOTC_KEYSTORE_PASSWORD')
+def releaseKeyAlias = signingValue('keyAlias', 'SOTC_KEY_ALIAS')
+def releaseKeyPassword = signingValue('keyPassword', 'SOTC_KEY_PASSWORD')
+def releaseStoreType = signingValue('storeType', 'SOTC_KEYSTORE_TYPE') ?: 'PKCS12'
+def releaseSigningReady = [releaseStoreFile, releaseStorePassword, releaseKeyAlias, releaseKeyPassword].every { it != null && !it.isBlank() }
 def sourceRoot = file('../../..')
 def runnerDirs = generatedDir == null ? file('../../ps2xRuntime/src/runner').absolutePath :
     [file(generatedDir).absolutePath, new File(sourceRoot, 'game/overrides').absolutePath,
@@ -22,8 +42,8 @@ android {
         versionCode 1
         versionName '0.1.0-dev'
         testInstrumentationRunner 'com.genisson.sotc.ControlsInstrumentation'
-        buildConfigField 'boolean', 'HAS_GAME', providers.gradleProperty('sotcHasGame').getOrElse(generatedDir != null ? 'true' : 'false')
-        buildConfigField 'String', 'BOOT_SHA256', '"' + providers.gradleProperty('sotcBootSha256').getOrElse('') + '"'
+        buildConfigField 'boolean', 'HAS_GAME', hasGame.toString()
+        buildConfigField 'String', 'BOOT_SHA256', '"' + bootSha256 + '"'
         ndk { abiFilters 'arm64-v8a' }
         if (prebuiltDir == null) {
             externalNativeBuild {
@@ -58,7 +78,23 @@ android {
             }
         }
     } else { sourceSets.main.jniLibs.srcDirs = [file(prebuiltDir)] }
-    buildTypes { release { minifyEnabled false } }
+    signingConfigs {
+        release {
+            if (releaseSigningReady) {
+                storeFile rootProject.file(releaseStoreFile)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+                storeType releaseStoreType
+            }
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (releaseSigningReady) signingConfig signingConfigs.release
+        }
+    }
     packaging { jniLibs { useLegacyPackaging = false } }
     sourceSets.main.assets.srcDir(layout.buildDirectory.dir('generated/licenseAssets'))
 }
@@ -72,3 +108,15 @@ tasks.register('collectLicenses', Copy) {
     }
 }
 tasks.named('preBuild').configure { dependsOn 'collectLicenses' }
+
+tasks.register('validateLocalReleaseSigning') {
+    doLast {
+        if (!releaseSigningReady) {
+            throw new GradleException('Release signing is required. Configure the SOTC_KEYSTORE_* / SOTC_KEY_* environment variables or private signing.properties; see signing/README.md.')
+        }
+        if (!rootProject.file(releaseStoreFile).isFile()) {
+            throw new GradleException('The configured release keystore file does not exist.')
+        }
+    }
+}
+tasks.matching { it.name == 'preReleaseBuild' }.configureEach { dependsOn 'validateLocalReleaseSigning' }
