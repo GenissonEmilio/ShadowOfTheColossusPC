@@ -5,15 +5,26 @@ Linux and Windows launcher, a local recompiler, and a native OpenGL renderer.
 Built on [Celosia](https://github.com/HenryKun55/celosia) and
 [PS2Recomp](https://github.com/ran-j/PS2Recomp).
 
-Android ARM64 development is in [PS2Recomp/android](PS2Recomp/android/README.md),
-including the native GLES renderer, customizable touch controls and swipe camera.
-It uses the same owned North American disc. Android gameplay validation is separate
-from the desktop campaign results below.
+## Android mobile support
+
+The **Android ARM64 development preview** runs on Android 9 or later with
+OpenGL ES 3.0. It includes a mobile launcher, customizable touch controls, a
+swipe camera, and **Adaptive fullscreen**, which shows more of the scene at
+the sides while preserving the vertical framing and interface proportions.
+
+The [Android release](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/android-v0.2.0-dev)
+provides source code. To play, follow the [Android build and signing guide](PS2Recomp/android/README.md)
+and build an APK locally using your own **SCUS-97472** disc image. The title
+screen and opening shrine were checked on a physical ARM64 phone. The campaign
+table below records desktop validation.
+
+![Android shrine comparison showing original 4:3 above and adaptive fullscreen below](docs/android-widescreen.png)
 
 ## How it works
 
 The disc’s MIPS executable and the KERNEL, MANAGER, and GAMECORE modules are
-translated to C++ and compiled for x86_64 on your computer. The port reads models,
+translated to C++ and compiled on your computer for x86_64 on desktop or
+ARM64 on Android. The port reads models,
 textures, animations, and audio from your disc and runs without PCSX2 or a BIOS.
 The runtime implements the PS2 services the game uses. Manual decompilation
 continues upstream in Celosia.
