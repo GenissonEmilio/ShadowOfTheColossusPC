@@ -9,6 +9,7 @@ namespace desktop_video
 {
     Rectangle destination(int width, int height, int sourceWidth, int sourceHeight, int mode);
     void setFullscreen(bool enabled);
+    bool isFullscreen();
     bool loadShader(const char *path, std::string &error);
     bool shaderActive();
     void draw(Texture2D texture, int width, int height, bool flipY, int mode);
