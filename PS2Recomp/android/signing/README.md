@@ -41,19 +41,19 @@ Alternatively, copy `../signing.properties.example` to the ignored
 take precedence. Passwords are not Gradle command-line arguments or repository
 secrets in this change.
 
-From `PS2Recomp/android`, use the same private game/prebuilt and FFmpeg properties
-documented in the Android README:
+From `PS2Recomp/android`, build the public APK using the Android version and
+version code planned for the release:
 
 ```sh
-./gradlew :app:assembleRelease \
-  -PsotcPrebuiltDir=/private/jniLibs -PsotcHasGame=true \
-  -PsotcBootSha256=SHA256_OF_SCUS_974_72 \
-  -PsotcFfmpegRoot=/private/ffmpeg/install
+./gradlew :app:assembleRelease -PsotcPortable=true \
+  -PsotcVersionName=0.2.1 -PsotcVersionCode=3
 ```
 
 `assembleRelease` fails if signing configuration is absent or its keystore is
 missing. Debug builds and the ROM-free CI need no release credentials. The
-workflow does not sign or publish a playable release.
+signed public app uses `com.genisson.sotc.mobile` and imports the private
+game bundle prepared from the player's disc. Development builds keep their own
+app data and saves.
 
 ## Verification and certificate export
 

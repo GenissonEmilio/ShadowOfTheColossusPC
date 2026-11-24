@@ -28,12 +28,16 @@ import java.util.function.IntConsumer;
 
 public final class MainActivity extends Activity {
     private static final int IMPORT_DISC = 100;
+    private static final int IMPORT_PLAYER = 101;
+    private static final String BOOT_SHA256 = BuildConfig.PORTABLE ? PlayerPackage.BOOT_SHA256 : BuildConfig.BOOT_SHA256;
     private static final ThreadPoolExecutor DISK_WORKER = new ThreadPoolExecutor(
             1, 1, 30, TimeUnit.SECONDS, new LinkedBlockingQueue<>());
     static { DISK_WORKER.allowCoreThreadTimeOut(true); }
 
     private SharedPreferences preferences;
     private DiscRepository discs;
+    private PlayerPackage player;
+    private boolean playerInstalled;
     private final ReentrantLock discCommit = new ReentrantLock();
     private DiscRepository.Verification verifiedDisc = DiscRepository.Verification.MISSING;
     private FutureTask<Void> diskTask;
@@ -57,6 +61,7 @@ public final class MainActivity extends Activity {
         super.onCreate(state);
         preferences = getSharedPreferences("game", MODE_PRIVATE);
         discs = new DiscRepository(getFilesDir(), getCacheDir());
+        player = new PlayerPackage(getFilesDir());
         Window window = getWindow();
         if (Build.VERSION.SDK_INT >= 30) {
             window.setDecorFitsSystemWindows(false);
@@ -69,13 +74,8 @@ public final class MainActivity extends Activity {
         }
         launcher = new LauncherScreen(this);
         launcher.playButton.setOnClickListener(view -> play());
-        launcher.importButton.setOnClickListener(view -> {
-            Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-            picker.addCategory(Intent.CATEGORY_OPENABLE);
-            picker.setType("*/*");
-            picker.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            startActivityForResult(picker, IMPORT_DISC);
-        });
+        launcher.importButton.setOnClickListener(view -> openPicker(IMPORT_DISC));
+        launcher.playerButton.setOnClickListener(view -> openPicker(IMPORT_PLAYER));
         launcher.controlsButton.setOnClickListener(view -> new AlertDialog.Builder(this)
                 .setTitle("Controles touch")
                 .setMessage("Mova Wander com o analógico esquerdo. Arraste a área livre à direita para olhar ao redor.\n\n"
@@ -84,6 +84,18 @@ public final class MainActivity extends Activity {
                 .setPositiveButton("ENTENDI", null).show());
         setContentView(launcher);
         refresh();
+    }
+
+    private void openPicker(int request) {
+        Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        picker.addCategory(Intent.CATEGORY_OPENABLE);
+        picker.setType("*/*");
+        picker.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        startActivityForResult(picker, request);
+    }
+
+    private boolean hasGame() {
+        return BuildConfig.PORTABLE ? playerInstalled : BuildConfig.HAS_GAME;
     }
 
     @Override public void onConfigurationChanged(Configuration config) {
@@ -97,15 +109,22 @@ public final class MainActivity extends Activity {
         lastGameRunning = running;
         boolean busy = diskTask != null;
         launcher.playButton.setText(running ? R.string.launcher_continue : R.string.launcher_play);
-        launcher.setImportHighlighted(!ready && !running);
-        launcher.playButton.setEnabled(ready && BuildConfig.HAS_GAME && !busy && !launching);
+        if (BuildConfig.PORTABLE && !playerInstalled && !running) {
+            launcher.setPrimaryAction(launcher.playerButton);
+        } else {
+            launcher.setPrimaryAction(ready || running ? launcher.playButton : launcher.importButton);
+        }
+        launcher.playButton.setEnabled(ready && hasGame() && !busy && !launching);
         launcher.importButton.setEnabled(!busy && !running);
+        launcher.playerButton.setEnabled(!busy && !running);
         launcher.progress.setVisibility(busy ? View.VISIBLE : View.GONE);
         if (importing) return;
         if (busy) launcher.status.setText("Verificando os arquivos do disco…");
         else if (diskMessage != null) launcher.status.setText(diskMessage);
-        else if (!BuildConfig.HAS_GAME) launcher.status.setText("Preparação do jogo pendente nesta compilação.");
-        else if (running) launcher.status.setText("A jornada está em andamento. Saia do jogo antes de trocar o disco.");
+        else if (running) launcher.status.setText(BuildConfig.PORTABLE
+                ? R.string.launcher_player_running : R.string.launcher_disc_running);
+        else if (BuildConfig.PORTABLE && !playerInstalled) launcher.status.setText(R.string.launcher_player_missing);
+        else if (!hasGame()) launcher.status.setText("Preparação do jogo pendente nesta compilação.");
         else if (ready) launcher.status.setText("Seu disco está pronto. A jornada pode começar.");
         else if (verifiedDisc.directory() != null) launcher.status.setText("O disco importado difere desta compilação. Importe a edição compatível.");
         else launcher.status.setText("Importe sua ISO americana para começar.");
@@ -121,7 +140,7 @@ public final class MainActivity extends Activity {
     }
 
     private void play() {
-        if (launching || diskTask != null || !BuildConfig.HAS_GAME || !verifiedDisc.compatible()) return;
+        if (launching || diskTask != null || !hasGame() || !verifiedDisc.compatible()) return;
         launching = true;
         launcher.playButton.setEnabled(false);
         try {
@@ -138,13 +157,18 @@ public final class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
-        if (request == IMPORT_DISC && result == RESULT_OK && data != null && data.getData() != null && !importing && !gameRunning()) {
-            // A picker result can arrive as a recreated activity starts its verification.
-            cancelDiskTask();
-            launcher.status.setText("Lendo seu disco… mantenha o aplicativo aberto.");
-            Uri uri = data.getData();
-            startDiskTask(true, id -> importDisc(uri, id));
-        }
+        boolean playerRequest = BuildConfig.PORTABLE && request == IMPORT_PLAYER;
+        if ((!playerRequest && request != IMPORT_DISC) || result != RESULT_OK
+                || data == null || data.getData() == null || importing || gameRunning()) return;
+        // A picker result can arrive as a recreated activity starts its verification.
+        cancelDiskTask();
+        launcher.status.setText(playerRequest
+                ? R.string.launcher_player_importing : R.string.launcher_disc_importing);
+        Uri uri = data.getData();
+        startDiskTask(true, id -> {
+            if (playerRequest) importPlayer(uri, id);
+            else importDisc(uri, id);
+        });
     }
 
     private void startDiskTask(boolean importing, IntConsumer work) {
@@ -154,7 +178,7 @@ public final class MainActivity extends Activity {
             try {
                 work.accept(id);
             } catch (RuntimeException error) {
-                publishDiskResult(id, DiscRepository.Verification.MISSING,
+                publishDiskResult(id, DiscRepository.Verification.MISSING, false,
                         "Não foi possível acessar os arquivos do disco: " + error.getMessage());
             }
         }, null);
@@ -190,6 +214,7 @@ public final class MainActivity extends Activity {
     private boolean recoverInterruptedImports(String activePath) {
         try {
             discs.recoverInterruptedImports(activePath);
+            if (BuildConfig.PORTABLE) player.recoverInterruptedImports();
             return true;
         } catch (IOException | RuntimeException error) {
             Log.w("SOTC", "Could not clean up interrupted imports", error);
@@ -201,23 +226,42 @@ public final class MainActivity extends Activity {
         DiscRepository.Verification verification;
         String statusText = message;
         try {
-            verification = discs.verify(activePath, BuildConfig.BOOT_SHA256);
+            verification = discs.verify(activePath, BOOT_SHA256);
         } catch (IOException | RuntimeException error) {
             verification = DiscRepository.Verification.MISSING;
             if (statusText == null) statusText = "Não foi possível verificar o disco: " + error.getMessage();
         }
-        publishDiskResult(id, verification, statusText);
+        publishDiskResult(id, verification, BuildConfig.PORTABLE && player.installedRunner() != null, statusText);
     }
 
-    private void publishDiskResult(int id, DiscRepository.Verification result, String message) {
+    private void publishDiskResult(int id, DiscRepository.Verification result, boolean playerInstalled,
+                                   String message) {
         runOnUiThread(() -> {
             if (isDestroyed() || diskTaskId != id) return;
             diskTask = null;
             importing = false;
             verifiedDisc = result;
+            this.playerInstalled = playerInstalled;
             diskMessage = message;
             refresh();
         });
+    }
+
+    private void importPlayer(Uri uri, int id) {
+        String activePath = preferences.getString("disc", "");
+        String message;
+        try {
+            if (gameRunning()) throw new IOException(getString(R.string.launcher_player_running));
+            try (InputStream input = getContentResolver().openInputStream(uri)) {
+                player.install(input);
+            }
+            message = discs.verify(activePath, BOOT_SHA256).compatible()
+                    ? getString(R.string.launcher_player_imported_ready)
+                    : getString(R.string.launcher_player_imported);
+        } catch (IOException | RuntimeException error) {
+            message = getString(R.string.launcher_player_import_failed, error.getMessage());
+        }
+        finishDiskTask(id, activePath, message);
     }
 
     private void importDisc(Uri uri, int id) {
@@ -244,7 +288,7 @@ public final class MainActivity extends Activity {
                 }
             }
             final long[] lastProgress = { 0 };
-            DiscImageImporter.extract(temporary, destination, BuildConfig.BOOT_SHA256, (bytes, files) -> {
+            DiscImageImporter.extract(temporary, destination, BOOT_SHA256, (bytes, files) -> {
                 long now = System.nanoTime();
                 if (now - lastProgress[0] > 250_000_000L) {
                     lastProgress[0] = now;
@@ -257,7 +301,9 @@ public final class MainActivity extends Activity {
             });
             commitImportedDisc(destination, activePath);
             activePath = destination.getAbsolutePath();
-            message = "Disco importado. Seus saves foram preservados.";
+            message = BuildConfig.PORTABLE && player.installedRunner() == null
+                    ? getString(R.string.launcher_disc_imported_waiting_for_player)
+                    : "Disco importado. Seus saves foram preservados.";
         } catch (IOException | RuntimeException error) {
             message = "Não foi possível importar: " + error.getMessage();
         } finally {

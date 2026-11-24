@@ -18,7 +18,7 @@
             android:screenOrientation="sensorLandscape"
             android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|density"
             android:windowSoftInputMode="stateAlwaysHidden">
-            <meta-data android:name="android.app.lib_name" android:value="ps2EntryRunner" />
+            <meta-data android:name="android.app.lib_name" android:value="${sotcNativeLib}" />
         </activity>
     </application>
 </manifest>

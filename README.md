@@ -12,13 +12,13 @@ OpenGL ES 3.0. It includes a mobile launcher, customizable touch controls, a
 swipe camera, and **Adaptive fullscreen**, which shows more of the scene at
 the sides while preserving the vertical framing and interface proportions.
 
-The [Android release](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/android-v0.2.0)
-provides source code. To play, follow the [Android build and signing guide](PS2Recomp/android/README.md)
-and build an APK locally using your own **SCUS-97472** disc image. The title
-screen and opening shrine were checked on a physical ARM64 phone. The campaign
-table below records desktop validation.
+Download the Android ARM64 APK from the same release as the Linux and Windows
+packages. After installing it, use your own **SCUS-97472** disc image to prepare
+a game bundle on your computer, then import the bundle and the ISO on Android.
+[Latest downloads](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/latest)
+· [Android setup guide](PS2Recomp/android/README.md)
 
-![Android shrine comparison showing original 4:3 above and adaptive fullscreen below](docs/android-widescreen.png)
+![Opening shrine in adaptive fullscreen on Android with touch controls](docs/android-widescreen.png)
 
 ## How it works
 
@@ -79,7 +79,7 @@ cards are outside the count. Results apply to the Linux versions listed.
 
 ## Play
 
-1. Download the package for your system from the [desktop release](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/v1.2.3).
+1. Download the Linux or Windows package from the [latest release](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/latest).
 2. Extract the entire package and open `ShadowOfTheColossusPC` on Linux or
    `ShadowOfTheColossusPC.exe` on Windows.
 3. Choose your North American disc image (`.iso`, `.7z`, `.zip`, or `.rar`).

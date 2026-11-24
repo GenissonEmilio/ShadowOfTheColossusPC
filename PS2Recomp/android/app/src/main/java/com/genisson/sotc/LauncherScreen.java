@@ -45,6 +45,7 @@ final class LauncherScreen extends ScrollView {
 
     final Button playButton;
     final Button importButton;
+    final Button playerButton;
     final Button controlsButton;
     final TextView status;
     final ProgressBar progress;
@@ -56,7 +57,7 @@ final class LauncherScreen extends ScrollView {
     private final LinearLayout menuColumn;
     private final LinearLayout menu;
     private final LinearLayout card;
-    private Boolean importHighlighted;
+    private Button primaryAction;
 
     LauncherScreen(Context context) {
         super(context);
@@ -107,7 +108,8 @@ final class LauncherScreen extends ScrollView {
         LinearLayout discHeading = new LinearLayout(context);
         discHeading.setGravity(Gravity.CENTER_VERTICAL);
         add(card, discHeading, 0);
-        TextView heading = text(getResources().getText(R.string.launcher_disc_heading), 16, GOLD);
+        TextView heading = text(getResources().getText(BuildConfig.PORTABLE
+                ? R.string.launcher_player_heading : R.string.launcher_disc_heading), 16, GOLD);
         heading.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         heading.setAccessibilityHeading(true);
         discHeading.addView(heading, new LinearLayout.LayoutParams(0, WRAP, 1f));
@@ -128,10 +130,13 @@ final class LauncherScreen extends ScrollView {
         add(card, playButton, 14);
         importButton = action(R.string.launcher_import, R.drawable.ic_launcher_disc);
         add(card, importButton, 8);
+        playerButton = action(R.string.launcher_player_import, R.drawable.ic_launcher_sigil);
+        if (!BuildConfig.PORTABLE) playerButton.setVisibility(GONE);
+        add(card, playerButton, 8);
         controlsButton = action(R.string.launcher_controls, R.drawable.ic_launcher_controls);
         styleAction(controlsButton, false);
         add(card, controlsButton, 8);
-        setImportHighlighted(false);
+        setPrimaryAction(playButton);
 
         String footnote = getResources().getString(R.string.launcher_disc_edition) + "\n"
                 + getResources().getString(R.string.launcher_saves);
@@ -176,11 +181,12 @@ final class LauncherScreen extends ScrollView {
         title.setTextSize(config.screenWidthDp < 340 ? 38 : landscape ? 45 : 50);
     }
 
-    void setImportHighlighted(boolean highlighted) {
-        if (importHighlighted != null && importHighlighted == highlighted) return;
-        importHighlighted = highlighted;
-        styleAction(playButton, !highlighted);
-        styleAction(importButton, highlighted);
+    void setPrimaryAction(Button action) {
+        if (primaryAction == action) return;
+        primaryAction = action;
+        styleAction(playButton, action == playButton);
+        styleAction(importButton, action == importButton);
+        styleAction(playerButton, action == playerButton);
     }
 
     private Button action(int label, int icon) {

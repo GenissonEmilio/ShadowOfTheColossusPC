@@ -9,4 +9,18 @@
     <string name="launcher_disc_edition">Disco de PS2 · edição americana SCUS‑97472</string>
     <string name="launcher_saves">Seus saves ficam separados dos arquivos do jogo.</string>
     <string name="game_adaptive_widescreen">Tela cheia adaptada</string>
+    <string name="launcher_disc_running">A jornada está em andamento. Saia do jogo antes de trocar o disco.</string>
+    <string name="launcher_disc_importing">Lendo seu disco… mantenha o aplicativo aberto.</string>
+    <string name="launcher_disc_imported_waiting_for_player">Disco importado. Importe o pacote .sotcplay preparado no computador.</string>
+    <string name="launcher_player_heading">Preparação do jogo</string>
+    <string name="launcher_player_import">Importar pacote do jogo</string>
+    <string name="launcher_player_running">Saia do jogo antes de trocar o disco ou o pacote.</string>
+    <string name="launcher_player_missing">Importe apenas o pacote .sotcplay que você preparou no computador a partir do seu disco.</string>
+    <string name="launcher_player_importing">Validando o pacote do jogo… mantenha o aplicativo aberto.</string>
+    <string name="launcher_player_imported">Pacote instalado. Importe sua ISO americana para jogar.</string>
+    <string name="launcher_player_imported_ready">Pacote instalado. Seu disco está pronto para jogar.</string>
+    <string name="launcher_player_import_failed">Não foi possível importar o pacote: %1$s</string>
+    <string name="game_start_failed">Não foi possível iniciar o jogo</string>
+    <string name="game_player_incompatible">Prepare um novo pacote .sotcplay com a versão do preparador correspondente a este aplicativo e importe-o novamente.</string>
+    <string name="game_close">Fechar</string>
 </resources>

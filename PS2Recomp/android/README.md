@@ -40,16 +40,70 @@ Prerecorded movies use their original framing. The diamond menu lets you
 switch back to the centered 4:3 view. The display choice is saved separately
 from the touch controls.
 
-## Importing your disc
+## Playing on Android
 
-Use **Importar meu disco** to select your own `.iso`. The importer validates the
-SCUS executable and extracts to app-private storage using a bounded buffer.
-A replacement is activated only after extraction and validation succeed. Saves
-are stored separately in `files/memcards`; updates and disc replacement preserve
-them. Space for both the temporary ISO and extracted data is needed during import.
+1. Install the public Android ARM64 APK from the same release as the desktop
+   packages. It requires Android 9 or later and OpenGL ES 3.0.
+2. On your computer, prepare `ShadowOfTheColossus.sotcplay` as described below
+   using your own North American PS2 disc image (`SCUS-97472`).
+3. Copy the `.sotcplay` bundle and your `.iso` to the phone. Use **Importar
+   pacote do jogo** and **Importar meu disco** on the launcher, then select
+   **Jogar**. Import requires space for the extracted game data.
+
+The launcher activates each replacement after validating it. Saves are kept in
+the app's `files/memcards` directory across bundle, disc and signed APK updates
+under the same application ID. The public APK uses `com.genisson.sotc.mobile`
+and has separate storage from the previous development APK. Keep a backup
+before uninstalling an Android build, which removes its app-private data.
 
 The game still has the desktop port's campaign limitations. Android builds must
 be validated independently; compilation and HUD tests do not prove playability.
+
+### Preparing the private play bundle on a computer
+
+Use the source code from the same release as the APK. For the native build on
+Linux x86-64, install Python 3.10 or later, Git, the Android SDK's NDK
+`28.2.13676358` and CMake `3.31.6`. Set `ANDROID_HOME` to the SDK path or pass
+`--sdk`. Obtain `compiler/bin/ps2_recomp` from the extracted desktop release and
+build the [ARM64 static FFmpeg libraries](#building-ffmpeg) once. The Android
+CMake build fetches open-source dependencies when they are absent locally.
+
+From the source checkout root, run the following with your local paths. On
+Linux, setting `LD_LIBRARY_PATH` lets the packaged recompiler find its bundled
+libraries.
+
+```sh
+export LD_LIBRARY_PATH=/private/desktop-release/compiler/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+python3 tools/android/prepare_play_bundle.py \
+  --iso /private/owned-disc.iso --work /private/android-game \
+  --recompiler /private/desktop-release/compiler/bin/ps2_recomp \
+  --ffmpeg-root /private/ffmpeg/install \
+  --captures-dir /private/captures
+```
+
+The capture directory holds your private `kernel.bin`, `manager.bin` and
+`gamecore.bin` files (32 MiB each). A completed desktop preparation can supply
+them from `builds/<build_id>/captures` under the launcher's data directory. If
+you have no captures, omit `--captures-dir` to try capturing from the local ISO
+with a host C/C++ compiler and graphics development libraries. If the host
+runner reaches MANAGER but cannot capture GAMECORE, use the Android development
+capture procedure below for the missing stage. The script reuses matching
+generated sources and incremental native builds in `--work`.
+
+Windows x86-64 uses `python`, the corresponding desktop `ps2_recomp.exe`, and
+the Windows SDK components. Reuse a complete set of private module captures for
+the Windows workflow. The Windows host capture and full prepare command require
+separate validation.
+
+If you already built a complete compatible ARM64 game library from your own
+disc, pass `--runner /private/libps2EntryRunner.so` instead of `--recompiler`,
+`--ffmpeg-root` and `--captures-dir`. This route only needs Python and the SDK's
+NDK. It checks the ISO, ARM64 ABI, Android API level, 16 KiB page alignment,
+system library dependencies and the JNI and FFmpeg exports before packaging.
+
+The result is `ShadowOfTheColossus.sotcplay` in `--work`. It contains the
+locally built ARM64 runner and its manifest. Keep it private with your disc
+image and captures.
 
 ## Development build
 
@@ -64,6 +118,19 @@ cd PS2Recomp/android
 
 Without generated sources this builds the native runtime and test harness. Its
 Play button stays unavailable. It is not a playable distribution.
+From `PS2Recomp/android`, build the public variant using its release keystore.
+
+```sh
+./gradlew assembleRelease -PsotcPortable=true \
+  -PsotcVersionCode=3 -PsotcVersionName=0.2.1
+```
+
+Use `./gradlew assembleDebug assembleDebugAndroidTest -PsotcPortable=true` to
+build its debug launcher and importer instrumentation. The synthetic test
+cases cover strict manifest parsing, archive entries, SHA-256, ELF architecture
+and alignment, and atomic package replacement. Instrument the portable build
+with `adb shell am instrument -w com.genisson.sotc.mobile.test/com.genisson.sotc.ControlsInstrumentation`
+on a device with the portable debug APKs installed.
 
 Prepare generated C++ from the owned disc outside the repository using
 `tools/android/prepare_game.py --help`. That script builds and executes successive
@@ -91,7 +158,12 @@ This maps to CMake's `SOTC_ANDROID_CAPTURE_MODULES=ON`. The runtime writes
 `files/capture-gamecore.bin` in app-private storage; copy it to the private capture
 directory as `gamecore.bin` before running `prepare_game.py --captures-dir`.
 Capture mode is a development stage and intentionally stops at the missing
-GAMECORE entry. It is disabled for the complete build.
+GAMECORE entry. To retrieve the capture from an installed debug build, use
+`adb exec-out run-as com.genisson.sotc cat files/capture-gamecore.bin` and save
+the output as `gamecore.bin` alongside `kernel.bin` and `manager.bin`. Use a
+separate test device or application ID for debug builds signed with a different
+key than the APK you use to play. The private play bundle build disables
+capture mode.
 
 For a game build, pass these Gradle properties:
 
@@ -102,7 +174,9 @@ For a game build, pass these Gradle properties:
   -PsotcFfmpegRoot=/private/ffmpeg/install
 ```
 
-For FMVs, use the official FFmpeg 7.1.5 tarball and verify its SHA-256 is
+### Building FFmpeg
+
+Use the official FFmpeg 7.1.5 tarball and verify its SHA-256 is
 `de668509caf9e35e3cd162473441fdb29538c6d96ed080292b3cf9e6fc5d558f`.
 [FFmpeg 7.1.5 source](https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz)
 
@@ -131,7 +205,7 @@ the full `NICO.DAT` hash in the validation report is a separate, one-time check.
 Public development certificates, APK verification metadata and private release
 signing configuration are documented in [APK signing](signing/README.md).
 
-Generated C++, captures, disc contents, saves, local keys and APKs must remain
+Generated C++, captures, disc contents, `.sotcplay` packages, saves, local keys and APKs must remain
 outside version control. The CI job builds the ROM-free harness and runs JVM
 tests and lint. It compiles instrumentation; executing those tests needs a device.
 It does not publish a game APK.
