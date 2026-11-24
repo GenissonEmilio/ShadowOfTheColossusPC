@@ -5,6 +5,7 @@ import android.app.NativeActivity;
 import android.content.SharedPreferences;
 import android.graphics.PixelFormat;
 import android.os.Bundle;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowManager;
@@ -13,10 +14,12 @@ import android.widget.LinearLayout;
 import android.widget.SeekBar;
 import android.widget.TextView;
 import java.io.File;
+import java.io.IOException;
 
 public final class NativeGameActivity extends NativeActivity {
     private static final String ADAPTIVE_WIDESCREEN = "adaptive_widescreen";
-    static { System.loadLibrary("ps2EntryRunner"); }
+    static { System.loadLibrary(BuildConfig.PORTABLE ? "SotcBootstrap" : "ps2EntryRunner"); }
+    private static native String nativeAttachRunner(String path);
     public static native boolean nativeHasGame();
     public static native void nativeConfigure(String disc, String bootElf, String saves, String log, int resolutionPercent);
     public static native void nativeSetInput(int buttons, float moveX, float moveY, float cameraX, float cameraY);
@@ -25,6 +28,7 @@ public final class NativeGameActivity extends NativeActivity {
     private static native void nativeSetWidescreen(boolean enabled, float aspect);
     private TouchControlsView controls;
     private boolean editing;
+    private boolean gameAttached;
     private AlertDialog menu;
     private boolean overlayAttached;
     private boolean resumed;
@@ -32,6 +36,16 @@ public final class NativeGameActivity extends NativeActivity {
     private android.window.OnBackInvokedCallback backCallback;
 
     @Override protected void onCreate(Bundle state) {
+        if (BuildConfig.PORTABLE && !attachRunner()) {
+            // NativeActivity still needs its lifecycle. The bootstrap has no
+            // callbacks to forward when a portable runner failed to attach.
+            super.onCreate(state);
+            new AlertDialog.Builder(this).setTitle(R.string.game_start_failed)
+                    .setMessage(R.string.game_player_incompatible)
+                    .setPositiveButton(R.string.game_close, (dialog, which) -> finish())
+                    .setOnCancelListener(dialog -> finish()).show();
+            return;
+        }
         displayPreferences = getSharedPreferences("sotc-display", MODE_PRIVATE);
         android.util.DisplayMetrics metrics = getResources().getDisplayMetrics();
         updateDisplayMode(metrics.widthPixels, metrics.heightPixels);
@@ -43,6 +57,7 @@ public final class NativeGameActivity extends NativeActivity {
                     saves.getAbsolutePath(), new File(getFilesDir(), "last-game.log").getAbsolutePath(), 100);
         }
         super.onCreate(state);
+        gameAttached = true;
         if (android.os.Build.VERSION.SDK_INT >= 33) {
             backCallback = this::showMenu;
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
@@ -89,6 +104,20 @@ public final class NativeGameActivity extends NativeActivity {
             getWindowManager().addView(controls, params);
             overlayAttached = true;
         });
+    }
+
+    private boolean attachRunner() {
+        try {
+            File runner = new PlayerPackage(getFilesDir()).installedRunner();
+            if (runner != null && getIntent().getStringExtra("disc") != null) {
+                String error = nativeAttachRunner(runner.getCanonicalPath());
+                if (error == null) return true;
+                Log.e("SOTC", "Could not attach the imported runner: " + error);
+            }
+        } catch (IOException | LinkageError | RuntimeException error) {
+            Log.e("SOTC", "Could not attach the imported runner", error);
+        }
+        return false;
     }
 
     private void immersive() {
@@ -173,21 +202,28 @@ public final class NativeGameActivity extends NativeActivity {
     }
     @Override public void onWindowFocusChanged(boolean focused) {
         super.onWindowFocusChanged(focused);
+        if (!gameAttached) return;
         if (!focused) { if (controls != null) controls.releaseAll(); nativeReleaseInput(); }
         else immersive();
     }
     @Override protected void onPause() {
         resumed = false;
         if (controls != null) controls.releaseAll();
-        nativeReleaseInput(); nativePause(true);
+        if (gameAttached) {
+            nativeReleaseInput();
+            nativePause(true);
+        }
         super.onPause();
     }
     @Override protected void onResume() {
         super.onResume();
         resumed = true;
-        updatePauseState();
+        if (gameAttached) updatePauseState();
     }
-    @Override public void onBackPressed() { showMenu(); }
+    @Override public void onBackPressed() {
+        if (gameAttached) showMenu();
+        else super.onBackPressed();
+    }
     @Override protected void onDestroy() {
         resumed = false;
         if (menu != null) {
@@ -195,7 +231,7 @@ public final class NativeGameActivity extends NativeActivity {
             menu.dismiss();
         }
         if (controls != null) controls.releaseAll();
-        nativeReleaseInput();
+        if (gameAttached) nativeReleaseInput();
         if (overlayAttached) {
             getWindowManager().removeViewImmediate(controls);
             overlayAttached = false;

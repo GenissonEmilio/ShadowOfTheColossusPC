@@ -43,4 +43,12 @@ jobs:
             PS2Recomp/android/app/build/outputs/apk/debug/app-debug.apk
           "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 4 \
             PS2Recomp/android/app/build/outputs/apk/debug/app-debug.apk
-      # No game or playable APK is published by this ROM-free build.
+      - name: Compile the public Android installer and its bundle-import tests
+        working-directory: PS2Recomp/android
+        run: bash gradlew assembleDebug assembleDebugAndroidTest lintDebug -PsotcPortable=true --no-daemon --max-workers=2
+      - name: Verify the public installer ships only its bootstrap
+        run: |
+          apk=PS2Recomp/android/app/build/outputs/apk/debug/app-debug.apk
+          test "$(unzip -Z1 "$apk" | sed -n '/^lib\//p')" = lib/arm64-v8a/libSotcBootstrap.so
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify "$apk"
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 4 "$apk"

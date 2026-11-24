@@ -1,5 +1,6 @@
 plugins { id 'com.android.application' }
 
+def portable = providers.gradleProperty('sotcPortable').getOrElse('false').toBoolean()
 def generatedDir = providers.gradleProperty('sotcGeneratedDir').orNull
 def vu1Dir = providers.gradleProperty('sotcVu1Dir').orNull
 def prebuiltDir = providers.gradleProperty('sotcPrebuiltDir').orNull
@@ -7,6 +8,10 @@ def ffmpegRoot = providers.gradleProperty('sotcFfmpegRoot').orNull
 def captureMissing = providers.gradleProperty('sotcCaptureMissing').getOrElse('false').toBoolean()
 def hasGame = providers.gradleProperty('sotcHasGame').getOrElse(generatedDir != null ? 'true' : 'false').toBoolean()
 def bootSha256 = providers.gradleProperty('sotcBootSha256').getOrElse('')
+if (portable && (generatedDir != null || vu1Dir != null || prebuiltDir != null || ffmpegRoot != null
+        || captureMissing || hasGame || !bootSha256.isEmpty())) {
+    throw new GradleException('sotcPortable builds cannot include a game, prebuilt libraries or capture modules.')
+}
 if (hasGame && !(bootSha256 ==~ /(?i)[0-9a-f]{64}/)) {
     throw new GradleException('A game build requires -PsotcBootSha256 with the SHA-256 of its SCUS executable.')
 }
@@ -37,15 +42,25 @@ android {
     ndkVersion '28.2.13676358'
     defaultConfig {
         applicationId 'com.genisson.sotc'
+        if (portable) applicationIdSuffix '.mobile'
         minSdk 28
         targetSdk 36
-        versionCode 2
-        versionName '0.2.0'
+        versionCode providers.gradleProperty('sotcVersionCode').getOrElse('2').toInteger()
+        versionName providers.gradleProperty('sotcVersionName').getOrElse('0.2.0')
+        manifestPlaceholders = [sotcNativeLib: portable ? 'SotcBootstrap' : 'ps2EntryRunner']
+        buildConfigField 'boolean', 'PORTABLE', portable.toString()
         testInstrumentationRunner 'com.genisson.sotc.ControlsInstrumentation'
         buildConfigField 'boolean', 'HAS_GAME', hasGame.toString()
         buildConfigField 'String', 'BOOT_SHA256', '"' + bootSha256 + '"'
         ndk { abiFilters 'arm64-v8a' }
-        if (prebuiltDir == null) {
+        if (portable) {
+            externalNativeBuild {
+                cmake {
+                    arguments '-DANDROID_STL=none'
+                    targets 'SotcBootstrap'
+                }
+            }
+        } else if (prebuiltDir == null) {
             externalNativeBuild {
                 cmake {
                     arguments '-DPS2X_BUILD_RECOMP=OFF', '-DPS2X_BUILD_ANALYZER=OFF',
@@ -70,7 +85,7 @@ android {
     if (prebuiltDir == null) {
         externalNativeBuild {
             cmake {
-                path '../../CMakeLists.txt'
+                path(portable ? 'src/main/cpp/CMakeLists.txt' : '../../CMakeLists.txt')
                 version '3.31.6'
                 if (providers.gradleProperty('sotcBuildDir').isPresent()) {
                     buildStagingDirectory file(providers.gradleProperty('sotcBuildDir').get())

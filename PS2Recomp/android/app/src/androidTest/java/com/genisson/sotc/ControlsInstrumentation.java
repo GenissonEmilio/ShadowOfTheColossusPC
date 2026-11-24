@@ -59,6 +59,10 @@ public final class ControlsInstrumentation extends Instrumentation {
             tests++;
             verifyLayoutPersistence(activity, view, preferences, probe);
             tests++;
+            if (BuildConfig.PORTABLE) {
+                PlayerPackageInstrumentation.verify(getTargetContext());
+                tests++;
+            }
             if (Boolean.parseBoolean(arguments.getString("screenshot"))) {
                 result.putString("screenshot", takeScreenshot(activity));
             }
