@@ -44,6 +44,12 @@ namespace ps2x::iop::detail
 
         void reset();
 
+        // Native-IOP owner only: emulated SPU2 is deliberately excluded and
+        // the enclosing IopEmulator must prove that no IOP code has run.
+        bool captureState(std::vector<uint8_t> &out, std::string &error) const;
+        bool validateState(const std::vector<uint8_t> &data, std::string &error) const;
+        bool restoreState(const std::vector<uint8_t> &data, std::string &error);
+
         [[nodiscard]] uint8_t read8(uint32_t address) const;
         [[nodiscard]] uint16_t read16(uint32_t address) const;
         [[nodiscard]] uint32_t read32(uint32_t address) const;

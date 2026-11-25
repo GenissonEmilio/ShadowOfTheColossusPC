@@ -1,5 +1,7 @@
 #include "Common.h"
 #include "CD.h"
+#include "runtime/save_state_archive.h"
+#include "runtime/host_state.h"
 #include "MPEG.h"
 #include "runtime/ee_scheduler.h"
 
@@ -10,8 +12,7 @@ namespace ps2_stubs
         constexpr uint32_t kCdStreamBlocking = 1u;
         constexpr uint32_t kDvdSectorsPerSecondX1 = 675u;
         constexpr uint32_t kDvdSectorsPerSecondX4 = kDvdSectorsPerSecondX1 * 4u;
-        constexpr uint64_t kNtScFieldsPerSecondNumerator = 60000u;
-        constexpr uint64_t kNtScFieldsPerSecondDenominator = 1001u;
+        constexpr uint64_t kStreamUnitsPerSecond = 60000u;
 
         struct CdStreamTimingState
         {
@@ -34,6 +35,13 @@ namespace ps2_stubs
         uint64_t currentCdStreamTick(PS2Runtime *runtime)
         {
             return runtime != nullptr ? runtime->eeScheduler().currentVSyncTick() : 0u;
+        }
+
+        uint64_t cdStreamUnitsPerTick(PS2Runtime *runtime)
+        {
+            // 60000/1001 Hz in NTSC and 60000/1200 Hz in PAL.
+            const uint64_t fieldPeriodUnits = runtime->eeScheduler().palVideoMode() ? 1200u : 1001u;
+            return g_cdStreamTiming.sectorsPerSecond * fieldPeriodUnits;
         }
 
         uint32_t dvdStreamSectorsPerSecond(uint8_t spindleControl)
@@ -88,11 +96,10 @@ namespace ps2_stubs
             const uint64_t elapsedTicks = tick - g_cdStreamTiming.lastVSyncTick;
             g_cdStreamTiming.lastVSyncTick = tick;
 
-            // 59.94 Hz field clock: sectors = fields * sectors/s * 1001 / 60000.
-            const uint64_t unitsPerTick = static_cast<uint64_t>(g_cdStreamTiming.sectorsPerSecond) * kNtScFieldsPerSecondDenominator;
+            const uint64_t unitsPerTick = cdStreamUnitsPerTick(runtime);
             const uint64_t accumulated = g_cdStreamTiming.productionRemainder + elapsedTicks * unitsPerTick;
-            const uint64_t elapsedProduction = accumulated / kNtScFieldsPerSecondNumerator;
-            g_cdStreamTiming.productionRemainder = accumulated % kNtScFieldsPerSecondNumerator;
+            const uint64_t elapsedProduction = accumulated / kStreamUnitsPerSecond;
+            g_cdStreamTiming.productionRemainder = accumulated % kStreamUnitsPerSecond;
             if (elapsedProduction == 0u)
             {
                 return;
@@ -147,16 +154,16 @@ namespace ps2_stubs
         uint64_t cdStreamWakeTickForSectors(PS2Runtime *runtime, uint32_t sectorsNeeded)
         {
             const uint64_t now = currentCdStreamTick(runtime);
-            if (sectorsNeeded == 0u || g_cdStreamTiming.sectorsPerSecond == 0u)
+            if (!runtime || sectorsNeeded == 0u || g_cdStreamTiming.sectorsPerSecond == 0u)
             {
                 return now;
             }
 
-            const uint64_t requiredUnits = static_cast<uint64_t>(sectorsNeeded) * kNtScFieldsPerSecondNumerator;
+            const uint64_t requiredUnits = static_cast<uint64_t>(sectorsNeeded) * kStreamUnitsPerSecond;
             const uint64_t remainingUnits = requiredUnits > g_cdStreamTiming.productionRemainder
                                                 ? requiredUnits - g_cdStreamTiming.productionRemainder
                                                 : 0u;
-            const uint64_t unitsPerTick = static_cast<uint64_t>(g_cdStreamTiming.sectorsPerSecond) * kNtScFieldsPerSecondDenominator;
+            const uint64_t unitsPerTick = cdStreamUnitsPerTick(runtime);
             const uint64_t ticks = std::max<uint64_t>(1u, (remainingUnits + unitsPerTick - 1u) / unitsPerTick);
             return now + ticks;
         }
@@ -1011,4 +1018,81 @@ namespace ps2_stubs
         }
         setReturnS32(ctx, 1);
     }
+}
+
+namespace ps2_stubs {
+    struct CdPersistent {
+        int32_t g_lastCdError = 0; uint32_t g_cdMode = 0, g_cdStreamingLbn = 0, g_cdStreamingEndLbn = 0xffffffff, g_nextPseudoLbn = 0;
+        bool g_cdInitialized = false; CdStreamTimingState timing;
+        std::unordered_map<std::string, CdFileEntry> files;
+    };
+    template<class Archive> static void cdTimingCodec(Archive &a, CdStreamTimingState &t) {
+        a.pod(t.initialized);
+        a.pod(t.active);
+        a.pod(t.paused);
+        a.pod(t.capacitySectors);
+        a.pod(t.bankCount);
+        a.pod(t.sectorsPerBank);
+        a.pod(t.sectorsPerSecond);
+        a.pod(t.producedSectors);
+        a.pod(t.consumedSectors);
+        a.pod(t.productionRemainder);
+        a.pod(t.lastVSyncTick);
+    }
+    bool captureCdState(std::vector<uint8_t> &out, std::string &error) {
+        ps2state::Writer w(out,error); w.pod(uint32_t{0x31564443});
+        w.pod(g_lastCdError);
+        w.pod(g_cdMode);
+        w.pod(g_cdStreamingLbn);
+        w.pod(g_cdStreamingEndLbn);
+        w.pod(g_cdInitialized);
+        w.pod(g_nextPseudoLbn);
+        cdTimingCodec(w,g_cdStreamTiming);
+        w.pod(uint32_t(g_cdFilesByKey.size()));
+        const auto root = PS2Runtime::getIoPaths().cdRoot;
+        for (const auto &[key,entry] : g_cdFilesByKey) {
+            auto relative = entry.hostPath.lexically_relative(root);
+            if (relative.empty() || relative.is_absolute() || *relative.begin() == "..") { error="Disc file is outside the mounted disc."; return false; }
+            w.string(key); w.string(relative.generic_string()); w.pod(entry.sizeBytes); w.pod(entry.baseLbn); w.pod(entry.sectors);
+        }
+        return w.finish();
+    }
+    static bool decodeCdState(const std::vector<uint8_t> &blob, bool apply, std::string &error) {
+        ps2state::Reader r(blob,error); uint32_t magic=0,count=0; CdPersistent s; r.pod(magic);
+        r.pod(s.g_lastCdError);
+        r.pod(s.g_cdMode);
+        r.pod(s.g_cdStreamingLbn);
+        r.pod(s.g_cdStreamingEndLbn);
+        r.pod(s.g_cdInitialized);
+        r.pod(s.g_nextPseudoLbn);
+        cdTimingCodec(r,s.timing); r.pod(count);
+        if (!r.good() || magic != 0x31564443 || count > 65536) { error="Invalid disc state."; return false; }
+        for (uint32_t i=0;i<count;++i) {
+            std::string key,path; CdFileEntry entry;
+            if (!r.string(key) || !r.string(path) || !r.pod(entry.sizeBytes) || !r.pod(entry.baseLbn) || !r.pod(entry.sectors)) return false;
+            std::filesystem::path relative(path);
+            if (relative.empty() || relative.is_absolute()) { error="Invalid disc path."; return false; }
+            for (const auto &part:relative) if (part=="..") { error="Invalid disc path."; return false; }
+            entry.hostPath=PS2Runtime::getIoPaths().cdRoot/relative;
+            if (!s.files.emplace(key,std::move(entry)).second) { error="Duplicate disc file."; return false; }
+        }
+        if (!r.finish() || s.timing.consumedSectors > s.timing.producedSectors || !s.timing.capacitySectors ||
+            !s.timing.bankCount || !s.timing.sectorsPerBank || s.timing.productionRemainder>=60000)
+        { error="Invalid disc timing state."; return false; }
+        if (apply) {
+            g_lastCdError=s.g_lastCdError;
+            g_cdMode=s.g_cdMode;
+            g_cdStreamingLbn=s.g_cdStreamingLbn;
+            g_cdStreamingEndLbn=s.g_cdStreamingEndLbn;
+            g_cdInitialized=s.g_cdInitialized;
+            g_nextPseudoLbn=s.g_nextPseudoLbn;
+            g_cdStreamTiming=s.timing; g_cdFilesByKey.swap(s.files);
+            // These indexes contain only host lookup caches, not guest state.
+            g_cdLeafIndex.clear(); g_cdLoosePathIndex.clear(); g_cdLeafIndexBuilt=false;
+            g_cdImageSizeValid=false;
+        }
+        return true;
+    }
+    bool validateCdState(const std::vector<uint8_t> &b,std::string &e) { return decodeCdState(b,false,e); }
+    bool restoreCdState(const std::vector<uint8_t> &b,std::string &e) { return decodeCdState(b,true,e); }
 }

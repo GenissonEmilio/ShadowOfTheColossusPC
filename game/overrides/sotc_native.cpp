@@ -21,10 +21,14 @@
 // from the lights in the instance's own packet.
 // Not yet: the second texture and mip levels.
 
+#include "sotc_button_prompts.h"
+#include "sotc_texture_mods.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
+#include "runtime/desktop_input.h"
 #include "runtime/native_tuning.h"
 #include "runtime/native_renderer.h"
+#include "runtime/save_state_archive.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
 #include "runtime/gs/ps2_gs_psmt4.h"
@@ -32,6 +36,7 @@
 #include "runtime/ps2_stats.h"
 
 #include <algorithm>
+#include <atomic>
 #include <map>
 #include <memory>
 #include <cmath>
@@ -51,12 +56,17 @@
 #include <utility>
 #include <vector>
 
+bool captureSotcSystemState(std::vector<uint8_t> &,std::string &);
+bool validateSotcSystemState(const std::vector<uint8_t> &,std::string &);
+bool restoreSotcSystemState(const std::vector<uint8_t> &,std::string &);
+
 namespace sotc_native
 {
     constexpr uint32_t kModelDisp = 0x01097118u, kGetCameraContext = 0x0108F518u;
     PS2Runtime::RecompiledFunction g_modelDisp = nullptr, g_getCameraContext = nullptr;
     uint32_t g_cameraContext = 0;
     uint64_t g_frame = 0;
+    uint64_t g_stateEpoch = 0;
     uint32_t g_frameDraws = 0;
     uint32_t g_modelDraws = 0; // 3D draws this frame
 
@@ -116,7 +126,7 @@ namespace sotc_native
     {
         const uint32_t end = addr + size;
         uint32_t p = addr;
-        uint32_t positions = 0, normals = 0, colours = 0, uvs = 0, pairs = 0, skin = 0, count = 0;
+        uint32_t positions = 0, normals = 0, colours = 0, uvs = 0, pairs = 0, normalPairs = 0, skin = 0, count = 0;
         while (p < end)
         {
             const uint32_t code = m.word(p);
@@ -145,6 +155,10 @@ namespace sotc_native
                     uvs = p;
                     break;
                 case 0x6Du: // two ST pairs, or a normal
+                    // Skinned two-texture batches have both: field 2 is
+                    // the packed normal and field 3 contains the ST pairs.
+                    if (field == 2u)
+                        normalPairs = p;
                     pairs = p;
                     break;
                 case 0x6Cu:
@@ -184,9 +198,10 @@ namespace sotc_native
                             v.ny = m.real(normals + i * 12u + 4u);
                             v.nz = m.real(normals + i * 12u + 8u);
                         }
-                        else if (pairs && uvs)
+                        else if (const uint32_t normal = uvs ? pairs :
+                                     (skin && normalPairs != pairs ? normalPairs : 0u))
                         {
-                            const uint32_t xy = m.word(pairs + i * 8u), z = m.word(pairs + i * 8u + 4u);
+                            const uint32_t xy = m.word(normal + i * 8u), z = m.word(normal + i * 8u + 4u);
                             v.nx = static_cast<int16_t>(xy & 0xFFFFu) / 4096.0f;
                             v.ny = static_cast<int16_t>(xy >> 16) / 4096.0f;
                             v.nz = static_cast<int16_t>(z & 0xFFFFu) / 4096.0f;
@@ -218,7 +233,7 @@ namespace sotc_native
                     }
                     out.push_back(std::move(strip));
                 }
-                positions = normals = colours = uvs = pairs = skin = count = 0;
+                positions = normals = colours = uvs = pairs = normalPairs = skin = count = 0;
             }
             p += words * 4u;
         }
@@ -388,6 +403,14 @@ namespace sotc_native
         uint64_t frame = ~0ull, key = 0;
     };
     TextureMemo g_textureMemo[256];
+    desktop_input::PromptProfile g_buttonPrompts;
+    uint64_t g_buttonPromptVariant = 0;
+    void sampleButtonPrompts()
+    {
+        g_buttonPrompts = desktop_input::prompts();
+        g_buttonPromptVariant = g_buttonPrompts.variant();
+    }
+
     uint64_t texture(uint32_t header)
     {
         if (!native_renderer::tuning().fastHooks)
@@ -398,6 +421,40 @@ namespace sotc_native
         const uint64_t key = decodedTexture(header);
         memo = {header, g_frame, key};
         return key;
+    }
+
+    // texTransResolve (0x10a7fe8..0x10a7ff8) uploads the active CLUT at
+    // *(NTO2 + 0xc) + 0xc, not the immutable palette at NTO2 + *(+0x18).
+    // texScaleClutAlpha writes a base copy at work+0x40; texClutScrollOne
+    // can select another copy at work+0x44/+0x48. Use the same selector
+    // for decoding and cache keys, with the file palette as the
+    // fallback before the texture work has been initialized.
+    uint32_t textureClut(uint32_t header, uint32_t bytes)
+    {
+        const auto ramSpan = [](uint32_t address, uint32_t size) -> uint32_t
+        {
+            // Accept only main RAM and its EE direct/uncached aliases. The
+            // normal word() mask alone would turn corrupt/IO pointers into
+            // unrelated RAM, and a CLUT must fit without crossing RAM's end.
+            if (address >= 0x20000000u && address < 0x40000000u)
+                address &= 0x1FFFFFFu;
+            else if (address >= 0x80000000u && address < 0xC0000000u)
+                address &= 0x1FFFFFFFu;
+            if (!address || (address & 3u) || size > 0x2000000u || address > 0x2000000u - size)
+                return 0;
+            return address;
+        };
+        header = ramSpan(header, 0x20u);
+        if (!header)
+            return 0;
+        const uint32_t work = ramSpan(word(header + 0xCu), 0x10u);
+        if (work)
+            if (const uint32_t active = ramSpan(word(work + 0xCu), bytes))
+                return active;
+        const uint32_t offset = word(header + 0x18u);
+        if (offset > 0x2000000u - header)
+            return 0;
+        return ramSpan(header + offset, bytes);
     }
 
     // A texture as it is in guest memory, copied out (decodable on another
@@ -463,8 +520,10 @@ namespace sotc_native
         src.swizzleBits = g_ram[(header + 0x1Fu) & 0x1FFFFFFu];
         if (src.psm != 0x00u)
         {
-            const uint32_t clut = header + word(header + 0x18u);
             const uint32_t entries = src.psm == 0x14u ? 16u : 256u;
+            const uint32_t clut = textureClut(header, entries * 4u);
+            if (!clut)
+                return false;
             for (uint32_t i = 0; i < entries; ++i)
             {
                 // CSM1: of every 32 entries, 8-15 and 16-23 are swapped.
@@ -602,11 +661,40 @@ namespace sotc_native
             return 0;
         const uint32_t format = word(header + 0x1Cu), psm = format & 0x3Fu;
         const uint32_t width = 1u << ((format >> 16) & 0xFu), height = 1u << ((format >> 20) & 0xFu);
-        const uint32_t pixelBytes = psm == 0x14u ? width * height / 2u : width * height;
+        const uint32_t pixelBytes = psm == 0x00u ? width * height * 4u :
+                                    (psm == 0x14u ? width * height / 2u : width * height);
+        // Hash every entry of the palette selected for upload. The original
+        // NTO2 palette stays unchanged while weak-point fades/scrolling write
+        // its runtime copies; hashing the original loses those animations.
+        const uint32_t paletteBytes = psm == 0x00u ? 0u : (psm == 0x14u ? 64u : 1024u);
+        const uint32_t clut = paletteBytes ? textureClut(header, paletteBytes) : 0u;
+        if (paletteBytes && !clut)
+            return 0;
+        const uint64_t paletteKey = contentHash(clut, paletteBytes, 0xcbf29ce484222325ull);
         const uint64_t sampled = sample(header + word(header + 0x14u), pixelBytes, 64u) ^
-                                 sample(header + word(header + 0x18u), psm == 0x14u ? 64u : 1024u, 16u) * 31u ^ format;
+                                 paletteKey * 31u ^ format ^ g_ram[(header + 0x1Fu) & 0x1FFFFFFu];
         uint64_t key = sampled;
+        const auto fullKey = [&]
+        {
+            uint32_t bytes = 0;
+            for (uint32_t level = 0, w = width, h = height, levels = std::clamp((format >> 12) & 0xFu, 1u, 7u); level < levels && w >= 1u && h >= 1u;
+                 ++level, w /= 2u, h /= 2u)
+                bytes += psm == 0x00u ? w * h * 4u : (psm == 0x13u ? w * h : w * h / 2u);
+            uint64_t h = contentHash(header + word(header + 0x14u), bytes, 0x84222325cbf29ce4ull ^ format);
+            h = contentHash(clut, paletteBytes, h ^ g_ram[(header + 0x1Fu) & 0x1FFFFFFu]);
+            return (h & 0x03FFFFFFFFFFFFFFull) | (1ull << 58);
+        };
+        const auto isButtonAtlas = [&]
+        {
+            // Verify the named US atlas against its original packed pixels.
+            constexpr char name[] = "button_icon_set";
+            const uint32_t physicalHeader = header & 0x1FFFFFFu;
+            return format == 0x01771014u && physicalHeader >= 0x1Eu &&
+                std::memcmp(g_ram + physicalHeader - 0x1Eu, name, sizeof(name)) == 0 &&
+                contentHash(header + word(header + 0x14u), pixelBytes, 0xcbf29ce484222325ull) == 0x47e7bfe4c9bd629dull;
+        };
         bool changedInPlace = false;
+        bool buttonAtlas = false;
         if (native_renderer::tuning().fastHooks)
         {
             // Fast hooks: a hash of the texture's bytes (every level, the
@@ -616,31 +704,40 @@ namespace sotc_native
             struct ContentMemo
             {
                 uint32_t address = 0;
-                uint64_t frame = ~0ull, sampled = 0, key = 0;
+                uint64_t frame = ~0ull, sampled = 0, key = 0, verifiedAt = 0;
+                bool rewritten = false;
+                bool buttonAtlas = false;
             };
             static WayMemo<ContentMemo, 512> memos;
+            static uint64_t epoch = 0;
+            if (epoch != g_stateEpoch) { memos = {}; epoch = g_stateEpoch; }
             bool found = false;
             ContentMemo &memo = memos.find(header, (header >> 4) ^ (header >> 13), found);
-            if (found && memo.sampled == sampled)
+            const bool reuse = found && memo.sampled == sampled && !memo.rewritten &&
+                               (memo.frame == g_frame || memo.frame + 1u == g_frame) && g_frame - memo.verifiedAt < 16u;
+            if (reuse)
             {
                 key = memo.key;
+                buttonAtlas = memo.buttonAtlas;
                 memo.frame = g_frame;
             }
             else
             {
-                // Drawn in the last two frames and changed: rewritten where it is
-                // (animated), decoded at once, not on the worker.
-                changedInPlace = found && memo.frame != ~0ull && memo.frame + 2u >= g_frame;
-                uint32_t bytes = 0;
-                for (uint32_t level = 0, w = width, h = height, levels = std::clamp((format >> 12) & 0xFu, 1u, 7u); level < levels && w >= 1u && h >= 1u;
-                     ++level, w /= 2u, h /= 2u)
-                    bytes += psm == 0x00u ? w * h * 4u : (psm == 0x13u ? w * h : w * h / 2u);
-                uint64_t h = contentHash(header + word(header + 0x14u), bytes, 0x84222325cbf29ce4ull ^ format);
-                h = contentHash(header + word(header + 0x18u), psm == 0x00u ? 0u : (psm == 0x14u ? 64u : 1024u), h ^ g_ram[(header + 0x1Fu) & 0x1FFFFFFu]);
-                key = (h & 0x03FFFFFFFFFFFFFFull) | (1ull << 58);
-                memo = {header, g_frame, sampled, key};
+                key = fullKey();
+                buttonAtlas = isButtonAtlas();
+                // Sparse samples cannot prove that streamed or animated bytes
+                // are unchanged. Check every byte periodically and on return
+                // after a gap; once animated, check fully on every frame.
+                changedInPlace = found && key != memo.key && memo.frame + 2u >= g_frame;
+                const bool rewritten = found && (memo.rewritten || changedInPlace);
+                memo = {header, g_frame, sampled, key, g_frame, rewritten, buttonAtlas};
             }
         }
+        else {
+            key = fullKey(); // diagnostic slow path must not reuse sparse keys either
+            buttonAtlas = isButtonAtlas();
+        }
+        if (buttonAtlas) key = sotc_button_prompts::textureKey(key, g_buttonPromptVariant);
         if (native_renderer::hasTexture(key))
             return key;
         if ((psm != 0x00u && psm != 0x13u && psm != 0x14u) || width > 1024u || height > 1024u)
@@ -675,43 +772,71 @@ namespace sotc_native
             if (checked % 200u == 0u)
                 std::fprintf(stderr, "[tex-check] %llu textures, %llu mismatches\n", (unsigned long long)checked, (unsigned long long)mismatched);
         }
-        // SOTC_TEXDUMP_DIR=<dir> (debugging): level 0 of every decoded texture, raw RGBA.
-        static const char *dumpDir = std::getenv("SOTC_TEXDUMP_DIR");
-        const auto finish = [key, width, height, header, psm](const std::vector<uint8_t> &rgba, uint32_t decoded)
+        const auto decode = [src, key, width, height, header, psm, buttonAtlas,
+                             prompts = buttonAtlas ? g_buttonPrompts : desktop_input::PromptProfile{}]
+            (sotc_texture_mods::Texture &texture)
         {
-            if (dumpDir)
+            const auto &replacementDir = sotc_texture_mods::replacements();
+            const auto &exportDir = sotc_texture_mods::dumps();
+            const bool replace = !buttonAtlas && !replacementDir.empty();
+            const bool exportOriginal = !buttonAtlas && !exportDir.empty();
+            static const char *rawDump = std::getenv("SOTC_TEXDUMP_DIR");
+            static const bool mipmaps = std::getenv("SOTC_NATIVE_NOMIPS") == nullptr;
+            const auto applyReplacement = [&]
             {
+                return replace && sotc_texture_mods::load(
+                    sotc_texture_mods::texturePath(replacementDir, key), width, height, mipmaps, texture);
+            };
+            if (!exportOriginal && !rawDump && applyReplacement())
+                return true;
+            if (!decodeTexture(*src, texture.pixels, texture.levels) || !texture.levels)
+                return false;
+            texture.width = width;
+            texture.height = height;
+            if (exportOriginal)
+                sotc_texture_mods::dump(exportDir, key, width, height, texture.pixels.data());
+            if (buttonAtlas)
+                sotc_button_prompts::apply(texture.pixels.data(), texture.pixels.size(), prompts);
+            if (rawDump)
+            {
+                // Keep the existing address-based RGBA capture for diagnostics.
                 char path[512];
-                std::snprintf(path, sizeof(path), "%s/nat_%08x_psm%02x_%ux%u.rgba", dumpDir, header, psm, width, height);
+                std::snprintf(path, sizeof(path), "%s/nat_%08x_psm%02x_%ux%u.rgba", rawDump, header, psm, width, height);
                 if (FILE *f = std::fopen(path, "wb"))
                 {
-                    std::fwrite(rgba.data(), 1, static_cast<size_t>(width) * height * 4u, f);
+                    std::fwrite(texture.pixels.data(), 1, static_cast<size_t>(width) * height * 4u, f);
                     std::fclose(f);
                 }
             }
-            native_renderer::uploadTexture(key, width, height, rgba.data(), decoded);
+            if (exportOriginal || rawDump)
+                applyReplacement();
+            return true;
         };
-        // On the worker: decoded there, uploaded at the next frame's start.
-        auto out = std::make_shared<std::pair<std::vector<uint8_t>, uint32_t>>();
+        const auto finish = [key](const sotc_texture_mods::Texture &texture)
+        {
+            native_renderer::uploadTexture(key, texture.width, texture.height, texture.pixels.data(), texture.levels);
+        };
+        // Decode on the worker and upload on the render thread.
+        auto out = std::make_shared<sotc_texture_mods::Texture>();
         auto ok = std::make_shared<bool>(false);
-        if (!changedInPlace && native_renderer::buildAsync({key}, [src, out, ok] { *ok = decodeTexture(*src, out->first, out->second); },
+        // The small button atlas is needed in this frame when a device changes.
+        if (!buttonAtlas && !changedInPlace && native_renderer::buildAsync({key}, [decode, out, ok] { *ok = decode(*out); },
                                         [out, ok, finish]
                                         {
                                             if (*ok)
-                                                finish(out->first, out->second);
+                                                finish(*out);
                                         }))
         {
             if (decodeStart)
                 native_renderer::frameCounters().decodeUs += native_renderer::nowUs() - decodeStart;
             return key;
         }
-        static std::vector<uint8_t> rgba;
-        uint32_t decoded = 0;
-        if (!decodeTexture(*src, rgba, decoded))
+        static sotc_texture_mods::Texture texture;
+        if (!decode(texture))
             return 0;
         if (decodeStart)
             native_renderer::frameCounters().decodeUs += native_renderer::nowUs() - decodeStart;
-        finish(rgba, decoded);
+        finish(texture);
         return key;
     }
 
@@ -721,8 +846,10 @@ namespace sotc_native
     {
         const uint32_t format = word(header + 0x1Cu), psm = format & 0x3Fu;
         const uint32_t width = 1u << ((format >> 16) & 0xFu), height = 1u << ((format >> 20) & 0xFu);
-        const uint32_t clut = header + word(header + 0x18u);
         const uint32_t entries = psm == 0x14u ? 16u : 256u;
+        const uint32_t clut = psm == 0x00u ? 0u : textureClut(header, entries * 4u);
+        if (psm != 0x00u && !clut)
+            return false;
         uint32_t palette[256];
         if (psm != 0x00u)
             for (uint32_t i = 0; i < entries; ++i)
@@ -825,15 +952,15 @@ namespace sotc_native
     // first second: ids by address rebuilt the whole scene each time (~2 400
     // packets and ~100 textures, five times in ~20 frames, every one of them
     // the same bytes as before). A memo by address keeps a packet's id while a
-    // sample of its contents (32 words) stays the same, so the full hash runs
-    // only when the packet is new there; the same packet drawn again in a
+    // sample of its contents is unchanged between periodic full checks;
+    // the same packet drawn again in a
     // frame (instances) takes the id it had. Without fast hooks: the address
-    // and size, and the sample (another area loaded in its place makes new ids).
+    // fast hooks disabled: all contents checked on every call.
     struct PacketMemo
     {
         uint32_t address = 0, size = 0;
-        uint64_t frame = ~0ull, sample = 0, id = 0;
-        uint64_t quick = 0, sampledAt = 0; // four words; the frame of the last full sample
+        uint64_t frame = ~0ull, id = 0;
+        uint64_t quick = 0, verifiedAt = 0; // four words; last hash of ALL bytes
         bool rewritten = false;            // seen changed in place
     };
     // Four words of a packet, spread over it (the quick check).
@@ -854,42 +981,30 @@ namespace sotc_native
     uint64_t packetId(uint32_t data, uint32_t size, bool fast)
     {
         g_packetChangedInPlace = false;
-        if (!fast)
-            return ((static_cast<uint64_t>(size) << 32) | data) ^ (sample(data, size, 32u) & 0x7FFF000000000000ull);
         bool found = false;
         PacketMemo &memo = g_packetMemo.find(data, (data >> 4) ^ (data >> 15), found);
         found = found && memo.size == size;
-        if (found && memo.frame == g_frame)
+        if (fast && found && memo.frame == g_frame && !memo.rewritten)
             return memo.id;
-        // Never rewritten in place: four words, the full sample one frame in
-        // 16 (by address, so not all on the same frame).
-        if (found && !memo.rewritten && native_renderer::tuning().packetQuickCheck && g_frame - memo.sampledAt < 16u &&
+        // A sample is only a shortcut between bounded full-content checks.
+        // Returning after a gap may mean streaming reused the address: always
+        // check every byte then, even if all sampled words happen to match.
+        if (fast && found && !memo.rewritten && native_renderer::tuning().packetQuickCheck && g_frame - memo.verifiedAt < 16u &&
+            memo.frame + 1u == g_frame &&
             ((g_frame + (data >> 5)) & 15u) != 0u)
         {
-            // Drawn the frame before too: taken as it was (the full sample
-            // comes round within 16 frames). Back after a while: four words.
-            if (memo.frame + 1u == g_frame || quickSample(data, size) == memo.quick)
+            if (quickSample(data, size) == memo.quick)
             {
                 memo.frame = g_frame;
                 return memo.id;
             }
         }
-        const uint64_t sampled = sample(data, size, 32u);
-        if (found && memo.sample == sampled)
-        {
-            memo.frame = g_frame;
-            memo.sampledAt = g_frame;
-            memo.quick = quickSample(data, size);
-            return memo.id;
-        }
-        // Drawn in the last two frames and changed: rewritten in place
-        // (animated). Long unused: another packet loaded there (async is fine).
-        g_packetChangedInPlace = found && memo.frame != ~0ull && memo.frame + 2u >= g_frame;
         // Bit 59 set, 60-63 clear: apart from the per-frame meshes' ids
         // (bits 60, 62, 63 and a count) and the second pass's (bit 61 flipped).
         const uint64_t id = (contentHash(data, size, 0x9E3779B97F4A7C15ull ^ size) & 0x07FFFFFFFFFFFFFFull) | (1ull << 59);
+        g_packetChangedInPlace = found && id != memo.id && memo.frame + 2u >= g_frame;
         const bool rewritten = found && (memo.rewritten || g_packetChangedInPlace);
-        memo = {data, size, g_frame, sampled, id, quickSample(data, size), g_frame, rewritten};
+        memo = {data, size, g_frame, id, quickSample(data, size), g_frame, rewritten};
         return id;
     }
 
@@ -902,6 +1017,59 @@ namespace sotc_native
             return 0;
         const uint32_t object = word(word(header + 0x40u) + index * 0x20u + 0x10u);
         return object ? texture(word(object + 0x20u)) : 0;
+    }
+
+    // texTransResolve builds TEST_1/2 from the selected NTO2 +0x80..8c.
+    // With AFAIL FB_ONLY, DATE off, and Z GEQUAL, an alpha comparison of
+    // NEVER disables depth writes and GEQUAL makes them conditional.
+    void surfaceAlphaTest(uint32_t header, uint32_t surface, native_renderer::DrawState &state, uint32_t field = 0x2Cu)
+    {
+        state.framebufferOnlyAlphaFail = false;
+        state.alphaReference = 0;
+        const auto range = [](uint32_t address, uint32_t bytes)
+        {
+            const uint32_t physical = address & 0x1FFFFFFFu;
+            return address != 0u && (address & 3u) == 0u && physical <= 0x2000000u - bytes;
+        };
+        if (!g_ram || !range(header, 0x64u) || (field != 0x2Cu && field != 0x3Cu) || surface >= word(header + 0x54u))
+            return;
+        const uint32_t surfaceBase = word(header + 0x50u);
+        const uint64_t surfaceAt = static_cast<uint64_t>(surfaceBase & 0x1FFFFFFFu) + static_cast<uint64_t>(surface) * 0x120u;
+        if (!range(surfaceBase, 0x120u) || surfaceAt > 0x2000000u - 0x120u)
+            return;
+        const uint32_t material = static_cast<uint32_t>(surfaceAt), mode = word(material + 0x1Cu);
+        // Bit 17 replaces TEST through setBossEffectTexture; its NTO2 is a
+        // placeholder even when the diagnostic boss-mask override is disabled.
+        if ((word(material + 0x18u) & (1u << 17)) || (mode != 1u && mode != 2u) || (field == 0x3Cu && mode != 2u))
+            return;
+        const uint32_t index = word(material + field), table = word(header + 0x40u);
+        const uint64_t entry = static_cast<uint64_t>(table & 0x1FFFFFFFu) + static_cast<uint64_t>(index) * 0x20u;
+        if (index >= word(header + 0x44u) || !range(table, 0x20u) || entry > 0x2000000u - 0x20u)
+            return;
+        const uint32_t object = word(static_cast<uint32_t>(entry) + 0x10u);
+        if (!range(object, 0x24u))
+            return;
+        const uint32_t nto2 = word(object + 0x20u);
+        if (!range(nto2, 0x90u) || word(nto2) != 0x324F544Eu)
+            return;
+        const uint32_t atst = word(nto2 + 0x80u), reference = word(nto2 + 0x84u);
+        const uint32_t afail = word(nto2 + 0x88u), forceAlways = word(nto2 + 0x8Cu);
+        // Requiring the complete raw fields also excludes malformed values
+        // that would leak bits into DATE/DATM or neighboring TEST fields.
+        if (reference > 255u || afail != 1u || forceAlways != 0u)
+            return;
+        if (atst == 0u)
+        {
+            // The FB_ONLY colour path also preserves fragments below the
+            // legacy alpha cutoff. With Z masked, AREF is unused.
+            state.framebufferOnlyAlphaFail = true;
+            state.noDepthWrite = true;
+            return;
+        }
+        if (atst != 5u)
+            return;
+        state.framebufferOnlyAlphaFail = true;
+        state.alphaReference = static_cast<uint8_t>(reference);
     }
 
     // modelGetDlLayer (0x1096a80): the display list layer of a surface; the
@@ -1118,6 +1286,7 @@ namespace sotc_native
         uint8_t bones;
         float u, v;         // as native_renderer::Vertex has them:
         uint8_t r, g, b, a; // u, v, then the colour
+        float u2, v2;
     };
     static_assert(offsetof(SkinBind, r) == offsetof(SkinBind, u) + 8u && offsetof(native_renderer::Vertex, u) == 24u &&
                       offsetof(native_renderer::Vertex, r) == 32u && sizeof(native_renderer::Vertex) == 36u,
@@ -1160,6 +1329,7 @@ namespace sotc_native
                 }
                 b.u = v.u, b.v = v.v;
                 b.r = v.r, b.g = v.g, b.b = v.b, b.a = v.a;
+                b.u2 = v.u2, b.v2 = v.v2;
                 packet.bind.push_back(b);
             }
             packet.stripEnd.push_back(static_cast<uint32_t>(packet.bind.size()));
@@ -1191,7 +1361,7 @@ namespace sotc_native
     // A skinned packet's bind pose for the GPU (native_renderer::uploadSkinnedMesh):
     // the strip vertices, and the strips' triangles as indices (those with two
     // corners the same vertex left out: no matrix pulls them apart).
-    void uploadSkinned(uint64_t id, const SkinnedPacket &packet)
+    void uploadSkinned(uint64_t id, const SkinnedPacket &packet, bool secondTexture = false)
     {
         static std::vector<native_renderer::SkinVertex> vertices;
         static std::vector<uint32_t> indices;
@@ -1203,7 +1373,7 @@ namespace sotc_native
             o = {};
             o.x = b.x, o.y = b.y, o.z = b.z;
             o.nx = b.nx, o.ny = b.ny, o.nz = b.nz;
-            o.u = b.u, o.v = b.v;
+            o.u = secondTexture ? b.u2 : b.u, o.v = secondTexture ? b.v2 : b.v;
             o.r = b.r, o.g = b.g, o.b = b.b, o.a = b.a;
             for (uint32_t k = 0; k < b.bones; ++k)
             {
@@ -1242,7 +1412,7 @@ namespace sotc_native
         const uint32_t *index = nullptr; // indexed: the indices (from `base`)
         uint32_t base = 0;
     };
-    PosedMesh poseSkinned(const SkinnedPacket &packet, const float *palette, native_renderer::Vertex *out)
+    PosedMesh poseSkinned(const SkinnedPacket &packet, const float *palette, native_renderer::Vertex *out, bool secondTexture = false)
     {
         static std::vector<Posed> posed;
         const size_t count = packet.bind.size();
@@ -1303,7 +1473,7 @@ namespace sotc_native
             const SkinBind &src = packet.bind[i];
             o.x = p.p[0], o.y = p.p[1], o.z = p.p[2];
             o.nx = normal[0], o.ny = normal[1], o.nz = normal[2];
-            o.u = src.u, o.v = src.v;
+            o.u = secondTexture ? src.u2 : src.u, o.v = secondTexture ? src.v2 : src.v;
             o.r = src.r, o.g = src.g, o.b = src.b, o.a = src.a;
         };
         PosedMesh mesh;
@@ -1367,6 +1537,102 @@ namespace sotc_native
     native_renderer::IdSet g_litPackets;                              // packets with normals
     native_renderer::IdSet g_skinnedIds;                              // g_skinnedPackets' keys (most packets are not: no map lookup for them)
     uint64_t g_skinnedDraws = 0;                                       // this frame's skinned meshes
+
+    // Several parts of one character refer to a shared DMA chain. The
+    // game may rewrite the palette after recording the first part. Match
+    // what the PS2 reads at the VIF1 kick (Celosia bb0bfd840a).
+    struct SkinDraw
+    {
+        const SkinnedPacket *packet;
+        uint64_t mesh;
+        uint32_t handle;
+        bool secondTexture;
+        bool fast;
+    };
+    struct SkinPaletteAtDraw
+    {
+        uint32_t chain, lo, hi;
+        size_t firstDraw, firstFloat;
+    };
+    std::vector<SkinDraw> g_pendingSkinDraws;
+    std::vector<SkinPaletteAtDraw> g_pendingSkinPalettes;
+    std::vector<float> g_skinPaletteSamples;
+
+    void clearPendingSkin()
+    {
+        g_pendingSkinDraws.clear();
+        g_pendingSkinPalettes.clear();
+        g_skinPaletteSamples.clear();
+    }
+
+    void poseCpuMesh(uint64_t mesh, const SkinnedPacket &packet, const float *palette,
+                     bool secondTexture, bool fast)
+    {
+        if (fast)
+        {
+            if (auto *out = native_renderer::frameMesh(std::max<uint32_t>(packet.maxVertices, static_cast<uint32_t>(packet.bind.size()))))
+            {
+                const PosedMesh written = poseSkinned(packet, palette, out, secondTexture);
+                native_renderer::commitFrameMesh(mesh, written.vertices, written.indices);
+            }
+            return;
+        }
+        const auto place = [palette](const BatchVertex &v, native_renderer::Vertex &o)
+        {
+            o.x = o.y = o.z = o.nx = o.ny = o.nz = 0.0f;
+            for (uint32_t b = 0; b < v.bones; ++b)
+            {
+                const float *m = palette + (v.bone[b] * 4u % 1024u) * 4u;
+                const float w = v.weight[b];
+                o.x += w * (m[0] * v.x + m[4] * v.y + m[8] * v.z + m[12]);
+                o.y += w * (m[1] * v.x + m[5] * v.y + m[9] * v.z + m[13]);
+                o.z += w * (m[2] * v.x + m[6] * v.y + m[10] * v.z + m[14]);
+                o.nx += w * (m[0] * v.nx + m[4] * v.ny + m[8] * v.nz);
+                o.ny += w * (m[1] * v.nx + m[5] * v.ny + m[9] * v.nz);
+                o.nz += w * (m[2] * v.nx + m[6] * v.ny + m[10] * v.nz);
+            }
+        };
+        static std::vector<native_renderer::Vertex> vertices;
+        vertices.clear();
+        triangulate(packet.strips, place, vertices, secondTexture);
+        native_renderer::uploadMesh(mesh, vertices.data(), static_cast<uint32_t>(vertices.size()), true);
+    }
+
+    void refreshSkinnedDrawsAtKick()
+    {
+        static VuPalette finalPalette;
+        static const bool log = std::getenv("SOTC_SKIN_KICK_LOG") != nullptr;
+        static unsigned logged = 0;
+        for (size_t i = 0; i < g_pendingSkinPalettes.size(); ++i)
+        {
+            const auto &sample = g_pendingSkinPalettes[i];
+            if (!readChainPalette(sample.chain, finalPalette) || finalPalette.hi <= finalPalette.lo)
+                continue;
+            if (sample.lo == finalPalette.lo && sample.hi == finalPalette.hi &&
+                std::memcmp(g_skinPaletteSamples.data() + sample.firstFloat, finalPalette.data() + sample.lo * 4u,
+                            (sample.hi - sample.lo) * 4u * sizeof(float)) == 0)
+                continue;
+            const size_t end = i + 1 < g_pendingSkinPalettes.size()
+                ? g_pendingSkinPalettes[i + 1].firstDraw : g_pendingSkinDraws.size();
+            for (size_t d = sample.firstDraw; d < end; ++d)
+            {
+                const SkinDraw &draw = g_pendingSkinDraws[d];
+                const SkinnedPacket &packet = *draw.packet;
+                if (draw.handle)
+                    native_renderer::rewriteFramePalette(draw.handle, finalPalette.data() + packet.lo * 4u,
+                                                        packet.hi - packet.lo);
+                else
+                    poseCpuMesh(draw.mesh, packet, finalPalette.data(), draw.secondTexture, draw.fast);
+            }
+            if (log && logged < 30)
+            {
+                ++logged;
+                std::fprintf(stderr, "[skin-kick] frame %llu chain %08x: updated %zu draws\n",
+                             static_cast<unsigned long long>(g_frame), sample.chain, end - sample.firstDraw);
+            }
+        }
+        clearPendingSkin();
+    }
 
     void flush2D();
 
@@ -1552,7 +1818,8 @@ namespace sotc_native
         const float scale = std::clamp(native_renderer::tuning().renderScale, 0.5f, 4.0f);
         native_renderer::endFrame(static_cast<uint32_t>(512.0f * scale + 0.5f), static_cast<uint32_t>(448.0f * scale + 0.5f));
         static const bool show = std::atoi(std::getenv("SOTC_NATIVE")) != 2; // 2: draw, keep the emulated picture
-        native_renderer::setShown(show && native_renderer::tuning().showNative && g_frameDraws != 0);
+        // Leave the GS drawing if the native worker could not initialize.
+        native_renderer::setShown(show && native_renderer::tuning().showNative && g_frameDraws != 0 && native_renderer::available());
     }
 
     void getCameraContextHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1571,33 +1838,35 @@ namespace sotc_native
     {
         native_renderer::FrameCounters &c = native_renderer::frameCounters();
         static uint64_t last = 0;
-        const uint64_t now = native_renderer::nowUs();
+        struct Sum
+        {
+            uint64_t frames = 0, period = 0, worst = 0, hooks = 0, decode = 0, tex = 0, mesh = 0;
+            uint64_t render = 0, readback = 0, present = 0, wait = 0, submit = 0, blocked = 0, threaded = 0;
+            uint64_t draws = 0, targets = 0, texUploads = 0, texBytes = 0, meshUploads = 0, meshBytes = 0;
+        };
+        static Sum sum;
         if (!native_renderer::tuning().frameLog)
         {
+            if (last)
+                sum = {};
             last = 0;
             c = {};
             return;
         }
-        struct Sum
-        {
-            uint64_t frames = 0, period = 0, worst = 0, hooks = 0, decode = 0, tex = 0, mesh = 0, render = 0, present = 0, wait = 0, blocked = 0, threaded = 0;
-            uint64_t draws = 0, targets = 0, texUploads = 0, texBytes = 0, meshUploads = 0, meshBytes = 0;
-        };
-        static Sum sum;
+        const uint64_t now = native_renderer::nowUs();
         if (last)
         {
             const uint64_t period = now - last;
-            if (period > 50000u)
-                std::fprintf(stderr, "[frame] slow %llu: %.1f ms: hooks %.1f (decode %.1f, %u textures %.0f KB, up %.1f; %u meshes %.0f KB, up %.1f) render %.1f present %.1f wait %.1f draws %u targets %u async %u/%u held %u\n",
-                             (unsigned long long)g_frame, period / 1000.0, c.hookUs / 1000.0, c.decodeUs / 1000.0, c.texUploads, c.texBytes / 1024.0, c.texUs / 1000.0,
-                             c.meshUploads, c.meshBytes / 1024.0, c.meshUs / 1000.0, c.renderUs / 1000.0, c.presentUs / 1000.0, c.waitUs / 1000.0, c.draws, c.targets,
-                             c.asyncJobs, c.asyncDone, c.heldDraws);
-            // SOTC_FRAME_LOG_ALL=1: every frame on a line of its own (cuts, loads).
+            const uint64_t blocked = c.renderWorker ? c.waitUs + c.submitUs : c.renderUs + c.presentUs;
+            // SOTC_FRAME_LOG_ALL=1 also logs frames below the hitch threshold.
             static const bool all = std::getenv("SOTC_FRAME_LOG_ALL") != nullptr;
-            if (all && period <= 50000u)
-                std::fprintf(stderr, "[frame] each %llu: %.1f ms: hooks %.1f (decode %.1f, %u textures, %u meshes, up %.1f) render %.1f wait %.1f draws %u async %u/%u held %u\n",
-                             (unsigned long long)g_frame, period / 1000.0, c.hookUs / 1000.0, c.decodeUs / 1000.0, c.texUploads, c.meshUploads,
-                             (c.texUs + c.meshUs) / 1000.0, c.renderUs / 1000.0, c.waitUs / 1000.0, c.draws, c.asyncJobs, c.asyncDone, c.heldDraws);
+            if (period > 50000u || all)
+                std::fprintf(stderr, "[frame] %s %llu: %.1f ms: game %.1f hooks %.1f (decode %.1f, %u textures %.0f KB, up %.1f; %u meshes %.0f KB, up %.1f) render %.1f readback %.1f present %.1f wait %.1f submit %.1f draws %u targets %u async %u/%u held %u\n",
+                             period > 50000u ? "slow" : "each", (unsigned long long)g_frame, period / 1000.0,
+                             (period - std::min(period, c.hookUs + blocked)) / 1000.0, c.hookUs / 1000.0, c.decodeUs / 1000.0,
+                             c.texUploads, c.texBytes / 1024.0, c.texUs / 1000.0, c.meshUploads, c.meshBytes / 1024.0, c.meshUs / 1000.0,
+                             c.renderUs / 1000.0, c.readbackUs / 1000.0, c.presentUs / 1000.0, c.waitUs / 1000.0, c.submitUs / 1000.0,
+                             c.draws, c.targets, c.asyncJobs, c.asyncDone, c.heldDraws);
             ++sum.frames;
             sum.period += period;
             sum.worst = std::max(sum.worst, period);
@@ -1606,13 +1875,15 @@ namespace sotc_native
             sum.tex += c.texUs;
             sum.mesh += c.meshUs;
             sum.render += c.renderUs;
+            sum.readback += c.readbackUs;
             sum.present += c.presentUs;
             sum.wait += c.waitUs;
+            sum.submit += c.submitUs;
             // A render thread draws (and shows) the frame before while the
             // game runs: the game thread's own time is what it did not wait.
             sum.threaded += c.renderThread ? 1u : 0u;
             // Without one (Metal) render and present were the game thread's.
-            sum.blocked += c.waitUs ? c.waitUs : c.renderUs + c.presentUs;
+            sum.blocked += blocked;
             sum.draws += c.draws;
             sum.targets += c.targets;
             sum.texUploads += c.texUploads;
@@ -1621,12 +1892,12 @@ namespace sotc_native
             sum.meshBytes += c.meshBytes;
             if (sum.frames == 60u)
             {
-                const double n = 60.0, game = (static_cast<double>(sum.period) - sum.hooks - sum.blocked) / n / 1000.0;
-                std::fprintf(stderr, "[frame] %llu: %.1f ms (%.1f fps, slowest %.1f) | game %.1f hooks %.1f (decode %.2f tex up %.2f mesh up %.2f) render %.1f present %.1f wait %.1f%s | "
+                const double n = 60.0, game = (sum.period - std::min(sum.period, sum.hooks + sum.blocked)) / n / 1000.0;
+                std::fprintf(stderr, "[frame] %llu: %.1f ms (%.1f fps, slowest %.1f) | game %.1f hooks %.1f (decode %.2f tex up %.2f mesh up %.2f) render %.1f readback %.1f present %.1f wait %.1f submit %.1f%s | "
                              "draws %.0f targets %.1f textures %.2f (%.0f KB) meshes %.0f (%.0f KB)\n",
                              (unsigned long long)g_frame, sum.period / n / 1000.0, n * 1e6 / static_cast<double>(sum.period), sum.worst / 1000.0, game, sum.hooks / n / 1000.0,
-                             sum.decode / n / 1000.0, sum.tex / n / 1000.0, sum.mesh / n / 1000.0, sum.render / n / 1000.0, sum.present / n / 1000.0,
-                             sum.wait / n / 1000.0, sum.threaded ? " (render thread)" : "",
+                             sum.decode / n / 1000.0, sum.tex / n / 1000.0, sum.mesh / n / 1000.0, sum.render / n / 1000.0,
+                             sum.readback / n / 1000.0, sum.present / n / 1000.0, sum.wait / n / 1000.0, sum.submit / n / 1000.0, sum.threaded ? " (render thread)" : "",
                              sum.draws / n, sum.targets / n, sum.texUploads / n, sum.texBytes / n / 1024.0, sum.meshUploads / n, sum.meshBytes / n / 1024.0);
                 sum = Sum{};
             }
@@ -1698,9 +1969,11 @@ namespace sotc_native
         if (frame != g_frame)
         {
             endFrame();
+            clearPendingSkin();
             frameLog();
             native_renderer::beginFrame();
             g_frame = frame;
+            sampleButtonPrompts();
             gcovDump(frame);
             g_frameDraws = 0;
             g_skinnedDraws = 0;
@@ -1757,14 +2030,47 @@ namespace sotc_native
         {0x010A24C0u, 0x010A5270u}, // spriteDrawSpriteTexNoSet .. spriteDrawSpriteST2 (menus, title, map)
         {0x0108A288u, 0x0108A758u}, // drawFrontFog, fadeScreen, drawDemoBar (cinema bars)
         {0x0134B490u, 0x0134B6F8u}, // subtitles (pre-rendered lines, a textured sprite)
-        {0x013F6B20u, 0x013F78A8u}, // HUD gauges (fans and strips)
+        {0x013F6B20u, 0x013F8AA0u}, // all HUD gauge helpers, including the attack-charge ring
         {0x014033F0u, 0x01403558u}, // title menu backdrop
         {0x001C2DD0u, 0x001C30D0u}, // loading indicator (lines)
         {0x0114FD00u, 0x01150278u}, // spriteDraw*, windowPrintf (windows)
         {0x01155B98u, 0x01155ED8u}, // windowSpriteNoTex, windowSprite
     };
 
-    std::vector<uint32_t> g_layers; // iosDlPushLayer stack
+    std::vector<uint32_t> g_layers; // active SDK pushes, excluding the root layer
+    bool syncLayersFromSdk(const uint8_t *rdram, std::string *error = nullptr)
+    {
+        if (!rdram) return false;
+        const auto read = [&](uint32_t address) {
+            uint32_t value;
+            std::memcpy(&value, rdram + address, sizeof(value));
+            return value;
+        };
+        // SCUS iosDlPushLayer/PopLayer/SetLayer use this live SDK context.
+        // numLayers == 0 precedes SDK initialization; keep the native fallback
+        // then (also used by synthetic renderer fixtures without an SDK).
+        if (read(0x002132ECu) == 0u) return true;
+        const uint32_t depth = read(0x001E10B0u);
+        if (depth > 256u)
+        {
+            if (error) *error = "Invalid SDK display-list layer depth.";
+            return false;
+        }
+        // Push stores the PREVIOUS current layer at saved[oldDepth], then
+        // selects its argument. saved[0] is the root, not an active push.
+        // Rebuild instead of counting hooks: iosResetDC's generated tail pop
+        // calls its original C++ function directly, bypassing popLayerHook.
+        g_layers.resize(depth);
+        for (uint32_t i = 0; i + 1u < depth; ++i)
+            g_layers[i] = read(0x00213308u + (i + 1u) * 4u);
+        if (depth) g_layers.back() = read(0x002132F4u);
+        return true;
+    }
+    uint32_t currentLayer(uint32_t fallback)
+    {
+        syncLayersFromSdk(g_ram);
+        return g_layers.empty() ? fallback : g_layers.back();
+    }
     constexpr uint32_t kScreenCopy = 1u; // a 2D "header" for 0x10f37c8's screen copy
     constexpr uint32_t kPreviousFrame = 2u; // and for feedbackBlur's display buffer (the last frame shown)
     uint32_t g_requested = 0;       // NTO2 header of the last texTransRequest
@@ -1855,7 +2161,11 @@ namespace sotc_native
         const float zA = real(g_cameraContext + 0x4A0u + 10u * 4u), zB = real(g_cameraContext + 0x4A0u + 14u * 4u);
         const float d = static_cast<float>(z) - zA;
         const float w = d > 0.0f ? zB / d : 1e6f;
-        return std::isfinite(w) ? std::clamp(w, 0.11f, 1e6f) : 1e6f;
+        // The native vertex stage clips at w = 0.1 (depth zero). GS depths
+        // nearer than that, including refractionEnd's maximum 24-bit Z,
+        // belong on this boundary: 0.11 put them behind visible geometry
+        // with 0.1 <= w < 0.11 instead of preserving their depth ordering.
+        return std::isfinite(w) ? std::clamp(w, 0.1f, 1e6f) : 1e6f;
     }
 
     // z: the GS Z of XYZ2 / XYZ3 (32 bits) or XYZF2 / XYZF3 (24).
@@ -1909,6 +2219,18 @@ namespace sotc_native
         const size_t n = v.size();
         switch (a.prim & 7u)
         {
+        case 0: // GS point: one logical pixel, also used by dotted effects
+        {
+            native_renderer::Vertex q[4] = {o, o, o, o};
+            q[1].x += 2.0f / 512.0f;
+            q[2].y -= 2.0f / 448.0f;
+            q[3].x = q[1].x;
+            q[3].y = q[2].y;
+            emit2D(q[0], q[1], q[2]);
+            emit2D(q[1], q[3], q[2]);
+            v.clear();
+            break;
+        }
         case 1: case 2: // line, line strip: one pixel wide
             if (n >= 2)
             {
@@ -1989,7 +2311,7 @@ namespace sotc_native
     void feed2D(uint32_t reg, uint64_t value)
     {
         Assembler &a = g_2d;
-        a.layer = g_layers.empty() ? 25u : g_layers.back();
+        a.layer = currentLayer(25u);
         a.header = g_requested;
         switch (reg)
         {
@@ -2008,6 +2330,203 @@ namespace sotc_native
         }
     }
 
+    // ---- bossDeathEffectBegin's mask -------------------------------------
+    // Adapted from HenryKun55/celosia 9a154f0294, under GPL-3.0.
+    //
+    // While getNowBossEffect (0x1186290) has bit 0, bossDeathEffectBegin
+    // (0x1085640) draws, in layer 8, into a 256 x 256 CT32 buffer (FRAME FBP
+    // getFrameBufferSizeFBP() + (W x H) >> 11, FBW 4, XYOFFSET 1920, SCISSOR
+    // 0..255): the buffer cleared to 0 (spriteNoTexFast, colour 0), then a
+    // 16-segment fan of glColor (0, 0, 0, 1.0) = RGBA (0, 0, 0, 0x80), its
+    // centre (real 0x1214740, real 0x1214744) x 256 - 128 and its rim at
+    // 256 x real(0x1186298) around it (glVertex2f; TEST ATST NEVER, AFAIL
+    // FB_ONLY: every pixel written, ALPHA 0x44 FIX 0x80: Cs). modelDisp then
+    // gives the surfaces with flag bit 17 setBossEffectTexture (0x1085400)
+    // instead of their own texture: TEX0 that buffer (TBP
+    // getFrameBufferSizeTBP() + (W x H) >> 6, TBW 4, CT32, 256 x 256, TCC 1,
+    // TFX MODULATE), TEX1 0x60 (linear, no mips), ALPHA 0x44 FIX 0x80
+    // (normal blending), TEST 0x51003 (no alpha cut, Z GEQUAL), the same for
+    // context 2. So those surfaces are black, their alpha the vertex alpha
+    // inside the growing disc and 0 outside it. bossDeathEffectEnd's copies
+    // reuse the buffer after the models (round 16's note that the fan has no
+    // effect looked at a scene with no bit-17 surface).
+    // Here the fan's GIF packet (glEnd from inside bossDeathEffectBegin,
+    // XYZ2 in screen space) is rasterised into a host RGBA texture as the GS
+    // would fill the buffer, uploaded when it changes, under one of four
+    // ids in turn (bounded memory; the frame still in flight keeps its own).
+    struct BossMask
+    {
+        std::atomic<uint64_t> id{0};      // the texture the bit-17 surfaces use (0: none)
+        std::atomic<uint64_t> frame{~0ull}; // the game frame it was made in
+        uint64_t hash = 0;
+        uint32_t slot = 0;
+        std::vector<uint8_t> rgba;
+    };
+    BossMask g_bossMask;
+    constexpr uint64_t kBossMaskId = 0x0200B05500000000ull; // bit 57: apart from the texture keys (bit 58) and the meshes (59-63)
+    // SOTC_BOSSMASK=0: the bit-17 surfaces keep their own texture (round 26's picture).
+    bool bossMaskOn()
+    {
+        static const bool on = !std::getenv("SOTC_BOSSMASK") || std::atoi(std::getenv("SOTC_BOSSMASK")) != 0;
+        return on;
+    }
+
+    // The packet's (value, register) qwords from `start` + 0x20 to `end`, as
+    // the GS would draw them into the 256 x 256 buffer (XYOFFSET 1920,
+    // scissor 0..255, every pixel written): triangles, strips and fans, the
+    // kick vertex's colour (flat; the fan's are all one), sampled at the
+    // pixels' centres (x + 0.5, y + 0.5): the emulated GS's coverage (round
+    // 27, PS2X_GS_FAN_DUMP: 18 057 texels, ~20 differ on the rim).
+    void rasteriseBossFan(uint32_t start, uint32_t end, std::vector<uint8_t> &rgba)
+    {
+        constexpr int kSize = 256;
+        rgba.assign(static_cast<size_t>(kSize) * kSize * 4u, 0u);
+        struct V
+        {
+            float x, y;
+            uint32_t rgba;
+        };
+        V ring[3];
+        uint32_t n = 0, prim = 0, colour = 0;
+        const auto triangle = [&rgba](const V &a, const V &b, const V &c, uint32_t col)
+        {
+            // Edge functions, made counter-clockwise; top-left rule for ties.
+            float area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+            if (area == 0.0f)
+                return;
+            const V *p0 = &a, *p1 = &b, *p2 = &c;
+            if (area < 0.0f)
+                std::swap(p1, p2), area = -area;
+            const int x0 = std::max(0, static_cast<int>(std::floor(std::min({a.x, b.x, c.x}))));
+            const int x1 = std::min(kSize - 1, static_cast<int>(std::ceil(std::max({a.x, b.x, c.x}))));
+            const int y0 = std::max(0, static_cast<int>(std::floor(std::min({a.y, b.y, c.y}))));
+            const int y1 = std::min(kSize - 1, static_cast<int>(std::ceil(std::max({a.y, b.y, c.y}))));
+            const V *e[3][2] = {{p0, p1}, {p1, p2}, {p2, p0}};
+            for (int y = y0; y <= y1; ++y)
+                for (int x = x0; x <= x1; ++x)
+                {
+                    bool inside = true;
+                    for (int k = 0; k < 3 && inside; ++k)
+                    {
+                        const V &s = *e[k][0], &t = *e[k][1];
+                        const float w = (t.x - s.x) * (static_cast<float>(y) + 0.5f - s.y) - (t.y - s.y) * (static_cast<float>(x) + 0.5f - s.x);
+                        // A pixel on an edge belongs to one of the two triangles sharing it.
+                        const bool owns = (t.y > s.y) || (t.y == s.y && t.x < s.x);
+                        inside = w > 0.0f || (w == 0.0f && owns);
+                    }
+                    if (inside)
+                        std::memcpy(&rgba[(static_cast<size_t>(y) * kSize + x) * 4u], &col, 4);
+                }
+        };
+        for (uint32_t q = start + 0x20u; q + 16u <= end; q += 16u)
+        {
+            uint64_t value;
+            std::memcpy(&value, g_ram + (q & 0x1FFFFF0u), 8);
+            const uint32_t reg = word(q + 8u) & 0xFFu;
+            if (reg == 0x00u)
+            {
+                prim = static_cast<uint32_t>(value) & 7u;
+                n = 0;
+            }
+            else if (reg == 0x01u)
+            {
+                const uint32_t r = static_cast<uint32_t>(value) & 0xFFu, g = (static_cast<uint32_t>(value) >> 8) & 0xFFu, b = (static_cast<uint32_t>(value) >> 16) & 0xFFu,
+                               a = (static_cast<uint32_t>(value) >> 24) & 0xFFu;
+                colour = r | (g << 8) | (b << 16) | (a << 24);
+            }
+            else if (reg == 0x04u || reg == 0x05u || reg == 0x0Cu || reg == 0x0Du)
+            {
+                const bool kick = reg == 0x04u || reg == 0x05u;
+                V v{static_cast<float>(value & 0xFFFFu) / 16.0f - 1920.0f, static_cast<float>((value >> 16) & 0xFFFFu) / 16.0f - 1920.0f, colour};
+                if (prim == 5u) // fan: ring[0] the centre
+                {
+                    if (n < 2u)
+                        ring[n] = v;
+                    else
+                    {
+                        ring[2] = v;
+                        if (kick)
+                            triangle(ring[0], ring[1], ring[2], colour);
+                        ring[1] = v;
+                    }
+                }
+                else if (prim == 4u) // strip
+                {
+                    if (n < 2u)
+                        ring[n] = v;
+                    else
+                    {
+                        ring[2] = v;
+                        if (kick)
+                            triangle(ring[0], ring[1], ring[2], colour);
+                        ring[0] = ring[1];
+                        ring[1] = ring[2];
+                    }
+                }
+                else if (prim == 3u) // list
+                {
+                    ring[n % 3u] = v;
+                    if (n % 3u == 2u && kick)
+                        triangle(ring[0], ring[1], ring[2], colour);
+                }
+                ++n;
+            }
+        }
+    }
+
+    // glEnd called by bossDeathEffectBegin: the fan's mask for this frame.
+    void captureBossFan(uint32_t start, uint32_t end)
+    {
+        if (!bossMaskOn() || !start || end <= start + 0x20u || end - start >= 0x10000u)
+            return;
+        BossMask &m = g_bossMask;
+        // The packet's words are what the mask depends on (vertices, colours).
+        uint64_t h = 0xcbf29ce484222325ull;
+        for (uint32_t q = start + 0x20u; q + 4u <= end; q += 4u)
+            h = (h ^ word(q)) * 0x100000001b3ull;
+        if (h != m.hash || !m.id.load(std::memory_order_relaxed) || !native_renderer::hasTexture(m.id.load(std::memory_order_relaxed)))
+        {
+            rasteriseBossFan(start, end, m.rgba);
+            m.hash = h;
+            m.slot = (m.slot + 1u) & 3u;
+            const uint64_t id = kBossMaskId | m.slot;
+            native_renderer::uploadTexture(id, 256u, 256u, m.rgba.data(), 1u);
+            m.id.store(id, std::memory_order_relaxed);
+            static const bool log = std::getenv("SOTC_BOSSMASK_LOG") != nullptr;
+            if (log)
+            {
+                uint32_t covered = 0;
+                for (size_t i = 3; i < m.rgba.size(); i += 4u)
+                    covered += m.rgba[i] != 0u;
+                std::fprintf(stderr, "[bossmask] frame %llu id %016llx radius %g centre %g %g texels %u (%u qwords)\n", (unsigned long long)g_frame,
+                             (unsigned long long)id, real(0x01186298u), real(0x01214740u), real(0x01214744u), covered, (end - start) / 16u - 2u);
+                // SOTC_BOSSMASK_DUMP=<dir>: each new mask as a PPM of its alpha.
+                if (const char *dir = std::getenv("SOTC_BOSSMASK_DUMP"))
+                {
+                    char path[512];
+                    std::snprintf(path, sizeof(path), "%s/bossmask_%06llu.pgm", dir, (unsigned long long)g_frame);
+                    if (FILE *f = std::fopen(path, "wb"))
+                    {
+                        std::fprintf(f, "P5 256 256 255\n");
+                        for (size_t i = 3; i < m.rgba.size(); i += 4u)
+                            std::fputc(m.rgba[i] ? 255 : 0, f);
+                        std::fclose(f);
+                    }
+                }
+            }
+        }
+        m.frame.store(g_frame, std::memory_order_relaxed);
+    }
+    // The mask for this frame's bit-17 surfaces: made this frame or the last
+    // (0: none; the draw is left out, as an empty mask would show nothing).
+    uint64_t bossMaskTexture()
+    {
+        const uint64_t frame = g_bossMask.frame.load(std::memory_order_relaxed);
+        if (frame == ~0ull || frame + 1u < g_frame)
+            return 0;
+        return g_bossMask.id.load(std::memory_order_relaxed);
+    }
+
     // The gl* immediate API (glBeginWithDlLayerNo .. glEnd) builds a GIF
     // packet on the CPU: at *0x1186398 a DMA tag, a GIF tag (+0x10, A+D),
     // then (value, register) pairs up to *0x1186394: TEST, PRIM, and per
@@ -2016,6 +2535,129 @@ namespace sotc_native
     constexpr uint32_t kGlEnd = 0x0108D060u;
     PS2Runtime::RecompiledFunction g_glEnd = nullptr;
 
+    // Opt-in, bounded scene evidence. This never changes guest or draw state.
+    // Limit both the number of callers and events, even across long QA runs.
+    bool effectDiagnosticEvent(uint32_t caller)
+    {
+        static const bool enabled = std::getenv("SOTC_HYDRUS_TRACE") != nullptr;
+        if (!enabled)
+            return false;
+        struct Seen { uint32_t count = 0; uint64_t frame = ~0ull; };
+        static std::map<uint32_t, Seen> counts;
+        if (counts.size() >= 32u && !counts.count(caller) && caller != 0x01385528u)
+            return false;
+        Seen &seen = counts[caller];
+        if (seen.count >= 64u || seen.frame == g_frame || (seen.count >= 4u && g_frame - seen.frame < 60u))
+            return false;
+        ++seen.count;
+        seen.frame = g_frame;
+        return true;
+    }
+
+    void diagnoseGlPacket(uint32_t caller, uint32_t start, uint32_t end)
+    {
+        if (!start || end <= start + 0x20u || end - start >= 0x100000u || !effectDiagnosticEvent(caller))
+            return;
+        uint64_t test[2] = {}, prim = 0;
+        uint32_t tests = 0, vertices = 0, minZ = ~0u, maxZ = 0;
+        uint32_t minX = ~0u, maxX = 0, minY = ~0u, maxY = 0;
+        for (uint32_t q = start + 0x20u; q + 16u <= end; q += 16u)
+        {
+            uint64_t value;
+            std::memcpy(&value, g_ram + (q & 0x1FFFFF0u), 8);
+            const uint32_t reg = word(q + 8u) & 0xFFu;
+            if (reg == 0x47u || reg == 0x48u)
+            {
+                test[reg - 0x47u] = value;
+                tests |= 1u << (reg - 0x47u);
+            }
+            if (reg == 0u)
+                prim = value;
+            if (reg == 4u || reg == 5u || reg == 12u || reg == 13u)
+            {
+                const uint32_t z = static_cast<uint32_t>(value >> 32) & ((reg == 4u || reg == 12u) ? 0xFFFFFFu : ~0u);
+                const uint32_t x = value & 0xFFFFu, y = (value >> 16) & 0xFFFFu;
+                minX = std::min(minX, x); maxX = std::max(maxX, x);
+                minY = std::min(minY, y); maxY = std::max(maxY, y);
+                minZ = std::min(minZ, z); maxZ = std::max(maxZ, z);
+                ++vertices;
+            }
+        }
+        std::fprintf(stderr, "[effect-gl] frame %llu ra %08x layer %u header %08x prim %03llx tests %x test1 %016llx test2 %016llx vertices %u xy %u,%u..%u,%u z %08x..%08x\n",
+                     static_cast<unsigned long long>(g_frame), caller, currentLayer(25u), g_requested,
+                     static_cast<unsigned long long>(prim), tests, static_cast<unsigned long long>(test[0]),
+                     static_cast<unsigned long long>(test[1]), vertices, minX, minY, maxX, maxY, minZ, maxZ);
+    }
+
+    // refractionEnd emits its grid through gsReg rather than glEnd. Summarize
+    // the preceding frame on its next invocation; never log every vertex.
+    void diagnoseUnderwaterRegister(uint32_t reg, uint64_t value)
+    {
+        static const bool enabled = std::getenv("SOTC_HYDRUS_TRACE") != nullptr;
+        if (!enabled)
+            return;
+        struct Packet
+        {
+            uint64_t frame = ~0ull, test = 0, prim = 0;
+            uint32_t vertices = 0, minZ = ~0u, maxZ = 0;
+        };
+        static Packet packet;
+        if (packet.frame != g_frame)
+        {
+            if (packet.vertices && effectDiagnosticEvent(0x0109C610u))
+                std::fprintf(stderr, "[effect-underwater] frame %llu layer 19 test %016llx prim %03llx vertices %u z %08x..%08x view %g..%g fog %u\n",
+                             static_cast<unsigned long long>(packet.frame), static_cast<unsigned long long>(packet.test),
+                             static_cast<unsigned long long>(packet.prim), packet.vertices, packet.minZ, packet.maxZ,
+                             viewDepth(packet.minZ), viewDepth(packet.maxZ), word(0x1186328u));
+            packet = {};
+            packet.frame = g_frame;
+        }
+        if (reg == 0x47u) packet.test = value;
+        if (reg == 0u) packet.prim = value;
+        if (reg == 4u || reg == 5u || reg == 12u || reg == 13u)
+        {
+            const uint32_t z = static_cast<uint32_t>(value >> 32) & ((reg == 4u || reg == 12u) ? 0xFFFFFFu : ~0u);
+            packet.minZ = std::min(packet.minZ, z);
+            packet.maxZ = std::max(packet.maxZ, z);
+            ++packet.vertices;
+        }
+    }
+
+    void diagnoseWeakSurface(uint32_t header, uint32_t surface, uint32_t s, uint64_t flags, uint64_t textureId)
+    {
+        static const bool enabled = std::getenv("SOTC_HYDRUS_TRACE") != nullptr;
+        if (!enabled)
+            return;
+        // SCRExecBossPreProcess uses the signed upper ten flag bits, minus
+        // one, as getWeakPointEffectIntensity's index. Zero is not a weak map.
+        const int32_t index = static_cast<int32_t>(static_cast<int64_t>(flags) >> 54) - 1;
+        if (index < 0 || index >= 8 || !effectDiagnosticEvent(0xF0000000u | static_cast<uint32_t>(index)))
+            return;
+        const auto ramSpan = [](uint32_t address, uint32_t size) -> uint32_t
+        {
+            address &= 0x0FFFFFFFu;
+            return address && size <= 0x02000000u && address <= 0x02000000u - size ? address : 0u;
+        };
+        const uint32_t texIndex = word(s + 0x2Cu);
+        const uint32_t object = texIndex < word(header + 0x44u) ? word(word(header + 0x40u) + texIndex * 0x20u + 0x10u) : 0u;
+        const uint32_t nto = object ? ramSpan(word(object + 0x20u), 0x20u) : 0u;
+        const uint32_t psm = nto ? word(nto + 0x1Cu) & 0x3Fu : ~0u;
+        const uint32_t bytes = psm == 0x14u ? 64u : (psm == 0x13u ? 1024u : 0u);
+        const uint32_t clut = bytes ? textureClut(nto, bytes) : 0u;
+        uint32_t minAlpha = 255u, maxAlpha = 0u, nonzero = 0u;
+        if (clut)
+            for (uint32_t i = 0; i < bytes / 4u; ++i)
+            {
+                const uint32_t alpha = word(clut + i * 4u) >> 24;
+                minAlpha = std::min(minAlpha, alpha); maxAlpha = std::max(maxAlpha, alpha);
+                nonzero += alpha != 0u;
+            }
+        std::fprintf(stderr, "[effect-weak] frame %llu model %08x surface %u flags %016llx index %d intensity %g nto %08x texture %016llx clut %08x alpha %u..%u nonzero %u/%u\n",
+                     static_cast<unsigned long long>(g_frame), header, surface, static_cast<unsigned long long>(flags), index,
+                     real(0x011E62A4u + static_cast<uint32_t>(index) * 120u), nto, static_cast<unsigned long long>(textureId),
+                     clut, clut ? minAlpha : 0u, maxAlpha, nonzero, bytes / 4u);
+    }
+
     void glEndHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         syncFrame(rdram);
@@ -2023,7 +2665,10 @@ namespace sotc_native
         const uint32_t start = word(0x01186398u), end = word(0x01186394u);
         // Not drawn here: bossDeathEffectBegin's fan goes to an off-screen buffer.
         const uint32_t ra = GPR_U32(ctx, 31);
+        diagnoseGlPacket(ra, start, end);
         const bool offScreen = ra >= 0x01085640u && ra < 0x01085E40u;
+        if (offScreen)
+            captureBossFan(start, end);
         // 0x10f3fb0's strips (the heat haze behind the bird) sample the copy
         // of the screen 0x10f37c8 made in their layer (UV in its 256 x 256 texels).
         const bool haze = ra >= 0x010F3FB0u && ra < 0x010F4890u;
@@ -2036,7 +2681,7 @@ namespace sotc_native
             if (log)
             {
                 static std::set<uint64_t> seen;
-                const uint32_t layer = g_layers.empty() ? 25u : g_layers.back();
+                const uint32_t layer = currentLayer(25u);
                 if (seen.insert((static_cast<uint64_t>(GPR_U32(ctx, 31)) << 8) | layer).second)
                     std::fprintf(stderr, "[gl] ra %08x layer %u qwords %u\n", GPR_U32(ctx, 31), layer, (end - start) / 16u - 2u);
             }
@@ -2061,7 +2706,7 @@ namespace sotc_native
         {
             static std::set<std::pair<uint32_t, uint64_t>> seen;
             if (seen.insert({ra, GPR_U64(ctx, 5)}).second && seen.size() < 300)
-                std::fprintf(stderr, "[gsreg-log] ra %08x layer %u value %016llx\n", ra, g_layers.empty() ? 99u : g_layers.back(),
+                std::fprintf(stderr, "[gsreg-log] ra %08x layer %u value %016llx\n", ra, currentLayer(99u),
                              static_cast<unsigned long long>(GPR_U64(ctx, 5)));
         }
         if (ra >= 0x0109E2A0u && ra < 0x0109FB08u)
@@ -2089,6 +2734,7 @@ namespace sotc_native
             // screen at layer 19, its ST waving over refractionBegin's 256 x 256
             // copy of the picture so far.
             syncFrame(rdram);
+            diagnoseUnderwaterRegister(GPR_U32(ctx, 4) & 0xFFu, GPR_U64(ctx, 5));
             const uint32_t requested = g_requested;
             g_requested = kScreenCopy;
             feed2D(GPR_U32(ctx, 4) & 0xFFu, GPR_U64(ctx, 5));
@@ -2117,6 +2763,14 @@ namespace sotc_native
 
     void pushLayerHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        // callGuest sets pc to the entry on a fresh call. A continuation has
+        // already consumed the entry arguments and must only run the original.
+        if (ctx->pc != kPushLayer)
+        {
+            g_pushLayer(rdram, ctx, runtime);
+            syncLayersFromSdk(rdram);
+            return;
+        }
         // SOTC_LOG_LAYER=<n> (debugging): who pushes display list layer n (caller, count).
         static const int logLayer = std::getenv("SOTC_LOG_LAYER") ? std::atoi(std::getenv("SOTC_LOG_LAYER")) : -1;
         if (logLayer >= 0 && GPR_U32(ctx, 4) == static_cast<uint32_t>(logLayer))
@@ -2159,15 +2813,14 @@ namespace sotc_native
             const float none = 0.0f;
             std::memcpy(rdram + 0x118629Cu, &none, 4);
         }
-        g_layers.push_back(GPR_U32(ctx, 4));
         g_pushLayer(rdram, ctx, runtime);
+        syncLayersFromSdk(rdram);
     }
 
     void popLayerHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        if (!g_layers.empty())
-            g_layers.pop_back();
         g_popLayer(rdram, ctx, runtime);
+        syncLayersFromSdk(rdram);
     }
 
     // ---- Cloth and hair: meshDisp -------------------------------------------
@@ -2191,7 +2844,7 @@ namespace sotc_native
         syncFrame(rdram);
         const uint32_t object = GPR_U32(ctx, 4);
         const uint32_t header = g_requested;
-        const uint32_t layer = g_layers.empty() ? 2u : g_layers.back();
+        const uint32_t layer = currentLayer(2u);
         g_meshDisp(rdram, ctx, runtime);
         HookTimer hookTimer;
         if (!g_cameraContext || g_ram[(object + 8u) & 0x1FFFFFFu] != '#')
@@ -2257,9 +2910,28 @@ namespace sotc_native
                 }
             native_renderer::uploadMesh(mesh, tris.data(), static_cast<uint32_t>(tris.size()), true);
         }
-        float camera[16];
+        // The grid has its own view matrix. In particular, the death tendrils
+        // are already in camera space, unlike Wander's world-space cape.
+        // Adapted from HenryKun55/celosia 9a154f0294 (GPL-3.0).
+        float worldClip[16], projection[16], product[16];
         for (int i = 0; i < 16; ++i)
-            camera[i] = real(g_cameraContext + 0x5A0u + i * 4u);
+        {
+            worldClip[i] = real(g_cameraContext + 0x5A0u + i * 4u);
+            projection[i] = real(g_cameraContext + 0x40u + i * 4u);
+        }
+        float diff = 0.0f, scale = 1e-6f;
+        for (int c = 0; c < 4; ++c)
+            for (int r = 0; r < 4; ++r)
+            {
+                float sum = 0.0f;
+                for (int k = 0; k < 4; ++k)
+                    sum += projection[k * 4 + r] * view[c * 4 + k];
+                product[c * 4 + r] = sum;
+                diff = std::max(diff, std::fabs(sum - worldClip[c * 4 + r]));
+                scale = std::max(scale, std::fabs(sum));
+            }
+        // Keep the body's exact camera bits for the usual cape matrix.
+        const float *camera = diff > scale * 1e-3f ? product : worldClip;
         native_renderer::DrawState state;
         state.texture = texture(header);
         state.order = layer;
@@ -2449,10 +3121,16 @@ namespace sotc_native
         float light[4] = {0, 0, 0, 0}, shade[4] = {0.75f, 0, 0, 0}; // VU 26 / 27 (type 4's lighting)
     } g_ptclEnvState;
     uint32_t g_ptclBlend = 0;
+    uint8_t g_ptclClamp = 0;
 
     void ptclMatHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         g_ptclBlend = GPR_U32(ctx, 4);
+        // ptclmanBuildMatPacket writes CLAMP_1 at packet +0x30: WMS is
+        // CLAMP for f12 <= 1, WMT for f13 <= 1, otherwise REPEAT. Capture
+        // the arguments before the original call can overwrite its registers.
+        g_ptclClamp = (FPU_C_OLE_S(ctx->f[12], 1.0f) ? 1u : 0u) |
+                      (FPU_C_OLE_S(ctx->f[13], 1.0f) ? 2u : 0u);
         g_ptclMat(rdram, ctx, runtime);
     }
 
@@ -2489,7 +3167,24 @@ namespace sotc_native
     {
         syncFrame(rdram);
         const uint32_t a = GPR_U32(ctx, 4), count = GPR_U32(ctx, 5);
-        const uint32_t header = g_requested, layer = g_layers.empty() ? 18u : g_layers.back();
+        const uint32_t header = g_requested, layer = currentLayer(18u);
+        const uint32_t caller = GPR_U32(ctx, 31);
+        // dischargeMain submits two type-2 sprites here. Preserve its inputs
+        // before the guest builder overwrites caller-saved registers.
+        if (caller == 0x01385528u && count && count <= 4096u && effectDiagnosticEvent(caller))
+        {
+            const ParticleEnv &env = g_ptclEnvState;
+            for (uint32_t i = 0; i < std::min(count, 2u); ++i)
+            {
+                const uint32_t q = a + i * 48u;
+                std::fprintf(stderr, "[effect-discharge] frame %llu ra %08x layer %u header %08x type %u blend %u count %u i %u p %g %g %g size %g rgba %g %g %g %g q2 %g %g %g %g vec %g %g k %g %g %g matrix %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g\n",
+                             static_cast<unsigned long long>(g_frame), caller, layer, header, env.type, g_ptclBlend, count, i,
+                             real(q), real(q + 4u), real(q + 8u), real(q + 12u), real(q + 16u), real(q + 20u), real(q + 24u), real(q + 28u),
+                             real(q + 32u), real(q + 36u), real(q + 40u), real(q + 44u), env.vec[0], env.vec[1], env.k[0], env.k[1], env.k[2],
+                             env.m[0], env.m[1], env.m[2], env.m[3], env.m[4], env.m[5], env.m[6], env.m[7],
+                             env.m[8], env.m[9], env.m[10], env.m[11], env.m[12], env.m[13], env.m[14], env.m[15]);
+            }
+        }
         g_ptclVtx(rdram, ctx, runtime);
         HookTimer hookTimer;
         const bool off = !native_renderer::tuning().particles;
@@ -2691,6 +3386,11 @@ namespace sotc_native
         native_renderer::DrawState state;
         state.texture = texture(header);
         state.blend = g_ptclBlend == 1u ? native_renderer::Blend::Additive : (g_ptclBlend == 2u ? native_renderer::Blend::Subtract : native_renderer::Blend::Normal);
+        state.clamp = g_ptclClamp;
+        // The material's TEST_1 is 0x51011: ATST NEVER, AFAIL FB_ONLY,
+        // with ZTE GEQUAL. Colour is drawn and depth is tested, but no
+        // particle writes Z, including normal and subtractive materials.
+        state.noDepthWrite = true;
         state.order = layer;
         state.fogged = false;
         native_renderer::draw(mesh, camera, state);
@@ -3336,6 +4036,21 @@ namespace sotc_native
         const bool hasPalette = readPalette(instance, palette);
         const bool fast = native_renderer::tuning().fastHooks;
         uint32_t paletteHandle = 0, paletteLo = 0, paletteHi = 0; // this instance's palette as last sent
+        bool sampledPalette = false;
+        const auto rememberSkinDraw = [&](const SkinDraw &draw)
+        {
+            if (palette.hi <= palette.lo)
+                return;
+            if (!sampledPalette)
+            {
+                g_pendingSkinPalettes.push_back({word(instance + 0xCu), palette.lo, palette.hi,
+                                                g_pendingSkinDraws.size(), g_skinPaletteSamples.size()});
+                g_skinPaletteSamples.insert(g_skinPaletteSamples.end(), palette.data() + palette.lo * 4u,
+                                            palette.data() + palette.hi * 4u);
+                sampledPalette = true;
+            }
+            g_pendingSkinDraws.push_back(draw);
+        };
         float projection[16];
         for (int i = 0; i < 16; ++i)
             projection[i] = real(g_cameraContext + 0x40u + i * 4u);
@@ -3404,7 +4119,7 @@ namespace sotc_native
                     }
                 }
             }
-            uint64_t mesh = id;
+            uint64_t mesh = id, secondMesh = id ^ (1ull << 61);
             const float *transform = clip;
             bool posed = false;                         // skinned: camera space
             uint32_t skinPalette = 0, skinPaletteCount = 0; // posed by the GPU: its palette
@@ -3421,11 +4136,15 @@ namespace sotc_native
                     // id, this instance's matrices sent with the draw.
                     if (!native_renderer::hasMesh(id))
                         uploadSkinned(id, packet);
+                    if (twoPasses && !native_renderer::hasMesh(secondMesh))
+                        uploadSkinned(secondMesh, packet, true);
                     if (!paletteHandle || paletteLo != packet.lo || paletteHi != packet.hi)
                     {
                         paletteHandle = native_renderer::framePalette(palette.data() + packet.lo * 4u, packet.hi - packet.lo);
                         paletteLo = packet.lo;
                         paletteHi = packet.hi;
+                        if (paletteHandle)
+                            rememberSkinDraw({&packet, 0, paletteHandle, false, true});
                     }
                     if (!paletteHandle)
                         continue;
@@ -3433,38 +4152,19 @@ namespace sotc_native
                     skinPaletteCount = packet.hi - packet.lo;
                     transform = projection;
                 }
-                // Posed on the CPU (camera space), one mesh per draw this frame.
-                else if (fast)
-                {
-                    // Written straight into the frame's vertex buffer.
-                    mesh = (1ull << 63) | g_skinnedDraws++;
-                    if (native_renderer::Vertex *out = native_renderer::frameMesh(std::max<uint32_t>(packet.maxVertices, static_cast<uint32_t>(packet.bind.size()))))
-                    {
-                        const PosedMesh written = poseSkinned(packet, palette.data(), out);
-                        native_renderer::commitFrameMesh(mesh, written.vertices, written.indices);
-                    }
-                    transform = projection;
-                }
                 else
                 {
-                    vertices.clear();
-                    triangulate(skinnedPacket->second.strips, [](const BatchVertex &v, native_renderer::Vertex &o)
-                    {
-                        o.x = o.y = o.z = o.nx = o.ny = o.nz = 0.0f;
-                        for (uint32_t b = 0; b < v.bones; ++b)
-                        {
-                            const float *m = &palette[(v.bone[b] * 4u % 1024u) * 4u];
-                            const float w = v.weight[b];
-                            o.x += w * (m[0] * v.x + m[4] * v.y + m[8] * v.z + m[12]);
-                            o.y += w * (m[1] * v.x + m[5] * v.y + m[9] * v.z + m[13]);
-                            o.z += w * (m[2] * v.x + m[6] * v.y + m[10] * v.z + m[14]);
-                            o.nx += w * (m[0] * v.nx + m[4] * v.ny + m[8] * v.nz);
-                            o.ny += w * (m[1] * v.nx + m[5] * v.ny + m[9] * v.nz);
-                            o.nz += w * (m[2] * v.nx + m[6] * v.ny + m[10] * v.nz);
-                        }
-                    }, vertices);
+                    // Posed on the CPU in camera space. Keep both passes tied
+                    // to the same pose when the palette is refreshed.
                     mesh = (1ull << 63) | g_skinnedDraws++;
-                    native_renderer::uploadMesh(mesh, vertices.data(), static_cast<uint32_t>(vertices.size()), true);
+                    poseCpuMesh(mesh, packet, palette.data(), false, fast);
+                    rememberSkinDraw({&packet, mesh, 0, false, fast});
+                    if (twoPasses)
+                    {
+                        secondMesh = (1ull << 63) | g_skinnedDraws++;
+                        poseCpuMesh(secondMesh, packet, palette.data(), true, fast);
+                        rememberSkinDraw({&packet, secondMesh, 0, true, fast});
+                    }
                     transform = projection;
                 }
             }
@@ -3549,6 +4249,26 @@ namespace sotc_native
                                  static_cast<int>(surfaceBlend(s)), static_cast<unsigned long long>(state.texture), surface, word(s + 0x18u));
             }
             state.background = state.order == 1u;            // the sky
+            // modelDisp binds the off-screen boss mask for bit-17 surfaces,
+            // not the placeholder texture carried by the material.
+            uint64_t bossMask = 0;
+            uint64_t effectFlags;
+            std::memcpy(&effectFlags, g_ram + ((s + 0x18u) & 0x1FFFFF8u), 8);
+            diagnoseWeakSurface(header, surface, s, effectFlags, state.texture);
+            if (bossMaskOn() && ((effectFlags >> 17) & 1u))
+            {
+                bossMask = bossMaskTexture();
+                if (!bossMask)
+                    continue; // an empty mask contributes no pixels
+                if (!state.debugColour)
+                {
+                    state.texture = bossMask;
+                    state.blend = native_renderer::Blend::Normal;
+                }
+                state.maxLod = state.lodK = 0.0f;
+                state.lodScale = 1.0f;
+                state.uvOffset[0] = state.uvOffset[1] = 0.0f;
+            }
             const bool logMat = env.logMat;
             if (logMat && k == 0u)
             {
@@ -3580,9 +4300,12 @@ namespace sotc_native
             // being 0x20; the splash rings drawn after on the surface stay visible.
             if ((word(s + 0x18u) & 0x2200u) == 0x2200u)
                 state.noDepthWrite = true;
-            const bool twoTextures = word(s + 0x1Cu) == 2u && !posed && !state.debugColour;
+            const bool surfaceDepthMask = state.noDepthWrite;
+            const bool twoTextures = twoPasses && !state.debugColour;
             if (twoTextures)
                 state.writeDepth = true;
+            if (!bossMask && !state.debugColour && state.texture)
+                surfaceAlphaTest(header, surface, state);
             native_renderer::draw(mesh, transform, state);
             ++g_frameDraws;
             ++g_modelDraws;
@@ -3592,15 +4315,27 @@ namespace sotc_native
                 // and coordinates, blended by ALPHA_2 (context 2).
                 native_renderer::DrawState second = state;
                 second.texture = surfaceTexture(header, surface, 0x3Cu);
+                // Context 2 has its own NTO2 TEST and keeps the surface mask.
+                second.noDepthWrite = surfaceDepthMask;
+                second.framebufferOnlyAlphaFail = false;
+                second.alphaReference = 0;
+                if (!bossMask && !second.debugColour && second.texture)
+                    surfaceAlphaTest(header, surface, second, 0x3Cu);
                 second.uvOffset[0] = second.uvOffset[1] = 0.0f; // the second pair takes ROW z / w (0)
                 second.maxLod = 0.0f;
                 if (!noMips)
                     surfaceLod(header, surface, second, 0x3Cu);
                 second.blend = surfaceBlend(s, 0x43u);
                 second.clamp = surfaceClamp(s, 0x09u);
+                if (bossMask)
+                {
+                    second.texture = bossMask;
+                    second.blend = native_renderer::Blend::Normal;
+                    second.maxLod = 0.0f;
+                }
                 second.writeDepth = false;
                 second.overlay = true;
-                native_renderer::draw(id ^ (1ull << 61), transform, second);
+                native_renderer::draw(secondMesh, transform, second);
                 ++g_frameDraws;
             }
             // Reflecting surfaces (flags 0x2200, modelDisp): their pass packet
@@ -3618,6 +4353,11 @@ namespace sotc_native
                 const uint32_t rec = word(word(header + 0x14u) + 4u) + surface * 0x40u + 0x20u;
                 const uint32_t data = word(rec + 4u); // CALL target: its VU constants
                 native_renderer::DrawState refl = state;
+                // These extra passes sample a rendered target with their own
+                // microcode/TEST contract, rather than the NTO2 material.
+                refl.noDepthWrite = surfaceDepthMask;
+                refl.framebufferOnlyAlphaFail = false;
+                refl.alphaReference = 0;
                 refl.reflectionSource = false;
                 refl.reflectionSample = true;
                 refl.overlay = true;
@@ -3694,6 +4434,80 @@ namespace sotc_native
     }
 }
 
+namespace sotc_native {
+    struct NativeState {
+        uint32_t camera = 0; uint64_t counter = 0, frame = 0; uint32_t frameDraws = 0, modelDraws = 0; uint64_t skinnedDraws = 0;
+        bool bloom = false; uint32_t requested = 0; bool haveLights = false; float lights[32]{};
+        ParticleEnv particles{}; uint32_t blend = 0; uint8_t clamp = 0;
+        native_renderer::Fog fog; std::vector<uint32_t> layers;
+        Assembler assembler; std::vector<native_renderer::Vertex> volume;
+        std::vector<uint8_t> system, gpu;
+    };
+    template<class A> void nativeCodec(A &a, NativeState &s) {
+        a.pod(s.camera); a.pod(s.counter); a.pod(s.frame); a.pod(s.frameDraws); a.pod(s.modelDraws); a.pod(s.skinnedDraws);
+        a.pod(s.bloom); a.pod(s.requested); a.pod(s.haveLights); a.pod(s.lights);
+        a.pod(s.particles); a.pod(s.blend); a.pod(s.clamp);
+        a.pod(s.fog.enabled);
+        a.pod(s.fog.start);
+        a.pod(s.fog.width);
+        a.pod(s.fog.steps);
+        a.pod(s.fog.order);
+        a.pod(s.fog.vertexFog);
+        a.pod(s.fog.base);
+        a.pod(s.fog.scale);
+        a.pod(s.fog.colour);
+        a.pod(s.assembler.prim);
+        a.pod(s.assembler.rgbaq);
+        a.pod(s.assembler.alpha);
+        a.pod(s.assembler.s);
+        a.pod(s.assembler.t);
+        a.pod(s.assembler.u);
+        a.pod(s.assembler.v);
+        a.pod(s.assembler.header);
+        a.pod(s.assembler.layer);
+        a.pod(s.assembler.batchKey);
+        a.pod(s.assembler.batchPrim);
+        a.pod(s.assembler.batchAlpha);
+        a.pod(s.assembler.batchHeader);
+        a.pod(s.assembler.batchLayer);
+        a.vector(s.layers, 256); a.vector(s.assembler.strip, 65536); a.vector(s.assembler.batch, 1u<<20); a.vector(s.volume, 1u<<20); a.vector(s.system,65536); a.vector(s.gpu,32u<<20);
+    }
+    bool captureNativeState(PS2Runtime &, std::vector<uint8_t> &out, std::string &error) {
+        if (!g_ram) { error="The native scene is not ready yet."; return false; }
+        if (!syncLayersFromSdk(g_ram, &error)) return false;
+        // Boss mask is a derived texture; rebuild it from restored guest data.
+        NativeState s; s.counter=ps2_stats::vif1Chains.load(); s.camera=g_cameraContext; s.frame=g_frame; s.frameDraws=g_frameDraws; s.modelDraws=g_modelDraws;
+        s.skinnedDraws=g_skinnedDraws; s.bloom=g_bloomRan; s.requested=g_requested; s.haveLights=g_haveViewLights;
+        std::memcpy(s.lights,g_viewLights,sizeof(s.lights)); s.particles=g_ptclEnvState; s.blend=g_ptclBlend; s.clamp=g_ptclClamp;
+        s.fog=g_fog; s.layers=g_layers; s.assembler=g_2d; s.volume=g_volume;
+        if (!captureSotcSystemState(s.system,error) || !native_renderer::captureState(s.gpu,error)) return false;
+        ps2state::Writer w(out,error); w.pod(uint32_t{0x31544f53}); nativeCodec(w,s); return w.finish();
+    }
+    bool decodeNativeState(PS2Runtime &runtime, const std::vector<uint8_t> &blob, bool apply, std::string &error) {
+        NativeState s; ps2state::Reader r(blob,error); uint32_t magic=0; r.pod(magic); nativeCodec(r,s);
+        if (!r.finish() || magic!=0x31544f53 || s.camera>=PS2_RAM_SIZE || s.layers.size()>256) { error="Invalid native scene state."; return false; }
+        if (!validateSotcSystemState(s.system,error) || !native_renderer::validateState(s.gpu,error)) return false;
+        if (apply) {
+            if (!native_renderer::resetStateFrame(error)) return false;
+            if (!native_renderer::restoreState(s.gpu,error) || !restoreSotcSystemState(s.system,error)) return false;
+            ++g_stateEpoch; for (auto &memo:g_textureMemo) memo={}; g_packetMemo={};
+            sampleButtonPrompts();
+            clearPendingSkin();
+            g_packetChangedInPlace=false; g_skinnedPackets.clear(); g_skinnedPacketBytes=0; g_litPackets={}; g_skinnedIds={};
+            g_bossMask.id.store(0); g_bossMask.frame.store(~0ull); g_bossMask.hash=0; g_bossMask.slot=0; g_bossMask.rgba.clear();
+            ps2_stats::vif1Chains.store(s.counter);
+            g_ram=runtime.memory().getRDRAM(); g_cameraContext=s.camera; g_frame=s.frame; g_frameDraws=s.frameDraws; g_modelDraws=s.modelDraws;
+            g_skinnedDraws=s.skinnedDraws; g_bloomRan=s.bloom; g_requested=s.requested; g_haveViewLights=s.haveLights;
+            std::memcpy(g_viewLights,s.lights,sizeof(g_viewLights)); g_ptclEnvState=s.particles; g_ptclBlend=s.blend; g_ptclClamp=s.clamp;
+            g_fog=s.fog; g_layers.swap(s.layers); g_2d=std::move(s.assembler); g_volume.swap(s.volume);
+            native_renderer::noteFrontendMemory(0);
+        }
+        return true;
+    }
+    bool validateNativeState(PS2Runtime &r,const std::vector<uint8_t> &b,std::string &e) { return decodeNativeState(r,b,false,e); }
+    bool restoreNativeState(PS2Runtime &r,const std::vector<uint8_t> &b,std::string &e) { return decodeNativeState(r,b,true,e); }
+}
+
 void installSotcNative(PS2Runtime &runtime)
 {
     using namespace sotc_native;
@@ -3704,6 +4518,7 @@ void installSotcNative(PS2Runtime &runtime)
         std::cerr << "[sotc:native] no native renderer on this platform" << std::endl;
         return;
     }
+    runtime.setStateHooks(captureNativeState, validateNativeState, restoreNativeState);
     g_modelDisp = runtime.lookupFunction(kModelDisp);
     runtime.registerFunction(kModelDisp, modelDispHook);
     g_getCameraContext = runtime.lookupFunction(kGetCameraContext);
@@ -3758,5 +4573,6 @@ void installSotcNative(PS2Runtime &runtime)
         g_zFog = runtime.lookupFunction(kZFog);
         runtime.registerFunction(kZFog, zFogHook);
     }
+    ps2_stats::kickHook = refreshSkinnedDrawsAtKick;
     std::cerr << "[sotc:native] models drawn by the native renderer" << std::endl;
 }

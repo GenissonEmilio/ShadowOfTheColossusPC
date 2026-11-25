@@ -1,0 +1,2 @@
+#include "utf8.rc"
+1 ICON "app-icon.ico"

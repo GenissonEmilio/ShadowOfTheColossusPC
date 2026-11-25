@@ -6,6 +6,7 @@
 #include "runtime/native_renderer.h"
 
 #include <functional>
+#include <mutex>
 
 namespace native_renderer::detail
 {
@@ -20,8 +21,30 @@ namespace native_renderer::detail
     };
     bool androidFrameStatsEnabled();
     AndroidFrameStats androidFrameStats();
-    bool copyFrameIfNew(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height, uint64_t &serial);
 #endif
+
+    struct FrameOutput
+    {
+        std::mutex mutex;
+        std::vector<uint8_t> pixels;
+        uint32_t width = 0, height = 0;
+        uint64_t revision = 0;
+
+        FrameRead read(std::vector<uint8_t> &rgba, uint32_t &w, uint32_t &h, uint64_t *seen)
+        {
+            const std::lock_guard lock(mutex);
+            if (!revision)
+                return FrameRead::Missing;
+            w = width;
+            h = height;
+            if (seen && *seen == revision)
+                return FrameRead::Unchanged;
+            rgba = pixels;
+            if (seen)
+                *seen = revision;
+            return FrameRead::Updated;
+        }
+    };
 
     class Backend
     {
@@ -61,6 +84,8 @@ namespace native_renderer::detail
         virtual bool canSkin() { return false; }
         virtual void uploadSkinnedMesh(uint64_t, const SkinVertex *, uint32_t, const uint32_t *, uint32_t) {}
         virtual uint32_t framePalette(const float *, uint32_t) { return 0; }
+        // Rewrite a current recording frame's palette; no GPU skinning by default.
+        virtual void rewriteFramePalette(uint32_t, const float *, uint32_t) {}
         virtual bool hasTexture(uint64_t id) = 0;
         virtual void uploadTexture(uint64_t id, uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t levels) = 0;
         virtual void beginFrame() = 0;
@@ -74,14 +99,24 @@ namespace native_renderer::detail
         // The frame ending next is not shown (its uploads still made): the
         // last one stays on screen (holdIncomplete). Backends that cannot: no-op.
         virtual void holdFrame() {}
-        virtual bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height) = 0;
+        virtual FrameRead readFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height, uint64_t *seen) = 0;
+        bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height)
+        {
+            return readFrame(rgba, width, height, nullptr) == FrameRead::Updated;
+        }
 #if defined(__ANDROID__)
-        virtual bool copyFrameIfNew(std::vector<uint8_t> &, uint32_t &, uint32_t &, uint64_t &) { return false; }
         virtual AndroidFrameStats androidFrameStats() { return {}; }
 #endif
         // A backend that draws on a thread of its own: returns once every
         // frame handed over is drawn.
         virtual void finishFrames() {}
+        virtual bool resetStateFrame() { return false; }
+        virtual bool captureState(std::vector<uint8_t> &, std::string &error) const
+        { error = "This native backend cannot capture temporal histories."; return false; }
+        virtual bool validateState(const std::vector<uint8_t> &, std::string &error) const
+        { error = "This native backend cannot validate temporal histories."; return false; }
+        virtual bool restoreState(const std::vector<uint8_t> &, std::string &error)
+        { error = "This native backend cannot restore temporal histories."; return false; }
         // It fills the frame log's render / present times itself (else the
         // front times endFrame).
         virtual bool timesItself() { return false; }

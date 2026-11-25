@@ -1,0 +1,35 @@
+enable_language(RC)
+set(repo "${CMAKE_CURRENT_SOURCE_DIR}/../..")
+set(runtime "${repo}/PS2Recomp/ps2xRuntime")
+set(win_manifest "${CMAKE_CURRENT_SOURCE_DIR}/utf8.rc")
+file(GLOB overrides CONFIGURE_DEPENDS "${repo}/game/overrides/*.cpp")
+
+add_library(sotc-windows-base STATIC "${runtime}/src/main.cpp" ${overrides})
+target_link_libraries(sotc-windows-base PRIVATE ps2_runtime)
+target_compile_features(sotc-windows-base PRIVATE cxx_std_20)
+target_compile_options(sotc-windows-base PRIVATE -O2 -fno-strict-aliasing)
+target_compile_definitions(sotc-windows-base PRIVATE PS2X_VU1_TRUST_FPU=1)
+
+add_executable(sotc-video-tool "${repo}/tools/linux/video_tool.cpp" ${win_manifest})
+target_link_libraries(sotc-video-tool PRIVATE ps2_runtime)
+target_compile_features(sotc-video-tool PRIVATE cxx_std_20)
+add_executable(sotc-input-tool "${repo}/tools/linux/input_tool.cpp" ${win_manifest})
+target_include_directories(sotc-input-tool PRIVATE "${raylib_SOURCE_DIR}/src/external/glfw/include")
+target_link_libraries(sotc-input-tool PRIVATE raylib glfw)
+target_compile_features(sotc-input-tool PRIVATE cxx_std_20)
+target_sources(ps2_recomp PRIVATE ${win_manifest})
+foreach(target IN ITEMS ps2_recomp sotc-video-tool sotc-input-tool)
+    target_include_directories(${target} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+endforeach()
+
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${repo}/tools/desktop/assets/icon.png" "${CMAKE_CURRENT_SOURCE_DIR}/make_icon.py")
+execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/make_icon.py"
+    "${repo}/tools/desktop/assets/icon.png" "${CMAKE_CURRENT_BINARY_DIR}/app-icon.ico"
+    COMMAND_ERROR_IS_FATAL ANY)
+add_executable(ShadowOfTheColossusPC WIN32 launcher.cpp launcher.rc)
+target_include_directories(ShadowOfTheColossusPC PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")
+target_link_libraries(ShadowOfTheColossusPC PRIVATE shell32)
+target_compile_features(ShadowOfTheColossusPC PRIVATE cxx_std_20)
+target_link_options(ShadowOfTheColossusPC PRIVATE -municode -static)

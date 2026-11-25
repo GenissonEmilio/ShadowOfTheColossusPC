@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "MemoryCard.h"
+#include "runtime/host_state.h"
 
 namespace ps2_stubs
 {
@@ -476,6 +477,25 @@ namespace ps2_stubs
 
             return std::fopen(hostPath.string().c_str(), mode);
         }
+    }
+
+    bool legacyCardStateCaptureSupported(std::string &error)
+    {
+        // This state format serializes the native DBC raw-card backend in
+        // MemoryCard2.cpp. The independent libmc/filesystem backend must stay
+        // in its initial guest-visible state; an empty FILE* map alone does
+        // not prove that (async replies, directories and cursors persist).
+        std::lock_guard<std::mutex> lock(g_mcStateMutex);
+        const bool initialPorts = std::all_of(g_mcPorts.begin(), g_mcPorts.end(), [](const McPortState &port) {
+            return port.currentDir == "/" && port.formatted;
+        });
+        if (!g_mcFiles.empty() || g_mcNextFd != 1 || g_mcLastCmd != 0 || g_mcCommandPending ||
+            g_mcLastResult != 0 || g_cvMcFileCursor != 0 || !initialPorts)
+        {
+            error = "Legacy LibMC/MCSERV filesystem card state is not supported by this native DBC state format.";
+            return false;
+        }
+        return true;
     }
 
     MemoryCardDebugSnapshot getMemoryCardDebugSnapshot()

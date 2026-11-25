@@ -15,6 +15,7 @@
 #include <condition_variable>
 #include <deque>
 #include <thread>
+#include <string>
 
 #include "gs/ps2_gif_arbiter.h"
 #if defined(_MSC_VER)
@@ -268,6 +269,12 @@ class PS2Memory
 public:
     PS2Memory();
     ~PS2Memory();
+
+    // Coordinator must first stop EE execution and all event producers.
+    // Capture drains MTVU; restore preserves bound buffers and callbacks.
+    bool captureState(std::vector<uint8_t> &out, std::string &error) const;
+    bool validateState(const std::vector<uint8_t> &data, std::string &error) const;
+    bool restoreState(const std::vector<uint8_t> &data, std::string &error);
 
     // Waits until queued VIF1/GIF work has run (no-op without MTVU).
     void syncVu1()

@@ -50,6 +50,12 @@ namespace ps2_stats
         ~TimeInto() { total.fetch_add(nowUs() - start, std::memory_order_relaxed); }
     };
     inline std::atomic<uint64_t> tlVu1Us{0}, tlVu1IdleUs{0}, tlGsUs{0}, tlRestUs{0}, tlFrames{0};
+    // Optional synchronous notification on the game/EE thread immediately
+    // before a VIF1 display-list chain increments vif1Chains and is submitted.
+    // The hook sees the frame being completed, not the next counter value.
+    // Install/reset only on that thread or while it is stopped; never called
+    // by the VIF1/GS workers. Adapted from Celosia bb0bfd840a (GPL-3.0).
+    inline void (*kickHook)() = nullptr;
     // At a kick: account the frame that the previous kick started.
     inline void frameKicked(uint64_t now, uint64_t vu1IdleNow)
     {

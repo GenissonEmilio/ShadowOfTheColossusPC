@@ -6,6 +6,7 @@
 #include "ps2_runtime_macros.h"
 #include "Stubs/DMA.h"
 #include "Stubs/GS.h"
+#include "ps2_vif1_compact.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -408,6 +409,13 @@ void register_ps2_memory_tests()
                 }
             }
             t.IsTrue(matches, "MPG num=0 should copy 2048 bytes into VU1 code memory");
+            const uint64_t generation = mem.getVU1CodeGeneration();
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+            t.Equals(mem.getVU1CodeGeneration(), generation, "An identical MPG should keep cached VU1 code valid");
+            packet.back() ^= 1u;
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+            t.Equals(mem.getVU1CodeGeneration(), generation + 1u, "Modified code should invalidate the VU1 cache");
+            t.Equals(vu1Code[2047], packet.back(), "MPG should write the changed instruction bytes");
         });
 
         tc.Run("VIF UNPACK num zero uploads 256 vectors", [](TestCase &t)
@@ -438,6 +446,99 @@ void register_ps2_memory_tests()
                 }
             }
             t.IsTrue(matches, "UNPACK num=0 should copy 256 V4_32 vectors (4096 bytes)");
+        });
+
+        tc.Run("VIF contiguous V4-32 UNPACK wraps at the end of VU1 memory", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            uint8_t *vu1Data = mem.getVU1Data();
+            std::memset(vu1Data, 0x5A, PS2_VU1_DATA_SIZE);
+
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x01u, 0u, 0x0404u)); // STCYCL: WL=CL=4
+            appendU32(packet, makeVifCmd(0x6Cu, 3u, 1023u));
+            for (uint32_t i = 0; i < 48u; ++i)
+                packet.push_back(static_cast<uint8_t>(i));
+            appendU32(packet, makeVifCmd(0x07u, 0u, 0x1234u));
+
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            const uint8_t *payload = packet.data() + 8u;
+            t.IsTrue(std::memcmp(vu1Data + PS2_VU1_DATA_SIZE - 16u, payload, 16u) == 0,
+                     "the first vector should occupy the final slot");
+            t.IsTrue(std::memcmp(vu1Data, payload + 16u, 32u) == 0,
+                     "the remaining vectors should wrap to the first two slots");
+            t.IsTrue(std::all_of(vu1Data + 32u, vu1Data + PS2_VU1_DATA_SIZE - 16u,
+                                 [](uint8_t value) { return value == 0x5Au; }),
+                     "all other vectors should remain untouched");
+            t.Equals(mem.vif1_regs.mark, 0x1234u, "the command after the payload should execute");
+
+            std::memset(vu1Data, 0x5A, PS2_VU1_DATA_SIZE);
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size() - 8u));
+            t.IsTrue(std::all_of(vu1Data, vu1Data + PS2_VU1_DATA_SIZE,
+                                 [](uint8_t value) { return value == 0x5Au; }),
+                     "a truncated UNPACK should leave VU1 memory untouched");
+        });
+
+        tc.Run("VIF strided V3-32 UNPACK preserves the fourth lane", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            uint8_t *vu1Data = mem.getVU1Data();
+            std::memset(vu1Data, 0x5A, PS2_VU1_DATA_SIZE);
+
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x01u, 0u, 0x0203u)); // STCYCL: WL=2, CL=3
+            appendU32(packet, makeVifCmd(0x68u, 4u, 1023u));
+            for (uint32_t i = 0; i < 48u; ++i)
+                packet.push_back(static_cast<uint8_t>(i));
+
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            const uint32_t positions[] = {1023u, 0u, 2u, 3u};
+            const uint32_t untouchedLane = 0x5A5A5A5Au;
+            for (uint32_t i = 0; i < 4u; ++i)
+            {
+                const uint8_t *dst = vu1Data + positions[i] * 16u;
+                t.IsTrue(std::memcmp(dst, packet.data() + 8u + i * 12u, 12u) == 0,
+                         "XYZ should follow the strided write cycle");
+                t.IsTrue(std::memcmp(dst + 12u, &untouchedLane, 4u) == 0,
+                         "the W lane should remain untouched");
+            }
+            t.IsTrue(std::all_of(vu1Data + 16u, vu1Data + 32u, [](uint8_t value) { return value == 0x5Au; }),
+                     "the skipped vector should remain untouched");
+        });
+
+        tc.Run("VIF event walker resumes skipped payloads across DMA pieces", [](TestCase &t)
+        {
+            VIFRegisters regs{};
+            const GifEventScanner::WriteFn write = [](uint8_t, uint64_t) {};
+            const Vif1Walker::Path3Mask mask = [](bool) {};
+            GifEventScanner gif(write);
+            Vif1Walker walker(regs, gif, mask);
+
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x01u, 0u, 0x0402u)); // STCYCL: two reads in four writes
+            const uint32_t unpack = makeVifCmd(0xE8u, 4u, 0u);
+            appendU32(packet, unpack);
+            packet.resize(packet.size() + 24u, 0xFFu);
+            const uint32_t mpg = makeVifCmd(0x4Au, 2u, 0u);
+            appendU32(packet, mpg);
+            packet.resize(packet.size() + 16u, 0xFFu);
+            const uint32_t mark = makeVifCmd(0x07u, 0u, 0x2345u);
+            appendU32(packet, mark);
+
+            walker.feed(packet.data(), 8u);
+            t.Equals(regs.code, unpack, "the UNPACK command should execute before its data arrives");
+            walker.feed(packet.data() + 8u, 16u);
+            t.Equals(regs.code, unpack, "UNPACK data should stay hidden when the payload spans pieces");
+            walker.feed(packet.data() + 24u, 16u);
+            t.Equals(regs.code, mpg, "the MPG following UNPACK should execute when the next piece arrives");
+            walker.feed(packet.data() + 40u, static_cast<uint32_t>(packet.size() - 40u));
+            t.Equals(regs.code, mark, "the MARK following MPG should execute after the final payload");
+            t.Equals(regs.mark, 0x2345u, "MARK should retain its immediate value");
+            t.IsTrue((regs.stat & (1u << 11)) != 0u, "the skipped UNPACK should still raise VIF1 STAT.INT");
         });
 
         tc.Run("VIF control commands update MARK MASK ROW and COL registers", [](TestCase &t)
@@ -1496,6 +1597,30 @@ void register_ps2_memory_tests()
                      "qwc-zero compact VIF1 chain should still process high-half VIFcodes");
             t.IsTrue((mem.readIORegister(kVif1Ch + 0x00u) & 0x100u) == 0u,
                      "qwc-zero compact VIF1 chain should clear the STR bit after drain");
+        });
+
+        tc.Run("VIF1 DMA transfers VIFcodes from a scratchpad tag alias", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kTagOffset = 0x100u;
+            uint8_t *scratchpad = mem.getScratchpad();
+            writeDmaTag(scratchpad, kTagOffset, makeDmaTag(0u, 7u, 0u, false));
+            const uint32_t itopCmd = makeVifCmd(0x04u, 0u, 0x66u);
+            std::memcpy(scratchpad + kTagOffset + 12u, &itopCmd, sizeof(itopCmd));
+
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, PS2_SCRATCHPAD_ALIAS_BASE + kTagOffset),
+                     "write VIF1 TADR scratchpad alias should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u),
+                     "write VIF1 CHCR STR|CHAIN|TTE should succeed");
+            mem.processPendingTransfers();
+            mem.syncVu1();
+
+            t.Equals(mem.vif1_regs.itops, 0x66u, "scratchpad tag should update ITOPS through TTE");
+            t.IsTrue((mem.readIORegister(kVif1Ch + 0x00u) & 0x100u) == 0u,
+                     "scratchpad tag should clear the STR bit after drain");
         });
 
         tc.Run("VIF1 DMA chain transfers REF tag high bytes when TTE is enabled", [](TestCase &t)

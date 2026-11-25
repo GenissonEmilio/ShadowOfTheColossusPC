@@ -22,6 +22,9 @@ namespace ps2x::iop
         IopSubsystem &operator=(IopSubsystem &&) noexcept;
 
         void reset();
+        bool captureState(std::vector<uint8_t> &out, std::string &error) const;
+        bool validateState(const std::vector<uint8_t> &data, std::string &error) const;
+        bool restoreState(const std::vector<uint8_t> &data, std::string &error);
 
         [[nodiscard]] ModuleLoadResult loadModule(std::string_view path, const void *arguments = nullptr, uint32_t argumentSize = 0);
         [[nodiscard]] ModuleLoadResult loadModuleBuffer(uint32_t guestAddress, const void *arguments = nullptr, uint32_t argumentSize = 0);

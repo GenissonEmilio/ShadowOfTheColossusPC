@@ -37,6 +37,7 @@ add_library(ps2_test_lib STATIC
     src/ps2_sif_dma_tests.cpp
     src/ps2_recompiler_tests.cpp
     src/ps2_runtime_expansion_tests.cpp
+    src/pal_video_timing_tests.cpp
 )
 
 target_include_directories(ps2_test_lib PRIVATE
@@ -83,6 +84,22 @@ target_link_libraries(ps2x_tests PRIVATE
     ps2_analyzer_lib
     ps2_runtime
 )
+
+# Execute actual compiler output against the real context/register helpers.
+# This narrow runner never starts the graphics/runtime test suites or needs ROMs.
+if(BUILD_TESTING AND UNIX AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+    add_test(NAME signed_branch_codegen_execution
+        COMMAND ${CMAKE_COMMAND}
+            "-DGENERATOR=$<TARGET_FILE:ps2x_tests>"
+            "-DCXX=${CMAKE_CXX_COMPILER}"
+            "-DRUNTIME_INCLUDE=${CMAKE_SOURCE_DIR}/ps2xRuntime/include"
+            "-DIOP_INCLUDE=${CMAKE_SOURCE_DIR}/ps2xIOP/include"
+            "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/signed-branch-fixture"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/signed_branch_codegen_execution.cmake")
+    set_tests_properties(signed_branch_codegen_execution PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+    add_test(NAME pal_video_timing COMMAND ps2x_tests --pal-video-timing)
+    set_tests_properties(pal_video_timing PROPERTIES TIMEOUT 15 RUN_SERIAL TRUE)
+endif()
 
 # VU/GS tests intentionally instantiate large interpreter state.
 # Windows executables default to a much smaller stack than Linux, and

@@ -277,6 +277,18 @@ public:
     void reset(uint8_t *rdram, const R5900Context &mainContext);
     void run();
     void requestStop();
+    // Host requests wake the executor; the runtime handles them only at the
+    // dispatcher boundary, never with a live recompiled/native call stack.
+    void notifyStateRequest();
+    // Called by the runtime's state-operation scope on every exit (success or
+    // failure). Excludes host IO/compression time from clock sync and pacing.
+    void rebaseHostClockAfterStateOperation();
+    // The coordinator must quiesce external producers and call these on the
+    // executor outside guest execution. No host pointers/functions are stored.
+    // Unsupported completion closures fail explicitly instead of being lost.
+    [[nodiscard]] bool captureState(std::vector<uint8_t> &bytes, std::string &error) const;
+    [[nodiscard]] bool validateState(const std::vector<uint8_t> &bytes, std::string &error) const;
+    [[nodiscard]] bool restoreState(const std::vector<uint8_t> &bytes, std::string &error);
     void postEvent(EeEvent event);
     [[nodiscard]] bool checkpointDue(uint32_t cycles = kGeneratedCheckpointCycles) noexcept;
     // The part of a checkpoint past the clock's gate (see EeClock).
@@ -342,6 +354,8 @@ public:
     int setIrqHandlerEnabled(bool dmac, int id, bool enabled);
     int setIrqCauseEnabled(bool dmac, uint32_t cause, bool enabled);
     void dispatchIrq(bool dmac, uint32_t cause);
+    void setGsVideoMode(uint32_t mode);
+    [[nodiscard]] bool palVideoMode() const noexcept { return m_palVideoMode.load(std::memory_order_relaxed); }
     void setVSyncFlag(uint32_t flagAddress, uint32_t tickAddress);
     [[nodiscard]] uint64_t currentVSyncTick() const noexcept;
     uint32_t setGsVSyncCallback(uint32_t callback, uint32_t gp, uint32_t sp);
@@ -389,6 +403,9 @@ public:
     void publishSnapshot();
 
 private:
+    struct SavedState;
+    [[nodiscard]] bool stateAccessAllowed(std::string &error) const;
+    [[nodiscard]] bool decodeState(const std::vector<uint8_t> &bytes, SavedState &state, std::string &error) const;
     struct ScheduledEvent
     {
         uint64_t deadlineCycle = 0;
@@ -417,6 +434,7 @@ private:
     [[nodiscard]] static bool eventCondition(uint32_t current, uint32_t requested, uint32_t mode);
     static int waitObjectId(const EeWaitState &wait);
     void writeGuestU32(uint32_t address, uint32_t value);
+    [[nodiscard]] std::chrono::microseconds vblankPeriod() const noexcept;
     void waitForEvent();
     void scheduleEvent(uint64_t deadlineCycle, std::chrono::steady_clock::time_point hostDeadline, EeEvent event);
     void updateNextDeadline();
@@ -433,23 +451,9 @@ private:
     std::unordered_map<int, GuestThread> m_threads;
     int m_threadCacheId = -1;                // thread(): the last one found
     GuestThread *m_threadCache = nullptr;
-    // Shared VU0 register state (see EeScheduler::run()).
-    struct Vu0OwnerKey
-    {
-        int threadId = 0;
-        size_t depth = 0;
-        uint64_t sequence = 0;
-        bool operator==(const Vu0OwnerKey &o) const
-        {
-            return threadId == o.threadId && depth == o.depth && sequence == o.sequence;
-        }
-    };
-    std::vector<uint8_t> m_vu0Global;
-    Vu0OwnerKey m_vu0Owner{};
-    bool m_vu0OwnerValid = false;
-    void saveGlobalVu0(R5900Context &ctx);
-    void loadGlobalVu0(R5900Context &ctx);
-    void flushVu0Owner();
+    // Keep VF/VI/ACC/Q/flags in their suspended execution context. Only
+    // the random generator is shared across guest threads and callbacks.
+    __m128 m_sharedVu0Random{};
     std::unordered_map<int, EeSemaphore> m_semaphores;
     std::unordered_map<int, EeEventFlag> m_eventFlags;
     std::unordered_map<int, EeAlarm> m_alarms;
@@ -482,12 +486,14 @@ private:
     uint64_t m_accountedCycle = 0; // the EE timers and the IOP have seen the cycles up to here
     bool m_gateEnabled = true;     // PS2X_EE_GATE=0: every checkpoint goes through the scheduler
     std::chrono::steady_clock::time_point m_hostClockBase{};
+    std::chrono::steady_clock::time_point m_stateOperationClockAnchor{};
     bool m_hostClockSync = false;
     uint64_t m_sliceEndCycle = kDefaultTimeSliceCycles;
     std::thread::id m_executorThread{};
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_guestExecuting{false};
     std::atomic<bool> m_stopRequested{false};
+    std::atomic<bool> m_stateRequestPending{false}; // host coordination, not guest state
     std::atomic<bool> &m_checkpointPending;
     uint32_t m_debugPublishCountdown = 0u;
 
@@ -499,6 +505,7 @@ private:
     uint64_t m_eventSequence = 0;
     uint64_t m_invocationSequence = 0;
     uint64_t m_vsyncTick = 0;
+    std::atomic<bool> m_palVideoMode{false};
     uint32_t m_vsyncFlagAddress = 0;
     uint32_t m_vsyncTickAddress = 0;
     uint32_t m_gsVSyncCallback = 0;

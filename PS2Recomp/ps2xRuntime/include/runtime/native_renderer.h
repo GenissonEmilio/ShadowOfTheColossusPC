@@ -183,6 +183,12 @@ namespace native_renderer
     bool gpuSkinning();
     void uploadSkinnedMesh(uint64_t id, const SkinVertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount);
     uint32_t framePalette(const float *qwords, uint32_t count); // 0: not kept
+    // Replace matrices in a palette allocated by framePalette in the current
+    // recording frame, on the game thread before that frame is submitted.
+    // count is in qwords and must fit the original allocation (at most
+    // kSkinPaletteQwords). Invalid/null/empty ranges and unsupported backends
+    // are ignored. Handles must not be retained across frames or flushes.
+    void rewriteFramePalette(uint32_t handle, const float *qwords, uint32_t count);
 
     bool hasTexture(uint64_t id);
     // RGBA8 (alpha 0x80 = opaque, as the PS2's), kept on the GPU under `id`.
@@ -197,6 +203,12 @@ namespace native_renderer
     // build) and a draw naming one of them, as its mesh or its texture, is
     // left out. False (nothing run) when the tuning is off: the caller
     // builds it itself.
+    // Executor-only: drain native jobs/frames before a machine-state operation.
+    bool stateBarrier(std::string &error);
+    bool resetStateFrame(std::string &error);
+    bool captureState(std::vector<uint8_t> &out, std::string &error);
+    bool validateState(const std::vector<uint8_t> &data, std::string &error);
+    bool restoreState(const std::vector<uint8_t> &data, std::string &error);
     bool buildAsync(std::vector<uint64_t> ids, std::function<void()> work, std::function<void()> finish);
 
     // Draws of one frame: `clip` (column-major) takes model space to clip
@@ -230,6 +242,11 @@ namespace native_renderer
         bool background = false; // also drawn into the background image (what distance fades to)
         bool fogged = false;     // fades to the background image with distance (setFog)
         bool writeDepth = false; // write depth even when additive (a second pass follows)
+        // GS TEST: GEQUAL alpha with AFAIL FB_ONLY, DATE off. The GL backend
+        // keeps colour for failing fragments but updates Z only for passing
+        // fragments, in primitive order. Reference is in GS alpha byte units.
+        bool framebufferOnlyAlphaFail = false;
+        uint8_t alphaReference = 0;
         // No depth write at all: the GS's TEST AFAIL FB_ONLY with every pixel
         // under AREF (SotC's water: vertex alpha 0x20 < 0x40), so what is drawn
         // after it on or just under the surface (the rings) is not hidden.
@@ -362,6 +379,9 @@ namespace native_renderer
     bool shown();
     // The last finished frame (RGBA8); false before the first.
     bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height);
+    enum class FrameRead { Missing, Unchanged, Updated };
+    // A presentation consumer owns its own revision, initially zero.
+    FrameRead readFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height, uint64_t &revision);
 
     // The frame timing log (Debug 'Frame timing log', SOTC_FRAME_LOG): what
     // one game frame spent where, filled by the frontend, the backends and the
@@ -374,13 +394,13 @@ namespace native_renderer
         // Microseconds: backend endFrame (render: its CPU side, present: the
         // host's swap), uploads into the backend, texture decoding, the
         // native hooks' own work (decoding and uploads included).
-        uint64_t renderUs = 0, presentUs = 0, texUs = 0, meshUs = 0, decodeUs = 0, hookUs = 0;
+        uint64_t renderUs = 0, readbackUs = 0, presentUs = 0, texUs = 0, meshUs = 0, decodeUs = 0, hookUs = 0;
         // A backend drawing on a thread of its own (the OpenGL one): render and
         // present are that thread's, for the last frame it drew (they overlap
         // the game); waitUs is the game thread's wait at endFrame (for the
         // frame before when renderThread, for its own frame when not).
-        uint64_t waitUs = 0;
-        bool renderThread = false;
+        uint64_t waitUs = 0, submitUs = 0;
+        bool renderWorker = false, renderThread = false;
         // buildAsync: draws left out (their mesh or texture still on the
         // worker), jobs handed to it, and finished jobs taken up.
         uint32_t heldDraws = 0, asyncJobs = 0, asyncDone = 0;

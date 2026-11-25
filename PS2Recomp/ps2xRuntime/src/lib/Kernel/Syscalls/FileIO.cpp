@@ -1,5 +1,7 @@
 #include "Common.h"
 #include "FileIO.h"
+#include "runtime/save_state_archive.h"
+#include "runtime/host_state.h"
 
 namespace ps2_syscalls
 {
@@ -413,4 +415,29 @@ namespace ps2_syscalls
             setReturnS32(ctx, 0); // Success
         }
     }
+}
+
+namespace ps2_syscalls {
+    bool captureFioState(std::vector<uint8_t> &out,std::string &error) {
+        std::lock_guard<std::mutex> lock(g_vagAccumMutex);
+        ps2state::Writer w(out,error); w.pod(uint32_t{0x314F4946}); w.pod(uint32_t(g_vagAccum.size()));
+        for (const auto &[id,entry]:g_vagAccum) { w.pod(id); w.pod(entry.firstBufAddr); w.vector(entry.data,kVagAccumMaxBytes); }
+        return w.finish();
+    }
+    static bool decodeFioState(const std::vector<uint8_t> &blob,bool apply,std::string &error) {
+        ps2state::Reader r(blob,error); uint32_t magic=0,count=0; r.pod(magic); r.pod(count);
+        if (!r.good() || magic!=0x314F4946 || count>4096) { error="Invalid sound-file state."; return false; }
+        std::unordered_map<int,VagAccumEntry> saved; size_t total=0;
+        for (uint32_t i=0;i<count;++i) {
+            int id=0; VagAccumEntry entry;
+            if (!r.pod(id) || id<3 || !r.pod(entry.firstBufAddr) || !r.vector(entry.data,kVagAccumMaxBytes) ||
+                entry.firstBufAddr>=PS2_RAM_SIZE || (total+=entry.data.size())>ps2state::DefaultLimit || !saved.emplace(id,std::move(entry)).second)
+            { error="Invalid sound-file buffer."; return false; }
+        }
+        if (!r.finish()) return false;
+        if (apply) { std::lock_guard<std::mutex> lock(g_vagAccumMutex); g_vagAccum.swap(saved); }
+        return true;
+    }
+    bool validateFioState(const std::vector<uint8_t> &b,std::string &e) { return decodeFioState(b,false,e); }
+    bool restoreFioState(const std::vector<uint8_t> &b,std::string &e) { return decodeFioState(b,true,e); }
 }

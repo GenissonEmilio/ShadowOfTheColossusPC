@@ -28,7 +28,7 @@ for line in (out_dir / "functions.csv").read_text().splitlines()[1:]:
         stubs[a] = f"{name}@0x{a:08X}"
 
 extra = root / "game/extra_stubs.txt"
-if extra.exists():
+if sys.argv[3:] != ["sces"] and extra.exists():
     for l in extra.read_text().splitlines():
         l = l.strip()
         if l and not l.startswith("#"):

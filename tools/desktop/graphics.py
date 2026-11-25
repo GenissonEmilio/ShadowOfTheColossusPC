@@ -7,6 +7,26 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+from language import translate as tr
+
+WINDOW_RESOLUTIONS = (
+    (640, 480), (800, 600), (1024, 720), (1280, 720),
+    (1600, 900), (1920, 1080), (2560, 1440), (3840, 2160),
+)
+SCREEN_MODE_COUNT = 4  # matches hostmenu::ScreenMode
+
+# IDs are persisted by native_renderer::Tuning. Keep the older IDs readable.
+GRAPHICS_PROFILES = (
+    ("0", "Baixo"), ("1", "Original"), ("5", "Equilibrado"), ("6", "Aprimorado"), ("7", "Ultra"),
+)
+LEGACY_PROFILES = (("2", "Alto (legado)"), ("3", "Ultra (legado)"))
+QUALITY_KEYS = {
+    "quality_preset", "render_scale", "msaa", "fxaa", "texture_filter", "model_detail", "water_detail", "effect_detail",
+}
+# Matches the Automatic, Portuguese and English values used by the F1 menu.
+MENU_LANGUAGES = {"0": "Automático", "1": "Português", "2": "English"}
+RECOMP_SETTINGS_KEYS = ("fullscreen", "screen", "window_resolution", "vsync", "upscale_fsr",
+                        "show_fps", "volume", "language")
 
 
 class Graphics:
@@ -15,27 +35,82 @@ class Graphics:
         self.config = library.player_directory / "celosia_settings.cfg"
         self.shader_config = library.directory / "shader.json"
 
-    def display(self):
+    def settings(self):
         values = {}
         try:
-            for line in self.config.read_text().splitlines():
-                key, _, value = line.partition("=")
-                values[key] = value
+            for line in self.config.read_text(encoding="utf-8").splitlines():
+                key, separator, value = line.partition("=")
+                if separator:
+                    values[key.strip()] = value.strip()
         except OSError:
             pass
-        return values.get("fullscreen", "1") == "1", int(values.get("screen", "0")) if values.get("screen") in ("0", "1", "2") else 0
+        return values
 
-    def save_display(self, fullscreen, mode):
+    def display(self):
+        values = self.settings()
+        mode = values.get("screen", "0")
+        modes = tuple(str(index) for index in range(SCREEN_MODE_COUNT))
+        return values.get("fullscreen", "1") == "1", int(mode) if mode in modes else 0
+
+    def upscaling(self):
+        values = self.settings()
+        modes = tuple(str(index) for index in range(len(WINDOW_RESOLUTIONS) + 1))
+        window = values.get("window_resolution", "0")
+        return int(window) if window in modes else 0, values.get("upscale_fsr") == "1"
+
+    def fps_enabled(self):
+        return self.settings().get("show_fps", "1") == "1"
+
+    def save_fps(self, enabled):
+        self._save_settings({"show_fps": int(bool(enabled))}, ("show_fps",))
+
+    def menu_language(self):
+        language = self.settings().get("language")
+        return language if language in MENU_LANGUAGES else "0"
+
+    def save_menu_language(self, language):
+        if language in MENU_LANGUAGES:
+            self._save_settings({"language": language}, ("language",))
+
+    def quality_profile(self):
+        values = self.settings()
+        profile = values.get("quality_preset")
+        if profile in dict(GRAPHICS_PROFILES + LEGACY_PROFILES):
+            return profile
+        return "4" if QUALITY_KEYS.intersection(values) else "1"
+
+    def save_quality_profile(self, profile):
+        if profile in dict(GRAPHICS_PROFILES + LEGACY_PROFILES):
+            # The runtime applies the selected preset, then does individual overrides.
+            self._save_settings({"quality_preset": profile}, QUALITY_KEYS)
+
+    def save_display(self, fullscreen, mode, *, window=None, fsr=None):
+        values = {"fullscreen": int(bool(fullscreen)), "screen": max(0, min(SCREEN_MODE_COUNT - 1, int(mode)))}
+        if window is not None:
+            values["window_resolution"] = max(0, min(len(WINDOW_RESOLUTIONS), int(window)))
+        if fsr is not None:
+            values["upscale_fsr"] = int(bool(fsr))
+        self._save_settings(values, values)
+
+    def normalize_external_settings(self):
+        # An external INI writer may use `key = value`. The runtime expects
+        # `key=value`. Preserve the native renderer's other settings and order.
+        values = self.settings()
+        external = {key: values[key] for key in RECOMP_SETTINGS_KEYS if key in values}
+        if external:
+            self._save_settings(external, external)
+
+    def _save_settings(self, values, replace):
         self.config.parent.mkdir(parents=True, exist_ok=True)
         try:
-            lines = [line for line in self.config.read_text().splitlines()
-                     if line.partition("=")[0] not in ("fullscreen", "screen")]
+            lines = [line for line in self.config.read_text(encoding="utf-8").splitlines()
+                     if line.partition("=")[0].strip() not in replace]
         except OSError:
             lines = []
-        lines += [f"fullscreen={int(bool(fullscreen))}", f"screen={max(0, min(2, int(mode)))}"]
+        lines += [f"{key}={value}" for key, value in values.items()]
         fd, temporary = tempfile.mkstemp(prefix=".video-", dir=self.config.parent)
         try:
-            with os.fdopen(fd, "w") as stream:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 stream.write("\n".join(lines) + "\n")
             os.replace(temporary, self.config)
         finally:
@@ -58,20 +133,20 @@ class Graphics:
         atomic_json(self.shader_config, {})
 
     def import_shader(self, source):
-        from model import atomic_json
+        from model import PROCESS_FLAGS, atomic_json, compiler_tool
         source = Path(source)
         if source.suffix.lower() not in (".frag", ".fs", ".glsl"):
-            raise ValueError("Escolha um fragment shader GLSL 330: .frag, .fs ou .glsl.")
+            raise ValueError(tr("Escolha um fragment shader GLSL 330: .frag, .fs ou .glsl."))
         with source.open("rb") as stream:
             data = stream.read(262145)
         if not data or len(data) > 262144 or b"\0" in data:
-            raise ValueError("O shader deve ser um texto de até 256 KiB.")
+            raise ValueError(tr("O shader deve ser um texto de até 256 KiB."))
         try:
             text = data.decode("utf-8-sig")
         except UnicodeDecodeError as exc:
-            raise ValueError("Salve o shader como texto UTF-8.") from exc
+            raise ValueError(tr("Salve o shader como texto UTF-8.")) from exc
         if not re.search(r"^\s*#version\s+330(?:\s+core)?\s*$", text, re.M):
-            raise ValueError("Este port usa GLSL 330. Veja o modelo de shader na aba Gráficos.")
+            raise ValueError(tr("Este port usa GLSL 330. Veja o modelo de shader na aba Gráficos."))
         data = text.encode("utf-8")
         folder = self.library.directory / "shaders"
         folder.mkdir(parents=True, exist_ok=True)
@@ -81,14 +156,15 @@ class Graphics:
             log = self.library.directory / "last-shader.log"
             try:
                 with log.open("w") as output:
-                    result = subprocess.run([str(self.library.program / "compiler/bin/sotc-video-tool"),
+                    result = subprocess.run([str(compiler_tool(self.library.program, "sotc-video-tool")),
                         "--validate", str(candidate), "--report", str(report)],
-                        env=self.library.game_environment(), stdout=output, stderr=subprocess.STDOUT, timeout=30)
+                        env=self.library.game_environment(), stdout=output, stderr=subprocess.STDOUT,
+                        creationflags=PROCESS_FLAGS, timeout=30)
                 details = json.loads(report.read_text()) if report.is_file() else {}
             except subprocess.TimeoutExpired as exc:
-                raise ValueError("O driver demorou para validar o shader. Consulte last-shader.log.") from exc
+                raise ValueError(tr("O driver demorou para validar o shader. Consulte last-shader.log.")) from exc
             if result.returncode or not details.get("ok"):
-                raise ValueError(details.get("error") or f"Não foi possível validar o shader. Detalhes: {log}")
+                raise ValueError(details.get("error") or tr("Não foi possível validar o shader. Detalhes em {path}").format(path=log))
             stem = re.sub(r"[^\w.-]", "-", source.stem, flags=re.UNICODE)[:64] or "shader"
             destination = folder / (stem + "-" + hashlib.sha256(data).hexdigest()[:12] + ".frag")
             os.replace(candidate, destination)

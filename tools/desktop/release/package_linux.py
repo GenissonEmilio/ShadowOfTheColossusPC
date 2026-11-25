@@ -2,22 +2,29 @@
 """Package only the launcher, open runtime and compiler; never game output."""
 from pathlib import Path
 import hashlib
+import json
 import shutil
+import sys
 import tarfile
 ROOT=Path(__file__).resolve().parents[3]
 NAME='ShadowOfTheColossusPC'
-VERSION='0.2.0'
+# The archive, frozen UI and CI must identify the same release.
+sys.path.insert(0, str(ROOT / 'tools' / 'desktop'))
+from model import VERSION
 OUT=ROOT / 'dist' / NAME
 if OUT.exists():shutil.rmtree(OUT)
 shutil.copytree(ROOT / 'artifacts/frozen' / NAME,OUT)
 shutil.copytree(ROOT / 'artifacts/compiler',OUT / 'compiler')
 shutil.copy2(ROOT / 'LICENSE',OUT / 'LICENSE')
+shutil.copy2(ROOT / 'recomplauncher.json',OUT / 'recomplauncher.json')
 shutil.copy2(ROOT / 'docs/SHADERS.md',OUT / 'SHADERS.md')
 shutil.copytree(ROOT / 'artifacts/distribution-licenses',OUT / 'licenses')
 shutil.copy2(ROOT / 'artifacts/third-party-sources.tar.gz',OUT / 'third-party-sources.tar.gz')
+(OUT / 'release.json').write_text(json.dumps({"version": VERSION, "platform": "linux-x86_64"}) + "\n",
+                                  encoding="utf-8")
 (OUT / 'LEIA-ME.txt').write_text('''Shadow of the Colossus PC — Linux x86_64
 
-Abra ShadowOfTheColossusPC e escolha seu disco ISO/7Z/ZIP/RAR USA SCUS-97472.
+Abra ShadowOfTheColossusPC e escolha seu disco ISO/7Z/ZIP/RAR SCUS-97472 (USA) ou SCES-53326 (PAL).
 A primeira preparação recompila o jogo localmente, com até duas tarefas.
 A preparação pode demorar; a janela mostra o progresso. Depois é só jogar.
 O pacote contém o compilador. Não é necessário instalar Docker ou um SDK.
@@ -25,17 +32,44 @@ O pacote contém o compilador. Não é necessário instalar Docker ou um SDK.
 Requisitos: Linux x86_64 com glibc 2.39+ (Ubuntu 24.04+, Fedora 40+), OpenGL 3.3,
 8 GB de memória e pelo menos 15 GB livres para importação e compilação.
 
-WASD: analógico esquerdo. H/J/Y/U: ✕/○/□/△. I/O: L1/L2. K/L: R1/R2.
-Z/X: Start/Select. F1: configurações. Controle USB/Bluetooth também funciona.
+WASD: movimentar. Espaço: pular. Q/E: trocar arma. F/R: L1/L2.
+Esc: Start (pausa). I: Select (mapa). C: chamar/acelerar Agro. Shift esquerdo: R2.
+Enter: confirmar nos menus. Backspace: voltar nos menus. Espaço também monta Agro.
+Mouse: câmera. Esquerdo: atacar. Direito: agarrar. Central: ação/luz da espada.
+F1: configurações, liberar cursor e Voltar ao launcher (Sistema).
+Personalize todas as atribuições, sensibilidade e inversão na aba Controles.
+F1/F5/F8/F9/F11 são reservados. Alterações de perfil valem na próxima abertura do jogo.
+F5: salvar estado rápido. F8: carregar estado rápido.
+F1 > Estados: slot rápido e cinco slots manuais, com data, tamanho e exclusão.
+Estados exigem o mesmo runtime e disco. Aguarde o fim de vídeos/carregamentos.
+Continuar salvando nos altares permite transferir progresso entre versões.
+Carregar estado não substitui o cartão real; cartão alterado bloqueia o load.
+Controle USB/Bluetooth também funciona junto com teclado e mouse.
+Configurações > Ícones dos botões no jogo: Automático, PlayStation, Xbox ou teclado/mouse.
+Automático acompanha o último dispositivo usado durante a partida. O teclado segue seu perfil.
+Configurações > Assistências: vida infinita e resistência infinita, desligadas por padrão.
+O modo e as assistências escolhidos valem na próxima abertura do jogo.
+No launcher: direcional/analógico navega, A/X confirma, B/Círculo volta,
+LB/RB trocam de página e Start inicia o jogo preparado. Esquerda/direita ajusta.
+Os sigilos dos colossos brilham com a espada equipada.
 F11: alterna tela cheia na resolução do monitor e janela.
+Na aba Controles, "Configurar meu controle" associa botoes e analogicos de
+controles sem perfil automatico. O perfil e salvo e usado tambem no menu F1.
 
 Na aba Gráficos, escolha Original 4:3 (faixas laterais) ou Esticar (tela toda).
+Escolha o tamanho da janela e ative o FSR 1 quando quiser ampliar a imagem.
+No jogo, F1 > Qualidade > Resolução ajusta a resolução interna.
 Importe fragment shaders GLSL 330 (.frag/.fs/.glsl) ou use Nitidez HD.
 Shaders são validados no driver local; mudanças valem na próxima abertura.
 São filtros da imagem final, não pacotes de texturas HD. Desativar remove o filtro.
 
 Dados e saves: ~/.local/share/ShadowOfTheColossusPC (ou XDG_DATA_HOME).
-Os arquivos originais não são alterados. Nenhum dado é enviado para a internet.
+Meus saves: importe/exporte cartões PS2/PCSX2 .ps2 de 8 MB entre computadores.
+Feche o jogo antes. O cartão anterior fica em player/memcards/backups ao importar.
+No jogo, escolha Carregar jogo para continuar a aventura importada.
+O launcher consulta os releases públicos do GitHub. Use Atualizar para baixar,
+verificar e instalar uma nova versão. ROMs e saves ficam no seu computador.
+Em Configurações, escolha Português, English, Español ou 日本語.
 No painel Sobre é possível adicionar o jogo ao menu de aplicativos.
 
 Base nativa: HenryKun55/celosia e ran-j/PS2Recomp (GPL-3.0).
@@ -47,10 +81,13 @@ O runtime e os scripts de build estão em compiler/source.
 GCC 13 e bibliotecas Ubuntu: fontes em https://archive.ubuntu.com/ubuntu/pool/
 (identificadas pelos pacotes em packages.txt); GCC em https://gcc.gnu.org/gcc-13/.
 
+Artes do launcher: _internal/assets/ARTWORK.md (origem e prompts das adaptações).
 Shadow of the Colossus pertence a Sony / Team Ico. Projeto independente.
 ''',encoding='utf-8')
 for p in OUT.rglob('*'):
-    if p.is_file() and (p.suffix.lower() in ('.iso','.7z','.rar','.xff','.elf','.ps2') or p.name in ('NICO.DAT','SCUS_974.72') or p.name.startswith('func_') or p.name=='complete.json'):
+    if p.is_file() and (p.suffix.lower() in ('.iso','.7z','.rar','.xff','.elf','.ps2','.sotcstate')
+                        or p.name.lower().rstrip('.') in ('nico.dat','scus_974.72','sces_533.26','xab','xac','xad','xae','complete.json')
+                        or p.name.startswith('func_')):
         raise ValueError('Unexpected game-derived file in package: '+str(p))
 archive=ROOT / 'dist' / f'{NAME}-{VERSION}-linux-x86_64.tar.gz'
 with tarfile.open(archive,'w:gz',compresslevel=6) as t:t.add(OUT,arcname=NAME)

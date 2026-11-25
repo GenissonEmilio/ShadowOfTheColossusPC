@@ -1,5 +1,7 @@
 #include "Common.h"
 #include "MPEG.h"
+#include "runtime/save_state_archive.h"
+#include "runtime/host_state.h"
 #include "runtime/ee_scheduler.h"
 
 #if !defined(PS2X_HAS_FFMPEG)
@@ -701,13 +703,16 @@ namespace ps2_stubs
         }
 
         uint64_t decodedFrameIntervalQ32(const MpegPlaybackState &playback,
-                                         const MpegDecodedFrame &frame)
+                                         const MpegDecodedFrame &frame,
+                                         bool pal)
         {
             const uint64_t base = playback.pictureIntervalQ32 != 0u
                                       ? playback.pictureIntervalQ32
                                       : kDefaultPictureIntervalQ32;
             const uint64_t fields = static_cast<uint64_t>(2 + std::max(0, frame.repeatPict));
-            return std::max(kPictureClockOne, (base * fields + 1u) / 2u);
+            const uint64_t interval = (base * fields + 1u) / 2u;
+            // Convert the stored NTSC-based interval to PAL's 50 fields/s.
+            return std::max(kPictureClockOne, pal ? (interval * 1001u + 600u) / 1200u : interval);
         }
 
         constexpr uint64_t kMpegPtsWrap = 1ull << 33u;
@@ -730,19 +735,19 @@ namespace ps2_stubs
             return static_cast<int64_t>(delta);
         }
 
-        uint64_t mpegPtsDeltaToVSyncQ32(uint64_t delta90k)
+        uint64_t mpegPtsDeltaToVSyncQ32(uint64_t delta90k, bool pal)
         {
-            // 90 kHz MPEG clock -> NTSC field clock (60000/1001 Hz):
-            // fields = pts * 60000 / (90000 * 1001) = pts * 2 / 3003.
-            constexpr uint64_t kPtsDivisor = 3003u;
-            const uint64_t whole = delta90k / kPtsDivisor;
-            const uint64_t remainder = delta90k % kPtsDivisor;
-            const uint64_t wholeQ32 = whole * 2u * kPictureClockOne;
-            const uint64_t remainderQ32 = ((remainder * 2u * kPictureClockOne) + kPtsDivisor / 2u) / kPtsDivisor;
+            // Convert a 90 kHz MPEG timestamp into PAL or NTSC fields.
+            const uint64_t multiplier = pal ? 1u : 2u;
+            const uint64_t divisor = pal ? 1800u : 3003u;
+            const uint64_t whole = delta90k / divisor;
+            const uint64_t remainder = delta90k % divisor;
+            const uint64_t wholeQ32 = whole * multiplier * kPictureClockOne;
+            const uint64_t remainderQ32 = (remainder * multiplier * kPictureClockOne + divisor / 2u) / divisor;
             return wholeQ32 + remainderQ32;
         }
 
-        uint64_t presentationTickForFrame(MpegPlaybackState &playback, const MpegDecodedFrame &frame, uint64_t currentTickQ32)
+        uint64_t presentationTickForFrame(MpegPlaybackState &playback, const MpegDecodedFrame &frame, uint64_t currentTickQ32, bool pal)
         {
             if (frame.pts90k < 0)
             {
@@ -763,10 +768,10 @@ namespace ps2_stubs
             const int64_t delta = mpegPtsDelta90k(playback.firstPresentedPts90k, frame.pts90k);
             if (delta >= 0)
             {
-                return playback.ptsPresentationBaseTickQ32 + mpegPtsDeltaToVSyncQ32(static_cast<uint64_t>(delta));
+                return playback.ptsPresentationBaseTickQ32 + mpegPtsDeltaToVSyncQ32(static_cast<uint64_t>(delta), pal);
             }
 
-            const uint64_t backwards = mpegPtsDeltaToVSyncQ32(static_cast<uint64_t>(-delta));
+            const uint64_t backwards = mpegPtsDeltaToVSyncQ32(static_cast<uint64_t>(-delta), pal);
             return playback.ptsPresentationBaseTickQ32 > backwards
                        ? playback.ptsPresentationBaseTickQ32 - backwards
                        : 0u;
@@ -1698,46 +1703,33 @@ namespace ps2_stubs
             const uint32_t outWidth = align16(width);
             const uint32_t outHeight = align16(height);
             const uint32_t macroblockColumns = outWidth / 16u;
+            constexpr size_t kStripRowBytes = 16u * 4u;
 
             for (uint32_t mbx = 0u; mbx < macroblockColumns; ++mbx)
             {
-                const size_t stripOffset =
-                    static_cast<size_t>(mbx) * static_cast<size_t>(outHeight) * 16u * 4u;
+                const uint32_t srcX = mbx * 16u;
+                const size_t visibleBytes = std::min(16u, width - srcX) * 4u;
+                const size_t stripOffset = static_cast<size_t>(mbx) * outHeight * kStripRowBytes;
                 for (uint32_t y = 0u; y < outHeight; ++y)
                 {
                     uint8_t *dst = getMemPtr(
                         rdram,
-                        destAddr + static_cast<uint32_t>(stripOffset + static_cast<size_t>(y) * 16u * 4u));
+                        destAddr + static_cast<uint32_t>(stripOffset + y * kStripRowBytes));
                     if (!dst)
                     {
                         continue;
                     }
 
-                    for (uint32_t x = 0u; x < 16u; ++x)
+                    const size_t copiedBytes = y < height ? visibleBytes : 0u;
+                    if (copiedBytes)
                     {
-                        const uint32_t srcX = mbx * 16u + x;
-                        const uint8_t *src = nullptr;
-                        if (srcX < width && y < height)
-                        {
-                            src = frame.rgba.data() +
-                                  (static_cast<size_t>(y) * static_cast<size_t>(width) + srcX) * 4u;
-                        }
-
-                        if (src)
-                        {
-                            dst[x * 4u + 0u] = src[0u];
-                            dst[x * 4u + 1u] = src[1u];
-                            dst[x * 4u + 2u] = src[2u];
-                            dst[x * 4u + 3u] = 0x80u;
-                        }
-                        else
-                        {
-                            dst[x * 4u + 0u] = 0u;
-                            dst[x * 4u + 1u] = 0u;
-                            dst[x * 4u + 2u] = 0u;
-                            dst[x * 4u + 3u] = 0x80u;
-                        }
+                        const size_t srcOffset = (static_cast<size_t>(y) * width + srcX) * 4u;
+                        std::memcpy(dst, frame.rgba.data() + srcOffset, copiedBytes);
                     }
+                    if (copiedBytes < kStripRowBytes)
+                        std::memset(dst + copiedBytes, 0, kStripRowBytes - copiedBytes);
+                    for (size_t alpha = 3; alpha < kStripRowBytes; alpha += 4)
+                        dst[alpha] = 0x80u;
                 }
             }
         }
@@ -2333,8 +2325,9 @@ namespace ps2_stubs
                 const uint64_t currentTick = runtime->eeScheduler().currentVSyncTick();
                 const uint64_t currentTickQ32 = currentTick << 32u;
                 const MpegDecodedFrame &nextFrame = playback.decodedFrames.front();
-                const uint64_t frameIntervalQ32 = decodedFrameIntervalQ32(playback, nextFrame);
-                uint64_t presentationTargetQ32 = presentationTickForFrame(playback, nextFrame, currentTickQ32);
+                const bool pal = runtime->eeScheduler().palVideoMode();
+                const uint64_t frameIntervalQ32 = decodedFrameIntervalQ32(playback, nextFrame, pal);
+                uint64_t presentationTargetQ32 = presentationTickForFrame(playback, nextFrame, currentTickQ32, pal);
 
                 if (currentTickQ32 > presentationTargetQ32 && currentTickQ32 - presentationTargetQ32 >= frameIntervalQ32)
                 {
@@ -2576,4 +2569,45 @@ namespace ps2_stubs
         getPlaybackState(mpegAddr).imageBufferAddr = imageBufferAddr;
         setReturnS32(ctx, 0);
     }
+}
+
+namespace ps2_stubs {
+    bool mpegPlaybackActive()
+    {
+        std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+        return !g_mpeg_stub_state.playbackByMpeg.empty();
+    }
+
+    bool captureMpegState(std::vector<uint8_t> &out, std::string &error)
+    {
+        std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+        if (!g_mpeg_stub_state.playbackByMpeg.empty() || !g_mpeg_stub_state.callbacksByMpeg.empty())
+        { error = "A movie decoder is active. Finish the movie and try again."; return false; }
+        ps2state::Writer w(out, error); w.pod(uint32_t{0x3147504d});
+        w.pod(g_mpeg_stub_state.initialized);
+        w.pod(g_mpeg_stub_state.nextCallbackHandle);
+        w.pod(g_mpeg_stub_state.cdStreamGeneration);
+        w.pod(g_mpeg_stub_state.cdStreamBytesProduced);
+        w.pod(g_mpeg_stub_state.cdStreamBytesDemuxed);
+        w.pod(g_mpeg_stub_state.cdStreamEofPending);
+        w.pod(g_mpeg_stub_state.currentCdStreamEofSeen);
+        return w.finish();
+    }
+    static bool decodeMpegState(const std::vector<uint8_t> &blob, bool apply, std::string &error)
+    {
+        MpegStubState saved; ps2state::Reader r(blob, error); uint32_t magic = 0; r.pod(magic);
+        r.pod(saved.initialized);
+        r.pod(saved.nextCallbackHandle);
+        r.pod(saved.cdStreamGeneration);
+        r.pod(saved.cdStreamBytesProduced);
+        r.pod(saved.cdStreamBytesDemuxed);
+        r.pod(saved.cdStreamEofPending);
+        r.pod(saved.currentCdStreamEofSeen);
+        if (!r.finish() || magic != 0x3147504d || !saved.nextCallbackHandle)
+        { error = "Invalid movie subsystem state."; return false; }
+        if (apply) { std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex); g_mpeg_stub_state = std::move(saved); }
+        return true;
+    }
+    bool validateMpegState(const std::vector<uint8_t> &blob, std::string &error) { return decodeMpegState(blob, false, error); }
+    bool restoreMpegState(const std::vector<uint8_t> &blob, std::string &error) { return decodeMpegState(blob, true, error); }
 }

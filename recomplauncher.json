@@ -1,0 +1,140 @@
+{
+  "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+  "format": 1,
+  "repo": "GenissonEmilio/ShadowOfTheColossusPC",
+  "game": {
+    "kind": "iso",
+    "label": "Shadow of the Colossus PS2 disc image (SCUS-97472 USA or SCES-53326 PAL)",
+    "check": { "iso9660": "NICO.DAT" }
+  },
+  "prepare": {
+    "program": ["ShadowOfTheColossusPC.exe", "ShadowOfTheColossusPC"],
+    "args": ["--prepare", "--rom", "{game}", "--data-dir", "{local}/ShadowOfTheColossusPC"],
+    "label": "Import the disc and prepare the PC game",
+    "timeout": 7200
+  },
+  "start": {
+    "program": ["ShadowOfTheColossusPC.exe", "ShadowOfTheColossusPC"],
+    "args": ["--play", "--data-dir", "{local}/ShadowOfTheColossusPC"]
+  },
+  "config": [
+    {
+      "id": "main",
+      "format": "ini",
+      "file": [{ "path": "{local}/ShadowOfTheColossusPC/player/celosia_settings.cfg" }],
+      "new": { "fullscreen": "1", "screen": "0", "window_resolution": "0", "vsync": "1", "upscale_fsr": "0", "show_fps": "1", "volume": "10", "language": "0" }
+    }
+  ],
+  "settings": [
+    {
+      "id": "fullscreen",
+      "label": "Display mode",
+      "help": "Choose a resizable window or full screen on the current monitor.",
+      "defaults": { "fullscreen": "1" },
+      "choices": [
+        { "label": "Full screen", "set": { "fullscreen": "1" } },
+        { "label": "Windowed", "set": { "fullscreen": "0" } }
+      ]
+    },
+    {
+      "id": "aspect",
+      "label": "Aspect ratio",
+      "help": "Widescreen extends the camera view. Stretch fills the display with the original framing.",
+      "defaults": { "screen": "0" },
+      "choices": [
+        { "label": "Original 4:3", "set": { "screen": "0" } },
+        { "label": "Widescreen 16:9", "set": { "screen": "3" } },
+        { "label": "Stretch", "set": { "screen": "1" } },
+        { "label": "Integer scaling", "set": { "screen": "2" } }
+      ]
+    },
+    {
+      "id": "window_resolution",
+      "label": "Window size",
+      "help": "Set the window dimensions. Internal render resolution is available in the game's F1 menu.",
+      "when": { "fullscreen": "0" },
+      "defaults": { "window_resolution": "0" },
+      "choices": [
+        { "label": "Automatic", "set": { "window_resolution": "0" } },
+        { "label": "640 × 480", "set": { "window_resolution": "1" } },
+        { "label": "800 × 600", "set": { "window_resolution": "2" } },
+        { "label": "1024 × 720", "set": { "window_resolution": "3" } },
+        { "label": "1280 × 720", "set": { "window_resolution": "4" } },
+        { "label": "1600 × 900", "set": { "window_resolution": "5" } },
+        { "label": "1920 × 1080", "set": { "window_resolution": "6" } },
+        { "label": "2560 × 1440", "set": { "window_resolution": "7" } },
+        { "label": "3840 × 2160", "set": { "window_resolution": "8" } }
+      ]
+    },
+    {
+      "id": "vsync",
+      "label": "VSync",
+      "help": "Synchronize presentation with the display refresh to reduce tearing.",
+      "defaults": { "vsync": "1" },
+      "choices": [
+        { "label": "On", "set": { "vsync": "1" } },
+        { "label": "Off", "set": { "vsync": "0" } }
+      ]
+    },
+    {
+      "id": "upscale_fsr",
+      "label": "FSR 1 upscaling",
+      "help": "Use spatial upscaling and sharpening when the game image is enlarged.",
+      "defaults": { "upscale_fsr": "0" },
+      "choices": [
+        { "label": "Off", "set": { "upscale_fsr": "0" } },
+        { "label": "On", "set": { "upscale_fsr": "1" } }
+      ]
+    },
+    {
+      "id": "show_fps",
+      "label": "FPS display",
+      "help": "Show the game and host frame rates on screen.",
+      "defaults": { "show_fps": "1" },
+      "choices": [
+        { "label": "On", "set": { "show_fps": "1" } },
+        { "label": "Off", "set": { "show_fps": "0" } }
+      ]
+    },
+    {
+      "id": "language",
+      "label": "F1 settings language",
+      "help": "Set the port’s F1 settings language. Campaign text and audio come from the original disc.",
+      "defaults": { "language": "0" },
+      "choices": [
+        { "label": "Automatic", "set": { "language": "0" } },
+        { "label": "Português", "set": { "language": "1" } },
+        { "label": "English", "set": { "language": "2" } }
+      ]
+    },
+    {
+      "id": "volume",
+      "label": "Game volume",
+      "help": "Set the master volume for game audio.",
+      "defaults": { "volume": "10" },
+      "choices": [
+        { "label": "Muted", "set": { "volume": "0" } },
+        { "label": "10%", "set": { "volume": "1" } },
+        { "label": "20%", "set": { "volume": "2" } },
+        { "label": "30%", "set": { "volume": "3" } },
+        { "label": "40%", "set": { "volume": "4" } },
+        { "label": "50%", "set": { "volume": "5" } },
+        { "label": "60%", "set": { "volume": "6" } },
+        { "label": "70%", "set": { "volume": "7" } },
+        { "label": "80%", "set": { "volume": "8" } },
+        { "label": "90%", "set": { "volume": "9" } },
+        { "label": "100%", "set": { "volume": "10" } }
+      ]
+    }
+  ],
+  "saves": ["{local}/ShadowOfTheColossusPC/player/memcards"],
+  "folders": {
+    "saves": [{ "path": "{local}/ShadowOfTheColossusPC/player/memcards" }],
+    "logs": [{ "path": "{local}/ShadowOfTheColossusPC" }]
+  },
+  "looks": { "graphics": "opengl", "lines": 448 },
+  "exit_codes": {
+    "65": "Select the SCUS-97472 (USA) or SCES-53326 (PAL) disc in Easy Setup and prepare the game again.",
+    "74": "The port could not prepare or start the game. Check last-prepare.log in the Logs folder."
+  }
+}

@@ -18,6 +18,9 @@ namespace ps2x::iop::detail
         IopModuleManager();
 
         void reset();
+        bool captureState(std::vector<uint8_t> &out, std::string &error) const;
+        bool validateState(const std::vector<uint8_t> &data, std::string &error) const;
+        bool restoreState(const std::vector<uint8_t> &data, std::string &error);
         void setServiceModuleKeys(std::vector<std::string> keys);
 
         [[nodiscard]] ModuleLoadResult loadHle(std::string_view path);

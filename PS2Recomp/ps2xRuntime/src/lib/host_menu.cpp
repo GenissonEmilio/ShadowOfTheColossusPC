@@ -1,5 +1,12 @@
 #include "runtime/host_menu.h"
+#include "runtime/desktop_input.h"
+#include "runtime/desktop_video.h"
 #include "runtime/native_tuning.h"
+#include "runtime/ps2_pad.h"
+#include "runtime/state_manager.h"
+#ifdef PS2X_DESKTOP_VIDEO
+#include "runtime/native_renderer.h"
+#endif
 
 #include "raylib.h"
 
@@ -7,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <string>
 #include <vector>
 
@@ -20,12 +28,18 @@ namespace hostmenu
 namespace
 {
     Settings g_settings;
-    bool g_open = false;
+    std::atomic<bool> g_open{false};
     bool g_help = false;
     bool g_quit = false;
     bool g_quitArmed = false; // "Quit game" needs a second Cross
-    bool g_holdBlock = false; // a button pressed in the menu is still held
+    std::atomic<bool> g_holdBlock{false}; // a button pressed in the menu is still held
     int g_tab = 0, g_item = 0;
+    Rectangle g_tabRects[8]{};
+    std::vector<std::pair<Rectangle, int>> g_rowRects;
+    bool g_stateConfirm = false, g_stateConfirmYes = false;
+    int g_stateConfirmItem = 0;
+    Rectangle g_stateConfirmRects[2]{}; // cancel, confirm
+    std::string g_stateMessage;
     double g_lastSelect = -1.0;
 
 #if defined(PLATFORM_VITA)
@@ -73,35 +87,80 @@ namespace
             {"Sound", "Som"},
             {"System", "Sistema"},
             {"About", "Sobre"},
+            {"States", "Estados"},
+            {"Quick state", "Estado rápido"},
+            {"Empty", "Vazio"},
+            {"Save", "Salvar"},
+            {"Load", "Carregar"},
+            {"Delete", "Excluir"},
+            {"Cancel", "Cancelar"},
+            {"Confirm", "Confirmar"},
+            {"Arrows", "Setas"},
+            {"Overwrite this state?", "Substituir este estado?"},
+            {"Load this state?", "Carregar este estado?"},
+            {"Delete this state?", "Excluir este estado?"},
+            {"The selected state is empty.", "O estado selecionado está vazio."},
+            {"Please wait for the current operation.", "Aguarde a operação atual terminar."},
+            {"Loading replaces the current game position and progress. Your memory-card file is preserved.",
+             "Carregar substitui a posição e o progresso atuais do jogo. O arquivo do cartão de memória é preservado."},
+            {"This replaces the selected state with the current game session.",
+             "Isto substitui o estado selecionado pela sessão atual do jogo."},
+            {"This removes only the selected state file.", "Isto remove apenas o arquivo do estado selecionado."},
             {"Renderer", "Gráficos"},
             {"Quality", "Qualidade"},
             {"Debug", "Depuração"},
             {"Exact transparency", "Transparências precisas"},
             {"Show FPS", "Mostrar FPS"},
             {"Screen", "Tela"},
+            {"Fullscreen", "Tela cheia"},
+            {"Window resolution", "Resolução da janela"},
+            {"FSR 1 upscaling", "Upscaling FSR 1"},
+            {"Frame generation (2x)", "Geração de quadros (2x)"},
+            {"The native renderer adds an interpolated frame when the display has room. The game keeps its base frame rate.",
+             "O renderizador nativo gera um quadro intermediário quando há tempo para exibi-lo. O jogo mantém a taxa de quadros base."},
+            {"Requires native renderer", "Requer renderizador nativo"},
+            {"Shows game frames and the video frame rate, including any generated frames.",
+             "Mostra a taxa de quadros do jogo e a taxa de vídeo, incluindo quadros gerados."},
+            {"Uses the current monitor's resolution in fullscreen. F11 also toggles this.",
+             "Usa a resolução do monitor atual em tela cheia. F11 também alterna o modo."},
+            {"Selects the game window size. Automatic lets you resize it freely. Fullscreen uses the monitor resolution.",
+             "Escolhe o tamanho da janela do jogo. Automático permite redimensionar. A tela cheia usa a resolução do monitor."},
+            {"Uses AMD FSR 1 to upscale the game picture when it is smaller than the display area. "
+             "Lower the resolution in Quality to reduce rendering load. Sharp mode uses whole-pixel scaling.",
+             "Usa AMD FSR 1 para ampliar a imagem do jogo quando ela é menor que a área de exibição. "
+             "Reduza a resolução em Qualidade para aliviar a renderização. O modo Nítido usa escala inteira."},
+            {"Synchronizes frame presentation with the monitor to reduce tearing.",
+             "Sincroniza a apresentação dos quadros com o monitor para reduzir cortes na imagem."},
             {"Volume", "Volume"},
             {"Language", "Idioma"},
-            {"Quit game", "Sair do jogo"},
+            {"Return to launcher", "Voltar ao launcher"},
             {"On", "Ligado"},
             {"Off", "Desligado"},
             {"Fit (4:3)", "Ajustar (4:3)"},
             {"Stretch", "Esticar"},
             {"Sharp (whole scale)", "Nítido (escala inteira)"},
+            {"Widescreen (16:9)", "Tela larga (16:9)"},
             {"Automatic", "Automático"},
-            {"Press X again to quit", "Aperte X de novo para sair"},
+            {"Confirm again to return", "Confirme de novo para sair"},
             {"L/R: tab   D-pad: choose   X: change   Triangle: help   O: close",
              "L/R: aba   Direcional: escolher   X: mudar   Triângulo: ajuda   O: fechar"},
             {"Triangle / O: back", "Triângulo / O: voltar"},
+            {"Tabs", "Abas"},
+            {"Choose", "Escolher"},
+            {"Change", "Mudar"},
+            {"Help", "Ajuda"},
+            {"Close", "Fechar"},
+            {"Back", "Voltar"},
             {"Draws the effects that use the alpha test exactly like the PS2 (clouds, mist, shadows). "
              "Turning it off gains a few frames per second; some mist and edges look harder.",
              "Desenha os efeitos que usam o teste de alfa exatamente como o PS2 (nuvens, névoa, sombras). "
              "Desligar ganha alguns quadros por segundo; parte da névoa e das bordas fica mais dura."},
             {"Shows the game's frame rate in the corner of the screen.",
              "Mostra a taxa de quadros do jogo no canto da tela."},
-            {"Fit keeps the original 4:3 picture with bars on the sides. Stretch fills the screen. "
-             "Sharp uses the largest whole multiple of the original size, so every pixel has the same size.",
-             "Ajustar mantém a imagem original 4:3 com faixas nas laterais. Esticar preenche a tela. "
-             "Nítido usa o maior múltiplo inteiro do tamanho original, então todo pixel tem o mesmo tamanho."},
+            {"Fit keeps the original 4:3 view. Widescreen expands the view to 16:9. Both add bars when needed. "
+             "Stretch fills the screen. Sharp uses the largest whole multiple of the original size.",
+             "Ajustar mantém a visão original em 4:3. Tela larga amplia a visão para 16:9. Ambos usam faixas quando necessário. "
+             "Esticar preenche a tela. Nítido usa o maior múltiplo inteiro do tamanho original."},
             {"Volume of the game's sound and music.", "Volume do som e da música do jogo."},
             {"Language of this menu. Automatic follows the system language.",
              "Idioma deste menu. Automático segue o idioma do sistema."},
@@ -124,6 +183,13 @@ namespace
         kExactAlpha,
         kShowFps,
         kScreen,
+#ifdef PS2X_DESKTOP_VIDEO
+        kVSync,
+        kFullscreen,
+        kWindowResolution,
+        kUpscaleFsr,
+        kFrameGeneration,
+#endif
         kVolume,
         kLanguage,
         kQuit,
@@ -147,33 +213,49 @@ namespace
         {kExactAlpha, "Exact transparency",
          "Draws the effects that use the alpha test exactly like the PS2 (clouds, mist, shadows). "
          "Turning it off gains a few frames per second; some mist and edges look harder."},
+#ifdef PS2X_DESKTOP_VIDEO
+        {kShowFps, "Show FPS", "Shows game frames and the video frame rate, including any generated frames."},
+#else
         {kShowFps, "Show FPS", "Shows the game's frame rate in the corner of the screen."},
+#endif
         {kScreen, "Screen",
-         "Fit keeps the original 4:3 picture with bars on the sides. Stretch fills the screen. "
-         "Sharp uses the largest whole multiple of the original size, so every pixel has the same size."},
+         "Fit keeps the original 4:3 view. Widescreen expands the view to 16:9. Both add bars when needed. "
+         "Stretch fills the screen. Sharp uses the largest whole multiple of the original size."},
+#ifdef PS2X_DESKTOP_VIDEO
+        {kVSync, "VSync", "Synchronizes frame presentation with the monitor to reduce tearing."},
+        {kFullscreen, "Fullscreen", "Uses the current monitor's resolution in fullscreen. F11 also toggles this."},
+        {kWindowResolution, "Window resolution",
+         "Selects the game window size. Automatic lets you resize it freely. Fullscreen uses the monitor resolution."},
+        {kUpscaleFsr, "FSR 1 upscaling",
+         "Uses AMD FSR 1 to upscale the game picture when it is smaller than the display area. "
+         "Lower the resolution in Quality to reduce rendering load. Sharp mode uses whole-pixel scaling."},
+        {kFrameGeneration, "Frame generation (2x)",
+         "The native renderer adds an interpolated frame when the display has room. The game keeps its base frame rate."},
+#endif
     };
     const Item kSoundItems[] = {
         {kVolume, "Volume", "Volume of the game's sound and music."},
     };
     const Item kSystemItems[] = {
         {kLanguage, "Language", "Language of this menu. Automatic follows the system language."},
-        {kQuit, "Quit game", "Closes the game. Unsaved progress is lost."},
+        {kQuit, "Return to launcher", "Closes the game. Unsaved progress is lost."},
     };
     // The Quality, Renderer and Debug tabs list native_renderer::tuningItems()
     // (the same list as the Mac's F10 panel), each with a last "Defaults" row:
     // Quality the preset, resolution, filtering...; Debug what to draw at
     // all, the layers; Renderer the rest.
-    constexpr int kQualityTab = 1, kRendererTab = 2, kDebugTab = 3;
+    constexpr int kQualityTab = 1, kRendererTab = 2, kDebugTab = 3, kStatesTab = 6;
     const Tab kTabs[] = {
-        {"Video", kVideoItems, 3},
+        {"Video", kVideoItems, static_cast<int>(sizeof(kVideoItems) / sizeof(kVideoItems[0]))},
         {"Quality", nullptr, -1},
         {"Renderer", nullptr, -1},
         {"Debug", nullptr, -1},
         {"Sound", kSoundItems, 1},
         {"System", kSystemItems, 2},
+        {"States", nullptr, -1},
         {"About", nullptr, 0},
     };
-    constexpr int kTabCount = 7;
+    constexpr int kTabCount = 8;
     int g_tabNow = 0; // the tab the renderer helpers below list
 
     // The list's items of a tuning tab.
@@ -193,7 +275,40 @@ namespace
 
     int itemCount(int tab)
     {
+        if (tab == kStatesTab)
+            return savestates::SlotCount * 3;
         return isTuningTab(tab) ? static_cast<int>(tuningRows(tab).size()) + 1 : kTabs[tab].count;
+    }
+
+    void stateAction(int item, bool confirmed = false)
+    {
+        if (savestates::busy())
+        {
+            // Keep the manager's live progress/result visible after this
+            // operation completes instead of pinning a stale local warning.
+            g_stateMessage.clear();
+            return;
+        }
+        const int slot = item / 3, operation = item % 3;
+        if (slot < 0 || slot >= savestates::SlotCount)
+            return;
+        const auto slots = savestates::slots();
+        if (operation != 0 && !slots[slot].exists)
+        {
+            g_stateMessage = T("The selected state is empty.");
+            return;
+        }
+        if (!confirmed && (operation != 0 || slots[slot].exists))
+        {
+            g_stateConfirm = true;
+            g_stateConfirmYes = false;
+            g_stateConfirmItem = item;
+            return;
+        }
+        g_stateMessage.clear();
+        const savestates::Action action = operation == 0 ? savestates::Action::Save :
+                                          operation == 1 ? savestates::Action::Load : savestates::Action::Delete;
+        savestates::request(action, slot);
     }
 
     // Row i of the current tuning tab -> the list's item (or -1: the reset row).
@@ -249,10 +364,24 @@ namespace
         {
         case kExactAlpha: return T(g_settings.exactAlpha ? "On" : "Off");
         case kShowFps: return T(g_settings.showFps ? "On" : "Off");
+#ifdef PS2X_DESKTOP_VIDEO
+        case kVSync: return T(g_settings.vsync ? "On" : "Off");
+        case kFullscreen: return T(g_settings.fullscreen ? "On" : "Off");
+        case kUpscaleFsr: return T(g_settings.upscaleFsr ? "On" : "Off");
+        case kFrameGeneration:
+            return T(native_renderer::shown() ? (g_settings.frameGeneration ? "On" : "Off") : "Requires native renderer");
+        case kWindowResolution:
+        {
+            const int resolution = g_settings.windowResolution.load();
+            if (resolution == 0) return T("Automatic");
+            const auto size = desktop_video::kWindowResolutions[resolution];
+            return std::to_string(size.width) + " x " + std::to_string(size.height);
+        }
+#endif
         case kScreen:
         {
-            static const char *modes[] = {"Fit (4:3)", "Stretch", "Sharp (whole scale)"};
-            return T(modes[std::clamp(g_settings.screenMode.load(), 0, 2)]);
+            static const char *modes[kScreenModeCount] = {"Fit (4:3)", "Stretch", "Sharp (whole scale)", "Widescreen (16:9)"};
+            return T(modes[std::clamp(g_settings.screenMode.load(), 0, kScreenModeCount - 1)]);
         }
         case kVolume:
         {
@@ -264,7 +393,7 @@ namespace
             static const char *langs[] = {"Automatic", "Português", "English"};
             return T(langs[std::clamp(g_settings.language.load(), 0, 2)]);
         }
-        case kQuit: return g_quitArmed ? T("Press X again to quit") : "";
+        case kQuit: return g_quitArmed ? T("Confirm again to return") : "";
         }
         return "";
     }
@@ -279,6 +408,11 @@ namespace
         std::fprintf(f, "exact_alpha=%d\nshow_fps=%d\nscreen=%d\nfullscreen=%d\nvolume=%d\nlanguage=%d\n", g_settings.exactAlpha ? 1 : 0,
                      g_settings.showFps ? 1 : 0, g_settings.screenMode.load(), g_settings.fullscreen ? 1 : 0,
                      g_settings.volume.load(), g_settings.language.load());
+#ifdef PS2X_DESKTOP_VIDEO
+        std::fprintf(f, "vsync=%d\nwindow_resolution=%d\nupscale_fsr=%d\n", g_settings.vsync ? 1 : 0,
+                     g_settings.windowResolution.load(), g_settings.upscaleFsr ? 1 : 0);
+        std::fprintf(f, "frame_generation=%d\n", g_settings.frameGeneration ? 1 : 0);
+#endif
         const native_renderer::Tuning &t = native_renderer::tuning();
         for (const native_renderer::TuningItem &item : native_renderer::tuningItems())
         {
@@ -301,7 +435,20 @@ namespace
         {
         case kExactAlpha: g_settings.exactAlpha = !g_settings.exactAlpha; break;
         case kShowFps: g_settings.showFps = !g_settings.showFps; break;
-        case kScreen: g_settings.screenMode = (g_settings.screenMode + 3 + dir) % 3; break;
+#ifdef PS2X_DESKTOP_VIDEO
+        case kVSync: g_settings.vsync = !g_settings.vsync; break;
+        case kFullscreen: g_settings.fullscreen = !g_settings.fullscreen; break;
+        case kWindowResolution:
+            g_settings.windowResolution = (g_settings.windowResolution + desktop_video::kWindowResolutionCount + dir)
+                % desktop_video::kWindowResolutionCount;
+            break;
+        case kUpscaleFsr: g_settings.upscaleFsr = !g_settings.upscaleFsr; break;
+        case kFrameGeneration:
+            if (!native_renderer::shown()) return;
+            g_settings.frameGeneration = !g_settings.frameGeneration;
+            break;
+#endif
+        case kScreen: g_settings.screenMode = (g_settings.screenMode + kScreenModeCount + dir) % kScreenModeCount; break;
         case kVolume: g_settings.volume = std::clamp(g_settings.volume + dir, 0, 10); break;
         case kLanguage: g_settings.language = (g_settings.language + 3 + dir) % 3; break;
         case kQuit:
@@ -330,19 +477,19 @@ namespace
     {
         std::memcpy(g_prev, g_down, sizeof(g_down));
         std::memset(g_down, 0, sizeof(g_down));
-        const int pad = 0;
-        if (IsGamepadAvailable(pad))
+        const auto pad = ps2pad::readGamepad();
+        if (pad.index >= 0)
         {
-            g_down[kUp] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_FACE_UP) || GetGamepadAxisMovement(pad, GAMEPAD_AXIS_LEFT_Y) < -0.6f;
-            g_down[kDown] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_FACE_DOWN) || GetGamepadAxisMovement(pad, GAMEPAD_AXIS_LEFT_Y) > 0.6f;
-            g_down[kLeft] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_FACE_LEFT) || GetGamepadAxisMovement(pad, GAMEPAD_AXIS_LEFT_X) < -0.6f;
-            g_down[kRight] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_FACE_RIGHT) || GetGamepadAxisMovement(pad, GAMEPAD_AXIS_LEFT_X) > 0.6f;
-            g_down[kCross] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_RIGHT_FACE_DOWN);
-            g_down[kCircle] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT);
-            g_down[kTriangle] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_RIGHT_FACE_UP);
-            g_down[kL1] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_TRIGGER_1);
-            g_down[kR1] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_RIGHT_TRIGGER_1);
-            g_down[kSelect] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_MIDDLE_LEFT);
+            g_down[kUp] = pad.buttons[GAMEPAD_BUTTON_LEFT_FACE_UP] || pad.axes[GAMEPAD_AXIS_LEFT_Y] < -0.6f;
+            g_down[kDown] = pad.buttons[GAMEPAD_BUTTON_LEFT_FACE_DOWN] || pad.axes[GAMEPAD_AXIS_LEFT_Y] > 0.6f;
+            g_down[kLeft] = pad.buttons[GAMEPAD_BUTTON_LEFT_FACE_LEFT] || pad.axes[GAMEPAD_AXIS_LEFT_X] < -0.6f;
+            g_down[kRight] = pad.buttons[GAMEPAD_BUTTON_LEFT_FACE_RIGHT] || pad.axes[GAMEPAD_AXIS_LEFT_X] > 0.6f;
+            g_down[kCross] = pad.buttons[GAMEPAD_BUTTON_RIGHT_FACE_DOWN];
+            g_down[kCircle] = pad.buttons[GAMEPAD_BUTTON_RIGHT_FACE_RIGHT];
+            g_down[kTriangle] = pad.buttons[GAMEPAD_BUTTON_RIGHT_FACE_UP];
+            g_down[kL1] = pad.buttons[GAMEPAD_BUTTON_LEFT_TRIGGER_1];
+            g_down[kR1] = pad.buttons[GAMEPAD_BUTTON_RIGHT_TRIGGER_1];
+            g_down[kSelect] = pad.buttons[GAMEPAD_BUTTON_MIDDLE_LEFT];
         }
         // Keyboard: arrows, Enter = Cross, Backspace = Circle, H = help, Q/E = tabs.
         g_down[kUp] |= IsKeyDown(KEY_UP);
@@ -371,6 +518,7 @@ namespace
         g_open = false;
         g_help = false;
         g_quitArmed = false;
+        g_stateConfirm = false;
         g_holdBlock = true; // until the closing button is released
     }
 
@@ -413,6 +561,184 @@ namespace
             flush();
         return lines;
     }
+
+    enum class HintRow { Menu, States, Back };
+
+    bool drawInputHints(HintRow row, int x, int y, int width, int fontSize, Color color)
+    {
+        using desktop_input::PromptStyle;
+        const auto style = desktop_input::prompts().style;
+        if (style == PromptStyle::PlayStation)
+            return false;
+        const bool keyboard = style == PromptStyle::Keyboard;
+        struct Hint { const char *button; const char *action; Color badge; };
+        const Color neutral{55, 67, 82, 255}, green{29, 111, 60, 255}, yellow{145, 99, 24, 255}, red{151, 47, 56, 255};
+        auto draw = [&](std::initializer_list<Hint> hints)
+        {
+            auto badgeWidth = [&](const Hint &hint, int size)
+            {
+                if (!hint.button) return size;
+                if (!keyboard && hint.button[1] == '\0') return size + 4;
+                return MeasureText(hint.button, size) + 8;
+            };
+            auto hintWidth = [&](const Hint &hint, int size)
+            {
+                return badgeWidth(hint, size) + (hint.action ? 4 + MeasureText(T(hint.action), size) : 0);
+            };
+            auto widthAt = [&](int size)
+            {
+                int required = 0;
+                for (const auto &hint : hints)
+                    required += hintWidth(hint, size) + size / 2;
+                return required - size / 2;
+            };
+            while (fontSize > 8 && widthAt(fontSize) > width)
+                --fontSize;
+            for (const auto &hint : hints)
+            {
+                const int badge = badgeWidth(hint, fontSize);
+                const int height = fontSize + 4;
+                if (!hint.button)
+                {
+                    const Color outline{240, 236, 226, 255}, selected{255, 198, 91, 255};
+                    DrawRectangleRounded({float(x), float(y), float(badge), float(height)}, 0.65f, 5, outline);
+                    DrawRectangleRounded({float(x + 1), float(y + 1), float(badge - 2), float(height - 2)}, 0.65f, 5, hint.badge);
+                    DrawRectangleRounded({float(x + 2), float(y + 2), float(badge / 2 - 2), float(height / 2 - 2)}, 0.35f, 4, selected);
+                    DrawRectangle(x + 1, y + height / 2, badge - 2, 1, outline);
+                    DrawRectangle(x + badge / 2, y + 1, 1, height / 2, outline);
+                }
+                else if (!keyboard && hint.button[1] == '\0')
+                    DrawCircle(x + badge / 2, y + height / 2, height / 2.0f, hint.badge);
+                else
+                {
+                    DrawRectangleRounded({float(x), float(y), float(badge), float(height)}, 0.45f, 5, hint.badge);
+                    if (keyboard)
+                        DrawRectangle(x + 3, y + height - 2, badge - 6, 1, Color{193, 186, 175, 255});
+                }
+                if (hint.button)
+                    DrawText(hint.button, x + (badge - MeasureText(hint.button, fontSize)) / 2, y + 2, fontSize, WHITE);
+                if (hint.action)
+                    DrawText(T(hint.action), x + badge + 4, y + 2, fontSize, color);
+                x += hintWidth(hint, fontSize) + fontSize / 2;
+            }
+        };
+        const char *activate = row == HintRow::States ? "Confirm" : "Change";
+        if (keyboard && row == HintRow::Back)
+            draw({{"H", nullptr, neutral}, {"Backspace", "Back", neutral}});
+        else if (keyboard)
+            draw({{"Q/E", "Tabs", neutral}, {T("Arrows"), "Choose", neutral},
+                  {"Enter", nullptr, neutral}, {nullptr, activate, neutral}, {"H", "Help", neutral}, {"F1", "Close", neutral}});
+        else if (row == HintRow::Back)
+            draw({{"Y", nullptr, yellow}, {"B", "Back", red}});
+        else
+            draw({{"LB/RB", "Tabs", neutral}, {"D-pad", "Choose", neutral},
+                  {"A", activate, green}, {"Y", "Help", yellow}, {"B", "Close", red}});
+        return true;
+    }
+
+    void drawStates(int boxX, int boxY, int boxW, int boxH, int listY, int size, int small)
+    {
+        const int pad = size;
+        const Color text{225, 228, 230, 255}, dim{150, 156, 162, 255}, accent{232, 196, 120, 255};
+        if (g_help)
+        {
+            DrawText(T("States"), boxX + pad, listY, size, accent);
+            const char *help = portuguese()
+                ? "Estados retomam a sessão exatamente no ponto salvo e são compatíveis com a mesma versão do núcleo e do jogo. F5 salva no espaço rápido; F8 carrega esse espaço diretamente. Use os cinco espaços manuais para manter outros pontos. Carregar pelo menu, substituir e excluir pedem confirmação. O cartão de memória continua separado: se ele mudar, estados anteriores podem deixar de ser compatíveis."
+                : "States resume the session at its saved position and require the same core and game version. F5 saves the quick slot; F8 loads it directly. Keep other positions in the five manual slots. Menu loads, overwrites and deletions require confirmation. The memory card stays separate: changing it can make an older state incompatible.";
+            drawWrapped(help, boxX + pad, listY + size * 2, boxW - 2 * pad, small, text, small / 3);
+            if (!drawInputHints(HintRow::Back, boxX + pad, boxY + boxH - size * 3 / 2, boxW - 2 * pad, small, dim))
+                DrawText(T("Triangle / O: back"), boxX + pad, boxY + boxH - size * 3 / 2, small, dim);
+            return;
+        }
+        const auto slots = savestates::slots();
+        const bool working = savestates::busy();
+        const int statusY = boxY + boxH - size * 9 / 2;
+        const int rowH = std::max(1, (statusY - size / 2 - listY) / savestates::SlotCount);
+        const int labelSize = std::min(small, std::max(10, rowH * 9 / 20));
+        const int metaSize = std::max(10, std::min(size / 2, rowH / 3));
+        const int infoW = (boxW - 2 * pad) * 43 / 100;
+        const int gap = std::max(3, size / 3);
+        const int buttonW = (boxW - 2 * pad - infoW - gap * 3) / 3;
+        for (int slot = 0; slot < savestates::SlotCount; ++slot)
+        {
+            const int y = listY + slot * rowH;
+            if (g_item / 3 == slot)
+                DrawRectangle(boxX + pad / 2, y, boxW - pad, rowH - 1, Color{255, 255, 255, 16});
+            const std::string name = slot == 0 ? T("Quick state") : std::string("Slot ") + std::to_string(slot);
+            DrawText(name.c_str(), boxX + pad, y + 2, labelSize, g_item / 3 == slot ? text : dim);
+            std::string metadata = T("Empty");
+            if (slots[slot].exists)
+            {
+                char bytes[32];
+                std::snprintf(bytes, sizeof(bytes), "  %.1f MiB", static_cast<double>(slots[slot].bytes) / (1024.0 * 1024.0));
+                metadata = slots[slot].modified + bytes;
+            }
+            int metadataSize = metaSize;
+            while (metadataSize > 8 && MeasureText(metadata.c_str(), metadataSize) > infoW - gap)
+                --metadataSize;
+            DrawText(metadata.c_str(), boxX + pad, y + labelSize + 3, metadataSize, dim);
+            for (int operation = 0; operation < 3; ++operation)
+            {
+                const int item = slot * 3 + operation;
+                const int x = boxX + pad + infoW + gap + operation * (buttonW + gap);
+                const bool enabled = !working && (operation == 0 || slots[slot].exists);
+                const Rectangle rectangle{float(x), float(y + 2), float(buttonW), float(std::max(1, rowH - 5))};
+                g_rowRects.push_back({rectangle, item});
+                DrawRectangle(x, y + 2, buttonW, std::max(1, rowH - 5),
+                              g_item == item ? Color{232, 196, 120, 45} : Color{255, 255, 255, 9});
+                const char *label = T(operation == 0 ? "Save" : operation == 1 ? "Load" : "Delete");
+                int font = small;
+                while (font > 8 && MeasureText(label, font) > buttonW - gap)
+                    --font;
+                DrawText(label, x + (buttonW - MeasureText(label, font)) / 2, y + (rowH - font) / 2,
+                         font, enabled ? (g_item == item ? accent : text) : Color{91, 96, 104, 255});
+            }
+        }
+        DrawRectangle(boxX + pad, statusY - size / 3, boxW - 2 * pad, 1, Color{70, 80, 90, 255});
+        const std::string status = g_stateMessage.empty() ? savestates::status() : g_stateMessage;
+        const char *idle = portuguese() ? "F5: salvar rápido   F8: carregar rápido" : "F5: quick save   F8: quick load";
+        int statusSize = small;
+        const char *message = status.empty() ? idle : status.c_str();
+        while (statusSize > 10 && drawWrapped(message, 0, 0, boxW - 2 * pad, statusSize, dim, statusSize / 4, false) *
+               (statusSize + statusSize / 4) > size * 3)
+            --statusSize;
+        drawWrapped(message, boxX + pad, statusY, boxW - 2 * pad, statusSize, working ? accent : dim, statusSize / 4);
+        const char *hint = portuguese() ? "Q/E: abas  Setas: espaço/ação  Enter/clique: escolher  H: ajuda  F1: fechar"
+                                       : "Q/E: tabs  Arrows: slot/action  Enter/click: select  H: help  F1: close";
+        int hintSize = small;
+        while (hintSize > 8 && MeasureText(hint, hintSize) > boxW - 2 * pad) --hintSize;
+        if (!drawInputHints(HintRow::States, boxX + pad, boxY + boxH - size, boxW - 2 * pad, small, dim))
+            DrawText(hint, boxX + pad, boxY + boxH - size, hintSize, dim);
+
+        if (g_stateConfirm)
+        {
+            DrawRectangle(boxX, boxY, boxW, boxH, Color{0, 0, 0, 205});
+            const int width = boxW - 4 * pad, height = std::min(boxH - 2 * pad, size * 9);
+            const int x = boxX + 2 * pad, y = boxY + (boxH - height) / 2;
+            DrawRectangle(x, y, width, height, Color{20, 24, 30, 255});
+            DrawRectangle(x, y, width, 2, accent);
+            const int operation = g_stateConfirmItem % 3;
+            const char *title = T(operation == 0 ? "Overwrite this state?" : operation == 1 ? "Load this state?" : "Delete this state?");
+            drawWrapped(title, x + pad, y + pad, width - 2 * pad, small, accent, small / 4);
+            const char *explanation = T(operation == 0 ? "This replaces the selected state with the current game session." :
+                                        operation == 1 ? "Loading replaces the current game position and progress. Your memory-card file is preserved." :
+                                                         "This removes only the selected state file.");
+            drawWrapped(explanation, x + pad, y + size * 5 / 2, width - 2 * pad, small, text, small / 4);
+            for (int choice = 0; choice < 2; ++choice)
+            {
+                const int buttonX = x + pad + choice * (width / 2 - pad / 2);
+                const int buttonWidth = width / 2 - pad * 3 / 2;
+                const int buttonY = y + height - size * 2;
+                g_stateConfirmRects[choice] = Rectangle{float(buttonX), float(buttonY), float(buttonWidth), float(size * 3 / 2)};
+                const bool selected = g_stateConfirmYes == (choice == 1);
+                DrawRectangle(buttonX, buttonY, buttonWidth, size * 3 / 2,
+                              selected ? Color{232, 196, 120, 45} : Color{255, 255, 255, 12});
+                const char *label = T(choice == 0 ? "Cancel" : "Confirm");
+                DrawText(label, buttonX + (buttonWidth - MeasureText(label, small)) / 2, buttonY + size / 4, small, selected ? accent : text);
+            }
+        }
+    }
 }
 
 Settings &settings() { return g_settings; }
@@ -437,8 +763,15 @@ void load()
             continue;
         if (!std::strcmp(key, "exact_alpha")) g_settings.exactAlpha = value != 0;
         else if (!std::strcmp(key, "show_fps")) g_settings.showFps = value != 0;
-        else if (!std::strcmp(key, "screen")) g_settings.screenMode = std::clamp(value, 0, 2);
+        else if (!std::strcmp(key, "screen")) g_settings.screenMode = value >= 0 && value < kScreenModeCount ? value : kScreenFit;
         else if (!std::strcmp(key, "fullscreen")) g_settings.fullscreen = value != 0;
+#ifdef PS2X_DESKTOP_VIDEO
+        else if (!std::strcmp(key, "vsync")) g_settings.vsync = value != 0;
+        else if (!std::strcmp(key, "window_resolution"))
+            g_settings.windowResolution = std::clamp(value, 0, desktop_video::kWindowResolutionCount - 1);
+        else if (!std::strcmp(key, "upscale_fsr")) g_settings.upscaleFsr = value != 0;
+        else if (!std::strcmp(key, "frame_generation")) g_settings.frameGeneration = value != 0;
+#endif
         else if (!std::strcmp(key, "volume")) g_settings.volume = std::clamp(value, 0, 10);
         else if (!std::strcmp(key, "language")) g_settings.language = std::clamp(value, 0, 2);
     }
@@ -451,6 +784,7 @@ bool inputBlocked() { return g_open || g_holdBlock; }
 
 void update()
 {
+    ps2pad::pollGamepads();
     readButtons();
     if (g_holdBlock && !anyDown())
         g_holdBlock = false;
@@ -478,6 +812,36 @@ void update()
         close();
         return;
     }
+    if (g_stateConfirm)
+    {
+        if (pressed(kCircle) || pressed(kTriangle))
+        {
+            g_stateConfirm = false;
+            return;
+        }
+        bool activate = pressed(kCross);
+        if (pressed(kLeft) || pressed(kRight) || pressed(kUp) || pressed(kDown))
+            g_stateConfirmYes = !g_stateConfirmYes;
+#ifdef PS2X_DESKTOP_VIDEO
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+        {
+            const Vector2 pointer = GetMousePosition();
+            for (int choice = 0; choice < 2; ++choice)
+                if (CheckCollisionPointRec(pointer, g_stateConfirmRects[choice]))
+                {
+                    g_stateConfirmYes = choice == 1;
+                    activate = true;
+                }
+        }
+#endif
+        if (activate)
+        {
+            g_stateConfirm = false;
+            if (g_stateConfirmYes)
+                stateAction(g_stateConfirmItem, true);
+        }
+        return;
+    }
     if (g_help)
     {
         if (pressed(kTriangle) || pressed(kCircle))
@@ -489,6 +853,26 @@ void update()
         close();
         return;
     }
+    bool mouseActivate = false;
+#ifdef PS2X_DESKTOP_VIDEO
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        const Vector2 pointer = GetMousePosition();
+        for (int i = 0; i < kTabCount; ++i) {
+            if (CheckCollisionPointRec(pointer, g_tabRects[i])) {
+                g_tab = i; g_item = 0; g_quitArmed = false;
+                return;
+            }
+        }
+        for (const auto &row : g_rowRects) {
+            if (CheckCollisionPointRec(pointer, row.first)) {
+                if (g_item != row.second) g_quitArmed = false;
+                g_item = row.second;
+                mouseActivate = true;
+                break;
+            }
+        }
+    }
+#endif
     const Tab &tab = kTabs[g_tab];
     if (pressed(kL1) || pressed(kR1))
     {
@@ -500,6 +884,21 @@ void update()
     const int count = itemCount(g_tab);
     if (count == 0)
         return;
+    if (g_tab == kStatesTab)
+    {
+        if (pressed(kUp) || pressed(kDown))
+        {
+            const int slot = (g_item / 3 + (pressed(kDown) ? 1 : savestates::SlotCount - 1)) % savestates::SlotCount;
+            g_item = slot * 3 + g_item % 3;
+        }
+        if (pressed(kLeft) || pressed(kRight))
+            g_item = (g_item / 3) * 3 + (g_item % 3 + (pressed(kRight) ? 1 : 2)) % 3;
+        if (mouseActivate || pressed(kCross))
+            stateAction(g_item);
+        if (pressed(kTriangle))
+            g_help = true;
+        return;
+    }
     if (pressed(kUp) || pressed(kDown))
     {
         g_item = (g_item + (pressed(kDown) ? 1 : count - 1)) % count;
@@ -508,7 +907,7 @@ void update()
     if (isTuningTab(g_tab))
     {
         g_tabNow = g_tab;
-        const int dir = (pressed(kCross) || pressed(kRight)) ? 1 : (pressed(kLeft) ? -1 : 0);
+        const int dir = (mouseActivate || pressed(kCross) || pressed(kRight)) ? 1 : (pressed(kLeft) ? -1 : 0);
         if (dir != 0)
         {
             const int k = tuningIndex(g_item);
@@ -523,7 +922,7 @@ void update()
         return;
     }
     const ItemId id = tab.items[g_item].id;
-    if (pressed(kCross) || pressed(kRight))
+    if (mouseActivate || pressed(kCross) || pressed(kRight))
         change(id, +1);
     else if (pressed(kLeft) && id != kQuit)
         change(id, -1);
@@ -549,9 +948,10 @@ void draw(int screenWidth, int screenHeight)
     DrawRectangle(boxX, boxY, boxW, 2, accent);
     DrawText(T("SETTINGS"), boxX + pad, boxY + pad * 2 / 3, size, accent);
 
+    g_rowRects.clear();
     // Tabs (smaller when they do not fit the box)
     int tabX = boxX + pad;
-    const int tabY = boxY + pad * 2;
+    int tabY = boxY + pad * 2;
     int tabSize = size, tabGap = size * 3 / 2;
     {
         int total = 0;
@@ -571,6 +971,14 @@ void draw(int screenWidth, int screenHeight)
     {
         const char *label = T(kTabs[i].label);
         const int w = MeasureText(label, tabSize);
+        // The additional States tab must not push controls outside the menu
+        // at smaller window sizes or with longer Portuguese labels.
+        if (tabX > boxX + pad && tabX + w + size / 3 > boxX + boxW - pad)
+        {
+            tabX = boxX + pad;
+            tabY += size * 7 / 4;
+        }
+        g_tabRects[i] = Rectangle{float(tabX - size/3), float(tabY - size/4), float(w + size*2/3), float(size*3/2)};
         if (i == g_tab)
             DrawRectangle(tabX - size / 3, tabY + size + size / 4, w + size * 2 / 3, 2, accent);
         DrawText(label, tabX, tabY, tabSize, i == g_tab ? text : dim);
@@ -583,11 +991,17 @@ void draw(int screenWidth, int screenHeight)
     const int helpY = boxY + boxH - size * 5;
     const bool renderer = isTuningTab(g_tab);
     g_tabNow = g_tab;
+    if (g_tab == kStatesTab)
+    {
+        drawStates(boxX, boxY, boxW, boxH, listY, size, small);
+        return;
+    }
     if (g_help && itemCount(g_tab) > 0)
     {
         DrawText(renderer ? rendererLabel(g_item) : T(tab.items[g_item].label), boxX + pad, listY, size, accent);
         drawWrapped(renderer ? rendererHelp(g_item) : T(tab.items[g_item].help), boxX + pad, listY + size * 2, boxW - 2 * pad, small, text, small / 2);
-        DrawText(T("Triangle / O: back"), boxX + pad, boxY + boxH - size * 3 / 2, small, dim);
+        if (!drawInputHints(HintRow::Back, boxX + pad, boxY + boxH - size * 3 / 2, boxW - 2 * pad, small, dim))
+            DrawText(T("Triangle / O: back"), boxX + pad, boxY + boxH - size * 3 / 2, small, dim);
         return;
     }
     if (itemCount(g_tab) == 0)
@@ -610,6 +1024,7 @@ void draw(int screenWidth, int screenHeight)
         for (int i = first; i < count && i < first + rows; ++i)
         {
             const int y = listY + (i - first) * size * 3 / 2;
+            g_rowRects.push_back({Rectangle{float(boxX + pad/2), float(y - size/4), float(boxW - pad), float(size*3/2)}, i});
             if (i == g_item)
                 DrawRectangle(boxX + pad / 2, y - size / 4, boxW - pad, size * 3 / 2, highlight);
             DrawText(renderer ? rendererLabel(i) : T(tab.items[i].label), boxX + pad, y, size, i == g_item ? text : dim);
@@ -629,6 +1044,14 @@ void draw(int screenWidth, int screenHeight)
             helpSize -= 2;
         drawWrapped(help, boxX + pad, helpY, boxW - 2 * pad, helpSize, dim, helpSize / 3);
     }
+    if (drawInputHints(HintRow::Menu, boxX + pad, boxY + boxH - size * 3 / 2, boxW - 2 * pad, small, dim))
+        return;
+#ifdef PS2X_DESKTOP_VIDEO
+    const char *hint = portuguese() ? "Q/E: abas  Setas: item  Enter/clique: mudar  H: ajuda  F1: fechar"
+                                   : "Q/E: tabs  Arrows: item  Enter/click: change  H: help  F1: close";
+    DrawText(hint, boxX + pad, boxY + boxH - size * 3 / 2, small, dim);
+#else
     DrawText(T("L/R: tab   D-pad: choose   X: change   Triangle: help   O: close"), boxX + pad, boxY + boxH - size * 3 / 2, small, dim);
+#endif
 }
 }

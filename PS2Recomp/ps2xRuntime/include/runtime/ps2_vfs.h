@@ -67,6 +67,10 @@ public:
     [[nodiscard]] bool stat(std::string_view path, const PS2VfsMounts &mounts, const PS2RomDevice &rom, PS2VfsStat &result) const;
     [[nodiscard]] bool resolveHostPath(std::string_view path, const PS2VfsMounts &mounts, std::filesystem::path &result) const;
     [[nodiscard]] std::vector<PS2VfsDescriptorInfo> descriptors() const;
+    bool captureState(std::vector<uint8_t> &out, std::string &error) const;
+    bool validateState(const std::vector<uint8_t> &blob, const PS2VfsMounts &mounts, const PS2RomDevice &rom, std::string &error) const;
+    bool restoreState(const std::vector<uint8_t> &blob, const PS2VfsMounts &mounts, const PS2RomDevice &rom, std::string &error);
+
 
 private:
     struct OpenDescriptor
@@ -74,8 +78,10 @@ private:
         std::unique_ptr<IPS2OpenFile> file;
         std::string device;
         std::string path;
+        uint32_t flags = 0;
     };
 
+    bool decodeState(const std::vector<uint8_t> &blob, const PS2VfsMounts &mounts, const PS2RomDevice &rom, bool apply, std::string &error);
     mutable std::mutex m_mutex;
     std::unordered_map<int32_t, OpenDescriptor> m_descriptors;
     int32_t m_nextDescriptor = 3;

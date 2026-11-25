@@ -1,4 +1,5 @@
 #include "ps2_iop_host.h"
+#include "runtime/save_state_archive.h"
 
 #include "ps2_runtime.h"
 #include "ps2_stubs.h"
@@ -328,7 +329,7 @@ uint64_t PS2IopHostAdapter::openHostFile(std::string_view path)
     {
         handle = m_nextHostFileHandle++;
     }
-    m_hostFiles.emplace(handle, HostFile{stream, size});
+    m_hostFiles.emplace(handle, HostFile{stream, size, hostPath.string()});
     return handle;
 }
 
@@ -530,3 +531,46 @@ void PS2IopHostAdapter::log(ps2x::iop::LogLevel level, std::string_view message)
     }
     std::cerr << prefix << ' ' << message << std::endl;
 }
+
+bool PS2IopHostAdapter::captureState(std::vector<uint8_t> &out,std::string &error) const {
+    if (m_activeContext || m_activeRdram || m_activeToken) { error="An IOP host call is active."; return false; }
+    std::lock_guard<std::mutex> lock(m_hostFileMutex);
+    ps2state::Writer w(out,error); w.pod(uint32_t{0x31484F49}); w.pod(m_nextToken); w.pod(m_nextHostFileHandle); w.pod(uint32_t(m_hostFiles.size()));
+    const auto root=PS2Runtime::getIoPaths().cdRoot;
+    for (const auto &[id,file]:m_hostFiles) {
+        auto path=std::filesystem::path(file.path).lexically_relative(root);
+        if (path.empty() || path.is_absolute() || *path.begin()=="..") { error="An IOP file lies outside the mounted disc."; return false; }
+        w.pod(id); w.pod(file.size); w.string(path.generic_string());
+    }
+    return w.finish();
+}
+bool PS2IopHostAdapter::decodeState(const std::vector<uint8_t> &blob,bool apply,std::string &error) {
+    ps2state::Reader r(blob,error); uint32_t magic=0,count=0; uint64_t token=0,next=0;
+    r.pod(magic); r.pod(token); r.pod(next); r.pod(count);
+    if (!r.good() || magic!=0x31484F49 || !token || !next || count>4096) { error="Invalid IOP host state."; return false; }
+    // Own all staged FILE*s until the full chunk is accepted.
+    std::unordered_map<uint64_t,HostFile> files;
+    const auto discard=[&] { for (auto &[id,file]:files) if (file.stream) std::fclose(file.stream); files.clear(); };
+    for (uint32_t i=0;i<count;++i) {
+        uint64_t id=0,size=0; std::string name;
+        if (!r.pod(id) || !id || id>=next || !r.pod(size) || !r.string(name) || files.count(id)) { error="Invalid IOP file handle."; discard(); return false; }
+        std::filesystem::path path(name);
+        if (path.empty() || path.is_absolute()) { error="Invalid IOP file path."; discard(); return false; }
+        for (const auto &part:path) if (part=="..") { error="Invalid IOP file path."; discard(); return false; }
+        path=PS2Runtime::getIoPaths().cdRoot/path;
+        std::error_code ec;
+        if (std::filesystem::file_size(path,ec)!=size || ec) { error="IOP disc file is missing or changed."; discard(); return false; }
+        FILE *stream=std::fopen(path.string().c_str(),"rb");
+        if (!stream) { error="Cannot reopen IOP disc file."; discard(); return false; }
+        files.emplace(id,HostFile{stream,size,path.string()});
+    }
+    if (!r.finish()) { discard(); return false; }
+    if (apply) {
+        std::lock_guard<std::mutex> lock(m_hostFileMutex);
+        m_hostFiles.swap(files); m_nextToken=token; m_nextHostFileHandle=next;
+        m_activeContext=nullptr; m_activeRdram=nullptr; m_activeToken=0;
+    }
+    discard(); return true;
+}
+bool PS2IopHostAdapter::validateState(const std::vector<uint8_t> &b,std::string &e) const { return const_cast<PS2IopHostAdapter *>(this)->decodeState(b,false,e); }
+bool PS2IopHostAdapter::restoreState(const std::vector<uint8_t> &b,std::string &e) { return decodeState(b,true,e); }

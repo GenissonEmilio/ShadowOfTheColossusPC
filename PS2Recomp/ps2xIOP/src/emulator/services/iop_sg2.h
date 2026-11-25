@@ -7,6 +7,8 @@
 #include <array>
 #include <cstdint>
 #include <span>
+#include <string>
+#include <vector>
 
 namespace ps2x::iop::detail
 {
@@ -33,7 +35,12 @@ namespace ps2x::iop::detail
         [[nodiscard]] RpcResult handleRpc(const RpcRequest &request);
         [[nodiscard]] SoundMixer &mixer() { return m_mixer; }
 
+        bool captureState(std::vector<uint8_t> &out, std::string &error) const;
+        bool validateState(const std::vector<uint8_t> &blob, std::string &error) const;
+        bool restoreState(const std::vector<uint8_t> &blob, std::string &error);
+
     private:
+        bool decodeState(const std::vector<uint8_t> &blob, bool apply, std::string &error);
         // A voice streamed from IOP memory through a double buffer in sound
         // RAM (driver table 0x7218, 0x24 bytes per voice).
         struct Stream
@@ -87,7 +94,7 @@ namespace ps2x::iop::detail
 
         IopHost &m_host;
         IopMemory &m_memory;
-        SoundMixer m_mixer;
+        mutable SoundMixer m_mixer;
         std::array<uint32_t, 2> m_eea{}; // effect area end, words
         uint16_t m_coreVolumes[2][8]{};
         uint16_t m_voiceVolumes[48][2]{};

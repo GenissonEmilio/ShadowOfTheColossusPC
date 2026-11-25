@@ -324,6 +324,15 @@ public:
     bool syncCoreSubsystems();
     bool loadELF(const std::string &elfPath);
     void run();
+    // Called by the EE scheduler only after guest host frames have unwound.
+    void processStateRequest();
+    using StateCaptureHook = bool (*)(PS2Runtime &, std::vector<uint8_t> &, std::string &);
+    using StateReadHook = bool (*)(PS2Runtime &, const std::vector<uint8_t> &, std::string &);
+    void setStateHooks(StateCaptureHook capture, StateReadHook validate, StateReadHook restore)
+    { m_stateCaptureHook = capture; m_stateValidateHook = validate; m_stateRestoreHook = restore; }
+    bool captureMachineState(std::vector<uint8_t> &out, std::string &error);
+    bool validateMachineState(const std::vector<uint8_t> &blob, std::string &error);
+    bool restoreMachineState(const std::vector<uint8_t> &blob, std::string &error);
 
     [[nodiscard]] ps2x::iop::ModuleLoadResult loadIopModule(std::string_view path, const void *arguments = nullptr, uint32_t argumentSize = 0);
     [[nodiscard]] ps2x::iop::ModuleLoadResult loadIopModuleBuffer(uint32_t guestAddress, const void *arguments = nullptr, uint32_t argumentSize = 0);
@@ -518,6 +527,8 @@ public:
     inline ps2x::iop::IopSubsystem *iopSubsystem() { return m_iopSubsystem.get(); }
 
 private:
+    bool decodeRuntimeState(const std::vector<uint8_t> &blob, bool apply, std::string &error);
+    bool captureRuntimeState(std::vector<uint8_t> &out, std::string &error);
     struct GuestHeapBlock
     {
         uint32_t addr = 0;
@@ -553,6 +564,8 @@ private:
     friend class EeScheduler;
 
 private:
+    StateCaptureHook m_stateCaptureHook = nullptr;
+    StateReadHook m_stateValidateHook = nullptr, m_stateRestoreHook = nullptr;
     PS2Memory m_memory;
     GifArbiter m_gifArbiter;
     GS m_gs;

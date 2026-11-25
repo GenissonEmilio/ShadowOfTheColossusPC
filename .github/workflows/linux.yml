@@ -16,9 +16,11 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - name: Import and cache checks (synthetic data only)
+      - name: Import, cache and desktop shortcut checks (synthetic data only)
         run: |
+          # Discovery includes test_shortcut.py (canonical updates and portable fallback).
           python3 -m unittest discover -s tests/linux -v
+          python3 tools/linux/test_launcher_gamepad.py
           python3 -m compileall -q tools/desktop tools/linux
       - name: Build ROM-free compiler and desktop package
         run: tools/linux/build.sh
@@ -26,11 +28,170 @@ jobs:
         run: |
           LD_LIBRARY_PATH="$PWD/artifacts/compiler/lib" artifacts/compiler/bin/ps2_recomp --help
           test -f artifacts/compiler/manifest.json
+          python3 tools/desktop/release/test_recomplauncher.py --program dist/ShadowOfTheColossusPC
+      - name: Execute EE branch, video timing and IOP audio checks (no ROM)
+        run: |
+          # Test/analyzer setup fetches its pinned JSON dependency; execution is offline.
+          docker run --rm --init --cpus=2 --memory=1600m --memory-swap=1600m \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder cmake -S PS2Recomp -B build/cmake \
+            -DPS2X_BUILD_TEST=ON -DPS2X_BUILD_ANALYZER=ON -DPS2X_IOP_BUILD_TESTS=ON -DFETCHCONTENT_FULLY_DISCONNECTED=OFF
+          docker run --rm --init --cpus=2 --memory=1600m --memory-swap=1600m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder bash -euc '
+              cmake --build build/cmake --target ps2x_tests ps2_iop_emulator_tests -j2
+              ctest --test-dir build/cmake/ps2xTest -R "^(signed_branch_codegen_execution|pal_video_timing)$" --output-on-failure --no-tests=error
+              PS2X_AUDIO_PULL=1 ctest --test-dir build/cmake/ps2xIOP -R "^ps2_iop_emulator_tests$" --output-on-failure --no-tests=error
+            '
+      - name: Native fidelity, vector contexts and callback stacks (no ROM)
+        run: |
+          docker run --rm --init --cpus=2 --memory=1600m --memory-swap=1600m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_fidelity.sh
+          docker run --rm --init --cpus=2 --memory=1600m --memory-swap=1600m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_scheduler.sh
+          docker run --rm --init --cpus=2 --memory=1000m --memory-swap=1000m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_desktop_input.sh
+      - name: Native Celosia math, curves, textures and heap (no ROM)
+        run: |
+          docker run --rm --init --cpus=1 --memory=1600m --memory-swap=1600m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_native_decomp.sh
+      - name: Optional health and grip assists (no ROM)
+        run: |
+          docker run --rm --init --cpus=1 --memory=512m --memory-swap=512m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_assists.sh
+      - name: Save-state round trips, failure handling and temporal graphics (no ROM)
+        run: |
+          for check in test_host_menu_states test_save_state_components test_subsystem_states test_renderer_states test_runtime_states; do
+            docker run --rm --init --cpus=2 --memory=1600m --memory-swap=1600m --network=none \
+              -u "$(id -u):$(id -g)" -e HOME=/tmp -e LP_NUM_THREADS=2 -v "$PWD:/src:z" \
+              sotc-linux-builder bash "tools/linux/${check}.sh"
+          done
+      - name: Keyboard and mouse profile editor (frozen GTK, no ROM)
+        run: |
+          docker run --rm --init --cpus=2 --memory=1000m --memory-swap=1000m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder xvfb-run -a -s '-screen 0 1280x800x24' \
+            python3 tools/linux/test_desktop_controls.py \
+            --program dist/ShadowOfTheColossusPC/ShadowOfTheColossusPC --out artifacts/desktop-controls-ci
+      - name: Launcher navigation and preparation (frozen GTK, no ROM)
+        run: |
+          docker build -t sotc-launcher-clean -f tools/desktop/release/Test.Dockerfile .
+          docker run --rm --init --cpus=1 --memory=700m --memory-swap=700m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -e SDL_AUDIODRIVER=dummy -e GSETTINGS_BACKEND=memory -v "$PWD:/src:z" \
+            sotc-launcher-clean xvfb-run -a -s '-screen 0 1360x900x24' bash -euc '
+              openbox --sm-disable >/tmp/openbox.log 2>&1 &
+              wm=$!
+              trap "kill $wm 2>/dev/null || true" EXIT
+              python3 tools/linux/test_launcher_gamepad.py \
+                --program dist/ShadowOfTheColossusPC/ShadowOfTheColossusPC --out artifacts/launcher-gamepad-ci
+              python3 tools/linux/test_launcher_prepare.py \
+                --program dist/ShadowOfTheColossusPC/ShadowOfTheColossusPC --out artifacts/launcher-prepare-ci
+              python3 tools/linux/test_launcher_motion.py \
+                --program dist/ShadowOfTheColossusPC/ShadowOfTheColossusPC --out artifacts/launcher-motion-ci
+            '
       - name: GPU sampler transitions and dynamic palette uploads (no ROM)
         run: |
           docker run --rm --init --cpus=2 --memory=1000m --memory-swap=1000m --network=none \
             -u "$(id -u):$(id -g)" -e HOME=/tmp -e LP_NUM_THREADS=2 -v "$PWD:/src:z" \
             sotc-linux-builder bash tools/linux/test_texture_filters.sh
+      - name: Character call frames and campaign effects (no ROM)
+        run: |
+          docker run --rm --init --cpus=2 --memory=1000m --memory-swap=1000m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_chara_state.sh
+          docker run --rm --init --cpus=2 --memory=1000m --memory-swap=1000m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_campaign_graphics.sh
+          docker run --rm --init --cpus=2 --memory=1000m --memory-swap=1000m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -e LP_NUM_THREADS=2 -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_renderer_colours.sh
+      - name: Skinned material normals and both texture passes (no ROM)
+        run: |
+          docker run --rm --init --cpus=2 --memory=1600m --memory-swap=1600m --network=none \
+            -u "$(id -u):$(id -g)" -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_skinned_multipass.sh
+      - name: GS alpha failure preserves colour and primitive depth order (no ROM)
+        run: |
+          docker run --rm --init --cpus=2 --memory=1600m --memory-swap=1600m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -e LP_NUM_THREADS=2 -e SOTC_ALPHA_BASELINE=1 -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_alpha_depth.sh
+      - name: GS screen depth ordering against near geometry (no ROM)
+        run: |
+          docker run --rm --init --cpus=1 --memory=1100m --memory-swap=1100m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -e LP_NUM_THREADS=2 -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_screen_depth.sh
+      - name: Framebuffer readers follow layer order (no ROM)
+        run: |
+          docker run --rm --init --cpus=1 --memory=1000m --memory-swap=1000m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_screen_copy_order.sh
+      - name: Static ground support boundaries and seam transitions (no ROM)
+        run: |
+          docker run --rm --init --cpus=1 --memory=512m --memory-swap=512m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_ground_support.sh
+          docker run --rm --init --cpus=1 --memory=512m --memory-swap=512m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_ground_support_adapter.sh
+      - name: Transfer palette selection before and after (no ROM)
+        run: |
+          baseline=83d8eff3c72902822c673dd60709e601777459bd
+          git fetch --no-tags --depth=1 origin "$baseline"
+          git show "$baseline:game/overrides/sotc_native.cpp" > artifacts/transfer-palette-baseline.cpp
+          set +e
+          docker run --rm --init --cpus=2 --memory=1000m --memory-swap=1000m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            -e SOTC_NATIVE_TEST_SOURCE=/src/artifacts/transfer-palette-baseline.cpp \
+            -e SOTC_PALETTE_TEST_OUT=artifacts/transfer-palette-before \
+            sotc-linux-builder bash tools/linux/test_transfer_palette.sh \
+            > artifacts/transfer-palette-before.log 2>&1
+          before_status=$?
+          set -e
+          cat artifacts/transfer-palette-before.log
+          test "$before_status" -eq 1
+          test -x artifacts/transfer-palette-before/check
+          grep -Fx 'Compiled transfer-palette fixture' artifacts/transfer-palette-before.log
+          grep -Fx 'FAIL: 4-bit fast/reference decoders use active transfer colours and zero alpha' artifacts/transfer-palette-before.log
+          grep -Fx 'FAIL: in-place alpha fade changes the key and upload while file CLUT stays fixed' artifacts/transfer-palette-before.log
+          grep -Fx 'PASS: uninitialized work falls back to the file palette' artifacts/transfer-palette-before.log
+          grep -Fx 'PASS: direct RGBA textures do not require any CLUT work' artifacts/transfer-palette-before.log
+          grep -E '^FAIL: [0-9]+ transfer-palette checks, [1-9][0-9]* failures$' artifacts/transfer-palette-before.log
+          docker run --rm --init --cpus=2 --memory=1000m --memory-swap=1000m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_transfer_palette.sh \
+            | tee artifacts/transfer-palette-after.log
+      - name: Particle material contract before and after (no ROM)
+        run: |
+          baseline=4396d9981d76a74118b14f82f22993a99a5adcba
+          git fetch --no-tags --depth=1 origin "$baseline"
+          git show "$baseline:game/overrides/sotc_native.cpp" > artifacts/particle-baseline.cpp
+          set +e
+          docker run --rm --init --cpus=2 --memory=1000m --memory-swap=1000m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            -e SOTC_NATIVE_TEST_SOURCE=/src/artifacts/particle-baseline.cpp \
+            -e SOTC_PARTICLE_TEST_OUT=artifacts/particle-before \
+            sotc-linux-builder bash tools/linux/test_particle_fidelity.sh \
+            > artifacts/particle-before.log 2>&1
+          before_status=$?
+          set -e
+          cat artifacts/particle-before.log
+          test "$before_status" -eq 1
+          test -x artifacts/particle-before/check
+          grep -Fx 'Compiled particle-fidelity fixture' artifacts/particle-before.log
+          grep -Fx 'FAIL: normal particles test scene depth without writing Z' artifacts/particle-before.log
+          grep -Fx 'FAIL: unit particle extents clamp both axes like the material packet' artifacts/particle-before.log
+          grep -Fx 'PASS: additive streak retains its blend and six vertices' artifacts/particle-before.log
+          grep -Fx 'PASS: both original functions receive unchanged inputs exactly once per draw' artifacts/particle-before.log
+          grep -E '^FAIL: [0-9]+ particle-fidelity checks, [1-9][0-9]* failures$' artifacts/particle-before.log
+          docker run --rm --init --cpus=2 --memory=1000m --memory-swap=1000m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_particle_fidelity.sh \
+            | tee artifacts/particle-after.log
       - name: Native memory-card persistence (synthetic data)
         run: |
           docker run --rm --init --cpus=2 --network=none -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
@@ -45,15 +206,39 @@ jobs:
               /src/artifacts/compiler/bin/sotc-video-tool --self-test /src/artifacts/video-$geometry
             python3 tools/linux/check_video.py artifacts/video-$geometry
           done
+      - name: Launcher artwork and navigation pages (no ROM)
+        run: |
+          python3 tools/linux/test_desktop_services.py --program dist/ShadowOfTheColossusPC/ShadowOfTheColossusPC --out artifacts/desktop-services-ci
+          docker run --rm --init --cpus=1 --memory=700m --memory-swap=700m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-launcher-clean xvfb-run -a -s '-screen 0 1280x800x24' \
+            python3 tools/linux/test_launcher_updates.py \
+            --program dist/ShadowOfTheColossusPC/ShadowOfTheColossusPC --out artifacts/launcher-updates-ci
+          for asset in hero.png icon.png; do
+            cmp tools/desktop/assets/$asset dist/ShadowOfTheColossusPC/_internal/assets/$asset
+          done
+          for page in home graphics textures controls settings about; do
+            docker run --rm --init --cpus=2 --network=none -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+              sotc-linux-clean xvfb-run -a -s '-screen 0 1920x1080x24' \
+              /src/dist/ShadowOfTheColossusPC/ShadowOfTheColossusPC \
+              --data-dir /src/artifacts/launcher-ci --page "$page" --screenshot "/src/artifacts/launcher-ci/$page.png"
+            test -s "artifacts/launcher-ci/$page.png"
+          done
       - name: Package content check
         run: |
-          test -f dist/ShadowOfTheColossusPC-0.2.0-linux-x86_64.tar.gz
+          package_version=$(python3 -c 'import sys; sys.path.insert(0, "tools/desktop"); from model import VERSION; print(VERSION)')
+          package_archive="ShadowOfTheColossusPC-${package_version}-linux-x86_64.tar.gz"
+          test -f "dist/${package_archive}"
           cd dist
-          sha256sum -c ShadowOfTheColossusPC-0.2.0-linux-x86_64.tar.gz.sha256
+          sha256sum -c "${package_archive}.sha256"
       - uses: actions/upload-artifact@v4
+        # Keep the exact candidate available for diagnosing a later test failure.
+        # Publication still requires a completely successful workflow.
+        if: always()
         with:
           name: ShadowOfTheColossusPC-linux-x86_64
+          retention-days: 7
           path: |
             dist/*.tar.gz
             dist/*.sha256
-          if-no-files-found: error
+          if-no-files-found: ignore

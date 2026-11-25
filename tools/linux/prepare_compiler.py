@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 from compiler_key import compiler_key
+from stage_source import stage_source
 
 ROOT=Path(__file__).resolve().parents[2]
 BUILD=ROOT / 'build/cmake'
@@ -34,13 +35,11 @@ def deps(binary,directory,skip_system=True):
             continue
         copy(src,directory / src.name)
 
-for name in ('PS2Recomp','game','tools'):
-    copy(ROOT / name,OUT / 'source' / name)
-for name in ('raylib.h','raymath.h','rlgl.h'):
-    copy(BUILD / '_deps/raylib-src/src' / name,OUT / 'source/raylib' / name)
-for name in ('LICENSE','README.md','celosia'):
-    copy(ROOT / name,OUT / 'source' / name)
-copy(ROOT / 'docs/SHADERS.md',OUT / 'source/docs/SHADERS.md')
+stage_source(ROOT, BUILD, OUT)
+copy(ROOT / 'PS2Recomp/ps2xRuntime/third_party/gamecontrollerdb/LICENSE',
+     OUT / 'licenses/SDL_GameControllerDB.LICENSE')
+copy(ROOT / 'PS2Recomp/ps2xRuntime/third_party/amd-fsr/LICENSE',
+     OUT / 'licenses/AMD_FidelityFX_Super_Resolution.LICENSE')
 copy(BUILD / '_deps/raylib-src/LICENSE',OUT / 'licenses/raylib.LICENSE')
 copy(BUILD / 'ps2xRecomp/ps2_recomp',OUT / 'bin/ps2_recomp')
 deps(OUT / 'bin/ps2_recomp',OUT / 'lib')
@@ -51,6 +50,12 @@ subprocess.run(['g++','-std=c++20','-O2','-static-libstdc++','-static-libgcc',
     str(ROOT / 'tools/linux/video_tool.cpp'), str(ROOT / 'PS2Recomp/ps2xRuntime/src/lib/desktop_video.cpp'),
     str(next(BUILD.rglob('libraylib.a'))),'-lGL','-lX11','-ldl','-pthread','-lm',
     '-o',str(OUT / 'bin/sotc-video-tool')],check=True)
+subprocess.run(['g++', '-std=c++20', '-O2', '-static-libstdc++', '-static-libgcc',
+    '-I'+str(BUILD / '_deps/raylib-src/src'),
+    '-I'+str(BUILD / '_deps/raylib-src/src/external/glfw/include'),
+    str(ROOT / 'tools/linux/input_tool.cpp'), str(next(BUILD.rglob('libraylib.a'))),
+    '-lGL', '-lX11', '-ldl', '-pthread', '-lm',
+    '-o', str(OUT / 'bin/sotc-input-tool')], check=True)
 
 includes=ROOT / 'PS2Recomp/ps2xRuntime/include'
 base_dir=ROOT / 'artifacts/base'
@@ -71,7 +76,11 @@ base_hash.update(sources[0].read_bytes())
 base_key=base_dir / 'key.txt'
 objects=[str(base_dir / f'base-{i}.o') for i in range(len(sources))]
 if not (base_key.is_file() and base_key.read_text()==base_hash.hexdigest() and all(Path(p).is_file() for p in objects)):
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+    try:
+        workers=max(1,min(2,int(os.environ.get('SOTC_BUILD_JOBS','2'))))
+    except ValueError:
+        workers=1
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         objects=list(pool.map(compile_source,enumerate(sources)))
     base_key.write_text(base_hash.hexdigest())
 base=OUT / 'lib/libbase.a';base.parent.mkdir(exist_ok=True)

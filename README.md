@@ -1,7 +1,8 @@
 # Shadow of the Colossus PC
 
-An independent PC port of the **North American PS2 edition (SCUS-97472)** with a
-Linux and Windows launcher, a local recompiler, and a native OpenGL renderer.
+An independent PC port of the **North American SCUS-97472** and
+**European PAL SCES-53326** PS2 editions with a Linux and Windows launcher
+and a local recompiler. See the [PAL compatibility details](docs/PAL-SUPPORT.md).
 Built on [Celosia](https://github.com/HenryKun55/celosia) and
 [PS2Recomp](https://github.com/ran-j/PS2Recomp).
 
@@ -15,6 +16,7 @@ the sides while preserving the vertical framing and interface proportions.
 Download the Android ARM64 APK from the same release as the Linux and Windows
 packages. After installing it, use your own **SCUS-97472** disc image to prepare
 a game bundle on your computer, then import the bundle and the ISO on Android.
+Use the Android source release linked in the download notes to build your bundle.
 [Latest downloads](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/latest)
 · [Android setup guide](PS2Recomp/android/README.md)
 
@@ -39,9 +41,9 @@ and in the port’s in-game settings menu.** The two settings are independent.
 | Where | How to change the language |
 | --- | --- |
 | Launcher | Open **Settings → Launcher language** (**Configurações → Idioma do launcher**), choose **English** or **Português**, and select **Apply** (**Aplicar**). The launcher also offers **Español** and **日本語**. It initially uses the system language if supported, with English as the fallback. |
-| In-game settings | Press **F1** and open **System → Language** (**Sistema → Idioma**). Choose **English**, **Português**, or **Automatic** to follow the system language. With a controller, press **Select/Back** twice quickly to open the menu. |
+| In-game settings | Choose **Settings → F1 settings language** in the launcher, or **System → Language** in the F1 menu. Choose **English**, **Português**, or **Automatic** to follow the system language. With a controller, press **Select/Back** twice quickly to open the F1 menu. |
 
-The original game’s text and audio come from your disc.
+The original game’s text and audio come from your disc. On PAL, choose an available campaign language in the game’s original options.
 
 ## Campaign validation
 
@@ -57,12 +59,12 @@ cards are outside the count. Results apply to the Linux versions listed.
 | # | Colossus | Validation | Evidence or next test |
 | --- | --- | --- | --- |
 | 1 | Valus | **100% validated** | Fight, defeat, save, and reload verified. [Linux v0.2.7](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.2.7) |
-| 2 | Quadratus | **100% validated** | Route, climbing, HUD, both sigils, defeat, save, and reload verified. [Linux v0.9.5](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/v0.9.5) · [Test record](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/blob/v1.0.0/docs/CAMPAIGN-VALIDATION.md#quadratus-na-v094-linux) |
+| 2 | Quadratus | **100% validated** | Route, climbing, HUD, both sigils, defeat, save, and reload verified. [Linux v0.9.5](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/v0.9.5) · [Test record](docs/CAMPAIGN-VALIDATION.md#quadratus-na-v094-linux) |
 | 3 | Gaius | Partial | The ascent, surface, and descent of the ramp were tested. The fight is pending. [Linux v0.3.1](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.1) |
 | 4 | Phaedra | Pending | — |
 | 5 | Avion | Pending | — |
 | 6 | Barba | Pending | — |
-| 7 | Hydrus | **100% validated** | Rematch, sigil before damage, underwater camera, defeat, and reload on shore verified. [Linux v0.9.4](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/v0.9.4) · [Test record](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/blob/v1.0.0/docs/CAMPAIGN-VALIDATION.md#hydrus-na-v093-linux) |
+| 7 | Hydrus | **100% validated** | Rematch, sigil before damage, underwater camera, defeat, and reload on shore verified. [Linux v0.9.4](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/v0.9.4) · [Test record](docs/CAMPAIGN-VALIDATION.md#hydrus-na-v093-linux) |
 | 8 | Kuromori | Pending | — |
 | 9 | Basaran | **100% validated** | Fight, sigil, defeat effects, save, and reload verified. [Linux v0.3.4](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/tag/linux-v0.3.4) |
 | 10 | Dirge | Pending | — |
@@ -73,16 +75,17 @@ cards are outside the count. Results apply to the Linux versions listed.
 | 15 | Argus | Pending | — |
 | 16 | Malus | Partial | The route was tested past the second tunnel. The fight and ending are pending. |
 
-[Validation criteria and test history](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/blob/v1.0.0/docs/CAMPAIGN-VALIDATION.md)
+[Validation criteria and test history](docs/CAMPAIGN-VALIDATION.md)
 
-<img width="1282" height="774" alt="image" src="https://github.com/user-attachments/assets/5dd81a7e-44d2-44fa-8f6b-86bf49129ac8" />
+<img width="1282" height="774" alt="Shadow of the Colossus PC screenshot" src="https://github.com/user-attachments/assets/5dd81a7e-44d2-44fa-8f6b-86bf49129ac8" />
 
 ## Play
 
-1. Download the Linux or Windows package from the [latest release](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/latest).
+1. Download the package for your system from [Releases](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases).
 2. Extract the entire package and open `ShadowOfTheColossusPC` on Linux or
    `ShadowOfTheColossusPC.exe` on Windows.
-3. Choose your North American disc image (`.iso`, `.7z`, `.zip`, or `.rar`).
+3. Choose your SCUS-97472 (USA) or SCES-53326 (PAL) disc image
+   (`.iso`, `.7z`, `.zip`, or `.rar`).
 4. Wait for the first build. On later launches, select **Play**.
 
 Use **Compile / update** next to **Play** to prepare a build in the background
@@ -100,7 +103,7 @@ documentation reuse the existing build.
 ### RecompLauncher
 
 The packages include `recomplauncher.json` so RecompLauncher can set up the
-port from a North American SCUS-97472 ISO. RecompLauncher runs preparation
+port from a SCUS-97472 or SCES-53326 ISO. RecompLauncher runs preparation
 in the background. Its settings cover aspect ratio, full screen, window size,
 VSync, FSR 1, FPS display, and volume.
 
@@ -128,9 +131,16 @@ high performance for the compiled `game.exe` and respects an existing preference
 in Windows graphics settings.
 
 The active GPU appears in `last-game.log` under `Renderer:`. The `[stats]`
-lines show game timing, window presentation rate, and uploads of new frames
-to the GPU. Toggle the on-screen counter with **Graphics → Show FPS** in the
+lines report new game pictures (`realFps`), generated pictures and window
+refreshes. The `[display]` lines record frame copies, uploads and the longest
+gap between new pictures. Toggle the counter with **Graphics → Show FPS** in the
 launcher, **F1 → Video → Show FPS** during play, or **FPS display** in RecompLauncher.
+
+For a frame-rate report, stay in the same scene and record 20 seconds facing
+each direction that makes the frame rate change. Keep the resolution, effects
+and VSync fixed, and turn off frame generation while measuring. In the North
+American edition, enable **Frame timing log** in the F1 debug options to record
+time spent in the game, the renderer, GPU readback and render waits.
 
 Open **About** to create a shortcut in your applications menu. The data location
 is `~/.local/share/ShadowOfTheColossusPC` on Linux (under `XDG_DATA_HOME` if set)
@@ -185,7 +195,7 @@ saves.
 
 ## Full screen and shaders
 
-<img width="1282" height="774" alt="image" src="https://github.com/user-attachments/assets/e07df3fd-04f2-4dbd-af32-0faa8ec42773" />
+<img width="1282" height="774" alt="Shadow of the Colossus PC graphics screenshot" src="https://github.com/user-attachments/assets/e07df3fd-04f2-4dbd-af32-0faa8ec42773" />
 
 In **Graphics**, choose **Fullscreen · monitor resolution** to fill the current
 monitor. **Widescreen 16:9** expands the original view horizontally. On an
@@ -204,6 +214,10 @@ upscales the image from the internal resolution to the display area.
 
 **F1 → Video → VSync** synchronizes frame presentation with the monitor to reduce
 tearing. VSync is enabled by default and can be changed during play.
+
+Enable **F1 → Video → Frame generation (2x)** to interpolate between consecutive
+game frames when the display has time to show both. The game simulation keeps
+its original rate. Frame generation is off by default and adds presentation latency.
 
 **Import shader…** copies a **GLSL 330** post-processing fragment shader (`.frag`,
 `.fs`, or `.glsl`) and compiles it with your graphics driver. The launcher keeps
@@ -260,18 +274,19 @@ icons follow the bindings in **Controls**. Existing profiles retain the manual
 choice until you select **Automatic**. Controllers exposed by Steam Input as
 Xbox devices use Xbox icons, and you can still choose a mode manually.
 
-This setting changes the game elements that use the controller icon atlas.
-Tutorial captions with lettering baked into the original art retain their
-original appearance. Mode changes take effect when you next start the game.
+This setting changes the game elements that use the original North American disc’s
+controller icon atlas. PAL and tutorial art with fixed button images keep their
+original icons. Modified disc textures can also keep their original icons.
+Mode changes take effect when you next start the game.
 
 Under **Settings → Assists (cheats)**, **Infinite health** and **Infinite grip**
 are independent options. Both are off by default and take effect on the next
 launch. They prevent normal health or grip depletion. Wander’s maximum health
-and grip and the game’s scripted events are retained. [Assist scope and tests](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/blob/v1.0.0/docs/ASSISTS.md)
+and grip and the game’s scripted events are retained. [Assist scope and tests](docs/ASSISTS.md)
 
-Support for the **European PAL edition (SCES-53326)** is pending until a disc
-can be recompiled and tested. The launcher recognizes the edition and reports
-its status. [PAL support](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/blob/v1.0.0/docs/PAL-SUPPORT.md)
+The **European PAL edition (SCES-53326)** uses the compatibility renderer
+and its own recompilation cache. Save progress on the memory card during
+PAL play. [PAL compatibility details](docs/PAL-SUPPORT.md)
 
 | Keyboard | PS2 control |
 | --- | --- |
@@ -329,7 +344,7 @@ register state follows the original behavior.
 Synthetic tests cover these fixes. The October 28 test record describes three
 routes around the Cliff Path shrine using the supplied memory card and a fix
 for stale graphics in the cache. See [campaign validation](#campaign-validation)
-for fight status and the [October 28 test record](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/blob/v1.0.0/docs/FIDELITY-2026-10-28.md).
+for fight status and the [October 28 test record](docs/FIDELITY-2026-10-28.md).
 
 ## Build and test
 
@@ -359,7 +374,7 @@ release package to use the graphical launcher.
 - The main upstream revision is **HenryKun55/celosia e0bc43d6d4eb8cc1a022c4b277f396be3ee4fbbe**,
   with selected native routines and optimizations from **c2514d9**. Manual game
   decompilation and native coverage of PS2 services and rendering are tracked
-  independently. [Celosia integration notes](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/blob/v1.0.0/docs/CELOSIA-INTEGRATION-2026-11-17.md)
+  independently. [Celosia integration notes](docs/CELOSIA-INTEGRATION-2026-11-17.md)
 - Celosia and PS2Recomp are under **GPL-3.0**. Corresponding source for the port
   ships in `compiler/source`. [LICENSE](LICENSE)
 - The Linux launcher and original vector illustration are by GenissonEmilio

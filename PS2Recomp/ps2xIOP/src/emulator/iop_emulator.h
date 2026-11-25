@@ -21,6 +21,11 @@ namespace ps2x::iop::detail
         IopEmulator &operator=(const IopEmulator &) = delete;
 
         void reset();
+        // Same-core native SG2 snapshots. Full emulated IOP CPU/SPU2 state is
+        // not supported; capture/restore explicitly reject that configuration.
+        bool captureState(std::vector<uint8_t> &out, std::string &error) const;
+        bool validateState(const std::vector<uint8_t> &data, std::string &error) const;
+        bool restoreState(const std::vector<uint8_t> &data, std::string &error);
         [[nodiscard]] ModuleLoadResult loadModule(std::string_view path, const void *arguments, uint32_t argumentSize);
         [[nodiscard]] ModuleLoadResult loadModuleBuffer(uint32_t guestAddress, const void *arguments, uint32_t argumentSize);
         [[nodiscard]] bool stopModule(int32_t moduleId, int32_t *result);
@@ -52,5 +57,7 @@ namespace ps2x::iop::detail
     private:
         class Impl;
         std::unique_ptr<Impl> m_impl;
+        bool stateSupported(std::string &error) const;
+        bool decodeState(const std::vector<uint8_t> &data, bool apply, std::string &error);
     };
 }

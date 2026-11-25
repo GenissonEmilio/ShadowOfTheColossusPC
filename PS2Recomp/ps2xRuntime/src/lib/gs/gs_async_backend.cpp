@@ -274,6 +274,13 @@ void GSAsyncBackend::Initialize(uint8_t *vram, uint32_t vramSize)
     drain();
     m_inner->Initialize(vram, vramSize);
     m_hasVram = vram != nullptr;
+    m_transferShadow = {};
+    m_transferShadow.direction = 3u;
+    // Reinitialization after a state load must not present captures from
+    // the later timeline. drain() completed every queued presentation.
+    std::lock_guard<std::mutex> lock(m_presentMutex);
+    m_frames.clear();
+    m_presentsQueued = 0;
 }
 
 void GSAsyncBackend::Reset()
@@ -352,6 +359,9 @@ void GSAsyncBackend::Sync(GSSyncReason reason)
         return;
     drain();
     m_inner->Sync(reason);
+    // The debug shadow normally tracks only BeginTransfer. At a blocking
+    // barrier it must also describe completed uploads/readbacks accurately.
+    m_transferShadow = m_inner->GetTransferSnapshot();
 }
 
 PresentationFrame GSAsyncBackend::Present(const GSPresentationRequest &request)

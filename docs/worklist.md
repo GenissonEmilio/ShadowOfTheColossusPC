@@ -50,8 +50,8 @@ reflection detail) is what exists so far (STATUS.md, Settings).
 
 | # | Item | Feasibility |
 |---|------|-------------|
-| 20 | Widescreen 16:9 (hor+) | medium-hard: the projection is easy to widen, but the game culls models and parts against its 4:3 frustum (things would pop in at the sides), 2D, fades and cinema bars are laid out in 512 x 448, and the screen copies (refraction, haze, bloom mask, DoF) assume that frame; each needs its own fix |
-| 21 | Texture replacement packs (upscaled textures) by content hash | easy-medium: textures are already decoded once and cached by a content hash; load `<hash>.png` from a folder at decode time (mip chain rebuilt), dump mode to collect them |
+| 20 | Widescreen 16:9 (hor+) | Uses the game's widescreen camera and visibility calculations. HUD gauges, menu sprites and subtitles preserve their proportions, while fades, cinema bars and screen copies cover the logical frame. The host centers the 16:9 picture on displays of other proportions. Boot and MPEG video retain their 4:3 framing. |
+| 21 | Texture replacement packs | Implemented for native NTO2 textures. The desktop launcher selects a folder of content-keyed PNGs and can export the original textures. The loader validates dimensions, rebuilds mipmaps, and retains the original on failure. |
 | 22 | Longer draw distance | hard: what is drawn far is the game's choice (its own culling, fog distances and LOD tables); pushing the fog out shows the edges of what it loads |
 | 23 | Better shadows (shadow maps for the world) | hard: the game has character shadow volumes only; world shadows are baked into vertex colours, so new ones would double them |
 | 24 | SSAO | medium: the depth buffer is there after the opaque layers; a pass before the translucent layers, but it darkens the baked lighting too, so it needs tuning per scene |

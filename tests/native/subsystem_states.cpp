@@ -1,0 +1,337 @@
+// ROM-free restoration, malformed-input and unsupported-mode checks.
+#include "runtime/ps2_memory.h"
+#include "ps2_runtime.h"
+#include "runtime/ps2_vu1.h"
+#include "runtime/gs/gs_frontend.h"
+#include "runtime/native_renderer.h"
+#include "runtime/host_state.h"
+#include "Kernel/Stubs/LibC.h"
+#include "Kernel/Stubs/MemoryCard.h"
+#include "native/native_history_state.h"
+#include "emulator/core/iop_memory.h"
+#include "iop_module_manager.h"
+#include "../../PS2Recomp/ps2xIOP/tests/iop_compat_test_support.h"
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <memory>
+#include <array>
+
+namespace {
+    unsigned checks = 0;
+    void check(bool ok, const char *what) {
+        ++checks;
+        if (!ok) { std::fprintf(stderr, "FAIL: %s\n", what); std::fflush(nullptr); std::_Exit(1); }
+    }
+    void check(bool ok, const std::string &what) { check(ok, what.c_str()); }
+#if defined(__linux__) && defined(__GLIBC__)
+    void libcRandomState() {
+        R5900Context context;
+        auto seed = [&](uint32_t value, PS2Runtime *owner = nullptr) {
+            context.r[4] = _mm_set_epi64x(0, value);
+            ps2_stubs::srand(nullptr, &context, owner);
+        };
+        auto draw = [&](PS2Runtime *owner = nullptr) {
+            ps2_stubs::rand(nullptr, &context, owner);
+            return static_cast<uint32_t>(_mm_extract_epi32(context.r[2], 0));
+        };
+        // No guest srand yet: preserve the original glibc default seed of 1.
+        std::srand(1);
+        bool same = true;
+        for (int i = 0; i < 512; ++i) {
+            const uint32_t actual = draw();
+            same &= actual == static_cast<uint32_t>(std::rand() & 0x7fff);
+        }
+        check(same, "unseeded guest rand preserves glibc's default sequence");
+        for (uint32_t value : {0u, 1u, 2u, 3u, 31u, 127773u, 0x7fffffffu,
+                               0x80000000u, 0x80000001u, 0xdeadbeefu, 0xfffffffeu, 0xffffffffu}) {
+            seed(value); std::srand(value); same = true;
+            for (int i = 0; i < 4096; ++i) {
+                const uint32_t actual = draw();
+                same &= actual == static_cast<uint32_t>(std::rand() & 0x7fff);
+            }
+            check(same, "4096 guest rand draws match std::rand for seed " + std::to_string(value));
+        }
+
+        std::string error;
+        std::vector<uint8_t> state, restored;
+        for (uint32_t offset = 0; offset < 31; ++offset) {
+            const uint32_t value = 0x80000001u + offset;
+            seed(value); std::srand(value);
+            for (uint32_t i = 0; i < 64u + offset; ++i) {
+                const uint32_t actual = draw();
+                check(actual == static_cast<uint32_t>(std::rand() & 0x7fff), "pre-snapshot glibc sequence agrees");
+            }
+            check(ps2_stubs::captureLibcState(state, error), error);
+            check(ps2_stubs::validateLibcState(state, error), error);
+            std::array<uint32_t, 128> continuation{};
+            for (auto &expected : continuation) expected = std::rand() & 0x7fff;
+            same = true;
+            for (uint32_t expected : continuation) same &= draw() == expected;
+            check(same, "capturing libc random does not advance its sequence");
+            seed(value ^ 0xa5a5a5a5u);
+            for (int i = 0; i < 17; ++i) draw();
+            check(ps2_stubs::restoreLibcState(state, error), error);
+            check(ps2_stubs::captureLibcState(restored, error) && restored == state,
+                  "all 31 rear positions and logical random words round trip byte for byte");
+            same = true;
+            for (uint32_t expected : continuation) same &= draw() == expected;
+            check(same, "restored random generator resumes the exact uninterrupted continuation");
+        }
+
+        // Every malformed archive must preserve both serialized state and the
+        // next sequence, even if its valid-looking prefix contains RNG words.
+        check(ps2_stubs::captureLibcState(state, error), error);
+        auto rejected = [&](const std::vector<uint8_t> &bad) {
+            std::vector<uint8_t> before, after;
+            check(ps2_stubs::captureLibcState(before, error), error);
+            std::array<uint32_t, 64> continuation{};
+            for (auto &expected : continuation) expected = draw();
+            check(ps2_stubs::restoreLibcState(before, error), error);
+            check(!ps2_stubs::validateLibcState(bad, error), "malformed libc random metadata/archive rejected by validation");
+            check(!ps2_stubs::restoreLibcState(bad, error), "malformed libc random archive rejected before commit");
+            check(ps2_stubs::captureLibcState(after, error) && after == before,
+                  "rejected libc random archive leaves live words and cursor unchanged");
+            same = true;
+            for (uint32_t expected : continuation) same &= draw() == expected;
+            check(same, "rejected libc random archive leaves the next draws unchanged");
+            check(ps2_stubs::restoreLibcState(before, error), error);
+        };
+        // Six fixed uint32 fields precede the 31 logical words: magic, next
+        // file handle, generator type, degree, separation and rear position.
+        auto corrupt = [&](size_t field, uint32_t value) {
+            auto bad = state;
+            check(bad.size() >= 6 * sizeof(uint32_t), "libc RNG archive has bounded metadata");
+            std::memcpy(bad.data() + field * sizeof(uint32_t), &value, sizeof(value));
+            rejected(bad);
+        };
+        corrupt(0, 0); corrupt(1, 0);
+        corrupt(2, 0); corrupt(2, 4); corrupt(2, UINT32_MAX);
+        corrupt(3, 0); corrupt(3, 30); corrupt(3, 63);
+        corrupt(4, 1); corrupt(4, UINT32_MAX);
+        corrupt(5, 31); corrupt(5, UINT32_MAX);
+        for (size_t length = 0; length < state.size(); ++length)
+            rejected(std::vector<uint8_t>(state.begin(), state.begin() + length));
+        auto trailing = state; trailing.push_back(0); rejected(trailing);
+
+        // A new runtime owner and a new host random allocation need no state
+        // from the previous owner, its pointers, or a replay of earlier draws.
+        auto owner = std::make_unique<PS2Runtime>();
+        seed(0xfedcba98u, owner.get());
+        for (int i = 0; i < 79; ++i) draw(owner.get());
+        check(ps2_stubs::captureLibcState(state, error), error);
+        std::array<uint32_t, 512> continuation{};
+        for (auto &expected : continuation) expected = draw(owner.get());
+        owner.reset();
+        owner = std::make_unique<PS2Runtime>();
+        seed(7u, owner.get());
+        check(ps2_stubs::restoreLibcState(state, error), error);
+        same = true;
+        for (uint32_t expected : continuation) same &= draw(owner.get()) == expected;
+        check(same, "libc RNG archive restores into a new runtime owner with independent host storage");
+    }
+#endif
+    void memoryState() {
+        PS2Memory memory;
+        check(memory.initialize(), "initialize memory");
+        auto *ram = memory.getRDRAM(); auto *scratch = memory.m_scratchpad;
+        memory.write32(0x12340, 0x87654321); memory.write32(0x70000010, 0xabcdef01);
+        memory.vif1_regs.row[2] = 42; memory.dma_regs[2].qwc = 13;
+        memory.m_eeTimers[1].compareBacklog = 7; memory.m_timerDeferred = 91;
+        memory.m_tlbEntries.push_back({0x1000, 0x2000, 0xfff, true});
+        memory.m_path3MaskedFifo.push_back(std::vector<uint8_t>(16, 0xa5));
+        memory.m_pendingGifTransfers.push_back({false, 0x12000, 1, std::vector<uint8_t>(16, 0x44)});
+        unsigned callbacks = 0;
+        memory.setGsEventWriter([&](uint8_t, uint64_t) { ++callbacks; });
+        std::vector<uint8_t> state; std::string error;
+        check(memory.captureState(state, error), error);
+        memory.write32(0x12340, 0); memory.vif1_regs.row[2] = 0;
+        memory.m_eeTimers[1].compareBacklog = 0; memory.m_path3MaskedFifo.clear();
+        check(memory.restoreState(state, error), error);
+        check(memory.getRDRAM() == ram && memory.m_scratchpad == scratch, "EE storage addresses preserved");
+        check(memory.read32(0x12340) == 0x87654321 && memory.read32(0x70000010) == 0xabcdef01, "RAM and scratch restored");
+        check(memory.vif1_regs.row[2] == 42 && memory.dma_regs[2].qwc == 13, "VIF and DMA restored");
+        check(memory.m_eeTimers[1].compareBacklog == 7 && memory.m_timerDeferred == 91, "timer backlog restored");
+        check(memory.m_tlbEntries.back().valid && memory.m_tlbEntries.back().pfn == 0x2000, "TLB restored");
+        check(memory.m_path3MaskedFifo[0][0] == 0xa5 && memory.m_pendingGifTransfers[0].chainData[0] == 0x44, "pending transfer bytes restored");
+        memory.m_gsEventWrite(0, 0); check(callbacks == 1, "callback preserved, not serialized");
+        memory.write32(0x12340, 99);
+        state.pop_back(); check(!memory.restoreState(state, error), "truncated memory rejected");
+        check(memory.read32(0x12340) == 99, "invalid memory archive leaves live RAM unchanged");
+    }
+    void vuState() {
+        auto source = std::make_unique<VU1Interpreter>();
+        source->state().q = 2.5f; source->state().pc = 8;
+        source->m_fdiv.valid = true; source->m_fdiv.readyCycle = 23; source->m_fdiv.value = 3.5f;
+        source->m_vfWritePipeline[0].valid = true; source->m_vfWritePipeline[0].reg = 5;
+        source->m_vfWritePipeline[0].laneMask = 15;
+        source->m_xgkick.active = true; source->m_xgkick.copiedBytes = 16;
+        source->m_xgkick.currentTagEnd = 64; source->m_xgkick.totalBytes = 0;
+        source->m_xgkick.packet[3] = 0x88; // EOP not yet encountered: totalBytes is legitimately zero.
+        std::vector<uint8_t> state; std::string error;
+        check(source->captureState(state, error), error);
+        auto restored = std::make_unique<VU1Interpreter>();
+        check(restored->restoreState(state, error), error);
+        check(restored->state().q == 2.5f && restored->state().pc == 8, "VU scalar/PC restored");
+        check(restored->m_fdiv.valid && restored->m_fdiv.readyCycle == 23 && restored->m_fdiv.value == 3.5f, "pending division restored");
+        check(restored->m_vfWritePipeline[0].valid && restored->m_vfWritePipeline[0].reg == 5, "pending VF write restored");
+        check(restored->m_xgkick.active && restored->m_xgkick.packet[3] == 0x88 && !restored->m_xgkick.totalBytes, "partial XGKICK restored before EOP");
+        VU1Interpreter wrongUnit(VU1Interpreter::Unit::VU0);
+        check(!wrongUnit.validateState(state, error), "VU0 rejects VU1 archive");
+        state.pop_back(); restored->state().q = 77;
+        check(!restored->restoreState(state, error) && restored->state().q == 77, "truncated VU leaves live context intact");
+    }
+    void vuMicrocodeRewrite() {
+        PS2Memory memory;
+        check(memory.initialize(), "initialize VIF microcode memory");
+        GS gs;
+        auto vu = std::make_unique<VU1Interpreter>();
+        constexpr uint32_t nop = 0x000002ffu;
+        constexpr uint32_t end = 0x40000000u;
+        constexpr uint32_t immediate = 0x80000000u;
+        constexpr uint32_t addImmediate = 0x10000000u;
+        const auto upload = [&](uint32_t pair, uint32_t lower, uint32_t upper) {
+            const uint32_t mpg[] = {0x4a010000u | pair, lower, upper};
+            memory.processVIF1Data(reinterpret_cast<const uint8_t *>(mpg), sizeof(mpg));
+        };
+        const auto run = [&] {
+            vu->reset();
+            vu->execute(memory.getVU1Code(), PS2_VU1_CODE_SIZE, memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                        gs, &memory, 0, 0, 0, 16);
+        };
+
+        upload(0, addImmediate | (1u << 16) | 5u, nop | end); // vi1 = 5
+        upload(1, addImmediate | (2u << 16) | (1u << 11) | 1u, nop); // vi2 = vi1 + 1
+        run();
+        const auto cycles = vu->state().cycles;
+        check(vu->state().vi[1] == 5 && vu->state().vi[2] == 6, "VU executes initial MPG and end delay slot");
+        run();
+        check(vu->state().vi[2] == 6 && vu->state().cycles == cycles, "warm VU decode keeps values and cycles");
+        upload(0, addImmediate | (1u << 16) | 9u, nop | end);
+        run();
+        check(vu->state().vi[1] == 9 && vu->state().vi[2] == 10 && vu->state().cycles == cycles,
+              "VIF rewrite uses changed lower word and unchanged delay slot");
+        upload(0, addImmediate | (1u << 16) | 9u, nop | end | immediate);
+        run();
+        check(vu->state().vi[1] == 0 && vu->state().vi[2] == 1, "VIF rewrite sees an upper-word-only I-bit change");
+    }
+    void iopState() {
+        using namespace ps2x::iop::detail;
+        IopMemory memory;
+        const auto block = memory.allocate(33); const auto *ram = memory.ram().data();
+        memory.write32(block, 0x11223344); memory.write32(IopMemory::ScratchBase, 0x55667788);
+        memory.setInterruptMask(0x123);
+        std::vector<uint8_t> state; std::string error;
+        check(memory.captureState(state, error), error);
+        memory.write32(block, 0); check(memory.freeAllocation(block), "free future IOP allocation");
+        check(memory.restoreState(state, error), error);
+        check(memory.ram().data() == ram && memory.read32(block) == 0x11223344, "IOP RAM value and address restored");
+        check(memory.read32(IopMemory::ScratchBase) == 0x55667788 && memory.interruptMask() == 0x123, "IOP scratch and interrupt mask restored");
+        check(memory.allocationContaining(block).has_value(), "IOP ownership/allocator restored");
+        state.pop_back(); memory.write32(block, 7);
+        check(!memory.restoreState(state, error) && memory.read32(block) == 7, "truncated IOP memory leaves bytes intact");
+
+        IopModuleManager modules;
+        const auto id = modules.loadHle("rom0:LIBSD").moduleId;
+        check(modules.loadHle("rom0:LIBSD").moduleId == id, "second HLE reference shares the module ID");
+        check(modules.captureState(state, error), error);
+        modules.reset(); check(modules.restoreState(state, error), error);
+        check(modules.stopHle(id, nullptr), "first restored module reference stops");
+        const std::string_view aliases[] = {"libsd"};
+        check(modules.isLoaded(aliases), "second restored module reference remains");
+        check(modules.stopHle(id, nullptr) && !modules.isLoaded(aliases), "last restored module reference deactivates");
+
+        iop_test::Host host;
+        ps2x::iop::IopSubsystem source(host);
+        check(!source.captureState(state, error), "uninitialized SG2 state explicitly rejected");
+        std::vector<uint8_t> synthetic(128, 0);
+        std::memcpy(synthetic.data(), "\x7f" "ELF", 4);
+        const uint32_t end = 128; const uint16_t stride = 1, count = 0;
+        std::memcpy(synthetic.data() + 0x20, &end, 4); std::memcpy(synthetic.data() + 0x2e, &stride, 2);
+        std::memcpy(synthetic.data() + 0x30, &count, 2); std::memcpy(synthetic.data() + 0x40, "sg2iop_driver", 13);
+        check(source.writeMemory(0x1000, synthetic.data(), synthetic.size()), "synthetic SG2 identification buffer written");
+        check(source.loadModuleBuffer(0x1000).moduleId > 0, "native driver selected without proprietary IRX");
+        check(source.loadModule("rom0:LIBSD").moduleId > 0, "HLE service initialized");
+        source.runEeCycles(123456);
+        check(source.captureState(state, error), error);
+        ps2x::iop::IopSubsystem destination(host);
+        check(destination.restoreState(state, error), error);
+        check(destination.debugSnapshot().emulatorCycles == source.debugSnapshot().emulatorCycles, "native IOP clock restored across owners");
+        check(destination.canBindRpc(0x80000701u), "HLE routes reconstructed from factories");
+        check(destination.readMemory(0x1040, synthetic.data(), 13) && std::memcmp(synthetic.data(), "sg2iop_driver", 13) == 0, "IOP RAM preserved with SG2 state");
+    }
+    void gsState() {
+        PS2Memory memory; check(memory.initialize(), "GS backing allocation");
+        GS gs; gs.init(memory.getGSVRAM(), PS2_GS_VRAM_SIZE, &memory.gs_regs);
+        native_renderer::setShown(true);
+        memory.getGSVRAM()[17] = 0x55; gs.writeRegister(GS_REG_FRAME_1, 3u | (2ull << 16u));
+        // A strip retains two queued vertices while its kick counter grows
+        // beyond the queue capacity. Exercise the normal public GS path.
+        gs.writeRegister(GS_REG_PRIM, GS_PRIM_TRISTRIP);
+        for (uint64_t i = 0; i < 37; ++i)
+            gs.writeRegister(GS_REG_XYZ2, (i * 16u) | (((i % 7u) * 16u) << 16u) | ((0x1234u + i) << 32u));
+        std::vector<uint8_t> state; std::string error;
+        check(gs.captureState(state, error), error);
+        check(gs.validateState(state, error), "GS archive accepts more than six cumulative vertex kicks");
+        memory.getGSVRAM()[17] = 0; gs.writeRegister(GS_REG_FRAME_1, 0);
+        gs.writeRegister(GS_REG_PRIM, GS_PRIM_POINT);
+        gs.writeRegister(GS_REG_XYZ2, 0);
+        check(gs.restoreState(state, error), error);
+        check(memory.getGSVRAM()[17] == 0x55 && gs.getDebugSnapshot().ctx[0].frame.fbp == 3, "GS registers and VRAM restored");
+        std::vector<uint8_t> restored;
+        check(gs.captureState(restored, error) && restored == state,
+              "GS strip queue and cumulative vertex counter round trip byte for byte after 37 kicks");
+        state.pop_back(); check(!gs.restoreState(state, error), "truncated GS rejected");
+        check(memory.getGSVRAM()[17] == 0x55, "invalid GS state does not mutate VRAM");
+        native_renderer::setShown(false);
+        gs.writeRegister(GS_REG_BITBLTBUF, 1ull << 48u); gs.writeRegister(GS_REG_TRXREG, 4u | (4ull << 32u));
+        gs.writeRegister(GS_REG_TRXDIR, 0);
+        native_renderer::setShown(true);
+        check(!gs.prepareStateCapture(error), "partial GS image upload rejected");
+        native_renderer::setShown(false);
+        for (int i = 0; i < 8; ++i) gs.writeRegister(GS_REG_HWREG, 0x1122334455667788ull);
+        native_renderer::setShown(true);
+        check(gs.prepareStateCapture(error), "completed async image upload accepted at blocking barrier");
+    }
+    void historyCodec() {
+        using namespace native_renderer::detail;
+        HistoryState state; state.width = 8; state.height = 4; state.bloom = state.gsBloom = true;
+        state.previous.resize(128, 0x22); state.bloomPixels.resize(8, 0x33); state.gsBloomPixels.resize(16384, 0x44);
+        std::vector<uint8_t> blob; std::string error;
+        ps2state::Writer writer(blob, error, HistoryStateLimit);
+        check(historyStateCodec(writer, state), error);
+        HistoryState decoded; check(decodeHistoryState(blob, decoded, error), error);
+        check(decoded.previous == state.previous && decoded.bloomPixels == state.bloomPixels && decoded.gsBloomPixels == state.gsBloomPixels, "all temporal buffers round trip");
+        blob[20] = 2; check(!decodeHistoryState(blob, decoded, error), "noncanonical history boolean rejected");
+        blob[20] = 1; blob.pop_back(); check(!decodeHistoryState(blob, decoded, error), "truncated temporal pixels rejected");
+        state.width = 8192; state.height = 8192;
+        ps2state::Writer oversized(blob, error, HistoryStateLimit);
+        check(!historyStateCodec(oversized, state), "history dimension budget checked before pixel allocation");
+    }
+    void legacyCardGuard() {
+        std::string error;
+        R5900Context context{};
+        check(ps2_stubs::legacyCardStateCaptureSupported(error), "unused legacy filesystem card is supported");
+        // No filesystem operation: an unknown fd still records a guest-visible
+        // async command and result. An open-files-only guard would miss it.
+        context.r[4] = _mm_set_epi64x(0, 12345);
+        ps2_stubs::sceMcClose(nullptr, &context, nullptr);
+        check(!ps2_stubs::legacyCardStateCaptureSupported(error), "legacy command metadata blocks states with no open FILE handles");
+        ps2_stubs::sceMcEnd(nullptr, &context, nullptr);
+        check(ps2_stubs::legacyCardStateCaptureSupported(error), "real libmc teardown leaves initial metadata");
+        context.r[5] = _mm_set_epi64x(0, 3);
+        ps2_stubs::mcSetFileSelectWindowCursol(nullptr, &context, nullptr);
+        check(!ps2_stubs::legacyCardStateCaptureSupported(error), "legacy UI cursor blocks states without any card fd");
+        ps2_stubs::mcSetFileSelectWindowCursolInit(nullptr, &context, nullptr);
+        check(ps2_stubs::legacyCardStateCaptureSupported(error), "fixture restores its own legacy cursor");
+    }
+}
+int main() {
+    setenv("SOTC_NATIVE", "1", 1); setenv("PS2X_NATIVE_IOP_BOOT", "1", 1); setenv("PS2X_NATIVE_SG2", "1", 1);
+    setenv("PS2X_MTVU", "0", 1); setenv("PS2X_GS_HW", "0", 1); setenv("PS2X_GS_NODRAW", "1", 1);
+#if defined(__linux__) && defined(__GLIBC__)
+    libcRandomState();
+#endif
+    memoryState(); vuState(); vuMicrocodeRewrite(); iopState(); gsState(); historyCodec(); legacyCardGuard();
+    std::printf("PASS: %u subsystem state checks; no ROM, GPU context or personal files\n", checks);
+}

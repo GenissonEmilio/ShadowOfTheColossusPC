@@ -1,4 +1,5 @@
-#if defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__))
+#if defined(_WIN32) || defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__))
+#define GLFW_INCLUDE_NONE
 #include "GLFW/glfw3.h"
 #endif
 #include "runtime/gs/gs_hw_backend.h"
@@ -16,8 +17,11 @@
 #include <filesystem>
 #include "runtime/native_tuning.h"
 #include "runtime/host_menu.h"
+#include "runtime/state_manager.h"
+#include "runtime/desktop_input.h"
 #include "runtime/desktop_video.h"
-#if defined(__linux__) && !defined(__ANDROID__)
+#ifdef PS2X_DESKTOP_VIDEO
+#include "desktop_frame_pacing.h"
 #include "rlgl.h"
 #endif
 #include "runtime/gs/gs_direct_frame.h"
@@ -82,7 +86,7 @@ static constexpr int HOST_WINDOW_HEIGHT = 544;
 // raylib uses the native surface dimensions when both are zero.
 static constexpr int HOST_WINDOW_WIDTH = 0;
 static constexpr int HOST_WINDOW_HEIGHT = 0;
-#elif defined(__linux__)
+#elif defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
 static constexpr int HOST_WINDOW_WIDTH = 1024;
 static constexpr int HOST_WINDOW_HEIGHT = 720;
 #else
@@ -421,7 +425,7 @@ static Texture2D g_directFrame{};
 
 static void waitDirectFrame(uint64_t fence)
 {
-#if defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__))
+#if defined(_WIN32) || defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__))
     // glWaitSync without pulling GL headers in here (GLFW owns them).
     using WaitSync = void (*)(void *, unsigned int, uint64_t);
     static WaitSync waitSync = reinterpret_cast<WaitSync>(glfwGetProcAddress("glWaitSync"));
@@ -432,7 +436,11 @@ static void waitDirectFrame(uint64_t fence)
 #endif
 }
 
-static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight)
+static bool UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight
+#ifdef PS2X_DESKTOP_VIDEO
+                        , std::pair<uint32_t, uint32_t> &softTextureSize
+#endif
+                        )
 {
 
     static uint64_t s_lastPresentationTick = std::numeric_limits<uint64_t>::max();
@@ -452,15 +460,15 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     // A frame drawn over three vsyncs stays three refreshes, like on a TV.
     static double s_clock = -1.0;
     static double s_clockTime = 0.0;
-    constexpr double kVsyncRate = 59.94;
+    const double vsyncRate = rt->eeScheduler().palVideoMode() ? 50.0 : 59.94;
     constexpr double kLatencyVsyncs = 2.0;
     const double now = GetTime();
-    const double goal = static_cast<double>(rt->eeScheduler().currentVSyncTick()) - kLatencyVsyncs;
+    const double goal = static_cast<double>(rt->memory().gs().vsyncTick.load(std::memory_order_acquire)) - kLatencyVsyncs;
     if (s_clock < 0.0 || std::fabs(goal - s_clock) > 8.0)
         s_clock = goal;
     else
     {
-        s_clock += (now - s_clockTime) * kVsyncRate;
+        s_clock += (now - s_clockTime) * vsyncRate;
         s_clock += (goal - s_clock) * 0.05;
         s_clock = std::min(s_clock, goal + 1.0);
     }
@@ -490,7 +498,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     {
         outWidth = (s_lastWidth != 0u) ? s_lastWidth : FB_WIDTH;
         outHeight = (s_lastHeight != 0u) ? s_lastHeight : DEFAULT_DISPLAY_HEIGHT;
-        return;
+        return false;
     }
 
     s_scratch.clear();
@@ -506,15 +514,11 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
                                                    &sourceFbp,
                                                    &usedPreferredDisplaySource))
     {
-        Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, MAGENTA);
-        UpdateTexture(tex, blank.data);
-        UnloadImage(blank);
-        outWidth = FB_WIDTH;
-        outHeight = DEFAULT_DISPLAY_HEIGHT;
-        s_lastWidth = outWidth;
-        s_lastHeight = outHeight;
-        s_hasUploadedFrame = true;
-        return;
+        // Until the GS has a frame, the initial black texture is enough.
+        // A missed presentation can also leave the last good picture in place.
+        outWidth = s_lastWidth ? s_lastWidth : FB_WIDTH;
+        outHeight = s_lastHeight ? s_lastHeight : DEFAULT_DISPLAY_HEIGHT;
+        return false;
     }
 
     PS2_IF_AGRESSIVE_LOGS({
@@ -556,10 +560,24 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
         outWidth = width;
         outHeight = height;
         s_hasUploadedFrame = true;
-        return;
+        return true;
     }
     g_directFrame.id = 0;
 
+#ifdef PS2X_DESKTOP_VIDEO
+    const bool packed = width && height && width <= FB_WIDTH && height <= FB_HEIGHT &&
+                        s_scratch.size() >= static_cast<size_t>(width) * height * 4u;
+    if (packed && std::pair{width, height} == softTextureSize)
+    {
+        // The full upload at this size cleared the texture outside the picture.
+        UpdateTextureRec(tex, {0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height)}, s_scratch.data());
+        outWidth = width;
+        outHeight = height;
+        s_hasUploadedFrame = true;
+        return true;
+    }
+    softTextureSize = packed ? std::pair{width, height} : std::pair<uint32_t, uint32_t>{};
+#endif
     std::fill(s_uploadBuffer.begin(), s_uploadBuffer.end(), 0u);
     if (!s_scratch.empty() && width != 0u && height != 0u)
     {
@@ -585,6 +603,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     outWidth = width;
     outHeight = height;
     s_hasUploadedFrame = true;
+    return true;
 }
 
 PS2Runtime::PS2Runtime()
@@ -638,6 +657,7 @@ namespace
 {
     // Audio callbacks may still be draining the IOP's ring buffer at shutdown.
     std::atomic<ps2x::iop::IopSubsystem *> g_spu2AudioSource{nullptr};
+    std::mutex g_stateAudioMutex;
 }
 
 PS2Runtime::~PS2Runtime()
@@ -849,7 +869,8 @@ bool PS2Runtime::syncCoreSubsystems()
                               { m_gs.writeRegister(reg, value); });
     {
         extern uint32_t (*g_ps2MmioCaller)();
-        static PS2Runtime *self = this;
+        static PS2Runtime *self = nullptr;
+        self = this; // A restored/new runtime owns the process MMIO callback.
         g_ps2MmioCaller = []() -> uint32_t
         {
             const R5900Context *context = self->m_eeScheduler ? self->m_eeScheduler->currentContext() : nullptr;
@@ -947,6 +968,7 @@ namespace
 {
     void spu2AudioCallback(void *buffer, unsigned int frames)
     {
+        std::lock_guard<std::mutex> stateLock(g_stateAudioMutex);
         auto *out = static_cast<int16_t *>(buffer);
         size_t produced = 0;
         if (ps2x::iop::IopSubsystem *iop = g_spu2AudioSource.load(std::memory_order_acquire))
@@ -989,10 +1011,25 @@ bool PS2Runtime::initialize(const char *title)
             std::cerr << "Failed to bind runtime core subsystems" << std::endl;
             return false;
         }
+        if (std::getenv("PS2X_MODULE_CAPTURE"))
+        {
+            setMissingFunctionPolicy(MissingFunctionPolicy::Stop);
+            std::cerr << "[capture] core ready without host video or audio" << std::endl;
+            return true;
+        }
 #if defined(PLATFORM_VITA) && !defined(PS2X_VITA_SDL2_SHIM)
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
 #else
-        SetConfigFlags(FLAG_WINDOW_RESIZABLE | (std::getenv("PS2X_HIDDEN_WINDOW") ? FLAG_WINDOW_HIDDEN : 0));
+        unsigned int windowFlags = FLAG_WINDOW_RESIZABLE |
+            (std::getenv("PS2X_HIDDEN_WINDOW") ? FLAG_WINDOW_HIDDEN : 0);
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+        // The EE and audio keep running on their own threads. Keep the host
+        // event loop running too when iconified, so input/state requests do
+        // not stall inside EndDrawing's minimized-window wait.
+        windowFlags |= FLAG_WINDOW_ALWAYS_RUN |
+            (std::getenv("PS2X_BACKGROUND_WINDOW") ? FLAG_WINDOW_UNFOCUSED : 0);
+#endif
+        SetConfigFlags(windowFlags);
 #if defined(__linux__) && !defined(__ANDROID__)
         // GLFW names the X11 window's WM_CLASS instance after RESOURCE_NAME
         // (otherwise after the title): docks match it to the desktop entry's
@@ -1007,7 +1044,7 @@ bool PS2Runtime::initialize(const char *title)
             return false;
         }
 #endif
-#if defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__))
+#if defined(_WIN32) || defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__))
         if (std::getenv("PS2X_GS_HW"))
         {
             // The hardware GS renderer draws on the GS worker thread: give it a
@@ -1033,15 +1070,15 @@ bool PS2Runtime::initialize(const char *title)
                 std::cerr << "[gs:hw] could not create the GS GL context" << std::endl;
         }
         if (
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
             true
 #else
             std::getenv("SOTC_NATIVE_GL")
 #endif
         )
         {
-            // The native renderer on OpenGL (to check it against Metal): its own
-            // hidden context, current on the game thread that drives it.
+            // The native renderer has a separate hidden context that becomes
+            // current on its render worker.
             glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
             glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
             glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
@@ -1065,7 +1102,9 @@ bool PS2Runtime::initialize(const char *title)
         native_renderer::setGlContext([] {});
 #endif
         hostmenu::load();
-#if defined(__linux__) && !defined(__ANDROID__)
+        desktop_input::initialize();
+#ifdef PS2X_DESKTOP_VIDEO
+        desktop_video::setWindowResolution(hostmenu::settings().windowResolution);
         if (!std::getenv("PS2X_HIDDEN_WINDOW"))
             desktop_video::setFullscreen(hostmenu::settings().fullscreen);
         std::string shaderError;
@@ -1672,12 +1711,24 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
     {
         if (const char *dumpPath = std::getenv("PS2X_DUMP_RAM_ON_MISSING"))
         {
-            if (FILE *dump = std::fopen(dumpPath, "wb"))
+            const bool captureOnly = std::getenv("PS2X_MODULE_CAPTURE") != nullptr;
+            const std::string path = captureOnly ? std::string(dumpPath) + ".part" : dumpPath;
+            if (FILE *dump = std::fopen(path.c_str(), "wb"))
             {
-                std::fwrite(rdram, 1, PS2_RAM_SIZE, dump);
-                std::fclose(dump);
-                std::cerr << "[guest-branch:missing-target] RAM dumped to " << dumpPath << std::endl;
+                const size_t written = std::fwrite(rdram, 1, PS2_RAM_SIZE, dump);
+                const int closed = std::fclose(dump);
+                if (written == PS2_RAM_SIZE && closed == 0 &&
+                    (!captureOnly || std::rename(path.c_str(), dumpPath) == 0))
+                    std::cerr << "[guest-branch:missing-target] RAM dumped to " << dumpPath << std::endl;
+                else
+                {
+                    if (captureOnly)
+                        std::remove(path.c_str());
+                    std::cerr << "[guest-branch:missing-target] incomplete RAM dump at " << dumpPath << std::endl;
+                }
             }
+            else
+                std::cerr << "[guest-branch:missing-target] could not open RAM dump at " << dumpPath << std::endl;
         }
     }
 
@@ -2471,6 +2522,21 @@ uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment
 
     uint32_t base = top - allocSize;
     base &= ~(normalizedAlignment - 1u);
+    // Callback stacks descend through the kernel area. RPC, TLS and boot
+    // metadata occupy a hole inside that area, not below its floor. After
+    // eleven 16 KiB stacks, the old allocator handed this live metadata out
+    // as stack memory. Skip the complete service-pool interval, including
+    // when alignment padding or a larger stack would cross it.
+    constexpr uint32_t servicesBegin = ps2x::kernel_memory::kRpcPacketPoolBase;
+    constexpr uint32_t servicesEnd = ps2x::kernel_memory::kBootModePoolBase +
+                                     ps2x::kernel_memory::kBootModePoolBytes;
+    if (base < servicesEnd && top > servicesBegin)
+    {
+        top = servicesBegin;
+        if (top <= allocSize)
+            return 0u;
+        base = (top - allocSize) & ~(normalizedAlignment - 1u);
+    }
     if (base < m_asyncCallbackStackFloor || base >= top)
     {
         std::cerr << "[runtime] callback stack space exhausted (floor 0x" << std::hex << m_asyncCallbackStackFloor
@@ -2811,6 +2877,7 @@ void PS2Runtime::HandleIntegerOverflow(R5900Context *ctx)
 void PS2Runtime::run()
 {
     m_stopRequested.store(false, std::memory_order_relaxed);
+    savestates::bind(nullptr);
     ps2_stubs::resetSifState();
     resetIop();
     ps2_stubs::resetAudioStubState();
@@ -2826,30 +2893,85 @@ void PS2Runtime::run()
 
     RUNTIME_LOG("Starting execution at address 0x" << std::hex << m_cpuContext.pc << std::dec);
 
+    const bool captureOnly = std::getenv("PS2X_MODULE_CAPTURE") != nullptr;
+    auto runGuest = [&]()
+    {
+        ThreadNaming::SetCurrentThreadName("GameThread");
+#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+        // Cores 0 and 1: the native renderer's render thread has core 2.
+        sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), SCE_KERNEL_CPU_MASK_USER_0 | SCE_KERNEL_CPU_MASK_USER_1);
+#endif
+        ps2_load::setThreadSlot(ps2_load::kGame);
+        // Guest float code runs like the EE: round toward zero, no denormals.
+        ps2SetEeFloatingPointMode();
+        g_ps2FpuSetcsrNearest = std::getenv("PS2X_FPU_SETCSR") != nullptr && std::atoi(std::getenv("PS2X_FPU_SETCSR")) != 0;
+        try
+        {
+            m_eeScheduler->reset(m_memory.getRDRAM(), m_cpuContext);
+            if (captureOnly)
+                std::cerr << "[capture] starting EE scheduler" << std::endl;
+            else
+                savestates::bind(this); // Accept requests only after reset/wake state is ready.
+            m_eeScheduler->run();
+            uint32_t pc = m_debugPc.load(std::memory_order_relaxed);
+            RUNTIME_LOG("Game thread returned. PC=0x" << std::hex << pc
+                      << " RA=0x" << static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[31], 0)) << std::dec << std::endl);
+        }
+        catch (const std::exception &e)
+        {
+            if (captureOnly) throw;
+            std::cerr << "Error during program execution: " << e.what() << std::endl;
+        }
+        catch (...)
+        {
+            if (captureOnly) throw;
+            std::cerr << "Error during program execution: unknown exception" << std::endl;
+        }
+    };
+    if (captureOnly)
+    {
+        // The module loader uses the same EE scheduler without a host frame loop.
+        runGuest();
+        return;
+    }
+
     // A blank image to use as a framebuffer
-    Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
+    Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLACK);
     Texture2D frameTex = LoadTextureFromImage(blank);
     UnloadImage(blank);
 
-    // One host frame: the game picture (4:3 / stretch / integer), the FPS
+    // One host frame: the game picture (4:3 / stretch / integer / 16:9), the FPS
     // overlay, the debug UI and the settings menu.
     // Set while the native renderer's GL picture is shown: GL textures are y-up.
     bool hostFrameFlipY = false;
+    double fpsWindowStart = GetTime();
+    uint64_t lastFpsChains = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
+    int gameFps = 0;
+    bool sampledGameFrame = false;
+#ifdef PS2X_DESKTOP_VIDEO
+    desktop_video::FrameCounts presentation;
+    desktop_video::FrameCounts lastFpsPresentation;
+    int videoFps = 0, generatedFps = 0;
+#endif
     std::function<void(const Texture2D &, uint32_t, uint32_t)> drawHostFrame = [&](const Texture2D &shown, uint32_t presentWidth, uint32_t presentHeight)
     {
             BeginDrawing();
             ClearBackground(BLACK);
-#if defined(__linux__) && !defined(__ANDROID__)
+            auto &video = hostmenu::settings();
+            int screenMode = video.screenMode.load(std::memory_order_relaxed);
+            if (screenMode == hostmenu::kScreenWidescreen &&
+                (!video.widescreenActive.load(std::memory_order_relaxed) || ps2_stubs::mpegPlaybackActive()))
+                screenMode = hostmenu::kScreenFit;
+#ifdef PS2X_DESKTOP_VIDEO
             desktop_video::draw(shown, std::max(1u, presentWidth), std::max(1u, presentHeight), hostFrameFlipY,
-                                hostmenu::settings().screenMode);
+                                screenMode, video.upscaleFsr, native_renderer::tuning().fxaa);
 #else
             const float srcWidth = static_cast<float>(std::max<uint32_t>(1u, presentWidth));
             const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight));
             const float screenWidth = static_cast<float>(GetScreenWidth());
             const float screenHeight = static_cast<float>(GetScreenHeight());
-            // The PS2 picture is 4:3 whatever its pixel size (512x448, 640x448...).
-            float aspect = 4.0f / 3.0f;
-            int screenMode = hostmenu::settings().screenMode.load(std::memory_order_relaxed);
+            // The guest framebuffer dimensions are independent of its display aspect.
+            float aspect = screenMode == hostmenu::kScreenWidescreen ? hostmenu::kWidescreenAspect : hostmenu::kOriginalAspect;
 #if defined(__ANDROID__)
             if (const float widescreen = ps2x::android::activeWidescreenAspect(); widescreen > 0.0f)
             {
@@ -2881,21 +3003,35 @@ void PS2Runtime::run()
                 dstHeight};
             DrawTexturePro(shown, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
 #endif
-            if (hostmenu::settings().showFps.load(std::memory_order_relaxed))
+            // FPS overlay: game frames = display lists sent to VIF1 per second.
+            // Sample while hidden too, so enabling the overlay shows the current rate.
+            const double now = GetTime();
+            if (now - fpsWindowStart >= 1.0)
             {
-                // FPS overlay: game frames = display lists sent to VIF1 per second.
-                static double windowStart = GetTime();
-                static uint64_t lastChains = 0;
-                static int gameFps = 0;
-                const double now = GetTime();
-                if (now - windowStart >= 1.0)
-                {
-                    const uint64_t chains = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
-                    gameFps = static_cast<int>((chains - lastChains) / (now - windowStart) + 0.5);
-                    lastChains = chains;
-                    windowStart = now;
-                }
-                const std::string fpsText = "game " + std::to_string(gameFps) + " fps | host " + std::to_string(GetFPS()) + " fps";
+                const uint64_t chains = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
+                sampledGameFrame |= chains > lastFpsChains;
+                gameFps = chains >= lastFpsChains ? static_cast<int>((chains - lastFpsChains) / (now - fpsWindowStart) + 0.5) : 0;
+                lastFpsChains = chains;
+#ifdef PS2X_DESKTOP_VIDEO
+                const auto generated = presentation.generated - lastFpsPresentation.generated;
+                const auto displayed = presentation.shown() - lastFpsPresentation.shown();
+                videoFps = static_cast<int>(displayed / (now - fpsWindowStart) + 0.5);
+                generatedFps = static_cast<int>(generated / (now - fpsWindowStart) + 0.5);
+                lastFpsPresentation = presentation;
+                sampledGameFrame |= displayed > 0;
+#endif
+                fpsWindowStart = now;
+            }
+            if (sampledGameFrame && video.showFps.load(std::memory_order_relaxed))
+            {
+                std::string fpsText = "game " + std::to_string(gameFps) + " fps";
+#ifdef PS2X_DESKTOP_VIDEO
+                fpsText += " | video " + std::to_string(videoFps) + " fps";
+                if (video.frameGeneration.load(std::memory_order_relaxed) && native_renderer::shown())
+                    fpsText += " (" + std::to_string(generatedFps) + " FG)";
+#else
+                fpsText += " | host " + std::to_string(GetFPS()) + " fps";
+#endif
                 DrawRectangle(8, GetScreenHeight() - 30, MeasureText(fpsText.c_str(), 20) + 12, 26, Color{0, 0, 0, 160});
                 DrawText(fpsText.c_str(), 14, GetScreenHeight() - 27, 20, Color{120, 255, 120, 255});
             }
@@ -2904,7 +3040,19 @@ void PS2Runtime::run()
                 m_debugUiDrawCallback(*this, m_debugUiUserData);
             }
             hostmenu::draw(GetScreenWidth(), GetScreenHeight());
-#if defined(__linux__) && !defined(__ANDROID__)
+            if (!hostmenu::isOpen()) {
+                static std::string stateMessage;
+                static double stateMessageAt = 0;
+                const std::string current = savestates::status();
+                if (current != stateMessage) { stateMessage = current; stateMessageAt = GetTime(); }
+                if (!stateMessage.empty() && (savestates::busy() || GetTime()-stateMessageAt < 8.0)) {
+                    const int size=18;
+                    const int width=std::min(GetScreenWidth()-32,MeasureText(stateMessage.c_str(),size)+24);
+                    DrawRectangle(16,16,width,38,Color{12,18,16,235});
+                    DrawText(stateMessage.c_str(),28,26,size,Color{235,217,165,255});
+                }
+            }
+#ifdef PS2X_DESKTOP_VIDEO
             static bool presentationCaptured = false;
             if (!presentationCaptured && GetTime() >= 12.0)
                 if (const char *path = std::getenv("SOTC_PRESENT_SNAPSHOT"))
@@ -2998,41 +3146,46 @@ void PS2Runtime::run()
     _pthread_stack_default_user = 1024u * 1024u;
 #endif
     std::thread gameThread([&]()
-                           {
-        ThreadNaming::SetCurrentThreadName("GameThread");
-#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
-        // Cores 0 and 1: the native renderer's render thread has core 2.
-        sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), SCE_KERNEL_CPU_MASK_USER_0 | SCE_KERNEL_CPU_MASK_USER_1);
-#endif
-        ps2_load::setThreadSlot(ps2_load::kGame);
-        // Guest float code runs like the EE: round toward zero, no denormals.
-        ps2SetEeFloatingPointMode();
-        g_ps2FpuSetcsrNearest = std::getenv("PS2X_FPU_SETCSR") != nullptr && std::atoi(std::getenv("PS2X_FPU_SETCSR")) != 0;
-        try
-        {
-            m_eeScheduler->reset(m_memory.getRDRAM(), m_cpuContext);
-            m_eeScheduler->run();
-            uint32_t pc = m_debugPc.load(std::memory_order_relaxed);
-            RUNTIME_LOG("Game thread returned. PC=0x" << std::hex << pc
-                      << " RA=0x" << static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[31], 0)) << std::dec << std::endl);
-        }
-        catch (const std::exception &e)
-        {
-            std::cerr << "Error during program execution: " << e.what() << std::endl;
-        }
-        catch (...)
-        {
-            std::cerr << "Error during program execution: unknown exception" << std::endl;
-        }
-        gameThreadFinished.store(true, std::memory_order_release); });
+    {
+        runGuest();
+        gameThreadFinished.store(true, std::memory_order_release);
+    });
 #if defined(PLATFORM_VITA)
     _pthread_stack_default_user = threadStackDefault;
 #endif
 
     uint64_t tick = 0;
+    uint64_t nativeFrameUploads = 0;
+    uint64_t hostFrames = 0;
+    uint64_t lastHostFrames = 0;
+    double lastStatsTime = 0.0;
+    double nextStats = 5.0;
+    uint64_t lastStatChains = 0;
 #if !(defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
     Texture2D nativeTex{};
     std::vector<uint8_t> nativePixels;
+    uint64_t nativeRevision = 0;
+#endif
+#ifdef PS2X_DESKTOP_VIDEO
+    Texture2D previousNativeTex{};
+    Texture2D midpoint{};
+    double previousNativeArrival = -1.0;
+    uint64_t previousNativeSlot = 0;
+    uint64_t realFrameSlot = 0;
+    std::pair<uint32_t, uint32_t> softTextureSize;
+    desktop_video::PresentedFrame gsPresentation;
+    desktop_video::FrameCounts lastStatsPresentation;
+    double lastRealTime = -1.0, longestRealGap = 0.0;
+    struct DisplayTiming
+    {
+        uint64_t readUs = 0, uploadUs = 0, gsUs = 0, gsMaxUs = 0, interpolationUs = 0;
+        uint64_t uploads = 0, gsPolls = 0, interpolations = 0;
+    } displayTiming;
+#endif
+#if defined(PLATFORM_VITA)
+    static const bool statsEnabled = true;
+#else
+    static const bool statsEnabled = std::getenv("PS2X_STATS") != nullptr;
 #endif
 #if defined(__ANDROID__)
     bool audioPaused = false;
@@ -3040,7 +3193,6 @@ void PS2Runtime::run()
     const char *reuseOption = std::getenv("SOTC_REUSE_NATIVE_FRAME");
     const bool reuseNativeFrame = !reuseOption || reuseOption[0] != '0';
     uint64_t nativeFrameSerial = 0;
-    bool hadNativePicture = false;
     const bool logAndroidFrames = native_renderer::detail::androidFrameStatsEnabled();
     native_renderer::detail::AndroidFrameStats lastAndroidFrameStats;
     double androidFrameWindowStart = GetTime();
@@ -3066,6 +3218,19 @@ void PS2Runtime::run()
             continue;
         }
 #endif
+#if !(defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
+        const bool nativeRequested = native_renderer::shown();
+#endif
+#ifdef PS2X_DESKTOP_VIDEO
+        const bool logStats = statsEnabled || native_renderer::tuning().frameLog;
+        desktop_video::setWindowResolution(hostmenu::settings().windowResolution);
+        if (!IsWindowHidden()) desktop_video::setFullscreen(hostmenu::settings().fullscreen);
+        const bool visible = !IsWindowHidden() && !IsWindowMinimized();
+        const bool frameGeneration = nativeRequested && hostmenu::settings().frameGeneration;
+        const bool interpolationEnabled = frameGeneration && !hostmenu::isOpen() && !savestates::busy();
+        desktop_video::updatePresentation(visible && hostmenu::settings().vsync,
+                                          native_renderer::tuning().frameCap30, frameGeneration);
+#else
         {
             // Renderer setting 'Cap at 30 fps': the picture shown every other
             // vblank at most (the Vita: vsync interval 2), so a game frame
@@ -3078,6 +3243,7 @@ void PS2Runtime::run()
                 SetTargetFPS(wantFps);
             }
         }
+#endif
         PS2_IF_AGRESSIVE_LOGS({
             tick++;
             if ((tick % 120) == 0)
@@ -3142,7 +3308,9 @@ void PS2Runtime::run()
         });
         uint32_t presentWidth = FB_WIDTH;
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
+#ifndef PS2X_DESKTOP_VIDEO
         UploadFrame(frameTex, this, presentWidth, presentHeight);
+#endif
 #if !(defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
         // The native renderer's picture at its own size (it may draw larger
         // than the PS2's 512 x 448), filtered: not through the GS's display.
@@ -3150,17 +3318,55 @@ void PS2Runtime::run()
 #if defined(__ANDROID__)
         bool uploadedNativeFrame = false;
 #endif
-        if (native_renderer::shown())
+#ifdef PS2X_DESKTOP_VIDEO
+        if (!interpolationEnabled)
+        {
+            previousNativeArrival = -1.0;
+            realFrameSlot = 0;
+            midpoint = {};
+        }
+        // Finish presenting the current pair before reading another frame.
+        // The midpoint and endpoint each hold for about half a game frame.
+        const bool presentingPair = realFrameSlot != 0;
+        if (presentingPair && hostFrames >= realFrameSlot)
+        {
+            midpoint = {};
+            realFrameSlot = 0;
+        }
+        uint64_t midpointSlots = 0;
+#endif
+        if (nativeRequested)
         {
             uint32_t nw = 0, nh = 0;
-#if defined(__ANDROID__)
+#ifdef PS2X_DESKTOP_VIDEO
+            const uint64_t lastRevision = nativeRevision;
+            const uint64_t readStart = logStats ? native_renderer::nowUs() : 0;
+            const auto frameRead = presentingPair ? native_renderer::FrameRead::Unchanged :
+                native_renderer::readFrame(nativePixels, nw, nh, nativeRevision);
+            const uint64_t readUs = logStats && frameRead == native_renderer::FrameRead::Updated ?
+                native_renderer::nowUs() - readStart : 0;
+#elif defined(__ANDROID__)
             uint64_t serial = reuseNativeFrame ? nativeFrameSerial : 0u;
-            const bool newFrame = native_renderer::detail::copyFrameIfNew(nativePixels, nw, nh, serial);
+            const auto frameRead = native_renderer::readFrame(nativePixels, nw, nh, serial);
 #else
-            const bool newFrame = native_renderer::latestFrame(nativePixels, nw, nh);
+            const auto frameRead = native_renderer::readFrame(nativePixels, nw, nh, nativeRevision);
 #endif
-            if (newFrame && nw && nh && nativePixels.size() >= static_cast<size_t>(nw) * nh * 4u)
+            if (frameRead == native_renderer::FrameRead::Updated && nw && nh && nativePixels.size() >= static_cast<size_t>(nw) * nh * 4u)
             {
+#ifdef PS2X_DESKTOP_VIDEO
+                if (interpolationEnabled)
+                {
+                    const double arrived = GetTime();
+                    const double period = arrived - previousNativeArrival;
+                    const uint64_t slots = hostFrames - previousNativeSlot;
+                    if (previousNativeArrival >= 0.0)
+                        midpointSlots = desktop_video::midpointHold(slots, period, nativeRevision == lastRevision + 1u);
+                    previousNativeArrival = arrived;
+                    previousNativeSlot = hostFrames;
+                    std::swap(nativeTex, previousNativeTex);
+                }
+                const uint64_t uploadStart = logStats ? native_renderer::nowUs() : 0;
+#endif
                 // The display shows colour only (the PS2's CRTC ignores alpha):
                 // drawn blended over black, the picture's alpha darkened it.
                 for (size_t i = 3; i < static_cast<size_t>(nw) * nh * 4u; i += 4)
@@ -3175,28 +3381,35 @@ void PS2Runtime::run()
                 }
                 else
                     UpdateTexture(nativeTex, nativePixels.data());
-                presentWidth = nw;
-                presentHeight = nh;
-                nativeOnScreen = true;
+#ifdef PS2X_DESKTOP_VIDEO
+                if (logStats)
+                {
+                    displayTiming.readUs += readUs;
+                    displayTiming.uploadUs += native_renderer::nowUs() - uploadStart;
+                    ++displayTiming.uploads;
+                }
+#endif
+                if (nativeTex.id != 0)
+                {
+                    ++nativeFrameUploads;
 #if defined(__ANDROID__)
-                uploadedNativeFrame = nativeTex.id != 0;
-                nativeOnScreen = uploadedNativeFrame;
-                if (uploadedNativeFrame)
+                    uploadedNativeFrame = true;
                     nativeFrameSerial = serial;
 #endif
+                }
+                else
+                {
+                    nativeRevision = 0; // Retry if the graphics driver could not allocate the texture.
+                }
             }
-#if defined(__ANDROID__)
-            else if (reuseNativeFrame && hadNativePicture && nativeTex.id)
+            if (frameRead != native_renderer::FrameRead::Missing && nativeTex.id != 0)
             {
-                // Keep drawing the last texture while the game builds the next frame.
                 presentWidth = static_cast<uint32_t>(nativeTex.width);
                 presentHeight = static_cast<uint32_t>(nativeTex.height);
                 nativeOnScreen = true;
             }
-#endif
         }
 #if defined(__ANDROID__)
-        hadNativePicture = nativeOnScreen;
         if (logAndroidFrames)
         {
             ++androidHostFrames;
@@ -3226,14 +3439,45 @@ void PS2Runtime::run()
             }
         }
 #endif
+#ifdef PS2X_DESKTOP_VIDEO
+        // The native texture already contains the complete picture. Latching
+        // the fallback here drains the GS worker and can upload the same
+        // picture a second time.
+        if (!nativeOnScreen)
+        {
+            const uint64_t start = logStats ? native_renderer::nowUs() : 0;
+            if (UploadFrame(frameTex, this, presentWidth, presentHeight, softTextureSize))
+                gsPresentation = {desktop_video::FrameSource::Gs, gs().hostPresentationTick()};
+            if (logStats)
+            {
+                const uint64_t elapsed = native_renderer::nowUs() - start;
+                displayTiming.gsUs += elapsed;
+                displayTiming.gsMaxUs = std::max(displayTiming.gsMaxUs, elapsed);
+                ++displayTiming.gsPolls;
+            }
+            previousNativeArrival = -1.0;
+        }
+        if (nativeOnScreen && midpointSlots != 0)
+        {
+            const uint64_t start = logStats ? native_renderer::nowUs() : 0;
+            midpoint = desktop_video::interpolate(previousNativeTex, nativeTex);
+            if (logStats)
+            {
+                displayTiming.interpolationUs += native_renderer::nowUs() - start;
+                ++displayTiming.interpolations;
+            }
+            if (midpoint.id)
+                realFrameSlot = hostFrames + midpointSlots;
+        }
+#endif
         const Texture2D &shownTex = nativeOnScreen ? nativeTex : (g_directFrame.id ? g_directFrame : frameTex);
-        // F8: the same moment twice, for comparing: the emulated picture (the
+        // F9: the same moment twice, for comparing: the emulated picture (the
         // native one hidden for a few frames so the GS draws), the native one,
         // and the list of the native draws of that frame, in shots/f8_<n>_*.
         {
             static int f8Wait = 0, f8Count = 0;
             static bool f8WasNative = true;
-            if (f8Wait == 0 && IsKeyPressed(KEY_F8))
+            if (f8Wait == 0 && IsKeyPressed(KEY_F9))
             {
                 f8WasNative = native_renderer::tuning().showNative;
                 native_renderer::tuning().showNative = false;
@@ -3263,17 +3507,17 @@ void PS2Runtime::run()
         const Texture2D &shownTex = g_directFrame.id ? g_directFrame : frameTex;
 #endif
 
-#if defined(PLATFORM_VITA)
-        static const bool statsEnabled = true; // to the log file: the Vita has no environment
+#ifdef PS2X_DESKTOP_VIDEO
+        const double statsTime = logStats ? GetTime() : 0.0;
 #else
-        static const bool statsEnabled = std::getenv("PS2X_STATS") != nullptr;
-#endif
-        static double nextStats = 5.0;
-        static uint64_t hostFrames = 0;
         ++hostFrames; // host loop iterations: frames actually shown in the window
-        if (statsEnabled && GetTime() >= nextStats)
+        const double statsTime = statsEnabled ? GetTime() : 0.0;
+#endif
+        if (statsTime >= nextStats)
         {
-            nextStats += 5.0;
+            const double statsWindow = statsTime - lastStatsTime;
+            lastStatsTime = statsTime;
+            nextStats = statsTime + 5.0;
             {
                 // Busy share of each emulation thread over the window (wall time
                 // minus the time spent at its waits).
@@ -3296,12 +3540,42 @@ void PS2Runtime::run()
                 lastGlWait = glWait;
                 std::cerr << line << std::endl;
             }
-            static uint64_t lastStatChains = 0;
-            static uint64_t lastHostFrames = 0;
             const uint64_t statChains = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
-            std::cerr << "[stats] t=" << static_cast<int>(GetTime())
-                      << " gameFps=" << (statChains - lastStatChains) / 5.0
-                      << " shownFps=" << ps2_stats::presentedFrames.exchange(0) / 5.0
+            // GS captures can continue while the native picture is on screen.
+            const double gsFps = ps2_stats::presentedFrames.exchange(0) / statsWindow;
+#ifdef PS2X_DESKTOP_VIDEO
+            const auto averageMs = [](uint64_t total, uint64_t samples) {
+                return samples ? total / 1000.0 / samples : 0.0;
+            };
+            const double currentGap = lastRealTime >= 0.0 ? statsTime - lastRealTime : 0.0;
+            std::cerr << "[display] t=" << static_cast<int>(statsTime)
+                      << " nativeCopyMs=" << averageMs(displayTiming.readUs, displayTiming.uploads)
+                      << " nativeUploadMs=" << averageMs(displayTiming.uploadUs, displayTiming.uploads)
+                      << " nativeSamples=" << displayTiming.uploads
+                      << " gsPollMs=" << averageMs(displayTiming.gsUs, displayTiming.gsPolls)
+                      << " gsPollMaxMs=" << displayTiming.gsMaxUs / 1000.0
+                      << " gsPolls=" << displayTiming.gsPolls
+                      << " interpolationMs=" << averageMs(displayTiming.interpolationUs, displayTiming.interpolations)
+                      << " interpolations=" << displayTiming.interpolations
+                      << " longestRealGapMs=" << std::max(longestRealGap, currentGap) * 1000.0
+                      << std::endl;
+            displayTiming = {};
+            longestRealGap = 0.0;
+#endif
+            std::cerr << "[stats] t=" << static_cast<int>(statsTime)
+                      << " gameFps=" << (statChains >= lastStatChains ? statChains - lastStatChains : 0u) / statsWindow
+#ifdef PS2X_DESKTOP_VIDEO
+                      << " shownFps=" << (presentation.shown() - lastStatsPresentation.shown()) / statsWindow
+                      << " realFps=" << (presentation.real - lastStatsPresentation.real) / statsWindow
+                      << " generatedFps=" << (presentation.generated - lastStatsPresentation.generated) / statsWindow
+                      << " repeatedFps=" << (presentation.repeated - lastStatsPresentation.repeated) / statsWindow
+                      << " gsFps=" << gsFps
+                      << " guestHz=" << (eeScheduler().palVideoMode() ? 50.0 : 59.94)
+#else
+                      << " shownFps=" << gsFps
+#endif
+                      << " hostFps=" << (hostFrames - lastHostFrames) / statsWindow
+                      << " nativeUploads=" << std::exchange(nativeFrameUploads, uint64_t{0})
                       << " frames=" << statChains
                       << []
                       {
@@ -3342,7 +3616,7 @@ void PS2Runtime::run()
                                         static_cast<double>(drainCount) / n, gsBusy / 1000.0 / n);
                           return std::string(text) + " gsKinds(" + kinds + " )";
                       }()
-                      << [this]
+                      << [this, statsWindow]
                       {
                           // PS2X_STATS_CLOCK=<addr>:<ticks per second>: speed of a guest
                           // 64-bit clock against real time (SotC: 0x1F8A98:147456000).
@@ -3355,7 +3629,7 @@ void PS2Runtime::run()
                           const double rate = colon ? std::atof(colon + 1) : 1.0;
                           uint64_t now = 0;
                           std::memcpy(&now, m_memory.getRDRAM() + (addr & 0x1FFFFFFu), sizeof(now));
-                          const double speed = last ? (now - last) / rate / 5.0 : 0.0;
+                          const double speed = last ? (now - last) / rate / statsWindow : 0.0;
                           last = now;
                           return " clock=" + std::to_string(speed).substr(0, 5) + "x";
                       }()
@@ -3376,6 +3650,9 @@ void PS2Runtime::run()
                 std::cerr << ps2_stats::gsPrims[i].exchange(0) << (i < 6 ? "," : "");
             lastStatChains = statChains;
             lastHostFrames = hostFrames;
+#ifdef PS2X_DESKTOP_VIDEO
+            lastStatsPresentation = presentation;
+#endif
             dumpDispatchProfile();
             std::cerr << " vif:";
             for (int op = 0; op < 128; ++op)
@@ -3577,17 +3854,45 @@ void PS2Runtime::run()
             std::this_thread::sleep_for(std::chrono::milliseconds(4));
         }
 #else
-        drawHostFrame(shownTex, presentWidth, presentHeight);
+#ifdef PS2X_DESKTOP_VIDEO
+        if (midpoint.id)
+        {
+            hostFrameFlipY = true; // The midpoint comes from an OpenGL framebuffer.
+            drawHostFrame(midpoint, presentWidth, presentHeight);
+            hostFrameFlipY = false;
+        }
+        else
 #endif
-#if defined(__linux__) && !defined(__ANDROID__)
+            drawHostFrame(shownTex, presentWidth, presentHeight);
+#endif
+#ifdef PS2X_DESKTOP_VIDEO
+        // Count the picture submitted by EndDrawing. A held picture can be
+        // swapped several times while the window and overlay keep updating.
+        const uint64_t previousRealFrames = presentation.real;
+        if (midpoint.id)
+            presentation.submit({desktop_video::FrameSource::Generated, nativeRevision});
+        else if (nativeOnScreen)
+            presentation.submit({desktop_video::FrameSource::Native, nativeRevision});
+        else
+            presentation.submit(gsPresentation);
+        if (logStats && presentation.real != previousRealFrames)
+        {
+            const double now = GetTime();
+            if (lastRealTime >= 0.0)
+                longestRealGap = std::max(longestRealGap, now - lastRealTime);
+            lastRealTime = now;
+        }
+        ++hostFrames;
         if (IsKeyPressed(KEY_F11))
         {
-            desktop_video::setFullscreen(!IsWindowFullscreen());
-            hostmenu::settings().fullscreen = IsWindowFullscreen();
+            hostmenu::settings().fullscreen = !hostmenu::settings().fullscreen;
             hostmenu::saveSettings();
         }
 #endif
+        if (IsKeyPressed(KEY_F5)) savestates::request(savestates::Action::Save);
+        if (IsKeyPressed(KEY_F8)) savestates::request(savestates::Action::Load);
         hostmenu::update();
+        desktop_input::poll(hostmenu::inputBlocked());
 
         if (WindowShouldClose() || hostmenu::quitRequested())
         {
@@ -3617,13 +3922,16 @@ void PS2Runtime::run()
 #endif
     UnloadTexture(frameTex);
 #if !(defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
-    if (nativeTex.id)
-        UnloadTexture(nativeTex);
+    if (nativeTex.id) UnloadTexture(nativeTex);
 #endif
-#if defined(__linux__) && !defined(__ANDROID__)
+#ifdef PS2X_DESKTOP_VIDEO
+    if (previousNativeTex.id) UnloadTexture(previousNativeTex);
     desktop_video::shutdown();
 #endif
     CloseWindow();
 
+    savestates::bind(nullptr);
     RUNTIME_LOG("[run] exiting loop");
 }
+
+#include "ps2_runtime_state.inc"

@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <mutex>
 #include <unordered_map>
+#include <string>
+#include <vector>
 
 class PS2Runtime;
 struct R5900Context;
@@ -86,7 +88,11 @@ public:
 
     void log(ps2x::iop::LogLevel level, std::string_view message) override;
 
+    bool captureState(std::vector<uint8_t> &out, std::string &error) const;
+    bool validateState(const std::vector<uint8_t> &blob, std::string &error) const;
+    bool restoreState(const std::vector<uint8_t> &blob, std::string &error);
 private:
+    bool decodeState(const std::vector<uint8_t> &blob, bool apply, std::string &error);
     friend class CallScope;
 
     bool guestRange(uint32_t address, size_t size, uint8_t *&begin) const;
@@ -101,6 +107,7 @@ private:
     {
         std::FILE *stream = nullptr;
         uint64_t size = 0u;
+        std::string path;
     };
     mutable std::mutex m_hostFileMutex;
     std::unordered_map<uint64_t, HostFile> m_hostFiles;

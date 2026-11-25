@@ -60,11 +60,12 @@ def main(out_dir, boot_path, boot_syms, mods):
             data = None if s["type"] == 8 else boot.data[s["offset"]:s["offset"] + s["size"]]
             sections.append((s["name"], s["addr"], s["size"], data, s["flags"]))
 
-    # Addresses the hand-written overrides hook or replace stay function
-    # starts: a goto inside a merged function would go past the hook.
+    # The North American overrides use absolute addresses. Keep their hooks
+    # as function starts there, where a goto would otherwise bypass the hook.
     pinned = set()
-    for src in sorted((pathlib.Path(__file__).resolve().parent.parent / "game/overrides").glob("*.cpp")):
-        pinned |= {int(h, 16) for h in re.findall(r"\b0x([0-9A-Fa-f]{6,8})u?\b", src.read_text(errors="ignore"))}
+    if pathlib.Path(boot_path).name.upper() != "SCES_533.26":
+        for src in sorted((pathlib.Path(__file__).resolve().parent.parent / "game/overrides").glob("*.cpp")):
+            pinned |= {int(h, 16) for h in re.findall(r"\b0x([0-9A-Fa-f]{6,8})u?\b", src.read_text(errors="ignore"))}
     merged = []
 
     # boot ELF function map from heuristics

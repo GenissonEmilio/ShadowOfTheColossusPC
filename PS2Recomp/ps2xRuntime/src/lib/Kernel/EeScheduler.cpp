@@ -19,6 +19,9 @@
 #include <chrono>
 #include <iostream>
 #include <stdexcept>
+#include <bit>
+#include <set>
+#include <type_traits>
 
 namespace
 {
@@ -42,7 +45,8 @@ namespace
     constexpr uint32_t WEF_OR = 0x01u;
     constexpr uint32_t WEF_CLEAR = 0x10u;
     constexpr uint32_t WEF_CLEAR_ALL = 0x20u;
-    constexpr auto kVBlankPeriod = std::chrono::microseconds(16667);
+    constexpr auto kNtscVBlankPeriod = std::chrono::microseconds(16667);
+    constexpr auto kPalVBlankPeriod = std::chrono::microseconds(20000);
     constexpr auto kVBlankDuration = std::chrono::microseconds(500);
     constexpr uint64_t kAlarmTickMicroseconds = 64u;
     constexpr uint32_t kDebugPublishDispatchInterval = 4096u;
@@ -61,7 +65,6 @@ namespace
         return std::chrono::seconds(wholeSeconds) + std::chrono::nanoseconds(remainingNanoseconds);
     }
 
-    constexpr uint64_t kVBlankPeriodCycles = microsecondsToEeCycles(16667u);
     constexpr uint64_t kVBlankDurationCycles = microsecondsToEeCycles(500u);
     constexpr uint64_t kAlarmTickCycles = microsecondsToEeCycles(kAlarmTickMicroseconds);
 
@@ -129,6 +132,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_pendingEeTimerInterrupts = 0u;
     m_eeCycle = 0u;
     m_accountedCycle = 0u;
+    m_sharedVu0Random = mainContext.vu0_r;
     m_runtime.m_eeClock.gate = 0u;
     m_unwinding = false;
     // A/B switches for the dispatch fast paths (read here: on the Vita the
@@ -156,6 +160,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_eventSequence = 0;
     m_invocationSequence = 0;
     m_vsyncTick = 0;
+    m_palVideoMode.store(false, std::memory_order_relaxed);
     m_vsyncFlagAddress = 0;
     m_vsyncTickAddress = 0;
     m_gsVSyncCallback = 0;
@@ -177,8 +182,8 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     main.status = EeThreadStatus::Ready;
     m_threads.emplace(main.id, std::move(main));
     m_readyQueues[0].push_back(kMainThreadId);
-    scheduleEvent(m_eeCycle + kVBlankPeriodCycles,
-                  std::chrono::steady_clock::now() + kVBlankPeriod,
+    scheduleEvent(m_eeCycle + microsecondsToEeCycles(vblankPeriod().count()),
+                  std::chrono::steady_clock::now() + vblankPeriod(),
                   EeEvent{EeEventType::VBlankStart, 0, 0});
     publishSnapshot();
 }
@@ -211,6 +216,13 @@ void EeScheduler::run()
                 event.hostDeadline += pausedTime;
         }
 #endif
+
+        if (m_stateRequestPending.load(std::memory_order_relaxed) &&
+            m_stateRequestPending.exchange(false, std::memory_order_acq_rel))
+        {
+            m_stateOperationClockAnchor = std::chrono::steady_clock::now();
+            m_runtime.processStateRequest();
+        }
         processPendingEvents();
         if (m_stopRequested.load(std::memory_order_relaxed))
         {
@@ -286,9 +298,6 @@ void EeScheduler::run()
         {
             if (!running->invocations.empty())
             {
-                if (m_vu0OwnerValid && m_vu0Owner.threadId == running->id &&
-                    m_vu0Owner.depth == running->invocations.size())
-                    flushVu0Owner();
                 GuestInvocation completed = std::move(running->invocations.back());
                 running->invocations.pop_back();
                 if (completed.onComplete)
@@ -348,51 +357,26 @@ void EeScheduler::run()
             continue;
         }
 
-        // VU0 registers are one hardware unit shared by every thread and
-        // interrupt handler, but each guest context carries its own copy.
-        // Keep them coherent by moving the live VU0 state into whichever
-        // context runs next.
-        static const bool sharedVu0 = std::getenv("PS2X_VU0_PER_THREAD") == nullptr;
-        if (sharedVu0)
+        // A generated function can yield with live VU0 intermediates. A
+        // different thread/async callback must not overwrite that suspended
+        // register file. The random generator alone is global; new threads
+        // otherwise start with an all-zero LFSR and never advance it.
+        const int dispatchThread = running->id;
+        const size_t dispatchDepth = running->invocations.size();
+        const uint64_t dispatchSequence = dispatchDepth ? running->invocations.back().sequence : 0u;
+        auto saveRandom = [&]
         {
-            const Vu0OwnerKey key{m_currentThreadId, running->invocations.size(),
-                                  running->invocations.empty() ? 0u : running->invocations.back().sequence};
-            if (!m_vu0OwnerValid || !(key == m_vu0Owner))
-            {
-                // PS2X_SCHED_STATS=1: what changes the VU0 owner (thread or
-                // invocation switches), per second, by thread and guest PC.
-                static const bool schedStats = std::getenv("PS2X_SCHED_STATS") != nullptr; // the Vita: env.txt
-                if (schedStats)
-                {
-                    static std::map<std::tuple<int, size_t, uint32_t>, uint64_t> switches;
-                    static auto last = std::chrono::steady_clock::now();
-                    ++switches[{key.threadId, key.depth, context.pc}];
-                    const auto now = std::chrono::steady_clock::now();
-                    if (now - last >= std::chrono::seconds(5))
-                    {
-                        last = now;
-                        std::vector<std::pair<uint64_t, std::tuple<int, size_t, uint32_t>>> top;
-                        uint64_t total = 0;
-                        for (const auto &[k, n] : switches)
-                        {
-                            top.push_back({n, k});
-                            total += n;
-                        }
-                        std::sort(top.rbegin(), top.rend());
-                        std::cerr << "[sched] vu0 owner changes/s=" << total / 5 << " top:";
-                        for (size_t i = 0; i < top.size() && i < 8; ++i)
-                            std::cerr << " t" << std::get<0>(top[i].second) << "/d" << std::get<1>(top[i].second) << "@0x" << std::hex
-                                      << std::get<2>(top[i].second) << std::dec << "=" << top[i].first / 5;
-                        std::cerr << std::endl;
-                        switches.clear();
-                    }
-                }
-                flushVu0Owner();
-                loadGlobalVu0(context);
-                m_vu0Owner = key;
-                m_vu0OwnerValid = true;
-            }
-        }
+            // invokeCurrent() can grow the invocation vector, invalidating
+            // `context`; ExitDeleteThread can destroy the entire record.
+            const auto live = m_threads.find(dispatchThread);
+            if (live == m_threads.end())
+                return;
+            if (dispatchDepth == 0u)
+                m_sharedVu0Random = live->second.context.vu0_r;
+            else if (live->second.invocations.size() >= dispatchDepth &&
+                     live->second.invocations[dispatchDepth - 1u].sequence == dispatchSequence)
+                m_sharedVu0Random = live->second.invocations[dispatchDepth - 1u].context.vu0_r;
+        };
         try
         {
             m_insideInterrupt = !running->invocations.empty() && running->invocations.back().kind == GuestInvocationKind::Interrupt;
@@ -401,12 +385,15 @@ void EeScheduler::run()
             m_guestExecuting.store(true, std::memory_order_relaxed);
             m_unwinding = false;
             updateGate();
+            context.vu0_r = m_sharedVu0Random;
             function(m_rdram, &context, &m_runtime);
+            saveRandom();
             m_guestExecuting.store(false, std::memory_order_relaxed);
             m_insideInterrupt = false;
         }
         catch (const EeDispatcherTransfer &)
         {
+            saveRandom();
             m_guestExecuting.store(false, std::memory_order_relaxed);
             m_insideInterrupt = false;
         }
@@ -444,6 +431,35 @@ void EeScheduler::requestStop()
 #if defined(__ANDROID__)
     ps2x::android::wakeGuest();
 #endif
+}
+
+void EeScheduler::notifyStateRequest()
+{
+    // The mutex pairs with CV waiters, preventing a request between their
+    // predicate check and sleep from being lost.
+    {
+        std::lock_guard lock(m_eventMutex);
+        m_stateRequestPending.store(true, std::memory_order_release);
+        m_checkpointPending.store(true, std::memory_order_release);
+    }
+    m_eventCv.notify_all();
+}
+
+void EeScheduler::rebaseHostClockAfterStateOperation()
+{
+    assertExecutor();
+    assert(!m_guestExecuting.load(std::memory_order_relaxed));
+    const auto now = std::chrono::steady_clock::now();
+    if (m_stateOperationClockAnchor == std::chrono::steady_clock::time_point{})
+        return;
+    const auto paused = now - m_stateOperationClockAnchor;
+    {
+        std::lock_guard lock(m_eventMutex);
+        m_hostClockBase += paused;
+        for (auto &deadline : m_deadlines)
+            deadline.hostDeadline += paused;
+    }
+    m_stateOperationClockAnchor = {};
 }
 
 void EeScheduler::postEvent(EeEvent event)
@@ -666,6 +682,7 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
     assert(exiting != nullptr);
     const int id = exiting->id;
     const uint32_t ownedStack = deleteThreadRecord && exiting->ownsStack ? exiting->stack : 0u;
+    m_sharedVu0Random = exiting->activeContext().vu0_r;
     makeDormant(*exiting);
     m_currentThreadId = 0;
     if (deleteThreadRecord && id != kMainThreadId)
@@ -1457,6 +1474,20 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
     }
 }
 
+void EeScheduler::setGsVideoMode(uint32_t mode)
+{
+    // SCES-53326 lets the player switch between NTSC and PAL. The existing
+    // North American profile always uses its original scheduler cadence.
+    constexpr uint32_t kGsModePal = 0x03u;
+    const bool pal = mode == kGsModePal && PS2Runtime::getIoPaths().elfPath.filename() == "SCES_533.26";
+    m_palVideoMode.store(pal, std::memory_order_relaxed);
+}
+
+std::chrono::microseconds EeScheduler::vblankPeriod() const noexcept
+{
+    return palVideoMode() ? kPalVBlankPeriod : kNtscVBlankPeriod;
+}
+
 void EeScheduler::setVSyncFlag(uint32_t flagAddress, uint32_t tickAddress)
 {
     assertExecutor();
@@ -1629,50 +1660,6 @@ const GuestThread *EeScheduler::currentThread() const
 int EeScheduler::currentThreadId() const noexcept
 {
     return m_currentThreadId;
-}
-
-namespace
-{
-    // VU0 register block inside R5900Context: vu0_vf .. vu0_cf.
-    inline uint8_t *vu0Block(R5900Context &ctx) { return reinterpret_cast<uint8_t *>(&ctx.vu0_vf[0]); }
-    inline size_t vu0BlockSize(R5900Context &ctx)
-    {
-        return static_cast<size_t>(reinterpret_cast<uint8_t *>(&ctx.vu0_cf[4]) - vu0Block(ctx));
-    }
-}
-
-void EeScheduler::saveGlobalVu0(R5900Context &ctx)
-{
-    const size_t size = vu0BlockSize(ctx);
-    m_vu0Global.resize(size);
-    std::memcpy(m_vu0Global.data(), vu0Block(ctx), size);
-}
-
-void EeScheduler::loadGlobalVu0(R5900Context &ctx)
-{
-    const size_t size = vu0BlockSize(ctx);
-    if (m_vu0Global.size() == size)
-        std::memcpy(vu0Block(ctx), m_vu0Global.data(), size);
-}
-
-// The owner context holds the live VU0 registers; copy them back to the
-// shared store before another context takes over or the owner goes away.
-void EeScheduler::flushVu0Owner()
-{
-    if (!m_vu0OwnerValid)
-        return;
-    m_vu0OwnerValid = false;
-    GuestThread *owner = thread(m_vu0Owner.threadId);
-    if (!owner)
-        return;
-    if (m_vu0Owner.depth == 0u)
-    {
-        saveGlobalVu0(owner->context);
-        return;
-    }
-    if (owner->invocations.size() >= m_vu0Owner.depth &&
-        owner->invocations[m_vu0Owner.depth - 1u].sequence == m_vu0Owner.sequence)
-        saveGlobalVu0(owner->invocations[m_vu0Owner.depth - 1u].context);
 }
 
 R5900Context *EeScheduler::currentContext()
@@ -1878,8 +1865,6 @@ void EeScheduler::makeRunning(GuestThread &item)
 
 void EeScheduler::makeDormant(GuestThread &item)
 {
-    if (m_vu0OwnerValid && m_vu0Owner.threadId == item.id)
-        flushVu0Owner();
     removeReady(item);
     removeFromWaitObject(item);
     item.status = EeThreadStatus::Dormant;
@@ -2043,7 +2028,7 @@ void EeScheduler::processPendingEvents()
         std::lock_guard lock(m_eventMutex);
         const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
         const bool cycleEventDue = nextEventCycle != 0u && m_eeCycle >= nextEventCycle;
-        const bool pendingWork = !m_events.empty() || cycleEventDue || m_stopRequested.load(std::memory_order_acquire);
+        const bool pendingWork = m_stateRequestPending.load(std::memory_order_acquire) || !m_events.empty() || cycleEventDue || m_stopRequested.load(std::memory_order_acquire);
         m_checkpointPending.store(pendingWork, std::memory_order_release);
     }
     applyPendingPreemption();
@@ -2080,9 +2065,9 @@ void EeScheduler::processDueDeadlines()
             {
                 ps2_load::Wait pacing;
                 m_eventCv.wait_until(lock, pacingDeadline, [this]()
-                                     { return !m_events.empty() ||
+                                     { return m_stateRequestPending.load(std::memory_order_acquire) || !m_events.empty() ||
                                               m_stopRequested.load(std::memory_order_acquire); });
-                if (!m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
+                if (m_stateRequestPending.load(std::memory_order_acquire) || !m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
                 {
                     updateNextDeadline();
                     return;
@@ -2129,8 +2114,9 @@ void EeScheduler::processDueDeadlines()
                 scheduleEvent(scheduled.deadlineCycle + kVBlankDurationCycles,
                               scheduled.hostDeadline + kVBlankDuration,
                               EeEvent{EeEventType::VBlankEnd, 0, m_vsyncTick + 1u});
-                scheduleEvent(scheduled.deadlineCycle + kVBlankPeriodCycles,
-                              scheduled.hostDeadline + kVBlankPeriod,
+                const auto period = vblankPeriod();
+                scheduleEvent(scheduled.deadlineCycle + microsecondsToEeCycles(period.count()),
+                              scheduled.hostDeadline + period,
                               EeEvent{EeEventType::VBlankStart, 0, 0});
             }
             processEvent(scheduled.event);
@@ -2283,7 +2269,7 @@ void EeScheduler::waitForEvent()
 {
     m_profileContext.store(nullptr, std::memory_order_relaxed);
     std::unique_lock lock(m_eventMutex);
-    if (!m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
+    if (m_stateRequestPending.load(std::memory_order_acquire) || !m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
     {
         return;
     }
@@ -2293,7 +2279,7 @@ void EeScheduler::waitForEvent()
     {
         ps2_load::Wait idle;
         m_eventCv.wait(lock, [this]()
-                       { return !m_events.empty() || m_stopRequested.load(std::memory_order_acquire); });
+                       { return m_stateRequestPending.load(std::memory_order_acquire) || !m_events.empty() || m_stopRequested.load(std::memory_order_acquire); });
         return;
     }
 
@@ -2327,7 +2313,7 @@ void EeScheduler::waitForEvent()
     {
         ps2_load::Wait idle;
         return m_eventCv.wait_until(lock, hostDeadline, [this]()
-                                    { return !m_events.empty() ||
+                                    { return m_stateRequestPending.load(std::memory_order_acquire) || !m_events.empty() ||
                                              m_stopRequested.load(std::memory_order_acquire); });
     }();
     if (!signaled)
@@ -2407,7 +2393,8 @@ void EeScheduler::syncCyclesToHostClock()
     {
         uint64_t lag = hostCycles - m_eeCycle;
         // Never replay more than two frames at once; forget older lag instead.
-        const uint64_t maxLag = 2u * kVBlankPeriodCycles;
+        const uint64_t periodCycles = microsecondsToEeCycles(vblankPeriod().count());
+        const uint64_t maxLag = 2u * periodCycles;
         if (lag > maxLag)
         {
             m_hostClockBase += std::chrono::microseconds((lag - maxLag) * 1000000ull / kEeClockHz);
@@ -2415,7 +2402,7 @@ void EeScheduler::syncCyclesToHostClock()
         }
         while (lag != 0u)
         {
-            const uint64_t step = std::min<uint64_t>(lag, kVBlankPeriodCycles);
+            const uint64_t step = std::min(lag, periodCycles);
             accountCycles(static_cast<uint32_t>(step));
             lag -= step;
         }
@@ -2432,7 +2419,7 @@ void EeScheduler::idleWait()
             return;
     {
         std::unique_lock lock(m_eventMutex);
-        if (!m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
+        if (m_stateRequestPending.load(std::memory_order_acquire) || !m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
             return;
         // A deadline due by cycles is processed first. Host deadlines can lag
         // real time after a slow stretch (each VBlank is scheduled from the
@@ -2449,7 +2436,7 @@ void EeScheduler::idleWait()
         ps2_load::Wait idle;
         const R5900Context *running = m_profileContext.exchange(nullptr, std::memory_order_relaxed);
         m_eventCv.wait_until(lock, until, [this]()
-                             { return !m_events.empty() || m_stopRequested.load(std::memory_order_acquire); });
+                             { return m_stateRequestPending.load(std::memory_order_acquire) || !m_events.empty() || m_stopRequested.load(std::memory_order_acquire); });
         m_profileContext.store(running, std::memory_order_relaxed);
     }
     syncCyclesToHostClock();
@@ -2513,3 +2500,5 @@ void EeScheduler::publishIdleDebugContext()
         publishDebugContext(selected->activeContext());
     }
 }
+
+#include "EeSchedulerState.inc"

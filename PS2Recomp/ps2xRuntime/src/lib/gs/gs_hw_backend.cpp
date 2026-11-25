@@ -22,6 +22,14 @@
 #define GL_SILENCE_DEPRECATION
 #include <OpenGL/gl3.h>
 #define PS2X_GS_HW_GL 1
+#elif defined(_WIN32)
+#include "external/glad.h" // initialized by the desktop raylib window
+#define PS2X_GS_HW_GL 1
+#elif defined(__linux__) && !defined(__ANDROID__)
+#define GL_GLEXT_PROTOTYPES 1
+#include <GL/gl.h>
+#include <GL/glext.h>
+#define PS2X_GS_HW_GL 1
 #elif defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
 // vitaGL (GXM): one GL state for every thread, so the host and the GS thread
 // take turns under the raylib shim's lock. CG shaders, no depth textures, no

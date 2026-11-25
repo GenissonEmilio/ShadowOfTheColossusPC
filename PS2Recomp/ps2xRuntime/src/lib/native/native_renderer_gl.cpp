@@ -12,9 +12,10 @@
 // and stencil (nothing to attach); no depth textures, so the passes that read
 // depth (bloom mask, depth of field) are left out there for now.
 #include "native_backend.h"
+#include "native_history_state.h"
 #include "runtime/native_tuning.h"
 
-#if defined(__APPLE__) || defined(__linux__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
+#if defined(_WIN32) || defined(__APPLE__) || defined(__linux__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
 
 #if defined(__ANDROID__)
 #include <EGL/egl.h>
@@ -25,7 +26,11 @@
 #define GL_SILENCE_DEPRECATION
 #include <OpenGL/gl3.h>
 #include <malloc/malloc.h>
-#elif defined(__linux__)
+#elif defined(_WIN32)
+#include "external/glad.h" // the loader initialized by the desktop raylib window
+#define GLFW_INCLUDE_NONE
+#include "GLFW/glfw3.h"
+#elif defined(__linux__) && !defined(__ANDROID__)
 #define GL_GLEXT_PROTOTYPES 1
 #include <GL/gl.h>
 #include <GL/glext.h>
@@ -46,9 +51,11 @@ extern "C" unsigned int _newlib_heap_size_user;      // ps2_vita_runtime.cpp
 #include "ThreadNaming.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -77,6 +84,8 @@ namespace
         return mallinfo().uordblks;
 #elif defined(__linux__)
         return mallinfo2().uordblks;
+#elif defined(_WIN32)
+        return 0; // no portable measurement of bytes allocated by the CRT heap
 #else
         malloc_statistics_t stats{};
         malloc_zone_statistics(nullptr, &stats);
@@ -112,6 +121,29 @@ namespace
     }
 
 #if !defined(PS2X_NATIVE_VITA)
+    float queryMaxAnisotropy()
+    {
+        GLint major = 0, minor = 0;
+        glGetIntegerv(GL_MAJOR_VERSION, &major);
+        glGetIntegerv(GL_MINOR_VERSION, &minor);
+        bool supported = major > 4 || (major == 4 && minor >= 6);
+        if (!supported)
+        {
+            GLint count = 0;
+            glGetIntegerv(GL_NUM_EXTENSIONS, &count);
+            for (GLint i = 0; i < count && !supported; ++i)
+            {
+                const auto *extension = reinterpret_cast<const char *>(glGetStringi(GL_EXTENSIONS, i));
+                supported = extension && (std::strcmp(extension, "GL_EXT_texture_filter_anisotropic") == 0 ||
+                                          std::strcmp(extension, "GL_ARB_texture_filter_anisotropic") == 0);
+            }
+        }
+        GLfloat limit = 1.0f;
+        if (supported)
+            glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &limit);
+        return limit;
+    }
+
     const char *kMainVertex = R"(layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec4 aColor;
@@ -161,9 +193,10 @@ in vec4 vColor;
 in vec4 vScreen;
 uniform sampler2D uTex, uBackground, uReflection, uRefraction;
 uniform vec4 uFogA;      // start, width, steps, fogged
-uniform vec4 uFogC;      // scale, lod K, lod scale, max lod
+uniform vec4 uFogC;      // scale, lod K, lod scale, max lod (-1: hardware footprint)
 uniform vec4 uFogColour; // rgb, textured mode
 uniform vec4 uDebug;
+uniform vec4 uAlphaTest; // FB_ONLY enabled, GS byte reference, depth-only phase
 out vec4 oColor;
 void main()
 {
@@ -204,9 +237,16 @@ void main()
         return;
     }
     float lod = uFogC.w > 0.0 ? clamp(log2(max(depth, 1e-3)) * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
-    vec4 t = textured > 0.5 ? textureLod(uTex, vUV.xy, lod) : vec4(1.0);
+    vec4 t = vec4(vec3(128.0 / 255.0), 1.0); // GS untextured RGB uses vertex / 255
+    if (textured > 0.5)
+        t = uFogC.w < 0.0 ? texture(uTex, vUV.xy) : textureLod(uTex, vUV.xy, lod);
     float alpha = clamp(t.a * (textured > 0.5 ? 2.0 : 1.0) * vColor.a, 0.0, 1.0);
-    if (alpha < 0.02)
+    // Alpha TEST precedes the GS's blend-alpha saturation at 0x80. AFAIL
+    // FB_ONLY keeps even a low-alpha colour fragment, but not its Z.
+    float gsAlpha = clamp((textured > 0.5 ? t.a * 255.0 : 128.0) * vColor.a, 0.0, 255.0);
+    if (uAlphaTest.x > 0.5 && uAlphaTest.z > 0.5 && gsAlpha < uAlphaTest.y)
+        discard;
+    if (uAlphaTest.x < 0.5 && alpha < 0.02)
         discard;
     if (uDebug.w > 0.0)
     {
@@ -440,7 +480,7 @@ float4 main(float4 vUV : TEXCOORD0, float4 vColor : TEXCOORD1, float4 vScreen : 
         return float4(saturate(tex2D(uReflection, uv).rgb * uDebug.rgb * vColor.rgb), saturate(vColor.a * -uDebug.w));
     }
     float lod = uFogC.w > 0.0 ? clamp(log2(max(depth, 1e-3)) * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
-    float4 t = textured > 0.5 ? tex2Dlod(uTex, float4(vUV.xy, 0.0, lod)) : float4(1.0, 1.0, 1.0, 1.0);
+    float4 t = textured > 0.5 ? tex2Dlod(uTex, float4(vUV.xy, 0.0, lod)) : float4(0.5019608, 0.5019608, 0.5019608, 1.0); // GS untextured RGB uses vertex / 255
     float alpha = saturate(t.a * (textured > 0.5 ? 2.0 : 1.0) * vColor.a);
     if (alpha < 0.02)
         discard;
@@ -572,6 +612,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         uint64_t frame = 0;   // the arena it went into (debugging)
         uint64_t used = 0;    // the last frame that drew it (eviction)
         uint64_t bytes = 0;
+        uint8_t alphaMin = 0, alphaMax = 255;
+        std::vector<std::array<uint8_t, 2>> triangleAlpha;
     };
 
     struct Texture
@@ -579,11 +621,35 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         GLuint name = 0;
         uint32_t clamp = 0; // the wrap set on it (bit 0 s, bit 1 t clamp): new textures repeat
         uint32_t filter = 2; // the min / mag filter set on it (Tuning::textureFilter; 2 trilinear, as uploaded)
-        bool mipped = false; // has mip levels
+        uint32_t levels = 1; // number of uploaded mip levels, including level 0
         uint64_t used = 0;
         uint64_t bytes = 0;
         bool inHeap = false; // vitaGL put it in the newlib heap (its pools were full)
+        uint8_t alphaMin = 0, alphaMax = 255; // bounds over every uploaded mip
     };
+
+    template <typename GetAlpha>
+    void meshAlphaBounds(Mesh &mesh, uint32_t count, GetAlpha getAlpha)
+    {
+        mesh.alphaMin = 255;
+        mesh.alphaMax = 0;
+        mesh.triangleAlpha.resize(count / 3u);
+        for (uint32_t i = 0; i < count / 3u; ++i)
+        {
+            auto &range = mesh.triangleAlpha[i];
+            range = {255, 0};
+            for (uint32_t j = 0; j < 3u; ++j)
+            {
+                const auto alpha = getAlpha(i * 3u + j);
+                range[0] = std::min(range[0], alpha[0]);
+                range[1] = std::max(range[1], alpha[1]);
+            }
+            mesh.alphaMin = std::min(mesh.alphaMin, range[0]);
+            mesh.alphaMax = std::max(mesh.alphaMax, range[1]);
+        }
+        if (mesh.alphaMin == mesh.alphaMax)
+            std::vector<std::array<uint8_t, 2>>().swap(mesh.triangleAlpha);
+    }
 
     struct Draw
     {
@@ -609,6 +675,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         bool hasDepthClamp = false;
         GLint shadowDepthLocation = -1;
 #endif
+#if !defined(PS2X_NATIVE_VITA)
+        float maxAnisotropy = 1.0f;
+#endif
 #if defined(PS2X_NATIVE_VITA)
         GLuint quadPrograms[12] = {}; // by mode (8 and 11: the bloom mask's, see kQuadFragment)
 #endif
@@ -629,11 +698,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         std::unordered_map<UniformKey, GLint, UniformKeyHash> uniforms;
         Target colorPlain; // the picture's colour alone (passes that read its depth)
         Target color, background, backgroundSmall, reflection, refraction, refractionHalf, snapshot, shadowMask;
+#if !defined(PS2X_NATIVE_VITA)
+        Target waterRefraction, waterRefractionHalf; // higher-resolution copies for layer 9 only
+#endif
         Target previous; // the last frame shown (feedbackBlur)
         // Tuning midFrameRedraw: the picture up to a mid-frame effect's layer
         // drawn again into a target of its own (one per effect), and the
         // heat haze's 256 x 256 copy apart from the water's.
-        Target prefix[3], hazeSmall;
+        Target prefix[3], hazeSmall[3]; // one reduced haze source per bounded prefix slot
         Target shownFrame[2]; // what the host shows, alternately (the GPU draws later: never the target being drawn)
         int shownIndex = 0;
         Target glowLayer, glowSmall[4]; // bossDeathEffect: layer 8 apart (on the picture's depth); 256, 128, 64, 64
@@ -643,6 +715,126 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         Target gsBloom[7];
         bool gsBloomHistory = false;
         uint32_t width = 0, height = 0;
+#if defined(__linux__) && !defined(__ANDROID__)
+        // Opt-in investigation only: the first 240 frames containing the
+        // underwater screen-copy layer. Readbacks intentionally synchronize GL.
+        uint32_t waterCopyTraceFrames = 0, waterCopyTraceDraws = 0;
+        bool waterCopyTraceActive = false;
+        const Target *waterCopyTraceTarget(GLuint texture) const
+        {
+            for (const Target *t : {&color, &snapshot, &refraction, &refractionHalf,
+                                    &hazeSmall[0], &hazeSmall[1], &hazeSmall[2], &previous,
+                                    &prefix[0], &prefix[1], &prefix[2]})
+                if (texture && t->texture == texture) return t;
+            return nullptr;
+        }
+        void traceWaterCopy(const char *stage, const Target &target, const Target *input = nullptr,
+                            uint32_t order = 0, GLuint sampled = 0)
+        {
+            if (!waterCopyTraceActive) return;
+            GLint readFbo = 0, readBuffer = 0, drawFbo = 0, alignment = 0, rowLength = 0;
+            GLint skipRows = 0, skipPixels = 0, packBuffer = 0, activeTexture = 0, sampledBinding = 0;
+            GLint viewport[4] = {};
+            glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFbo);
+            glGetIntegerv(GL_READ_BUFFER, &readBuffer);
+            glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawFbo);
+            glGetIntegerv(GL_VIEWPORT, viewport);
+            glGetIntegerv(GL_PACK_ALIGNMENT, &alignment); glGetIntegerv(GL_PACK_ROW_LENGTH, &rowLength);
+            glGetIntegerv(GL_PACK_SKIP_ROWS, &skipRows); glGetIntegerv(GL_PACK_SKIP_PIXELS, &skipPixels);
+            glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &packBuffer);
+            glGetIntegerv(GL_ACTIVE_TEXTURE, &activeTexture);
+            glActiveTexture(GL_TEXTURE3); glGetIntegerv(GL_TEXTURE_BINDING_2D, &sampledBinding);
+            glActiveTexture(activeTexture);
+            GLenum before = GL_NO_ERROR, error = GL_NO_ERROR;
+            uint32_t beforeCount = 0;
+            for (int i = 0; i < 16; ++i) {
+                const GLenum e = glGetError();
+                if (e == GL_NO_ERROR) break;
+                if (!beforeCount++) before = e;
+            }
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+            glPixelStorei(GL_PACK_ALIGNMENT, 1); glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+            glPixelStorei(GL_PACK_SKIP_ROWS, 0); glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, target.fbo); glReadBuffer(GL_COLOR_ATTACHMENT0);
+            const GLenum status = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER);
+            std::vector<uint8_t> pixels(size_t(target.width) * target.height * 4u);
+            if (status == GL_FRAMEBUFFER_COMPLETE && !pixels.empty())
+                glReadPixels(0, 0, target.width, target.height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+            error = glGetError();
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo); glReadBuffer(readBuffer);
+            glPixelStorei(GL_PACK_ALIGNMENT, alignment); glPixelStorei(GL_PACK_ROW_LENGTH, rowLength);
+            glPixelStorei(GL_PACK_SKIP_ROWS, skipRows); glPixelStorei(GL_PACK_SKIP_PIXELS, skipPixels);
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, packBuffer);
+            uint64_t sum[3] = {}, hash = 14695981039346656037ull;
+            for (size_t i = 0; i < pixels.size(); i += 4u)
+                for (int c = 0; c < 3; ++c) {
+                    sum[c] += pixels[i + c]; hash = (hash ^ pixels[i + c]) * 1099511628211ull;
+                }
+            const double count = std::max(size_t(1), pixels.size() / 4u);
+            std::fprintf(stderr, "[water-copy] frame=%llu trace=%u stage=%s order=%u "
+                         "in=%u/%u/%ux%u out=%u/%u/%ux%u drawFbo=%d viewport=%d,%d,%d,%d "
+                         "sample=%u bound3=%d rgb=%.6f,%.6f,%.6f hash=%016llx status=%x errors=%x/%u/%x\n",
+                         (unsigned long long)arenaFrame, waterCopyTraceFrames, stage, order,
+                         input ? input->texture : 0, input ? input->fbo : 0,
+                         input ? input->width : 0, input ? input->height : 0,
+                         target.texture, target.fbo, target.width, target.height, drawFbo,
+                         viewport[0], viewport[1], viewport[2], viewport[3], sampled, sampledBinding,
+                         sum[0] / count, sum[1] / count, sum[2] / count, (unsigned long long)hash,
+                         status, before, beforeCount, error);
+        }
+        void traceWaterGeometry(const Draw &draw, const Mesh &mesh)
+        {
+            GLboolean depthMask = GL_FALSE;
+            GLint depthFunc = 0;
+            glGetBooleanv(GL_DEPTH_WRITEMASK, &depthMask); glGetIntegerv(GL_DEPTH_FUNC, &depthFunc);
+            const bool available = mesh.dynamic && !mesh.skinned && !mesh.indexed && mesh.frame == arenaFrame &&
+                size_t(mesh.first) <= arena.size() && mesh.count <= arena.size() - size_t(mesh.first);
+            std::fprintf(stderr, "[water-copy-depth] frame=%llu trace=%u test=%u func=%x mask=%u "
+                         "geometry=%s dynamic=%u indexed=%u meshFrame=%llu\n",
+                         (unsigned long long)arenaFrame, waterCopyTraceFrames, glIsEnabled(GL_DEPTH_TEST), depthFunc,
+                         depthMask, available ? "arena" : "unavailable", mesh.dynamic, mesh.indexed,
+                         (unsigned long long)mesh.frame);
+            if (!available) return;
+            // x/y/z/w of the actual shader clip position, followed by UV and
+            // NDC x/y. No guest reads and no assumption about static GPU meshes.
+            float low[8], high[8];
+            std::fill_n(low, 8, INFINITY); std::fill_n(high, 8, -INFINITY);
+            uint32_t invalid = 0, outside[6] = {}, alphaLow = 255, alphaHigh = 0;
+            uint32_t rgbaLow[3] = {255, 255, 255}, rgbaHigh[3] = {};
+            uint64_t hash = 14695981039346656037ull;
+            for (uint32_t i = 0; i < mesh.count; ++i) {
+                const native_renderer::Vertex &v = arena.data()[size_t(mesh.first) + i];
+                float c[4];
+                for (int k = 0; k < 4; ++k)
+                    c[k] = draw.clip[k] * v.x + draw.clip[4 + k] * v.y + draw.clip[8 + k] * v.z + draw.clip[12 + k];
+                const float q[8] = {c[0], c[1], c[3] - 0.2f, c[3], v.u + draw.state.uvOffset[0],
+                                    v.v + draw.state.uvOffset[1], c[0] / c[3], c[1] / c[3]};
+                bool finite = true;
+                for (int k = 0; k < 8; ++k) {
+                    finite = finite && std::isfinite(q[k]);
+                    if (std::isfinite(q[k])) { low[k] = std::min(low[k], q[k]); high[k] = std::max(high[k], q[k]); }
+                    uint32_t bits; std::memcpy(&bits, q + k, sizeof(bits));
+                    for (int b = 0; b < 4; ++b) hash = (hash ^ ((bits >> (8 * b)) & 255u)) * 1099511628211ull;
+                }
+                invalid += !finite;
+                for (int k = 0; k < 3; ++k) {
+                    outside[k * 2] += q[k] < -q[3]; outside[k * 2 + 1] += q[k] > q[3];
+                }
+                const uint8_t rgb[3] = {v.r, v.g, v.b};
+                for (int k = 0; k < 3; ++k) { rgbaLow[k] = std::min(rgbaLow[k], uint32_t(rgb[k])); rgbaHigh[k] = std::max(rgbaHigh[k], uint32_t(rgb[k])); }
+                alphaLow = std::min(alphaLow, uint32_t(v.a)); alphaHigh = std::max(alphaHigh, uint32_t(v.a));
+            }
+            std::fprintf(stderr, "[water-copy-geometry] frame=%llu trace=%u vertices=%u invalid=%u "
+                         "clipX=%g..%g clipY=%g..%g clipZ=%g..%g clipW=%g..%g uv=%g..%g,%g..%g "
+                         "ndc=%g..%g,%g..%g outside=%u,%u,%u,%u,%u,%u rgba=%u..%u,%u..%u,%u..%u,%u..%u hash=%016llx\n",
+                         (unsigned long long)arenaFrame, waterCopyTraceFrames, mesh.count, invalid,
+                         low[0], high[0], low[1], high[1], low[2], high[2], low[3], high[3],
+                         low[4], high[4], low[5], high[5], low[6], high[6], low[7], high[7],
+                         outside[0], outside[1], outside[2], outside[3], outside[4], outside[5],
+                         rgbaLow[0], rgbaHigh[0], rgbaLow[1], rgbaHigh[1], rgbaLow[2], rgbaHigh[2], alphaLow, alphaHigh,
+                         (unsigned long long)hash);
+        }
+#endif
         // What is bound now (render() starts from nothing known: the host
         // draws with its own state between frames). Binding only on a change
         // keeps vitaGL from redoing its per-call work every draw.
@@ -682,7 +874,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // last values sent (kept across frames: nothing else sets them).
         enum MainUniform
         {
-            uClip, uDirections, uColours, uMisc, uFogA, uFogB, uFogC, uFogColour, uDebug, kMainUniforms
+            uClip, uDirections, uColours, uMisc, uFogA, uFogB, uFogC, uFogColour, uDebug, uAlphaTest, kMainUniforms
         };
         // [0] mainProgram, [1] skinProgram (the same uniforms, kept apart).
         GLint mainLocation[2][kMainUniforms] = {};
@@ -810,7 +1002,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // What the last frame drawn cost (the render thread's): read at the next hand-over.
         struct
         {
-            uint64_t renderUs = 0, presentUs = 0;
+            uint64_t renderUs = 0, readbackUs = 0, presentUs = 0;
             uint32_t targets = 0;
         } stats;
         std::vector<native_renderer::ScreenBlur> blurs;
@@ -820,10 +1012,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         native_renderer::DepthOfField dof;
         bool hold = false; // holdFrame: uploads only, not drawn or shown
 
-        std::mutex outputMutex;
-        std::vector<uint8_t> output;
-        uint32_t outputWidth = 0, outputHeight = 0;
-        uint64_t outputSerial = 0;
+        native_renderer::detail::FrameOutput output;
+        std::vector<uint8_t> readbackPixels;
 #if defined(__ANDROID__)
         uint64_t readbackUs = 0;
 #endif
@@ -999,6 +1189,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             shadowDepthLocation = glGetUniformLocation(mainProgram, "uClampShadowDepth");
 #endif
 #if !defined(PS2X_NATIVE_VITA)
+            maxAnisotropy = queryMaxAnisotropy();
+            std::cerr << "[native:gl] maximum texture anisotropy " << maxAnisotropy << 'x' << std::endl;
             glGenVertexArrays(1, &vao);
             glBindVertexArray(vao);
 #endif
@@ -1022,7 +1214,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 if (!p)
                     continue;
                 glUseProgram(p);
-                const char *names[kMainUniforms] = {"uClip", "uDirections", "uColours", "uMisc", "uFogA", "uFogB", "uFogC", "uFogColour", "uDebug"};
+                const char *names[kMainUniforms] = {"uClip", "uDirections", "uColours", "uMisc", "uFogA", "uFogB", "uFogC", "uFogColour", "uDebug", "uAlphaTest"};
                 for (int i = 0; i < kMainUniforms; ++i)
                     mainLocation[slot][i] = glGetUniformLocation(p, names[i]);
                 glUniform1i(glGetUniformLocation(p, "uTex"), 0);
@@ -1204,7 +1396,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             return t;
         }
 
-        static void makeTarget(Target &t, uint32_t w, uint32_t h, bool depth)
+        static void destroyTarget(Target &t)
         {
             if (t.fbo)
                 glDeleteFramebuffers(1, &t.fbo);
@@ -1213,6 +1405,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             if (t.depth)
                 glDeleteTextures(1, &t.depth);
             t = Target{};
+        }
+
+        static bool makeTarget(Target &t, uint32_t w, uint32_t h, bool depth)
+        {
+            destroyTarget(t);
             t.width = w;
             t.height = h;
             t.texture = newTexture(w, h, true);
@@ -1232,11 +1429,32 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, t.depth, 0);
             }
             if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+            {
                 std::cerr << "[native:gl] incomplete framebuffer " << w << "x" << h << std::endl;
+                return false;
+            }
 #else
             (void)depth; // vitaGL gives every framebuffer its depth and stencil
 #endif
+            return true;
         }
+
+#if !defined(PS2X_NATIVE_VITA)
+        static bool resizeEffectTarget(Target &target, uint32_t size, bool depth)
+        {
+            if (target.texture && target.width == size)
+                return true;
+            Target candidate;
+            if (!makeTarget(candidate, size, size, depth))
+            {
+                destroyTarget(candidate);
+                return false;
+            }
+            destroyTarget(target);
+            target = candidate;
+            return true;
+        }
+#endif
 
         void ensureTargets(uint32_t w, uint32_t h)
         {
@@ -1257,11 +1475,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             // Full size on the Vita: the 256 x 256 targets drawn mid-frame
             // did not hold there (the refraction copy came out white).
             makeTarget(reflection, w, h, true);
-#else
-            makeTarget(reflection, 256, 256, true);
 #endif
             makeTarget(refraction, 256, 256, false);
-            makeTarget(hazeSmall, 256, 256, false);
+            for (Target &t : hazeSmall)
+                if (t.texture) makeTarget(t, 256, 256, false);
             for (Target &t : prefix)
                 if (t.texture)
                     makeTarget(t, w, h, true);
@@ -1296,6 +1513,121 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             bloomHistory = false;
             width = w;
             height = h;
+        }
+
+        bool captureHistory(std::vector<uint8_t> &out, std::string &error)
+        {
+#if defined(__linux__) && !defined(__ANDROID__)
+            native_renderer::detail::HistoryState state;
+            state.width = width; state.height = height;
+            state.bloom = bloomHistory; state.gsBloom = gsBloomHistory;
+            if (!width || !height || native_renderer::detail::historyStateBytes(width, height, bloomHistory, gsBloomHistory) >
+                                     native_renderer::detail::HistoryStateLimit - 64u)
+            { error = "Native temporal histories are not ready or exceed the 32 MiB state budget."; return false; }
+            // Called only by GlBackend's synchronous RenderThread command.
+            // Save all transfer state, including PBOs: a pointer must mean a
+            // CPU address here even if the preceding render used a PBO.
+            GLint framebuffer = 0, readBuffer = 0, alignment = 0, rowLength = 0, skipRows = 0, skipPixels = 0, buffer = 0;
+            glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &framebuffer); glGetIntegerv(GL_READ_BUFFER, &readBuffer);
+            glGetIntegerv(GL_PACK_ALIGNMENT, &alignment); glGetIntegerv(GL_PACK_ROW_LENGTH, &rowLength);
+            glGetIntegerv(GL_PACK_SKIP_ROWS, &skipRows); glGetIntegerv(GL_PACK_SKIP_PIXELS, &skipPixels);
+            glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &buffer);
+            struct RestoreReadState {
+                GLint framebuffer, readBuffer, alignment, rowLength, skipRows, skipPixels, buffer;
+                ~RestoreReadState() {
+                    glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer); glReadBuffer(readBuffer);
+                    glPixelStorei(GL_PACK_ALIGNMENT, alignment); glPixelStorei(GL_PACK_ROW_LENGTH, rowLength);
+                    glPixelStorei(GL_PACK_SKIP_ROWS, skipRows); glPixelStorei(GL_PACK_SKIP_PIXELS, skipPixels);
+                    glBindBuffer(GL_PIXEL_PACK_BUFFER, buffer);
+                }
+            } restore{framebuffer, readBuffer, alignment, rowLength, skipRows, skipPixels, buffer};
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+            glPixelStorei(GL_PACK_ALIGNMENT, 1); glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+            glPixelStorei(GL_PACK_SKIP_ROWS, 0); glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+            for (int i = 0; i < 16 && glGetError() != GL_NO_ERROR; ++i) {}
+            glFinish();
+            auto read = [&](const Target &target, uint32_t w, uint32_t h, std::vector<uint8_t> &pixels) {
+                if (!target.fbo || target.width != w || target.height != h) {
+                    error = "Native temporal target dimensions do not match."; return false;
+                }
+                pixels.resize(size_t(w) * h * 4u);
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, target.fbo); glReadBuffer(GL_COLOR_ATTACHMENT0);
+                if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+                    error = "Native temporal framebuffer is incomplete."; return false;
+                }
+                glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+                if (glGetError() != GL_NO_ERROR) { error = "Native temporal history readback failed."; return false; }
+                return true;
+            };
+            if (!read(previous, width, height, state.previous) ||
+                (bloomHistory && !read(bloomTex[2], std::max(width / 4u, 1u), std::max(height / 4u, 1u), state.bloomPixels)) ||
+                (gsBloomHistory && !read(gsBloom[4], 64, 64, state.gsBloomPixels))) return false;
+            ps2state::Writer writer(out, error, native_renderer::detail::HistoryStateLimit);
+            return native_renderer::detail::historyStateCodec(writer, state);
+#else
+            (void)out; error = "Temporal history snapshots currently require desktop Linux OpenGL."; return false;
+#endif
+        }
+
+        bool restoreHistory(const native_renderer::detail::HistoryState &state, std::string &error)
+        {
+#if defined(__linux__) && !defined(__ANDROID__)
+            GLint framebuffer = 0, readFramebuffer = 0, texture = 0, alignment = 0, rowLength = 0, skipRows = 0, skipPixels = 0, buffer = 0;
+            glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &framebuffer); glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFramebuffer);
+            glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture); glGetIntegerv(GL_UNPACK_ALIGNMENT, &alignment);
+            glGetIntegerv(GL_UNPACK_ROW_LENGTH, &rowLength); glGetIntegerv(GL_UNPACK_SKIP_ROWS, &skipRows);
+            glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &skipPixels); glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &buffer);
+            struct RestoreWriteState {
+                GLint framebuffer, readFramebuffer, texture, alignment, rowLength, skipRows, skipPixels, buffer;
+                ~RestoreWriteState() {
+                    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer); glBindFramebuffer(GL_READ_FRAMEBUFFER, readFramebuffer);
+                    glBindTexture(GL_TEXTURE_2D, texture); glPixelStorei(GL_UNPACK_ALIGNMENT, alignment);
+                    glPixelStorei(GL_UNPACK_ROW_LENGTH, rowLength); glPixelStorei(GL_UNPACK_SKIP_ROWS, skipRows);
+                    glPixelStorei(GL_UNPACK_SKIP_PIXELS, skipPixels); glBindBuffer(GL_PIXEL_UNPACK_BUFFER, buffer);
+                }
+            } restore{framebuffer, readFramebuffer, texture, alignment, rowLength, skipRows, skipPixels, buffer};
+            // Those bindings can name targets deleted by ensureTargets or
+            // by the history swap. The next render rebuilds its GL bindings.
+            restore.framebuffer = restore.readFramebuffer = restore.texture = 0;
+            Target staged[3]{};
+            struct DeleteTargets {
+                Target *targets;
+                ~DeleteTargets() { for (int i = 0; i < 3; ++i) {
+                    if (targets[i].fbo) glDeleteFramebuffers(1, &targets[i].fbo);
+                    if (targets[i].texture) glDeleteTextures(1, &targets[i].texture);
+                    if (targets[i].depth) glDeleteTextures(1, &targets[i].depth);
+                } }
+            } cleanup{staged};
+            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1); glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+            glPixelStorei(GL_UNPACK_SKIP_ROWS, 0); glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+            for (int i = 0; i < 16 && glGetError() != GL_NO_ERROR; ++i) {}
+            auto upload = [&](Target &target, uint32_t w, uint32_t h, const std::vector<uint8_t> &pixels) {
+                makeTarget(target, w, h, false);
+                if (!target.texture || !target.fbo || glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+                    error = "Cannot allocate native temporal history targets."; return false;
+                }
+                glBindTexture(GL_TEXTURE_2D, target.texture);
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+                if (glGetError() != GL_NO_ERROR) { error = "Native temporal history upload failed."; return false; }
+                return true;
+            };
+            // Validate and allocate every replacement before swapping any
+            // authoritative history. Object names are never read from disk.
+            if (!upload(staged[0], state.width, state.height, state.previous) ||
+                (state.bloom && !upload(staged[1], std::max(state.width / 4u, 1u), std::max(state.height / 4u, 1u), state.bloomPixels)) ||
+                (state.gsBloom && !upload(staged[2], 64, 64, state.gsBloomPixels))) return false;
+            ensureTargets(state.width, state.height);
+            if (glGetError() != GL_NO_ERROR) { error = "Cannot prepare native state dimensions."; return false; }
+            std::swap(previous, staged[0]);
+            if (state.bloom) std::swap(bloomTex[2], staged[1]);
+            if (state.gsBloom) std::swap(gsBloom[4], staged[2]);
+            bloomHistory = state.bloom; gsBloomHistory = state.gsBloom;
+            boundFbo = boundProgram = ~0u; cache = {};
+            return true;
+#else
+            (void)state; error = "Temporal history snapshots currently require desktop Linux OpenGL."; return false;
+#endif
         }
 
         // Blending as the Metal pipelines set it (alpha: source kept), or
@@ -1428,21 +1760,34 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             }
         }
 
-        void render(uint32_t w, uint32_t h);
+        void render(uint32_t w, uint32_t h, bool timed);
 
         // A mesh's triangles: the list as it is, or the indexed one's
         // indices (the frame's index buffer, bound with the frame's
         // vertices: the indices count from the start of the arena).
+        void bindMeshIndices(const Mesh &mesh)
+        {
+            if (mesh.indexed)
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.dynamic ? indexBuffers[arenaIndex] : mesh.indexBuffer);
+        }
+
         void drawMesh(const Mesh &mesh, GLint firstVertex)
+        {
+            bindMeshIndices(mesh);
+            drawMeshRange(mesh, firstVertex, 0u, mesh.count);
+        }
+
+        // Caller binds this mesh's EBO once; range draws and alpha-phase
+        // uniforms/masks do not change that binding.
+        void drawMeshRange(const Mesh &mesh, GLint firstVertex, uint32_t from, uint32_t count)
         {
             if (!mesh.indexed)
             {
-                glDrawArrays(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(mesh.count));
+                glDrawArrays(GL_TRIANGLES, firstVertex + static_cast<GLint>(from), static_cast<GLsizei>(count));
                 return;
             }
-            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.dynamic ? indexBuffers[arenaIndex] : mesh.indexBuffer);
-            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh.count), GL_UNSIGNED_INT,
-                           reinterpret_cast<const void *>(static_cast<uintptr_t>(mesh.dynamic ? mesh.firstIndex : 0u) * sizeof(uint32_t)));
+            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(count), GL_UNSIGNED_INT,
+                           reinterpret_cast<const void *>(static_cast<uintptr_t>((mesh.dynamic ? mesh.firstIndex : 0u) + from) * sizeof(uint32_t)));
         }
     };
 
@@ -1514,7 +1859,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         glBindBuffer(GL_ARRAY_BUFFER, mesh.buffer);
         glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(count * sizeof(native_renderer::Vertex)), vertices, GL_STATIC_DRAW);
         mesh.count = count;
-        mesh.bytes = static_cast<uint64_t>(count) * sizeof(native_renderer::Vertex);
+        meshAlphaBounds(mesh, count, [&](uint32_t i) {
+            return std::array<uint8_t, 2>{vertices[i].a, vertices[i].a};
+        });
+        mesh.bytes = static_cast<uint64_t>(count) * sizeof(native_renderer::Vertex)
+                   + mesh.triangleAlpha.capacity() * sizeof(mesh.triangleAlpha[0]);
         meshBytes += mesh.bytes;
         cache.buffer = ~0u;
     }
@@ -1536,7 +1885,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.indexBuffer);
         glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(indexCount * sizeof(uint32_t)), indices, GL_STATIC_DRAW);
         mesh.count = indexCount;
-        mesh.bytes = static_cast<uint64_t>(count) * sizeof(native_renderer::SkinVertex) + static_cast<uint64_t>(indexCount) * 4u;
+        meshAlphaBounds(mesh, indexCount, [&](uint32_t i) {
+            const uint32_t v = indices[i];
+            return v < count ? std::array<uint8_t, 2>{vertices[v].a, vertices[v].a}
+                             : std::array<uint8_t, 2>{0, 255};
+        });
+        mesh.bytes = static_cast<uint64_t>(count) * sizeof(native_renderer::SkinVertex) + static_cast<uint64_t>(indexCount) * 4u
+                   + mesh.triangleAlpha.capacity() * sizeof(mesh.triangleAlpha[0]);
         meshBytes += mesh.bytes;
         skinnedBytes += mesh.bytes;
         cache.buffer = ~0u;
@@ -1552,9 +1907,16 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         t.bytes = static_cast<uint64_t>(width) * height * 4u * (levels > 1u ? 4u : 3u) / 3u;
         if (!t.name)
             glGenTextures(1, &t.name);
+        t.alphaMin = 255;
+        t.alphaMax = 0;
         glBindTexture(GL_TEXTURE_2D, t.name);
         for (uint32_t level = 0, w = width, h = height; level < levels; ++level)
         {
+            for (size_t i = 3u, n = static_cast<size_t>(w) * h * 4u; i < n; i += 4u)
+            {
+                t.alphaMin = std::min(t.alphaMin, rgba[i]);
+                t.alphaMax = std::max(t.alphaMax, rgba[i]);
+            }
             glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(level), GL_RGBA, static_cast<GLsizei>(w), static_cast<GLsizei>(h), 0, GL_RGBA,
                          GL_UNSIGNED_BYTE, rgba);
             if (const GLenum e = glGetError(); e != GL_NO_ERROR)
@@ -1583,7 +1945,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // Invalidate an anisotropic sampler so a change back to trilinear
         // is applied even when the image was just uploaded again.
         t.filter = t.filter >= 3u ? ~0u : 2u;
-        t.mipped = levels > 1u;
+        t.levels = levels;
         cache.texture = ~0u;
     }
 
@@ -1629,14 +1991,35 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             mesh.indexed = f.indexed;
             mesh.firstIndex = f.firstIndex;
             mesh.count = f.count;
+            const uint64_t oldAlphaBytes = mesh.triangleAlpha.capacity() * sizeof(mesh.triangleAlpha[0]);
+            meshBytes -= oldAlphaBytes;
+            mesh.bytes -= oldAlphaBytes;
+            meshAlphaBounds(mesh, f.count, [&](uint32_t i) {
+                const size_t offset = static_cast<size_t>(f.firstIndex) + i;
+                const size_t vertex = f.indexed ? (offset < indexArena.size() ? indexArena.data()[offset] : arena.size())
+                                               : static_cast<size_t>(f.first) + i;
+                return vertex < arena.size() ? std::array<uint8_t, 2>{arena.data()[vertex].a, arena.data()[vertex].a}
+                                             : std::array<uint8_t, 2>{0, 255};
+            });
+            const uint64_t alphaBytes = mesh.triangleAlpha.capacity() * sizeof(mesh.triangleAlpha[0]);
+            meshBytes += alphaBytes;
+            mesh.bytes += alphaBytes;
         }
         frameMeshes.clear();
     }
 
-    void Renderer::render(uint32_t w, uint32_t h)
+    void Renderer::render(uint32_t w, uint32_t h, bool timed)
     {
         ensureTargets(w, h);
+        uint32_t alphaSplitTriangles = 0, alphaRangeDraws = 0;
         boundFbo = boundProgram = ~0u;
+#if defined(__linux__) && !defined(__ANDROID__)
+        static const bool waterCopyTrace = std::getenv("SOTC_WATER_COPY_TRACE") != nullptr;
+        waterCopyTraceActive = waterCopyTrace && waterCopyTraceFrames < 240u &&
+            std::any_of(draws.begin(), draws.end(), [](const Draw &d) { return d.state.screenCopy && d.state.order == 19u; });
+        waterCopyTraceDraws = 0;
+        if (waterCopyTraceActive) ++waterCopyTraceFrames;
+#endif
         if (!arena.empty())
         {
             // One upload for every dynamic mesh of the frame (in place of one
@@ -1660,13 +2043,38 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             drawOrder.push_back((static_cast<uint64_t>(draws[i].state.order) << 32) | i);
         std::sort(drawOrder.begin(), drawOrder.end());
         const bool fogOn = fog.enabled && fog.width > 0.0f;
+#if defined(PS2X_NATIVE_VITA)
+        constexpr float kMaxFilter = 2.0f;
+#else
+        constexpr float kMaxFilter = 6.0f;
+#endif
+        const auto frameFilter = static_cast<uint32_t>(std::clamp(native_renderer::tuning().textureFilter + 0.5f, 0.0f, kMaxFilter));
         bool haveMirror = false;
+        bool haveRefraction = false;
+        std::vector<uint32_t> screenCopyOrders;
         for (const Draw &d : draws)
-            if (d.state.reflectionSource)
-            {
-                haveMirror = true;
-                break;
-            }
+        {
+            haveMirror |= d.state.reflectionSource;
+            haveRefraction |= d.state.refractionSample;
+            if (d.state.screenCopy)
+                screenCopyOrders.push_back(d.state.order);
+        }
+        const auto waterFrom = static_cast<int>(native_renderer::tuning().waterSource + 0.5f);
+        bool enhancedWater = false;
+#if !defined(PS2X_NATIVE_VITA)
+        const auto detail = static_cast<unsigned>(std::clamp(native_renderer::tuning().effectDetail + 0.5f, 0.0f, 2.0f));
+        const uint32_t effectSize = 256u << detail;
+        if (haveMirror && !resizeEffectTarget(reflection, effectSize, true))
+            haveMirror = resizeEffectTarget(reflection, 256u, true);
+        if (detail > 0 && haveRefraction && waterFrom == 0)
+            enhancedWater = resizeEffectTarget(waterRefraction, effectSize, false) &&
+                            resizeEffectTarget(waterRefractionHalf, effectSize / 2u, false);
+        if ((!enhancedWater && haveRefraction) || detail == 0 || waterFrom != 0)
+        {
+            destroyTarget(waterRefraction);
+            destroyTarget(waterRefractionHalf);
+        }
+#endif
 #if defined(PS2X_NATIVE_VITA)
         // The soft path draws a separate mask that must test the picture's
         // stencil; vitaGL framebuffers cannot share it, so the mask covered
@@ -1677,7 +2085,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #endif
         // What the water (textured 3) and the heat haze (4) read when the
         // mid-frame redraw made them their own copies (0: the usual sources).
-        GLuint waterSource = 0, hazeSourceTexture = 0;
+        GLuint waterSource = 0;
+        std::unordered_map<uint32_t, GLuint> hazeSourceTextures;
         uint32_t softOrder = 0;
         float softAmount = 0.0f;
         if (!hardShadows)
@@ -1789,6 +2198,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 if (skinned && (!skinProgram || !d.state.skinPalette))
                     continue;
                 useProgram(skinned ? skinProgram : mainProgram);
+#if !defined(PS2X_NATIVE_VITA)
+                const float noAlphaTest[4] = {};
+                uniform4(uAlphaTest, noAlphaTest, 1);
+#endif
                 if (skinned)
                 {
                     // The draw's palette (skinProgram keeps the last one sent).
@@ -1939,10 +2352,12 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 if (textured == 3 || textured == 4)
                 {
                     const native_renderer::Tuning &t = native_renderer::tuning();
-                    const int source = static_cast<int>((textured == 4 ? t.hazeSource : t.waterSource) + 0.5f);
-                    const GLuint redrawn = textured == 4 ? hazeSourceTexture : waterSource;
+                    const int source = textured == 4 ? static_cast<int>(t.hazeSource + 0.5f) : waterFrom;
+                    const auto hazeSource = hazeSourceTextures.find(d.state.order);
+                    const GLuint redrawn = textured == 4 ? (hazeSource == hazeSourceTextures.end() ? 0u : hazeSource->second) : waterSource;
                     bindTexture(3, redrawn && source != 2 ? redrawn : (source == 2 ? previous.texture : (source == 1 ? snapshot.texture : refraction.texture)));
                 }
+                float maxLod = std::max(d.state.maxLod, 0.0f);
                 if (textured == 1)
                 {
                     tex->second.used = arenaFrame;
@@ -1958,33 +2373,35 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, (d.state.clamp & 1u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
                         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, (d.state.clamp & 2u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
                     }
-                    // Quality "Texture filtering": nearest, bilinear, trilinear, anisotropic 2x-16x (EXT_texture_filter_anisotropic; Vita: trilinear).
-#if defined(PS2X_NATIVE_VITA)
-                    constexpr float kMaxFilter = 2.0f;
-#else
-                    constexpr float kMaxFilter = 6.0f;
+                    uint32_t filter = d.state.screen ? 2u : frameFilter;
+#if !defined(PS2X_NATIVE_VITA)
+                    if (filter >= 3u)
+                    {
+                        // Use the pixel footprint for anisotropic world surfaces. The
+                        // GS's explicit LOD handles draws that limit the mip range,
+                        // UI and FB_ONLY depth coverage.
+                        const uint32_t levels = tex->second.levels;
+                        if (maxAnisotropy >= 2.0f && levels > 1u && maxLod >= static_cast<float>(levels - 1u) &&
+                            !d.state.background && !d.state.framebufferOnlyAlphaFail)
+                            maxLod = -1.0f;
+                        else
+                            filter = 2u;
+                    }
 #endif
-                    const uint32_t filter = d.state.screen ? 2u : static_cast<uint32_t>(std::clamp(native_renderer::tuning().textureFilter + 0.5f, 0.0f, kMaxFilter)); // 2D keeps the default
                     if (tex->second.filter != filter)
                     {
                         tex->second.filter = filter;
                         bindTexture(0, tex->second.name);
-                        const bool mipped = tex->second.mipped;
+                        const bool mipped = tex->second.levels > 1u;
                         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
                                         filter == 0 ? (mipped ? GL_NEAREST_MIPMAP_NEAREST : GL_NEAREST)
                                                     : (filter == 1 ? (mipped ? GL_LINEAR_MIPMAP_NEAREST : GL_LINEAR) : (mipped ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR)));
                         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter == 0 ? GL_NEAREST : GL_LINEAR);
 #if !defined(PS2X_NATIVE_VITA)
-                        // Anisotropic levels 3..6 = 2x..16x, up to what the GPU has (0 when it lacks the extension).
-                        static const float maxAniso = []
-                        {
-                            GLfloat v = 0.0f;
-                            glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &v);
-                            return glGetError() == GL_NO_ERROR ? v : 0.0f;
-                        }();
-                        if (maxAniso >= 1.0f)
+                        // Anisotropic levels 3..6 = 2x..16x, capped by the GPU.
+                        if (maxAnisotropy >= 2.0f)
                             glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT,
-                                            filter >= 3u && mipped ? std::min(maxAniso, static_cast<float>(1u << (filter - 2u))) : 1.0f);
+                                            filter >= 3u ? std::min(maxAnisotropy, static_cast<float>(1u << (filter - 2u))) : 1.0f);
 #endif
                     }
                 }
@@ -2001,7 +2418,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 const float fogB[4] = {static_cast<float>(w), static_cast<float>(h), vertexFog ? 1.0f : 0.0f, fog.base};
                 // The mirror's ripple (t, H) where a reflection reads no mip level.
                 const float fogC[4] = {fog.scale, d.state.reflectionSample ? d.state.mirrorRipple[0] : d.state.lodK,
-                                       d.state.reflectionSample ? d.state.mirrorRipple[1] : d.state.lodScale, d.state.reflectionSample ? 0.0f : d.state.maxLod};
+                                       d.state.reflectionSample ? d.state.mirrorRipple[1] : d.state.lodScale, d.state.reflectionSample ? 0.0f : maxLod};
                 const float fogColour[4] = {fog.colour[0], fog.colour[1], fog.colour[2], static_cast<float>(textured)};
                 float debug[4] = {static_cast<float>(d.state.debugColour & 0xFFu) / 255.0f, static_cast<float>((d.state.debugColour >> 8) & 0xFFu) / 255.0f,
                                   static_cast<float>((d.state.debugColour >> 16) & 0xFFu) / 255.0f, d.state.debugColour ? 1.0f : 0.0f};
@@ -2017,7 +2434,129 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 uniform4(uFogC, fogC, 1);
                 uniform4(uFogColour, fogColour, 1);
                 uniform4(uDebug, debug, 1);
-                drawMesh(mesh->second, firstVertex);
+#if defined(__linux__) && !defined(__ANDROID__)
+                const bool traceHaze = waterCopyTraceActive && textured == 4 && d.state.order == 19u && waterCopyTraceDraws++ < 4u;
+                GLuint traceQuery = 0;
+                bool traceQueryStarted = false;
+                if (traceHaze) {
+                    GLint active = 0, source = 0;
+                    glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+                    glActiveTexture(GL_TEXTURE3); glGetIntegerv(GL_TEXTURE_BINDING_2D, &source);
+                    glActiveTexture(active);
+                    std::fprintf(stderr, "[water-copy-draw] frame=%llu trace=%u mesh=%016llx order=%u blend=%u "
+                                 "opacity=%.6f hazeSource=%.3f redraw=%.3f texture=%d count=%u first=%d\n",
+                                 (unsigned long long)arenaFrame, waterCopyTraceFrames, (unsigned long long)d.mesh,
+                                 d.state.order, static_cast<unsigned>(d.state.blend), d.state.opacity,
+                                 native_renderer::tuning().hazeSource, native_renderer::tuning().midFrameRedraw,
+                                 source, mesh->second.count, firstVertex);
+                    if (const Target *sample = waterCopyTraceTarget(source))
+                        traceWaterCopy("haze-sample", *sample, nullptr, d.state.order, source);
+                    traceWaterCopy("haze-before", target, nullptr, d.state.order, source);
+                    traceWaterGeometry(d, mesh->second);
+                    GLint samples = 0, anySamples = 0, conservativeSamples = 0;
+                    glGetQueryiv(GL_SAMPLES_PASSED, GL_CURRENT_QUERY, &samples);
+                    glGetQueryiv(GL_ANY_SAMPLES_PASSED, GL_CURRENT_QUERY, &anySamples);
+                    static const bool conservativeQuery = [] {
+                        GLint major = 0, minor = 0;
+                        glGetIntegerv(GL_MAJOR_VERSION, &major); glGetIntegerv(GL_MINOR_VERSION, &minor);
+                        if (major > 4 || (major == 4 && minor >= 3)) return true;
+                        GLint count = 0; glGetIntegerv(GL_NUM_EXTENSIONS, &count);
+                        for (GLint i = 0; i < count; ++i)
+                            if (std::strcmp(reinterpret_cast<const char *>(glGetStringi(GL_EXTENSIONS, i)), "GL_ARB_ES3_compatibility") == 0)
+                                return true;
+                        return false;
+                    }();
+                    if (conservativeQuery)
+                        glGetQueryiv(GL_ANY_SAMPLES_PASSED_CONSERVATIVE, GL_CURRENT_QUERY, &conservativeSamples);
+                    if (!samples && !anySamples && !conservativeSamples) {
+                        glGenQueries(1, &traceQuery);
+                        glBeginQuery(GL_SAMPLES_PASSED, traceQuery);
+                        GLint current = 0;
+                        glGetQueryiv(GL_SAMPLES_PASSED, GL_CURRENT_QUERY, &current);
+                        traceQueryStarted = traceQuery && current == static_cast<GLint>(traceQuery);
+                    }
+                    if (!traceQueryStarted)
+                        std::fprintf(stderr, "[water-copy-coverage] frame=%llu trace=%u skipped=1 active=%d,%d,%d error=%x\n",
+                                     (unsigned long long)arenaFrame, waterCopyTraceFrames, samples, anySamples,
+                                     conservativeSamples, glGetError());
+                }
+#endif
+#if !defined(PS2X_NATIVE_VITA)
+                if (
+#if defined(SOTC_ALPHA_LEGACY_TEST)
+                    false && // ROM-free negative control: the old unconditional Z path
+#endif
+                    d.state.framebufferOnlyAlphaFail && !backdrop && !d.state.fresnel && textured <= 1 && !d.state.debugColour)
+                {
+                    float alphaTest[4] = {1.0f, static_cast<float>(d.state.alphaReference), 0.0f, 0.0f};
+                    uniform4(uAlphaTest, alphaTest, 1);
+                    const Mesh &m = mesh->second;
+                    if (!depthMask)
+                        drawMesh(m, firstVertex); // ZMSK/overlay: every alpha writes only colour
+                    else
+                    {
+                        const float texMin = tex != textures.end() ? tex->second.alphaMin : 128.0f;
+                        const float texMax = tex != textures.end() ? tex->second.alphaMax : 128.0f;
+                        const auto classify = [&](uint32_t triangle) {
+                            if (!d.state.alphaReference) return 1;
+                            if (!std::isfinite(d.state.opacity) || d.state.opacity < 0.0f || d.state.opacity > 2.0f) return 0;
+                            const auto range = m.triangleAlpha.empty() ? std::array<uint8_t, 2>{m.alphaMin, m.alphaMax}
+                                                                     : m.triangleAlpha[triangle];
+                            // Texture filtering and vertex interpolation stay inside these
+                            // bounds. Keep a margin for floating-point interpolation at AREF.
+                            const float lo = texMin * (static_cast<float>(range[0]) / 128.0f) * d.state.opacity;
+                            const float hi = texMax * (static_cast<float>(range[1]) / 128.0f) * d.state.opacity;
+                            if (lo >= d.state.alphaReference + 0.01f) return 1;
+                            if (hi < d.state.alphaReference - 0.01f) return -1;
+                            return 0;
+                        };
+                        if (m.count >= 3u)
+                            bindMeshIndices(m);
+                        for (uint32_t i = 0; i < m.count / 3u;)
+                        {
+                            const int kind = classify(i);
+                            uint32_t end = i + 1u;
+                            if (kind) // only proven all-pass/all-fail runs can share a draw
+                                while (end < m.count / 3u && classify(end) == kind) ++end;
+                            glDepthMask(kind > 0 ? GL_TRUE : GL_FALSE);
+                            drawMeshRange(m, firstVertex, i * 3u, (end - i) * 3u);
+                            ++alphaRangeDraws;
+                            if (!kind)
+                            {
+                                ++alphaSplitTriangles;
+                                // Do not reorder overlapping primitives: finish this
+                                // triangle's conditional Z before the next triangle's colour.
+                                glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+                                glDepthMask(GL_TRUE);
+                                alphaTest[2] = 1.0f;
+                                uniform4(uAlphaTest, alphaTest, 1);
+                                drawMeshRange(m, firstVertex, i * 3u, 3u);
+                                glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+                                alphaTest[2] = 0.0f;
+                                uniform4(uAlphaTest, alphaTest, 1);
+                            }
+                            i = end;
+                        }
+                        glDepthMask(GL_TRUE);
+                        cache.depthMask = 1;
+                    }
+                }
+                else
+#endif
+                    drawMesh(mesh->second, firstVertex);
+#if defined(__linux__) && !defined(__ANDROID__)
+                if (traceHaze) {
+                    if (traceQueryStarted) {
+                        glEndQuery(GL_SAMPLES_PASSED);
+                        GLuint samples = 0;
+                        glGetQueryObjectuiv(traceQuery, GL_QUERY_RESULT, &samples);
+                        std::fprintf(stderr, "[water-copy-coverage] frame=%llu trace=%u skipped=0 samples=%u error=%x\n",
+                                     (unsigned long long)arenaFrame, waterCopyTraceFrames, samples, glGetError());
+                    }
+                    if (traceQuery) glDeleteQueries(1, &traceQuery);
+                    traceWaterCopy("haze-after", target, nullptr, d.state.order);
+                }
+#endif
             }
             resolveShadows();
             for (GLuint i = 1; i < 6; ++i)
@@ -2184,28 +2723,57 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             bindTexture(0, bloomTex[0].texture);
             quad(color, 9, QuadBlend::Darken, amount);
         };
-        bool haveRefraction = false;
-        uint32_t screenCopyOrder = 0;
-        for (const Draw &d : draws)
+        auto copyWaterRefraction = [&]([[maybe_unused]] const Target &source)
         {
-            if (d.state.refractionSample)
-                haveRefraction = true;
-            if (d.state.screenCopy && !screenCopyOrder)
-                screenCopyOrder = d.state.order;
-        }
-        auto doRefraction = [&]
+#if !defined(PS2X_NATIVE_VITA)
+            copy(source, waterRefraction);
+            copy(waterRefraction, waterRefractionHalf);
+            copy(waterRefractionHalf, waterRefraction);
+            waterSource = waterRefraction.texture;
+#endif
+        };
+        std::sort(screenCopyOrders.begin(), screenCopyOrders.end());
+        screenCopyOrders.erase(std::unique(screenCopyOrders.begin(), screenCopyOrders.end()), screenCopyOrders.end());
+        // Submission order is not layer order. Every consumer layer needs the
+        // picture immediately before itself, even when another layer submitted
+        // its copy draw first. In particular underwater19 cannot read a copy
+        // scheduled at23 (or the previous frame's DoF/refraction scratch).
+        std::vector<uint32_t> copyOrders = screenCopyOrders;
+        if (haveRefraction) copyOrders.push_back(9u);
+        std::sort(copyOrders.begin(), copyOrders.end());
+        copyOrders.erase(std::unique(copyOrders.begin(), copyOrders.end()), copyOrders.end());
+        auto doRefraction = [&]([[maybe_unused]] uint32_t order)
         {
             // The copies the chosen sources need (Tuning hazeSource / waterSource).
             const native_renderer::Tuning &t = native_renderer::tuning();
-            const int haze = static_cast<int>(t.hazeSource + 0.5f), water = static_cast<int>(t.waterSource + 0.5f);
-            if (haze == 2 && water == 2)
+            const int haze = static_cast<int>(t.hazeSource + 0.5f);
+            if (haze == 2 && waterFrom == 2)
                 return;
+#if defined(__linux__) && !defined(__ANDROID__)
+            traceWaterCopy("screen-source", color, nullptr, order);
+#endif
             snapshotColor();
-            if (haze == 0 || water == 0)
+#if defined(__linux__) && !defined(__ANDROID__)
+            traceWaterCopy("screen-snapshot", snapshot, &color, order);
+#endif
+            if (enhancedWater && order == 9u)
+                copyWaterRefraction(snapshot);
+            const bool legacyCopy = enhancedWater ? (haze == 0 && std::binary_search(screenCopyOrders.begin(), screenCopyOrders.end(), order))
+                                                  : (haze == 0 || waterFrom == 0);
+            if (legacyCopy)
             {
                 copy(snapshot, refraction);
+#if defined(__linux__) && !defined(__ANDROID__)
+                traceWaterCopy("screen-256", refraction, &snapshot, order);
+#endif
                 copy(refraction, refractionHalf);
+#if defined(__linux__) && !defined(__ANDROID__)
+                traceWaterCopy("screen-128", refractionHalf, &refraction, order);
+#endif
                 copy(refractionHalf, refraction);
+#if defined(__linux__) && !defined(__ANDROID__)
+                traceWaterCopy("screen-restored-256", refraction, &refractionHalf, order);
+#endif
             }
             // Each draw binds its source (textured 3 / 4 in pass).
         };
@@ -2296,10 +2864,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #endif
         if (softShadows)
             events.push_back({softOrder, -3});
-        if (haveRefraction)
-            events.push_back({9u, -4});
-        if (screenCopyOrder)
-            events.push_back({screenCopyOrder, -4});
+        for (uint32_t order : copyOrders)
+            events.push_back({order, -4}); // water and haze at the same layer share one capture
 #if !defined(PS2X_NATIVE_VITA) // vitaGL framebuffers cannot share the picture's depth
         if (glow.enabled)
             events.push_back({glow.order, -2});
@@ -2332,17 +2898,27 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // light, the screen went white). Costs the draws below that layer a
         // second time, only in frames with such an effect.
         const float redrawMode = native_renderer::tuning().midFrameRedraw;
-        if (redrawMode >= 1.5f ? native_renderer::inEmulator() : redrawMode >= 0.5f)
+        bool redraw = redrawMode >= 1.5f ? native_renderer::inEmulator() : redrawMode >= 0.5f;
+#if defined(__linux__) && !defined(__ANDROID__)
+        // A plain prefix pass replays meshes, not intervening composites such
+        // as DoF20. With several copy layers it would also feed those stale
+        // prefixes into later ones. Desktop GL can resume the main target
+        // reliably: preserve chronological effects for these frames. Vita's
+        // redraw remains necessary for its target-switching implementation.
+        if (copyOrders.size() > 1u) redraw = false;
+#endif
+        if (redraw)
         {
             const native_renderer::Tuning &t = native_renderer::tuning();
-            const int hazeFrom = static_cast<int>(t.hazeSource + 0.5f), waterFrom = static_cast<int>(t.waterSource + 0.5f);
+            const int hazeFrom = static_cast<int>(t.hazeSource + 0.5f);
             int k = 0, last = -1;
             uint32_t lastOrder = ~0u;
             static const bool share = !std::getenv("SOTC_GL_REDRAW_NOSHARE");
             for (Event &ev : events)
             {
                 const bool water = ev.blur == -4 && haveRefraction && ev.order == 9u && waterFrom != 2;
-                const bool haze = ev.blur == -4 && screenCopyOrder && ev.order == screenCopyOrder && hazeFrom != 2;
+                const bool haze = ev.blur == -4 &&
+                    std::binary_search(screenCopyOrders.begin(), screenCopyOrders.end(), ev.order) && hazeFrom != 2;
                 if (!(ev.blur >= 0 || water || haze))
                     continue;
                 // Effects at the same layer read the same picture (the draws
@@ -2365,21 +2941,43 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 Target &pre = prefix[ev.prefix];
                 auto small = [&](Target &to) // the PS2's: 256 x 256, blurred once through 128 x 128
                 {
+#if defined(__linux__) && !defined(__ANDROID__)
+                    traceWaterCopy("prefix-source", pre, nullptr, ev.order);
+#endif
                     copy(pre, to);
+#if defined(__linux__) && !defined(__ANDROID__)
+                    traceWaterCopy("prefix-256", to, &pre, ev.order);
+#endif
                     copy(to, refractionHalf);
+#if defined(__linux__) && !defined(__ANDROID__)
+                    traceWaterCopy("prefix-128", refractionHalf, &to, ev.order);
+#endif
                     copy(refractionHalf, to);
+#if defined(__linux__) && !defined(__ANDROID__)
+                    traceWaterCopy("prefix-restored-256", to, &refractionHalf, ev.order);
+#endif
                 };
                 if (water)
                 {
-                    if (waterFrom == 0)
+                    if (enhancedWater)
+                        copyWaterRefraction(pre);
+                    else if (waterFrom == 0)
+                    {
                         small(refraction);
-                    waterSource = waterFrom == 0 ? refraction.texture : pre.texture;
+                        waterSource = refraction.texture;
+                    }
+                    else
+                        waterSource = pre.texture;
                 }
                 if (haze)
                 {
                     if (hazeFrom == 0)
-                        small(hazeSmall);
-                    hazeSourceTexture = hazeFrom == 0 ? hazeSmall.texture : pre.texture;
+                    {
+                        Target &to = hazeSmall[ev.prefix];
+                        if (!to.texture) makeTarget(to, 256, 256, false);
+                        small(to);
+                    }
+                    hazeSourceTextures[ev.order] = hazeFrom == 0 ? hazeSmall[ev.prefix].texture : pre.texture;
                 }
             }
         }
@@ -2399,7 +2997,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             else if (ev.blur == -5)
                 doDof();
             else if (ev.blur == -4)
-                doRefraction();
+                doRefraction(ev.order);
             else if (ev.blur == -3)
                 doShadow();
             else if (ev.blur == -2)
@@ -2436,8 +3034,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             bloomHistory = true;
         }
         copy(colorPlain, previous);
-
-
+        static const bool alphaTrace = std::getenv("SOTC_ALPHA_DEPTH_TRACE") != nullptr;
+        static uint32_t alphaTraceRows = 0;
+        if (alphaTrace && arenaFrame % 60u == 0u && alphaTraceRows++ < 120u)
+            std::fprintf(stderr, "[alpha-depth] frame=%llu mixed_triangles=%u range_draws=%u extra_depth_draws=%u\n",
+                         static_cast<unsigned long long>(arenaFrame), alphaSplitTriangles, alphaRangeDraws, alphaSplitTriangles);
         if (const auto &hook = native_renderer::detail::presentHook())
         {
             // The host shows a copy of its own: the next frame starts drawing
@@ -2446,7 +3047,6 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             copy(colorPlain, shownFrame[shownIndex]);
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             boundFbo = boundProgram = ~0u;
-            const bool timed = native_renderer::tuning().frameLog;
             const uint64_t start = timed ? native_renderer::nowUs() : 0u;
             hook(shownFrame[shownIndex].texture, w, h);
             if (timed)
@@ -2454,27 +3054,30 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             return;
         }
         // Read back, top row first (the GL picture is y-up).
-        std::vector<uint8_t> pixels(static_cast<size_t>(w) * h * 4u);
+        readbackPixels.resize(static_cast<size_t>(w) * h * 4u);
         glBindFramebuffer(GL_FRAMEBUFFER, color.fbo);
 #if defined(__ANDROID__)
         const bool measureReadback = native_renderer::detail::androidFrameStatsEnabled();
-        const uint64_t readbackStart = measureReadback ? native_renderer::nowUs() : 0;
+#else
+        constexpr bool measureReadback = false;
 #endif
-        glReadPixels(0, 0, static_cast<GLsizei>(w), static_cast<GLsizei>(h), GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-#if defined(__ANDROID__)
-        const uint64_t elapsedReadback = measureReadback ? native_renderer::nowUs() - readbackStart : 0;
-#endif
+        const uint64_t start = (timed || measureReadback) ? native_renderer::nowUs() : 0u;
+        glReadPixels(0, 0, static_cast<GLsizei>(w), static_cast<GLsizei>(h), GL_RGBA, GL_UNSIGNED_BYTE, readbackPixels.data());
+        const uint64_t readback = (timed || measureReadback) ? native_renderer::nowUs() - start : 0u;
+        if (timed)
+            stats.readbackUs += readback;
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        std::lock_guard<std::mutex> lock(outputMutex);
-        output.resize(pixels.size());
+        std::lock_guard<std::mutex> lock(output.mutex);
+        output.pixels.resize(readbackPixels.size());
         const size_t row = static_cast<size_t>(w) * 4u;
         for (uint32_t y = 0; y < h; ++y)
-            std::memcpy(output.data() + static_cast<size_t>(y) * row, pixels.data() + static_cast<size_t>(h - 1u - y) * row, row);
-        outputWidth = w;
-        outputHeight = h;
-        ++outputSerial;
+            std::memcpy(output.pixels.data() + static_cast<size_t>(y) * row, readbackPixels.data() + static_cast<size_t>(h - 1u - y) * row, row);
+        output.width = w;
+        output.height = h;
+        ++output.revision;
 #if defined(__ANDROID__)
-        readbackUs += elapsedReadback;
+        if (measureReadback)
+            readbackUs += readback;
 #endif
     }
 
@@ -2640,6 +3243,18 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             m_rec.palettes.insert(m_rec.palettes.end(), qwords, qwords + count * 4u);
             return static_cast<uint32_t>(at / 4u) + 1u;
         }
+        void rewriteFramePalette(uint32_t handle, const float *qwords, uint32_t count) override
+        {
+            if (!handle || !qwords || !count || count > native_renderer::kSkinPaletteQwords)
+                return;
+            // Check qword offsets before multiplying, including on 32-bit hosts.
+            // Only the game thread's recording buffer is mutable here; the
+            // render thread owns a separate frame after submission.
+            const size_t at = static_cast<size_t>(handle - 1u);
+            const size_t available = m_rec.palettes.size() / 4u;
+            if (at <= available && count <= available - at)
+                std::memcpy(m_rec.palettes.data() + at * 4u, qwords, static_cast<size_t>(count) * 16u);
+        }
         bool hasTexture(uint64_t id) override { return m_knownTextures.count(id) != 0; }
         void uploadTexture(uint64_t key, uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t levels) override
         {
@@ -2680,12 +3295,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             const uint64_t start = (timed || diagnostic) ? native_renderer::nowUs() : 0u;
             std::unique_lock<std::mutex> lock(m_mutex);
             waitIdle(lock);
+            const uint64_t waitedPrevious = timed ? native_renderer::nowUs() - start : 0u;
             // The render thread waits: what it holds changes hands. What the
             // last frame drawn cost goes into this frame's counters.
             if (timed)
             {
                 native_renderer::FrameCounters &c = native_renderer::frameCounters();
                 c.renderUs += r->stats.renderUs;
+                c.readbackUs += r->stats.readbackUs;
                 c.presentUs += r->stats.presentUs;
                 c.targets += r->stats.targets;
             }
@@ -2701,7 +3318,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             r->bloom = m_rec.bloom;
             r->glow = m_rec.glow;
             r->dof = m_rec.dof;
-            r->hold = m_rec.hold;
+            r->hold = m_rec.hold || m_skipStateFrame;
+            m_skipStateFrame = false;
             m_rec.hold = false;
             clearFrame();
             m_rec.uploads.clear();
@@ -2716,25 +3334,58 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             }
             m_width = width;
             m_height = height;
+            m_timed = timed;
             m_queued = true;
             m_work.notify_one();
             const bool threaded = native_renderer::tuning().renderThread;
+            const uint64_t handoff = timed ? native_renderer::nowUs() : 0u;
             if (!threaded)
                 waitIdle(lock);
-            const uint64_t handoffUs = (timed || diagnostic) ? native_renderer::nowUs() - start : 0u;
             if (timed)
             {
                 native_renderer::FrameCounters &c = native_renderer::frameCounters();
-                c.waitUs += handoffUs;
+                c.waitUs += waitedPrevious + (threaded ? 0u : native_renderer::nowUs() - handoff);
+                c.submitUs += handoff - start - waitedPrevious;
+                c.renderWorker = true;
                 c.renderThread = threaded;
             }
 #if defined(__ANDROID__)
             if (diagnostic)
             {
                 ++m_androidFrameStats.submitted;
-                m_androidFrameStats.handoffUs += handoffUs;
+                m_androidFrameStats.handoffUs += native_renderer::nowUs() - start;
             }
 #endif
+        }
+        bool resetStateFrame() override
+        {
+            std::unique_lock<std::mutex> lock(m_mutex);
+            waitIdle(lock);
+            clearFrame(); m_rec.uploads.clear();
+            m_recUploadBytes = m_frameUploadBytes = 0;
+            m_knownMeshes = {}; m_knownTextures = {};
+            m_keepMeshes.clear(); m_keepTextures.clear();
+            m_skipStateFrame = true;
+            return true;
+        }
+        bool captureState(std::vector<uint8_t> &out, std::string &error) const override
+        {
+            return const_cast<GlBackend *>(this)->stateCommand([&] { return r->captureHistory(out, error); }, error);
+        }
+        bool validateState(const std::vector<uint8_t> &data, std::string &error) const override
+        {
+#if defined(__linux__) && !defined(__ANDROID__)
+            native_renderer::detail::HistoryState state;
+            return native_renderer::detail::decodeHistoryState(data, state, error);
+#else
+            (void)data; error = "Temporal history snapshots currently require desktop Linux OpenGL."; return false;
+#endif
+        }
+        bool restoreState(const std::vector<uint8_t> &data, std::string &error) override
+        {
+            native_renderer::detail::HistoryState state;
+            if (!validateState(data, error) || !native_renderer::detail::decodeHistoryState(data, state, error)) return false;
+            return stateCommand([&] { return r->restoreHistory(state, error); }, error);
         }
         void finishFrames() override
         {
@@ -2743,39 +3394,38 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         }
         bool timesItself() override { return true; }
         void holdFrame() override { m_rec.hold = true; }
-        bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height) override
+        native_renderer::FrameRead readFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height, uint64_t *seen) override
         {
-            uint64_t serial = 0;
-            return copyFrameIfNew(rgba, width, height, serial);
+            return r->output.read(rgba, width, height, seen);
         }
 
 #if defined(__ANDROID__)
         native_renderer::detail::AndroidFrameStats androidFrameStats() override
         {
-            std::scoped_lock lock(m_mutex, r->outputMutex);
+            std::scoped_lock lock(m_mutex, r->output.mutex);
             auto stats = m_androidFrameStats;
-            stats.published = r->outputSerial;
+            stats.published = r->output.revision;
             stats.readbackUs = r->readbackUs;
             return stats;
         }
 #endif
 
     private:
-        bool copyFrameIfNew(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height, uint64_t &serial)
-#if defined(__ANDROID__)
-            override
-#endif
+        bool stateCommand(std::function<bool()> work, std::string &error)
         {
-            std::lock_guard<std::mutex> lock(r->outputMutex);
-            if (serial == r->outputSerial)
-                return false;
-            rgba = r->output;
-            width = r->outputWidth;
-            height = r->outputHeight;
-            serial = r->outputSerial;
-            return true;
+            std::unique_lock<std::mutex> lock(m_mutex);
+            waitIdle(lock);
+            if (!m_started || !m_initOk) { error = "Native RenderThread is unavailable."; return false; }
+            bool success = false;
+            m_stateCommand = [&] {
+                try { success = work(); }
+                catch (const std::exception &exception) { error = std::string("Native state operation failed: ") + exception.what(); }
+                catch (...) { error = "Native state operation failed."; }
+            };
+            m_work.notify_one();
+            waitIdle(lock);
+            return success;
         }
-
         // vitaGL is one GL for every thread: the host and this take turns.
         struct Lock
         {
@@ -3021,7 +3671,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             for (const auto &[id, t] : r->textures)
                 if (t.used < oldest && !m_keepTextures.count(id))
                     m_candidates.push_back({t.used, id, t.bytes, true});
-            std::sort(m_candidates.begin(), m_candidates.end(), [](const Candidate &a, const Candidate &b) { return a.used < b.used; });
+            // Age/pressure eviction visits every eligible entry. Only the
+            // budget pass stops at a byte target and needs oldest-first order.
+            if (budgetBefore)
+                std::sort(m_candidates.begin(), m_candidates.end(), [](const Candidate &a, const Candidate &b) { return a.used < b.used; });
             uint64_t cached = r->textureBytes + r->meshBytes;
             const uint64_t target = m_cacheBudget - m_cacheBudget / 8u;
             for (const Candidate &c : m_candidates)
@@ -3084,7 +3737,20 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #endif
             if (makeCurrent)
                 makeCurrent();
-            const bool ok = !initThere || r->init();
+            bool contextReady = true;
+#if defined(_WIN32)
+            // GLFW leaves the worker without a current context when WGL rejects the bind.
+            contextReady = glfwGetCurrentContext() != nullptr;
+            if (!contextReady)
+            {
+                const char *description = nullptr;
+                const int code = glfwGetError(&description);
+                std::fprintf(stderr, "[native:gl] could not bind the render worker context (GLFW %d): %s\n",
+                             code, description ? description : "no GLFW error description");
+                std::fflush(stderr);
+            }
+#endif
+            const bool ok = contextReady && (!initThere || r->init());
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_started = true;
@@ -3096,10 +3762,22 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             for (;;)
             {
                 std::unique_lock<std::mutex> lock(m_mutex);
-                while (!m_queued && m_side.empty() && !m_stopping)
+                while (!m_queued && m_side.empty() && !m_stopping && !m_stateCommand)
                     m_work.wait_for(lock, kRecheck);
                 if (m_stopping)
                     return;
+                if (m_stateCommand)
+                {
+                    auto operation = std::move(m_stateCommand);
+                    m_stateCommand = {};
+                    m_busy = true;
+                    lock.unlock();
+                    { Lock gl; operation(); }
+                    lock.lock();
+                    m_busy = false;
+                    m_idle.notify_all();
+                    continue;
+                }
                 // Flushed uploads first (they were asked for before this frame's).
                 if (!m_side.empty())
                 {
@@ -3124,10 +3802,16 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 m_queued = false;
                 m_busy = true;
                 const uint32_t width = m_width, height = m_height;
+                const bool timed = m_timed;
                 const bool uploadsOnly = m_uploadsOnly; // flushUploads (SOTC_GL_FLUSH_WAIT)
                 m_uploadsOnly = false;
                 lock.unlock();
+#if defined(__ANDROID__)
+                const bool diagnostic = native_renderer::detail::androidFrameStatsEnabled();
                 uint64_t renderUs = 0;
+#else
+                constexpr bool diagnostic = false;
+#endif
                 if (uploadsOnly)
                 {
                     Lock gl;
@@ -3136,14 +3820,18 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 else
                 {
                     Lock gl;
-                    const uint64_t start = native_renderer::nowUs(), present = r->stats.presentUs;
+                    const uint64_t start = (timed || diagnostic) ? native_renderer::nowUs() : 0u;
                     ++r->arenaFrame;
                     r->applyUploads();
                     if (!r->hold) // held: the last picture stays on screen
-                        r->render(width, height);
+                        r->render(width, height, timed);
                     r->evictUnused();
-                    renderUs = (native_renderer::nowUs() - start) - (r->stats.presentUs - present);
-                    r->stats.renderUs += renderUs;
+                    if (timed)
+                        r->stats.renderUs += native_renderer::nowUs() - start - r->stats.presentUs - r->stats.readbackUs;
+#if defined(__ANDROID__)
+                    if (diagnostic)
+                        renderUs = native_renderer::nowUs() - start - r->stats.presentUs;
+#endif
                 }
                 lock.lock();
 #if defined(__ANDROID__)
@@ -3193,10 +3881,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         static constexpr std::chrono::milliseconds kRecheck{2};
         void waitIdle(std::unique_lock<std::mutex> &lock)
         {
-            while (m_queued || m_busy)
+            while (m_queued || m_busy || !m_side.empty() || m_stateCommand)
                 m_idle.wait_for(lock, kRecheck);
         }
+        std::function<void()> m_stateCommand;
         bool m_started = false, m_initOk = false, m_stopping = false;
+        bool m_skipStateFrame = false;
+        bool m_timed = false;
         bool m_queued = false; // a frame handed over, not started yet
         bool m_busy = false;   // the render thread drawing
         bool m_uploadsOnly = false; // what is handed over is uploads alone (flushUploads, SOTC_GL_FLUSH_WAIT)

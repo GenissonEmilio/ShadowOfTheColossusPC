@@ -1,14 +1,16 @@
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 import zipfile
 import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[2] / 'tools/desktop'))
-from import_disc import Budget, ImportError_, candidates, extract_zip, inspect_disc, safe_name
+from import_disc import (Budget, DiscProfile, ImportError_, candidates, extract_zip,
+                         import_disc, inspect_disc, profile_from_config, safe_name, validate_disc)
 from model import Library, atomic_json
 from pipeline import Pipeline
 
@@ -52,6 +54,86 @@ class ImportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             p=Path(t)/'truncated.iso';p.write_bytes(b'CD001')
             with self.assertRaises(ValueError):inspect_disc(p)
+
+    def test_boot_setting_identifies_the_disc(self):
+        self.assertEqual(profile_from_config(b'BOOT2 = cdrom0:\\SCUS_974.72;1\r\n').serial, 'SCUS-97472')
+        self.assertEqual(profile_from_config(b'boot2 = CDROM0:\\sces_533.26;1\r\n').serial, 'SCES-53326')
+        invalid = (
+            b'COMMENT = cdrom0:\\SCES_533.26;1\r\n',
+            b'BOOT2 = cdrom0:\\SCES_533.26;1\r\nBOOT2 = cdrom0:\\SCUS_974.72;1\r\n',
+            b'BOOT2 = cdrom0:\\SLUS_123.45;1\r\n',
+        )
+        for config in invalid:
+            with self.subTest(config=config), self.assertRaises(ImportError_):
+                profile_from_config(config)
+
+    def test_pal_iso_checks_its_own_binary_and_all_asset_parts(self):
+        config = b'BOOT2 = cdrom0:\\SCES_533.26;1\r\n'
+        boot = b'pal boot fixture'
+        profile = DiscProfile('SCES-53326', 'SCES_533.26', {
+            'SCES_533.26': (len(boot), hashlib.sha256(boot).hexdigest()),
+        }, {'NICO.DAT': 6144, 'XAE.': 2100})
+        files = {'SYSTEM.CNF': (20, len(config)), 'SCES_533.26': (21, len(boot)),
+                 'NICO.DAT': (22, 6144), 'XAE.': (25, 2100)}
+        image = MagicMock()
+        image.sector, image.skip = 2048, 0
+        image.find.side_effect = files.get
+        image.read.side_effect = lambda sector, size: {20: config, 21: boot}[sector]
+        with patch('import_disc.DiscImage') as disc, patch.dict('import_disc.PROFILES', {'SCES-53326': profile}):
+            disc.return_value.__enter__.return_value = image
+            self.assertEqual(inspect_disc('/synthetic-pal.iso'), {'serial': profile.serial, 'boot': profile.boot})
+            self.assertEqual([call.args[0] for call in image.read_sector.call_args_list], [24, 26])
+            files['XAE.'] = (26, 2100)
+            with self.assertRaisesRegex(ImportError_, r'XAE\.'):
+                inspect_disc('/synthetic-pal.iso')
+            files.pop('XAE.')
+            with self.assertRaisesRegex(ImportError_, r'XAE\.'):
+                inspect_disc('/synthetic-pal.iso')
+
+    def test_pal_cached_files_reject_modified_binary_and_incomplete_payload(self):
+        boot = b'pal boot fixture'
+        profile = DiscProfile('SCES-53326', 'SCES_533.26', {
+            'SCES_533.26': (len(boot), hashlib.sha256(boot).hexdigest()),
+        }, {'NICO.DAT': 1, 'XAE.': 1})
+        with tempfile.TemporaryDirectory() as temporary, patch.dict('import_disc.PROFILES', {profile.serial: profile}):
+            path = Path(temporary)
+            (path / 'SYSTEM.CNF').write_bytes(b'BOOT2 = cdrom0:\\SCES_533.26;1\r\n')
+            (path / profile.boot).write_bytes(boot)
+            (path / 'NICO.DAT').write_bytes(b'n')
+            with self.assertRaisesRegex(ImportError_, r'NICO\.DAT'):
+                validate_disc(path)
+            (path / 'NICO.DAT').write_bytes(b'nx')
+            self.assertEqual(validate_disc(path), profile)
+            (path / profile.boot).write_bytes(boot.upper())
+            with self.assertRaisesRegex(ImportError_, r'SCES_533\.26'):
+                validate_disc(path)
+
+    def test_pal_import_writes_a_single_contiguous_archive(self):
+        config = b'BOOT2 = cdrom0:\\SCES_533.26;1\r\n'
+        boot = b'pal boot fixture'
+        first_part, second_part = b'n' * 2048, b'x' * 65
+        profile = DiscProfile('SCES-53326', 'SCES_533.26', {
+            'SCES_533.26': (len(boot), hashlib.sha256(boot).hexdigest()),
+        }, {'NICO.DAT': len(first_part), 'XAE.': len(second_part)})
+        files = {'SYSTEM.CNF': (20, len(config)), profile.boot: (21, len(boot)),
+                 'NICO.DAT': (22, len(first_part)), 'XAE.': (23, len(second_part))}
+        sectors = {20: config, 21: boot, 22: first_part, 23: second_part}
+        image = MagicMock()
+        image.sector, image.skip = 2048, 0
+        image.find.side_effect = files.get
+        image.read.side_effect = lambda sector, size: sectors[sector]
+        image.read_sector.return_value = bytes(2048)
+        image._directory.return_value = [(name, sector, size, False) for name, (sector, size) in files.items()]
+        image.file = io.BytesIO(bytes(20 * 2048) + b''.join(data.ljust(2048, b'\0') for data in sectors.values()))
+        with tempfile.TemporaryDirectory() as temporary, patch('import_disc.DiscImage') as disc, \
+                patch.dict('import_disc.PROFILES', {profile.serial: profile}):
+            root = Path(temporary)
+            destination = root / 'disc'
+            disc.return_value.__enter__.return_value = image
+            self.assertEqual(import_disc(root / 'disc.iso', destination), destination / profile.boot)
+            self.assertEqual((destination / 'NICO.DAT').read_bytes(), first_part + second_part)
+            self.assertFalse((destination / 'XAE.').exists())
+            self.assertFalse(list(root.glob('.import-*')))
 
     def test_config_failure_preserves_previous_selection(self):
         with tempfile.TemporaryDirectory() as t:

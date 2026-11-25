@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -23,6 +24,7 @@ public:
               uint32_t voiceIndex = 0xFFFFFFFFu);
     void stop(uint32_t voiceId);
     void stopAll();
+    bool stateCaptureSupported(std::string &error) const;
     void setAudioReady(bool ready) { m_audioReady = ready; }
 
 private:
@@ -39,7 +41,7 @@ private:
     std::vector<DecodedSample> m_loadOrderSamples;
     std::vector<uint32_t> m_loadOrderSampleKeys;
     std::unordered_map<uint32_t, DecodedSample> m_sampleBank;
-    std::mutex m_mutex;
+    mutable std::mutex m_mutex;
 
     void playDecodedSample(uint32_t sampleKey, DecodedSample &sample, float pitch, float volume,
                           bool isBgm = false);
