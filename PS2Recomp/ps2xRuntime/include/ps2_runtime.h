@@ -559,6 +559,7 @@ private:
     // Brings the IOP up to the EE's current cycle before an EE -> IOP call.
     void catchUpIopNow() const noexcept;
     void resetIop();
+    static inline uintptr_t currentHostStackPosition() noexcept;
 
     friend class PS2IopTransport;
     friend class EeScheduler;
@@ -647,9 +648,22 @@ __attribute__((always_inline)) inline PS2Runtime::RecompiledFunction PS2Runtime:
     return ((target & 3u) == 0u && slot < g_ps2RecompiledFunctionTableSlotCount) ? g_ps2RecompiledFunctionTable[slot] : nullptr;
 }
 
+__attribute__((always_inline)) inline uintptr_t PS2Runtime::currentHostStackPosition() noexcept
+{
+#if defined(_WIN32) && defined(__x86_64__) && defined(__GNUC__) && !defined(__clang__)
+    // Only the live stack position is needed. Requesting the frame address
+    // forces GCC to use RBP, including in Win64 frames unwound by SEH.
+    uintptr_t stackPointer;
+    asm volatile("mov{q %%rsp, %0| %0, rsp}" : "=r"(stackPointer));
+    return stackPointer;
+#else
+    return reinterpret_cast<uintptr_t>(__builtin_frame_address(0));
+#endif
+}
+
 __attribute__((always_inline)) inline bool PS2Runtime::hostStackDeep() const noexcept
 {
-    return reinterpret_cast<uintptr_t>(__builtin_frame_address(0)) < m_hostStackFloor;
+    return currentHostStackPosition() < m_hostStackFloor;
 }
 
 // Generated code's JAL / JALR: the callee runs as a host call through the

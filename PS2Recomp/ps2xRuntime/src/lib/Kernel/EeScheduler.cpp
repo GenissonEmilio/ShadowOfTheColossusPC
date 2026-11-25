@@ -195,7 +195,7 @@ void EeScheduler::run()
     {
         const char *kb = std::getenv("PS2X_HOST_STACK_KB");
         const uintptr_t budget = static_cast<uintptr_t>(kb ? std::strtoul(kb, nullptr, 0) : 384u) * 1024u;
-        const uintptr_t base = reinterpret_cast<uintptr_t>(__builtin_frame_address(0));
+        const uintptr_t base = PS2Runtime::currentHostStackPosition();
         m_runtime.m_hostStackFloor = base > budget ? base - budget : 0u;
     }
 

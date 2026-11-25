@@ -3,6 +3,7 @@
 import argparse
 import os
 from pathlib import Path
+import re
 import struct
 import sys
 import tempfile
@@ -25,6 +26,38 @@ with tempfile.TemporaryDirectory(prefix='sotc-compiler-check-') as t:
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+
+static LONG WINAPI continue_fixture_access_violation(EXCEPTION_POINTERS *exception) {
+    const auto &record = *exception->ExceptionRecord;
+    return record.ExceptionCode == EXCEPTION_ACCESS_VIOLATION && record.NumberParameters == 2 &&
+           record.ExceptionInformation[1] == 0x4321
+        ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
+}
+
+#if defined(__x86_64__) && defined(__GNUC__) && !defined(__clang__)
+struct FixtureDispatcherTransfer {};
+
+__attribute__((noipa)) static void throw_fixture_transfer() {
+    throw FixtureDispatcherTransfer{};
+}
+
+__attribute__((noipa)) static void check_nested_win64_frame(PS2Runtime &runtime) {
+    // Force a large Win64 frame with a nonvolatile XMM spill, like the
+    // frame the startup dump failed to unwind.
+    volatile char local[2048];
+    local[0] = 0;
+    asm volatile("" : : "r"(local) : "xmm7", "memory");
+    const auto originalFloor = runtime.m_hostStackFloor;
+    runtime.m_hostStackFloor = reinterpret_cast<uintptr_t>(&local[sizeof(local) - 1]);
+    const bool atLimit = runtime.hostStackDeep();
+    runtime.m_hostStackFloor = originalFloor;
+    if (!atLimit)
+        std::abort();
+    throw_fixture_transfer();
+    if (local[0] != 0)
+        std::abort();
+}
+#endif
 #endif
 extern const uint32_t g_ps2RecompiledFunctionTableBase = 0;
 extern const uint32_t g_ps2RecompiledFunctionTableEnd = 0x01000000;
@@ -34,9 +67,22 @@ void original_test_function(uint8_t* ram, R5900Context* ctx, PS2Runtime* runtime
 #if defined(_WIN32)
     if (std::getenv("SOTC_TEST_EXCEPTION_LOG")) {
         SetErrorMode(SEM_NOGPFAULTERRORBOX);
+        const auto handler = AddVectoredExceptionHandler(0, continue_fixture_access_violation);
+        const ULONG_PTR handled[] = {0, 0x4321};
+        for (int repeat = 0; repeat < 12; ++repeat)
+            RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 2, handled);
+        RemoveVectoredExceptionHandler(handler);
         const ULONG_PTR information[] = {0, 0x1234};
         RaiseException(EXCEPTION_ACCESS_VIOLATION, EXCEPTION_NONCONTINUABLE, 2, information);
     }
+#if defined(__x86_64__) && defined(__GNUC__) && !defined(__clang__)
+    try {
+        check_nested_win64_frame(*runtime);
+        std::abort();
+    } catch (const FixtureDispatcherTransfer &) {
+        ram[0x1001] = 43;
+    }
+#endif
 #endif
     ram[0x1000] = 42;
     runtime->dispatchGuestBranch(ram, ctx, 0x100100, 0x100000, 0x100008,
@@ -82,11 +128,15 @@ struct InstallFixture {
                                env=dict(pipeline.env, PS2X_MODULE_CAPTURE="1", SOTC_TEST_EXCEPTION_LOG="1"),
                                capture_output=True, text=True, errors="replace", timeout=15)
         assert crash.returncode & 0xffffffff == 0xc0000005, crash
-        crash_lines = [line for line in crash.stderr.splitlines()
-                       if line.startswith("[crash] 0xc0000005 ") and line.endswith("access=0x0 target=0x1234")]
-        assert len(crash_lines) == 2, crash.stderr
+        crash_lines = [line for line in crash.stderr.splitlines() if line.startswith("[crash] 0xc0000005 ")]
+        assert len(crash_lines) == 3, crash.stderr
         assert "phase=first-chance " in crash_lines[0], crash.stderr
-        assert crash_lines[0].replace("phase=first-chance ", "phase=unhandled ") == crash_lines[1], crash.stderr
+        assert crash_lines[0].endswith("access=0x0 target=0x4321"), crash.stderr
+        assert "phase=first-chance " in crash_lines[1], crash.stderr
+        assert crash_lines[1].endswith("access=0x0 target=0x1234"), crash.stderr
+        assert crash_lines[1].replace("phase=first-chance ", "phase=unhandled ") == crash_lines[2], crash.stderr
+        assert all(re.search(r" stack=0x[0-9a-f]+ module=[^ ]+\.dll rva=0x[0-9a-f]+ ", line, re.I)
+                   for line in crash_lines), crash.stderr
         # Scope to the disposable fixture's absolute path in the runner's hive.
         registry_path = r"Software\Microsoft\DirectX\UserGpuPreferences"
         filename = str(result.resolve())
@@ -111,5 +161,7 @@ struct InstallFixture {
     with capture.open('rb') as stream:
         stream.seek(0x1000)
         assert stream.read(1) == b'\x2a', 'Scheduler did not run the fixture before the RAM dump'
+        if os.name == 'nt':
+            assert stream.read(1) == b'\x2b', 'Win64 stack bound and unwind fixture did not complete'
     assert '[capture] core ready without host video or audio' in pipeline.log.read_text(encoding='utf-8')
     print('Headless module capture passed with the portable runtime')
