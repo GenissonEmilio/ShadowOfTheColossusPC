@@ -2,6 +2,7 @@
 """ROM-free smoke test of the launcher's compile and play actions."""
 import argparse
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,7 +17,8 @@ import threading
 import time
 import traceback
 
-from main import Gtk, GLib, Launcher
+from main import Gdk, Gtk, GLib, Launcher
+from pipeline import PreparationProgress
 import model
 
 
@@ -88,7 +90,8 @@ def probe(out):
 
         def prepare(self, disc):
             build_calls.append((disc, threading.get_ident()))
-            self.progress('Compiling fixture')
+            self.progress(PreparationProgress('Step 3/4 · MANAGER',
+                                              '45/80 batches\nEstimated time for this step: 2 min', .62))
             return next(attempts).prepare()
 
     class Game:
@@ -115,9 +118,15 @@ def probe(out):
     try:
         assert app.compile_button.get_visible() and app.compile_button.is_sensitive()
         app.compile_button.clicked()
-        settle(lambda: success.started.is_set() and app.status.get_text() == 'Compiling fixture',
+        settle(lambda: success.started.is_set() and app.status.get_text() == 'Step 3/4 · MANAGER',
                'Compile action did not start the worker or show its progress')
-        assert app.busy and app.progress.get_visible()
+        assert app.busy and app.progress.get_visible() and app.prepare_detail.get_visible()
+        assert app.progress.get_fraction() == .62 and not app.pulse()
+        assert 'Estimated time for this step: 2 min' in app.prepare_detail.get_text()
+        window = app.window.get_window()
+        image = Gdk.pixbuf_get_from_window(window, 0, 0, window.get_width(), window.get_height())
+        if image is not None:
+            image.savev(str(out / 'compile-progress.png'), 'png', [], [])
         assert all(not button.is_sensitive() for button in (app.compile_button, app.play_button, app.choose_button))
         app.compile_button.clicked()
         app.play_button.clicked()
@@ -204,4 +213,6 @@ if __name__ == '__main__':
                 if (out / log).is_file():
                     print((out / log).read_text(encoding='utf-8'), file=sys.stderr)
             raise SystemExit('Compile and play smoke test failed')
+        if (out / 'compile-progress.png').is_file():
+            shutil.copy2(out / 'compile-progress.png', args.out)
     print('Passed: compile readiness, progress, focus, failure, retry, explicit play and close')

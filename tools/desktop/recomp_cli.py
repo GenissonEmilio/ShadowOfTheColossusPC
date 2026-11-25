@@ -29,7 +29,9 @@ def run(arguments):
     try:
         if args.prepare:
             def progress(message):
-                print(f"progress 0.05 {message}", flush=True)
+                fraction = 0.05 + 0.94 * getattr(message, "fraction", 0.0)
+                detail = " · ".join(str(message).splitlines())
+                print(f"progress {round(fraction, 3)} {detail}", flush=True)
 
             library.prepare(args.rom, progress)
             graphics.normalize_external_settings()

@@ -6,6 +6,7 @@ from contextlib import contextmanager
 import errno
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import runpy
@@ -18,6 +19,7 @@ BOOT = "SCUS_974.72"
 PAL_BOOT = "SCES_533.26"
 BOOT_CONFIGS = {BOOT: "scus", PAL_BOOT: "sces"}
 MODULES = ("KERNEL", "MANAGER", "GAMECORE")
+STAGE_COUNT = 1 + len(MODULES)
 WINDOWS = os.name == "nt"
 PROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if WINDOWS else 0
 RAM_BYTES = 32 * 1024 * 1024
@@ -25,6 +27,27 @@ RAM_BYTES = 32 * 1024 * 1024
 
 class CompilationError(ValueError):
     """The disc passed validation but local compilation did not finish."""
+
+
+class PreparationProgress(str):
+    """Label, detail and position in a preparation. Still text for log callbacks."""
+
+    def __new__(cls, title, detail, fraction):
+        event = super().__new__(cls, f"{title} — {detail}")
+        event.title = title
+        event.detail = detail
+        event.fraction = fraction
+        return event
+
+
+def remaining_time(seconds):
+    if seconds < 60:
+        return tr("{seconds} s").format(seconds=max(1, math.ceil(seconds)))
+    minutes = math.ceil(seconds / 60)
+    if minutes < 60:
+        return tr("{minutes} min").format(minutes=minutes)
+    hours, minutes = divmod(minutes, 60)
+    return tr("{hours} h {minutes:02d} min").format(hours=hours, minutes=minutes)
 
 
 def executable_name(name):
@@ -111,7 +134,15 @@ class Pipeline:
             env["GCC_EXEC_PREFIX"] = str(tc / "lib/gcc")+"/"
         return env
 
-    def compile(self, directory):
+    def report_stage(self, step, detail, fraction=0.0):
+        if step is None:
+            self.progress(detail)
+            return
+        name = tr("Inicialização") if step == 1 else MODULES[step - 2]
+        title = tr("Etapa {step}/{stages} · {name}").format(step=step, stages=STAGE_COUNT, name=name)
+        self.progress(PreparationProgress(title, detail, (step - 1 + fraction) / STAGE_COUNT))
+
+    def compile(self, directory, *, step=None):
         generated = directory / "output"
         cpp = sorted(generated.glob("*.cpp"))
         if not cpp:
@@ -160,23 +191,47 @@ class Pipeline:
                 key.update(source.name.encode()); key.update(source.read_bytes())
             stamp = obj.with_suffix(".key")
             expected = key.hexdigest()
-            if not (obj.is_file() and stamp.is_file() and stamp.read_text() == expected):
+            cached = obj.is_file() and stamp.is_file() and stamp.read_text() == expected
+            if not cached:
                 try:
                     self.run([*flags,"-c",unity,"-o",obj],env=self.compiler_env())
                     stamp.write_text(expected)
                 except Exception:
                     failed.set()
                     raise
-            return obj
-        result = []
+            return obj, cached
+
+        def report_batches(done, fresh, started):
+            detail = tr("{done}/{total} blocos · {system}").format(
+                done=done, total=len(batches), system="Windows" if WINDOWS else "Linux")
+            if done < len(batches):
+                if fresh:
+                    # Wall time includes both workers. Cached objects do not count as new work.
+                    eta = remaining_time((time.monotonic() - started) * (len(batches) - done) / fresh)
+                    template = (tr("Restante estimado: {time}") if step == STAGE_COUNT
+                                else tr("Restante nesta etapa: {time}"))
+                    detail += "\n" + template.format(time=eta)
+                else:
+                    detail += "\n" + tr("Calculando o tempo restante…")
+            self.report_stage(step, detail, done / (len(batches) + 1))
+
+        result = [None] * len(batches)
         try:
             workers = max(1, min(2, int(self.env.get("SOTC_BUILD_JOBS", "2"))))
         except ValueError:
             workers = 1
+        started = time.monotonic()
+        fresh = 0
+        report_batches(0, fresh, started)
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-            for i, obj in enumerate(pool.map(batch,enumerate(batches)),1):
-                result.append(obj)
-                self.progress(tr("Compilando para {system}: {done}/{total} blocos…").format(system="Windows" if WINDOWS else "Linux", done=i, total=len(batches)))
+            pending = {pool.submit(batch, (index, files)): index for index, files in enumerate(batches)}
+            for done, future in enumerate(concurrent.futures.as_completed(pending), 1):
+                obj, cached = future.result()
+                result[pending[future]] = obj
+                fresh += not cached
+                if done < len(batches):
+                    report_batches(done, fresh, started)
+        self.report_stage(step, tr("Montando o executável…"), len(batches) / (len(batches) + 1))
         executable = directory / executable_name("game")
         libs = [self.bundle / p for p in self.manifest["link_inputs"]]
         if WINDOWS:
@@ -200,9 +255,10 @@ class Pipeline:
                   *link, "-pthread", "-o", executable], env=self.compiler_env())
         return executable
 
-    def stage(self, folder):
+    def stage(self, folder, *, step):
+        self.report_stage(step, tr("Gerando código para compilar…"))
         self.run([self.tool("ps2_recomp"), folder / "config.toml"],cwd=folder)
-        return self.compile(folder)
+        return self.compile(folder, step=step)
 
     def capture(self, executable, disc, name):
         output = self.work / "captures" / (name.lower()+".bin")
@@ -254,6 +310,7 @@ class Pipeline:
                     self.progress(tr("Compilação já pronta. Reutilizando o cache…"))
                     return final
             self.log.write_text("Local static recompilation — "+self.build_id+"\n", encoding="utf-8")
+            self.report_stage(1, tr("Lendo os arquivos do disco…"))
             boot = self.work / "boot"
             boot.mkdir(exist_ok=True)
             symbols = self.work / "symbols.txt"
@@ -266,11 +323,10 @@ class Pipeline:
             config = re.sub(r'^input = .*$', lambda _: "input = " + json.dumps(boot_path, ensure_ascii=False),
                             config, flags=re.M)
             (boot / "config.toml").write_text(config, encoding="utf-8")
-            self.progress(tr("Recompilando o executável de inicialização…"))
-            executable = self.stage(boot)
+            executable = self.stage(boot, step=1)
             captures = []
-            for module in MODULES:
-                self.progress(tr("Carregando o módulo {name}…").format(name=module))
+            for step, module in enumerate(MODULES, 2):
+                self.report_stage(step, tr("Carregando o módulo {name}…").format(name=module))
                 capture = self.capture(executable,disc,module)
                 captures.append((disc / (module+'.XFF'), capture))
                 folder = self.work / module.lower()
@@ -282,8 +338,8 @@ class Pipeline:
                 if self.boot_name == PAL_BOOT:
                     config_args.append(self.boot_config)
                 self.helper("gen_config",config_args)
-                self.progress(tr("Recompilando {name} para {system}…").format(name=module, system="Windows" if WINDOWS else "Linux"))
-                executable = self.stage(folder)
+                executable = self.stage(folder, step=step)
+            self.report_stage(STAGE_COUNT, tr("Verificando a compilação…"), 1.0)
             pending = stamp.with_suffix(".tmp")
             try:
                 pending.write_text(json.dumps({"build_id":self.build_id,"sha256":hashlib.sha256(final.read_bytes()).hexdigest()})+"\n")
