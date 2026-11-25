@@ -3176,7 +3176,8 @@ void PS2Runtime::run()
     std::pair<uint32_t, uint32_t> softTextureSize;
     desktop_video::PresentedFrame gsPresentation;
     desktop_video::FrameCounts lastStatsPresentation;
-    double lastRealTime = -1.0, longestRealGap = 0.0;
+    double lastRealTime = -1.0;
+    std::vector<double> realFrameGaps;
     struct DisplayTiming
     {
         uint64_t readUs = 0, uploadUs = 0, gsUs = 0, gsMaxUs = 0, interpolationUs = 0;
@@ -3549,6 +3550,13 @@ void PS2Runtime::run()
                 return samples ? total / 1000.0 / samples : 0.0;
             };
             const double currentGap = lastRealTime >= 0.0 ? statsTime - lastRealTime : 0.0;
+            std::sort(realFrameGaps.begin(), realFrameGaps.end());
+            const auto gapPercentileMs = [&realFrameGaps](size_t percentile) {
+                if (realFrameGaps.empty())
+                    return 0.0;
+                const size_t rank = (realFrameGaps.size() * percentile + 99u) / 100u;
+                return realFrameGaps[rank - 1u] * 1000.0;
+            };
             std::cerr << "[display] t=" << static_cast<int>(statsTime)
                       << " nativeCopyMs=" << averageMs(displayTiming.readUs, displayTiming.uploads)
                       << " nativeUploadMs=" << averageMs(displayTiming.uploadUs, displayTiming.uploads)
@@ -3558,10 +3566,13 @@ void PS2Runtime::run()
                       << " gsPolls=" << displayTiming.gsPolls
                       << " interpolationMs=" << averageMs(displayTiming.interpolationUs, displayTiming.interpolations)
                       << " interpolations=" << displayTiming.interpolations
-                      << " longestRealGapMs=" << std::max(longestRealGap, currentGap) * 1000.0
+                      << " realGapSamples=" << realFrameGaps.size()
+                      << " realGapP95Ms=" << gapPercentileMs(95)
+                      << " realGapP99Ms=" << gapPercentileMs(99)
+                      << " longestRealGapMs=" << std::max(gapPercentileMs(100), currentGap * 1000.0)
                       << std::endl;
             displayTiming = {};
-            longestRealGap = 0.0;
+            realFrameGaps.clear();
 #endif
             std::cerr << "[stats] t=" << static_cast<int>(statsTime)
                       << " gameFps=" << (statChains >= lastStatChains ? statChains - lastStatChains : 0u) / statsWindow
@@ -3876,11 +3887,11 @@ void PS2Runtime::run()
             presentation.submit({desktop_video::FrameSource::Native, nativeRevision});
         else
             presentation.submit(gsPresentation);
-        if (logStats && presentation.real != previousRealFrames)
+        if (statsEnabled && presentation.real != previousRealFrames)
         {
             const double now = GetTime();
             if (lastRealTime >= 0.0)
-                longestRealGap = std::max(longestRealGap, now - lastRealTime);
+                realFrameGaps.push_back(now - lastRealTime);
             lastRealTime = now;
         }
         ++hostFrames;
