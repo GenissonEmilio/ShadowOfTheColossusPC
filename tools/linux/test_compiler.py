@@ -33,6 +33,31 @@ static LONG WINAPI continue_fixture_access_violation(EXCEPTION_POINTERS *excepti
            record.ExceptionInformation[1] == 0x4321
         ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
 }
+
+#if defined(__x86_64__) && defined(__GNUC__) && !defined(__clang__)
+struct FixtureDispatcherTransfer {};
+
+__attribute__((noipa)) static void throw_fixture_transfer() {
+    throw FixtureDispatcherTransfer{};
+}
+
+__attribute__((noipa)) static void check_nested_win64_frame(PS2Runtime &runtime) {
+    // Force a large Win64 frame with a nonvolatile XMM spill, like the
+    // frame the startup dump failed to unwind.
+    volatile char local[2048];
+    local[0] = 0;
+    asm volatile("" : : "r"(local) : "xmm7", "memory");
+    const auto originalFloor = runtime.m_hostStackFloor;
+    runtime.m_hostStackFloor = reinterpret_cast<uintptr_t>(&local[sizeof(local) - 1]);
+    const bool atLimit = runtime.hostStackDeep();
+    runtime.m_hostStackFloor = originalFloor;
+    if (!atLimit)
+        std::abort();
+    throw_fixture_transfer();
+    if (local[0] != 0)
+        std::abort();
+}
+#endif
 #endif
 extern const uint32_t g_ps2RecompiledFunctionTableBase = 0;
 extern const uint32_t g_ps2RecompiledFunctionTableEnd = 0x01000000;
@@ -50,6 +75,14 @@ void original_test_function(uint8_t* ram, R5900Context* ctx, PS2Runtime* runtime
         const ULONG_PTR information[] = {0, 0x1234};
         RaiseException(EXCEPTION_ACCESS_VIOLATION, EXCEPTION_NONCONTINUABLE, 2, information);
     }
+#if defined(__x86_64__) && defined(__GNUC__) && !defined(__clang__)
+    try {
+        check_nested_win64_frame(*runtime);
+        std::abort();
+    } catch (const FixtureDispatcherTransfer &) {
+        ram[0x1001] = 43;
+    }
+#endif
 #endif
     ram[0x1000] = 42;
     runtime->dispatchGuestBranch(ram, ctx, 0x100100, 0x100000, 0x100008,
@@ -128,5 +161,7 @@ struct InstallFixture {
     with capture.open('rb') as stream:
         stream.seek(0x1000)
         assert stream.read(1) == b'\x2a', 'Scheduler did not run the fixture before the RAM dump'
+        if os.name == 'nt':
+            assert stream.read(1) == b'\x2b', 'Win64 stack bound and unwind fixture did not complete'
     assert '[capture] core ready without host video or audio' in pipeline.log.read_text(encoding='utf-8')
     print('Headless module capture passed with the portable runtime')
