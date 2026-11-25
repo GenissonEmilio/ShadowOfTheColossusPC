@@ -401,6 +401,7 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
     auto keyAxis = [](int negative, int positive) -> int
     { return (IsKeyDown(positive) ? 1 : 0) - (IsKeyDown(negative) ? 1 : 0); };
     setStick(6, 7, keyAxis(KEY_A, KEY_D), keyAxis(KEY_W, KEY_S));
+#endif
 
 #if defined(__ANDROID__)
     const auto touch = ps2x::android::padInput();
