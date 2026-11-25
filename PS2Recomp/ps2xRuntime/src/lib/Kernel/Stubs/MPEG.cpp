@@ -1760,12 +1760,6 @@ namespace ps2_stubs
         resetMpegStubStateUnlocked();
     }
 
-    bool mpegPlaybackActive()
-    {
-        std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
-        return !g_mpeg_stub_state.playbackByMpeg.empty();
-    }
-
     void enqueueMpegDecodedFrameForTesting(uint32_t mpegAddr)
     {
         constexpr int kTestFrameWidth = 16;
