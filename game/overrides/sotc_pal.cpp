@@ -5,6 +5,8 @@
 
 #include <iostream>
 
+void installSotcPalNativeComparison(PS2Runtime &runtime);
+
 namespace
 {
     constexpr uint32_t kPalSyncPath = 0x001BBD78u;
@@ -48,6 +50,7 @@ namespace
         g_gamecoreEntered = false;
         g_gamecoreEntry = runtime.lookupFunction(kPalGamecoreEntry);
         runtime.registerFunction(kPalGamecoreEntry, enterGamecore);
+        installSotcPalNativeComparison(runtime);
         if (runtime.hasFunction(kPalSyncPath))
         {
             g_syncPath = runtime.lookupFunction(kPalSyncPath);

@@ -64,6 +64,8 @@ namespace sotc_native
 {
     constexpr uint32_t kModelDisp = 0x01097118u, kGetCameraContext = 0x0108F518u;
     PS2Runtime::RecompiledFunction g_modelDisp = nullptr, g_getCameraContext = nullptr;
+    bool g_palNativeCompare = false;
+    bool g_palNativeSkinCompare = false;
     uint32_t g_cameraContext = 0;
     uint64_t g_frame = 0;
     uint64_t g_stateEpoch = 0;
@@ -83,6 +85,15 @@ namespace sotc_native
     };
 
     const uint8_t *g_ram = nullptr;
+    bool palComparisonSpan(uint32_t addr, uint32_t bytes)
+    {
+        const uint32_t segment = addr >> 29;
+        if (segment == 2u || segment == 3u || segment >= 6u)
+            return false;
+        const uint32_t physical = addr & 0x1FFFFFFFu;
+        return physical != 0u && (addr & 3u) == 0u && bytes <= PS2_RAM_SIZE && physical <= PS2_RAM_SIZE - bytes;
+    }
+
     uint32_t word(uint32_t addr)
     {
         uint32_t v;
@@ -689,7 +700,7 @@ namespace sotc_native
             // Verify the named US atlas against its original packed pixels.
             constexpr char name[] = "button_icon_set";
             const uint32_t physicalHeader = header & 0x1FFFFFFu;
-            return format == 0x01771014u && physicalHeader >= 0x1Eu &&
+            return !g_palNativeCompare && format == 0x01771014u && physicalHeader >= 0x1Eu &&
                 std::memcmp(g_ram + physicalHeader - 0x1Eu, name, sizeof(name)) == 0 &&
                 contentHash(header + word(header + 0x14u), pixelBytes, 0xcbf29ce484222325ull) == 0x47e7bfe4c9bd629dull;
         };
@@ -772,15 +783,16 @@ namespace sotc_native
             if (checked % 200u == 0u)
                 std::fprintf(stderr, "[tex-check] %llu textures, %llu mismatches\n", (unsigned long long)checked, (unsigned long long)mismatched);
         }
-        const auto decode = [src, key, width, height, header, psm, buttonAtlas,
+        const auto decode = [src, key, width, height, header, psm, buttonAtlas, compare = g_palNativeCompare,
                              prompts = buttonAtlas ? g_buttonPrompts : desktop_input::PromptProfile{}]
             (sotc_texture_mods::Texture &texture)
         {
             const auto &replacementDir = sotc_texture_mods::replacements();
             const auto &exportDir = sotc_texture_mods::dumps();
-            const bool replace = !buttonAtlas && !replacementDir.empty();
-            const bool exportOriginal = !buttonAtlas && !exportDir.empty();
-            static const char *rawDump = std::getenv("SOTC_TEXDUMP_DIR");
+            const bool replace = !compare && !buttonAtlas && !replacementDir.empty();
+            const bool exportOriginal = !compare && !buttonAtlas && !exportDir.empty();
+            static const char *rawDumpDir = std::getenv("SOTC_TEXDUMP_DIR");
+            const char *rawDump = compare ? nullptr : rawDumpDir;
             static const bool mipmaps = std::getenv("SOTC_NATIVE_NOMIPS") == nullptr;
             const auto applyReplacement = [&]
             {
@@ -1235,10 +1247,15 @@ namespace sotc_native
     }
     bool readChainPalette(uint32_t own, VuPalette &palette)
     {
+        if (g_palNativeCompare && !palComparisonSpan(own, 16u))
+            return false;
         if (((word(own) >> 28) & 7u) != 2u)
             return false;
-        const uint32_t ret = word(own + 4u), qwc = word(ret) & 0xFFFFu;
-        if (qwc <= 5u)
+        const uint32_t ret = word(own + 4u);
+        if (g_palNativeCompare && !palComparisonSpan(ret, 16u))
+            return false;
+        const uint32_t tag = word(ret), qwc = tag & 0xFFFFu;
+        if (qwc <= 5u || (g_palNativeCompare && (((tag >> 28) & 7u) != 6u || !palComparisonSpan(ret, 16u + qwc * 16u))))
             return false;
         std::vector<float> &vu = palette.vu;
         if (palette.hi > palette.lo)
@@ -1253,6 +1270,8 @@ namespace sotc_native
             if ((cmd & 0x6Fu) != 0x6Cu)
                 continue; // NOP / STCYCL / MSCAL: one word
             const uint32_t n = ((code >> 16) & 0xFFu) ? ((code >> 16) & 0xFFu) : 256u, at = code & 0x3FFu;
+            if (g_palNativeCompare && (cmd != 0x6Cu || n * 16u > end - p || at + n > 1024u || (hi != 0u && at != hi)))
+                return false;
             const uint32_t last = std::min(at + n, 1024u);
             for (uint32_t q = at; q < last; ++q)
             {
@@ -1272,7 +1291,7 @@ namespace sotc_native
         }
         palette.lo = lo;
         palette.hi = hi;
-        return true;
+        return !g_palNativeCompare || hi > lo;
     }
 
     // A skinned packet's strip vertices as the posing reads them: bind pose,
@@ -1618,6 +1637,8 @@ namespace sotc_native
             {
                 const SkinDraw &draw = g_pendingSkinDraws[d];
                 const SkinnedPacket &packet = *draw.packet;
+                if (g_palNativeCompare && (packet.lo < finalPalette.lo || packet.hi > finalPalette.hi))
+                    continue;
                 if (draw.handle)
                     native_renderer::rewriteFramePalette(draw.handle, finalPalette.data() + packet.lo * 4u,
                                                         packet.hi - packet.lo);
@@ -1968,6 +1989,23 @@ namespace sotc_native
         const uint64_t frame = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
         if (frame != g_frame)
         {
+            if (g_palNativeCompare)
+            {
+                if (g_frameDraws != 0u)
+                {
+                    native_renderer::endFrame(512u, 448u);
+                    if (std::getenv("SOTC_NATIVE_LOG") && g_frame % 60u == 0u)
+                        std::fprintf(stderr, "[sotc:pal-native] frame %llu, %u draws, %llu CPU skin passes\n",
+                                     static_cast<unsigned long long>(g_frame), g_frameDraws,
+                                     static_cast<unsigned long long>(g_skinnedDraws));
+                }
+                clearPendingSkin();
+                native_renderer::beginFrame();
+                g_frame = frame;
+                g_frameDraws = g_modelDraws = 0u;
+                g_skinnedDraws = 0u;
+                return;
+            }
             endFrame();
             clearPendingSkin();
             frameLog();
@@ -3892,12 +3930,20 @@ namespace sotc_native
         syncFrame(rdram);
         static const ModelDispEnv env;
         const uint32_t instance = GPR_U32(ctx, 4), matrix = GPR_U32(ctx, 5);
+        if (g_palNativeCompare && (!palComparisonSpan(instance, 0x258u) || !palComparisonSpan(matrix, 64u)))
+        {
+            g_modelDisp(rdram, ctx, runtime);
+            return;
+        }
         float model[16];
         for (int i = 0; i < 16; ++i)
             model[i] = real(matrix + i * 4u);
         // The lists are built while the GS draws (the emulated picture shown).
-        const bool ps2Lists = native_renderer::tuning().ps2Lists || !GS::skipRaster();
-        static const bool check = std::getenv("SOTC_MODELDISP_CHECK") != nullptr;
+        const bool ps2Lists = g_palNativeCompare || native_renderer::tuning().ps2Lists || !GS::skipRaster();
+        static const bool checkEnabled = std::getenv("SOTC_MODELDISP_CHECK") != nullptr;
+        const bool check = !g_palNativeCompare && checkEnabled;
+        if (g_palNativeCompare)
+            g_cameraContext = 0u; // The PAL getter must supply this model's camera.
         if (ps2Lists && !check)
             g_modelDisp(rdram, ctx, runtime); // the emulated drawing goes on as before
         else
@@ -3908,7 +3954,7 @@ namespace sotc_native
                 ctx->pc = GPR_U32(ctx, 31); // jr ra
         }
         HookTimer hookTimer;
-        if (!g_cameraContext)
+        if (!g_cameraContext || (g_palNativeCompare && !palComparisonSpan(g_cameraContext, 0x5E0u)))
             return;
 
         float camera[16], clip[16];
@@ -3927,7 +3973,12 @@ namespace sotc_native
         else if (!ps2Lists)
             modelDispState(ctx, instance, model);
 
-        const uint32_t header = word(word(instance) + 0x20u);
+        const uint32_t modelObject = word(instance);
+        if (g_palNativeCompare && !palComparisonSpan(modelObject, 0x24u))
+            return;
+        const uint32_t header = word(modelObject + 0x20u);
+        if (g_palNativeCompare && !palComparisonSpan(header, 0x64u))
+            return;
         static const uint32_t skipHeader = std::getenv("SOTC_NATIVE_SKIP") ? static_cast<uint32_t>(std::strtoul(std::getenv("SOTC_NATIVE_SKIP"), nullptr, 16)) : 0u; // debugging
         if (header == skipHeader)
             return;
@@ -3975,7 +4026,7 @@ namespace sotc_native
         // runs after), so +0x2c still held another instance's or an earlier
         // frame's result (on-screen parts skipped, off-screen ones drawn).
         const bool partCulled = (word(header + 0x18u) & 1u) == 0u && word(header + 0x54u) != 1u;
-        if (partCulled && table == 0u)
+        if (partCulled && (table == 0u || (g_palNativeCompare && !palComparisonSpan(table, 0x30u))))
             return; // modelDisp returns too (bVar4 stays set): nothing drawn
         static std::vector<uint8_t> partVisible;
         if (partCulled)
@@ -4012,6 +4063,8 @@ namespace sotc_native
                 if (index >= 4096u || depth > 64)
                     return;
                 const uint32_t node = table + index * 0x30u;
+                if (g_palNativeCompare && !palComparisonSpan(node, 0x30u))
+                    return;
                 const uint32_t state = inherited ? inherited : test(node);
                 if (partVisible.size() <= index)
                     partVisible.resize(index + 1u, 0u); // not reached: drawn
@@ -4033,7 +4086,9 @@ namespace sotc_native
         static std::vector<native_renderer::Vertex> vertices;
         static std::vector<Strip> strips;
         static VuPalette palette;
-        const bool hasPalette = readPalette(instance, palette);
+        if (g_palNativeCompare && !palComparisonSpan(packets, 32u))
+            return;
+        const bool hasPalette = (!g_palNativeCompare || g_palNativeSkinCompare) && readPalette(instance, palette);
         const bool fast = native_renderer::tuning().fastHooks;
         uint32_t paletteHandle = 0, paletteLo = 0, paletteHi = 0; // this instance's palette as last sent
         bool sampledPalette = false;
@@ -4057,32 +4112,52 @@ namespace sotc_native
         for (uint32_t k = 0; k < count; ++k)
         {
             const uint32_t pk = packets + k * 32u;
-            if (word(pk) == 0u)
+            if ((g_palNativeCompare && !palComparisonSpan(pk, 32u)) || word(pk) == 0u)
                 break;
             if (word(pk + 4u) != lod)
                 continue;
             const uint32_t part = word(pk + 12u);
             if (partCulled && part != 0xFFFFFFFFu && part < partVisible.size() && partVisible[part] == 1u)
                 continue;
-            const uint32_t surface = word(pk + 8u), s = word(header + 0x50u) + surface * 0x120u;
-            if (!surfaceDrawn(s))
+            const uint32_t surface = word(pk + 8u), surfaceBase = word(header + 0x50u);
+            if (g_palNativeCompare && (!palComparisonSpan(surfaceBase, 0x120u) ||
+                                      surface >= word(header + 0x54u) ||
+                                      surface > (PS2_RAM_SIZE - (surfaceBase & 0x1FFFFFFFu) - 0x120u) / 0x120u))
+                continue;
+            const uint32_t s = surfaceBase + surface * 0x120u;
+            if (g_palNativeCompare)
+            {
+                // Special surfaces rely on region-specific effect state and passes.
+                const uint32_t flags = word(s + 0x18u);
+                // PAL's modelGetDlLayer may also send bit 6 to layer 22.
+                constexpr uint32_t effects = (1u << 6) | (1u << 17) | (1u << 24) | (1u << 25) | (1u << 26) | (1u << 29);
+                const uint32_t maxTextureMode = g_palNativeSkinCompare ? 2u : 1u;
+                if ((flags & effects) || (flags & 0x2200u) == 0x2200u || word(s + 0x1Cu) > maxTextureMode)
+                    continue;
+            }
+            else if (!surfaceDrawn(s))
                 continue;
             const uint32_t size = word(pk), data = word(pk + 16u);
+            if (g_palNativeCompare && (!palComparisonSpan(data, size) || size % 4u != 0u))
+                continue;
             const uint64_t id = packetId(data, size, fast);
             const bool changedInPlace = g_packetChangedInPlace;
             auto skinnedPacket = g_skinnedIds.count(id) ? g_skinnedPackets.find(id) : g_skinnedPackets.end();
             const bool twoPasses = word(s + 0x1Cu) == 2u;
             const bool needsBuild = skinnedPacket == g_skinnedPackets.end() &&
                                     (!native_renderer::hasMesh(id) || (twoPasses && !native_renderer::hasMesh(id ^ (1ull << 61))));
-            if (needsBuild && !changedInPlace && buildPacketAsync(id, data, size, twoPasses))
+            if (needsBuild && !g_palNativeCompare && !changedInPlace && buildPacketAsync(id, data, size, twoPasses))
                 ; // on the worker: this packet is left out until it is taken up
             else if (needsBuild)
             {
                 strips.clear();
                 readBatches(data, size, strips);
-                if (skinned(strips) && lit(strips))
+                const bool hasSkin = skinned(strips);
+                if (g_palNativeCompare && (hasSkin ? !g_palNativeSkinCompare : twoPasses))
+                    continue;
+                if (hasSkin && lit(strips))
                     g_litPackets.insert(id);
-                if (skinned(strips))
+                if (hasSkin)
                 {
                     try
                     {
@@ -4126,11 +4201,11 @@ namespace sotc_native
             if (skinnedPacket != g_skinnedPackets.end())
             {
                 skinnedPacket->second.used = g_frame;
-                if (!hasPalette)
+                SkinnedPacket &packet = skinnedPacket->second;
+                if (!hasPalette || (g_palNativeCompare && (packet.lo < palette.lo || packet.hi > palette.hi)))
                     continue;
                 posed = true;
-                SkinnedPacket &packet = skinnedPacket->second;
-                if (fast && packet.gpu && native_renderer::gpuSkinning())
+                if (!g_palNativeCompare && fast && packet.gpu && native_renderer::gpuSkinning())
                 {
                     // Posed by the GPU: the bind pose kept under the packet's
                     // id, this instance's matrices sent with the draw.
@@ -4207,7 +4282,7 @@ namespace sotc_native
                                  word(s + 0x18u), word(s + 0x1Cu), g_frame, regs.c_str());
                 }
             }
-            const bool noReflect = !native_renderer::tuning().reflections;
+            const bool noReflect = g_palNativeCompare || !native_renderer::tuning().reflections;
             if ((layer == 12u || layer == 13u) && noReflect)
                 continue;
             if ((skipLayers >> (layer & 31u)) & 1u)
@@ -4220,7 +4295,7 @@ namespace sotc_native
             state.clamp = surfaceClamp(s);
             state.order = layer; // surfaceLayer above (pure)
             state.opacity = opacity;
-            const bool noMips = !native_renderer::tuning().mipmaps;
+            const bool noMips = g_palNativeCompare || !native_renderer::tuning().mipmaps;
             if (!noMips)
                 surfaceLod(header, surface, state);
             if (logPasses && state.maxLod > 0.0f)
@@ -4254,8 +4329,9 @@ namespace sotc_native
             uint64_t bossMask = 0;
             uint64_t effectFlags;
             std::memcpy(&effectFlags, g_ram + ((s + 0x18u) & 0x1FFFFF8u), 8);
-            diagnoseWeakSurface(header, surface, s, effectFlags, state.texture);
-            if (bossMaskOn() && ((effectFlags >> 17) & 1u))
+            if (!g_palNativeCompare)
+                diagnoseWeakSurface(header, surface, s, effectFlags, state.texture);
+            if (((effectFlags >> 17) & 1u) && bossMaskOn())
             {
                 bossMask = bossMaskTexture();
                 if (!bossMask)
@@ -4506,6 +4582,33 @@ namespace sotc_native {
     }
     bool validateNativeState(PS2Runtime &r,const std::vector<uint8_t> &b,std::string &e) { return decodeNativeState(r,b,false,e); }
     bool restoreNativeState(PS2Runtime &r,const std::vector<uint8_t> &b,std::string &e) { return decodeNativeState(r,b,true,e); }
+}
+
+void installSotcPalNativeComparison(PS2Runtime &runtime)
+{
+    using namespace sotc_native;
+    const char *compare = std::getenv("SOTC_PAL_NATIVE_COMPARE");
+    const char *mode = std::getenv("SOTC_NATIVE");
+    if (!compare || std::strcmp(compare, "1") != 0 || !mode || std::strcmp(mode, "2") != 0 ||
+        std::getenv("PS2X_MODULE_CAPTURE") || GS::skipRaster())
+        return;
+
+    // SCES-53326 GAMECORE. The PAL model uses the same packet and part
+    // records and calls the PAL camera getter before building its GS lists.
+    constexpr uint32_t modelDisp = 0x01092470u, cameraContext = 0x0108A810u;
+    if (!runtime.hasFunction(modelDisp) || !runtime.hasFunction(cameraContext) || !native_renderer::available())
+        return;
+    g_palNativeCompare = true;
+    const char *skin = std::getenv("SOTC_PAL_NATIVE_SKIN_COMPARE");
+    g_palNativeSkinCompare = skin && std::strcmp(skin, "1") == 0;
+    g_modelDisp = runtime.lookupFunction(modelDisp);
+    g_getCameraContext = runtime.lookupFunction(cameraContext);
+    runtime.registerFunction(modelDisp, modelDispHook);
+    runtime.registerFunction(cameraContext, getCameraContextHook);
+    native_renderer::setShown(false);
+    if (g_palNativeSkinCompare)
+        ps2_stats::kickHook = refreshSkinnedDrawsAtKick;
+    std::cerr << "[sotc:pal-native] " << (g_palNativeSkinCompare ? "CPU skin comparison enabled\n" : "static model comparison enabled\n");
 }
 
 void installSotcNative(PS2Runtime &runtime)
