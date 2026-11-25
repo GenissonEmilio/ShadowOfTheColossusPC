@@ -2464,10 +2464,19 @@ bool vu1native::tryBatch(VifBatch &batch)
     if (!hasBatchFns() || !t_vu1Fresh || t_vu1InNative)
         return false;
     VU1Interpreter &vu = *g_batchVu;
-    if (!vu.findRecompiled(g_batchMemory->getVU1Code(), PS2_VU1_CODE_SIZE, g_batchMemory))
+    static const bool identifyDirectImage = []
+    {
+        const char *mode = std::getenv("PS2X_VU1_DIRECT");
+        return mode && (std::strcmp(mode, "1") == 0 || std::strcmp(mode, "2") == 0);
+    }();
+    uint64_t image = 0;
+    if (vu.findRecompiled(g_batchMemory->getVU1Code(), PS2_VU1_CODE_SIZE, g_batchMemory,
+                          identifyDirectImage ? &image : nullptr))
+        image = vu.m_recHash;
+    if (!image)
         return false;
     for (const BatchEntry &entry : batchFns())
-        if (entry.hash == vu.m_recHash && entry.pc == vu.state().pc)
+        if (entry.hash == image && entry.pc == vu.state().pc)
         {
             batch.gs = g_batchGs;
             return entry.fn(vu.state(), batch);

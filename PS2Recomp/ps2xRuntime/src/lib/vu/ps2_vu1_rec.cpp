@@ -84,14 +84,18 @@ void VU1Interpreter::noteRecompiledBail()
     }
 }
 
-VU1Interpreter::RecompiledFn VU1Interpreter::findRecompiled(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory)
+VU1Interpreter::RecompiledFn VU1Interpreter::findRecompiled(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory,
+                                                            uint64_t *nativeImage)
 {
     static const bool disabled = std::getenv("PS2X_VU1_EXACT") != nullptr ||
                                  std::getenv("PS2X_VU1_NOREC") != nullptr;
-    // With nothing recompiled yet, only keep going to record images.
+    // Direct batches can recognize a known image even when the package has
+    // no generated VU functions. Keep the default interpreter lookup cheap.
     static const bool collecting = std::getenv("PS2X_VU1_DUMP_MISSING") != nullptr;
+    if (nativeImage)
+        *nativeImage = 0;
     if (disabled || m_unit != Unit::VU1 || !memory || vuCode != memory->getVU1Code() ||
-        codeSize != 0x4000u || (registry().empty() && !collecting))
+        codeSize != 0x4000u || (registry().empty() && !collecting && !nativeImage))
         return nullptr;
     const uint64_t generation = memory->getVU1CodeGeneration();
     static uint64_t imageHash = 0;
@@ -111,6 +115,8 @@ VU1Interpreter::RecompiledFn VU1Interpreter::findRecompiled(const uint8_t *vuCod
         m_recGeneration = generation;
         m_recCode = vuCode;
     }
+    if (nativeImage)
+        *nativeImage = m_recHash;
     // PS2X_VU1_DUMP_MISSING=<dir>: save microcode images that have no
     // recompiled version yet, with the pcs they start at, for the generator.
     static const char *missingDir = std::getenv("PS2X_VU1_DUMP_MISSING");

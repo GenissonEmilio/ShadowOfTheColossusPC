@@ -74,7 +74,8 @@ public:
     static void registerRecompiled(uint64_t imageHash, RecompiledFn fn);
     static int generateRecompiled(const char *dumpDir, const char *outDir);
 
-    RecompiledFn findRecompiled(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory);
+    RecompiledFn findRecompiled(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory,
+                                uint64_t *nativeImage = nullptr);
     RecompiledFn m_recFn = nullptr;
     uint64_t m_recGeneration = ~0ull;
     const uint8_t *m_recCode = nullptr;
