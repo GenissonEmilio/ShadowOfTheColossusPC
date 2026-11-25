@@ -24,9 +24,9 @@ and in the port’s in-game settings menu.** The two settings are independent.
 | Where | How to change the language |
 | --- | --- |
 | Launcher | Open **Settings → Launcher language** (**Configurações → Idioma do launcher**), choose **English** or **Português**, and select **Apply** (**Aplicar**). The launcher also offers **Español** and **日本語**. It initially uses the system language if supported, with English as the fallback. |
-| In-game settings | Press **F1** and open **System → Language** (**Sistema → Idioma**). Choose **English**, **Português**, or **Automatic** to follow the system language. With a controller, press **Select/Back** twice quickly to open the menu. |
+| In-game settings | Choose **Settings → F1 settings language** in the launcher, or **System → Language** in the F1 menu. Choose **English**, **Português**, or **Automatic** to follow the system language. With a controller, press **Select/Back** twice quickly to open the F1 menu. |
 
-The original game’s text and audio come from your disc.
+The original game’s text and audio come from your disc. On PAL, choose an available campaign language in the game’s original options.
 
 ## Campaign validation
 
@@ -114,9 +114,16 @@ high performance for the compiled `game.exe` and respects an existing preference
 in Windows graphics settings.
 
 The active GPU appears in `last-game.log` under `Renderer:`. The `[stats]`
-lines show game timing, window presentation rate, generated frames, and uploads
-of new game frames to the GPU. Toggle the on-screen counter with **Graphics → Show FPS** in the
+lines report new game pictures (`realFps`), generated pictures and window
+refreshes. The `[display]` lines record frame copies, uploads and the longest
+gap between new pictures. Toggle the counter with **Graphics → Show FPS** in the
 launcher, **F1 → Video → Show FPS** during play, or **FPS display** in RecompLauncher.
+
+For a frame-rate report, stay in the same scene and record 20 seconds facing
+each direction that makes the frame rate change. Keep the resolution, effects
+and VSync fixed, and turn off frame generation while measuring. In the North
+American edition, enable **Frame timing log** in the F1 debug options to record
+time spent in the game, the renderer, GPU readback and render waits.
 
 Open **About** to create a shortcut in your applications menu. The data location
 is `~/.local/share/ShadowOfTheColossusPC` on Linux (under `XDG_DATA_HOME` if set)
@@ -250,9 +257,10 @@ icons follow the bindings in **Controls**. Existing profiles retain the manual
 choice until you select **Automatic**. Controllers exposed by Steam Input as
 Xbox devices use Xbox icons, and you can still choose a mode manually.
 
-This setting changes the game elements that use the controller icon atlas.
-Tutorial captions with lettering baked into the original art retain their
-original appearance. Mode changes take effect when you next start the game.
+This setting changes the game elements that use the original North American disc’s
+controller icon atlas. PAL and tutorial art with fixed button images keep their
+original icons. Modified disc textures can also keep their original icons.
+Mode changes take effect when you next start the game.
 
 Under **Settings → Assists (cheats)**, **Infinite health** and **Infinite grip**
 are independent options. Both are off by default and take effect on the next

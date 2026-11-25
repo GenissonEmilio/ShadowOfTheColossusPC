@@ -987,7 +987,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // What the last frame drawn cost (the render thread's): read at the next hand-over.
         struct
         {
-            uint64_t renderUs = 0, presentUs = 0;
+            uint64_t renderUs = 0, readbackUs = 0, presentUs = 0;
             uint32_t targets = 0;
         } stats;
         std::vector<native_renderer::ScreenBlur> blurs;
@@ -998,6 +998,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         bool hold = false; // holdFrame: uploads only, not drawn or shown
 
         native_renderer::detail::FrameOutput output;
+        std::vector<uint8_t> readbackPixels;
 
         static GLuint compile(GLenum type, const char *source)
         {
@@ -1712,7 +1713,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             }
         }
 
-        void render(uint32_t w, uint32_t h);
+        void render(uint32_t w, uint32_t h, bool timed);
 
         // A mesh's triangles: the list as it is, or the indexed one's
         // indices (the frame's index buffer, bound with the frame's
@@ -1960,7 +1961,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         frameMeshes.clear();
     }
 
-    void Renderer::render(uint32_t w, uint32_t h)
+    void Renderer::render(uint32_t w, uint32_t h, bool timed)
     {
         ensureTargets(w, h);
         uint32_t alphaSplitTriangles = 0, alphaRangeDraws = 0;
@@ -2989,7 +2990,6 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             copy(colorPlain, shownFrame[shownIndex]);
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             boundFbo = boundProgram = ~0u;
-            const bool timed = native_renderer::tuning().frameLog;
             const uint64_t start = timed ? native_renderer::nowUs() : 0u;
             hook(shownFrame[shownIndex].texture, w, h);
             if (timed)
@@ -2997,15 +2997,18 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             return;
         }
         // Read back, top row first (the GL picture is y-up).
-        std::vector<uint8_t> pixels(static_cast<size_t>(w) * h * 4u);
+        readbackPixels.resize(static_cast<size_t>(w) * h * 4u);
         glBindFramebuffer(GL_FRAMEBUFFER, color.fbo);
-        glReadPixels(0, 0, static_cast<GLsizei>(w), static_cast<GLsizei>(h), GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        const uint64_t start = timed ? native_renderer::nowUs() : 0u;
+        glReadPixels(0, 0, static_cast<GLsizei>(w), static_cast<GLsizei>(h), GL_RGBA, GL_UNSIGNED_BYTE, readbackPixels.data());
+        if (timed)
+            stats.readbackUs += native_renderer::nowUs() - start;
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         std::lock_guard<std::mutex> lock(output.mutex);
-        output.pixels.resize(pixels.size());
+        output.pixels.resize(readbackPixels.size());
         const size_t row = static_cast<size_t>(w) * 4u;
         for (uint32_t y = 0; y < h; ++y)
-            std::memcpy(output.pixels.data() + static_cast<size_t>(y) * row, pixels.data() + static_cast<size_t>(h - 1u - y) * row, row);
+            std::memcpy(output.pixels.data() + static_cast<size_t>(y) * row, readbackPixels.data() + static_cast<size_t>(h - 1u - y) * row, row);
         output.width = w;
         output.height = h;
         ++output.revision;
@@ -3202,12 +3205,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             const uint64_t start = timed ? native_renderer::nowUs() : 0u;
             std::unique_lock<std::mutex> lock(m_mutex);
             waitIdle(lock);
+            const uint64_t waitedPrevious = timed ? native_renderer::nowUs() - start : 0u;
             // The render thread waits: what it holds changes hands. What the
             // last frame drawn cost goes into this frame's counters.
             if (timed)
             {
                 native_renderer::FrameCounters &c = native_renderer::frameCounters();
                 c.renderUs += r->stats.renderUs;
+                c.readbackUs += r->stats.readbackUs;
                 c.presentUs += r->stats.presentUs;
                 c.targets += r->stats.targets;
             }
@@ -3239,15 +3244,19 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             }
             m_width = width;
             m_height = height;
+            m_timed = timed;
             m_queued = true;
             m_work.notify_one();
             const bool threaded = native_renderer::tuning().renderThread;
+            const uint64_t handoff = timed ? native_renderer::nowUs() : 0u;
             if (!threaded)
                 waitIdle(lock);
             if (timed)
             {
                 native_renderer::FrameCounters &c = native_renderer::frameCounters();
-                c.waitUs += native_renderer::nowUs() - start;
+                c.waitUs += waitedPrevious + (threaded ? 0u : native_renderer::nowUs() - handoff);
+                c.submitUs += handoff - start - waitedPrevious;
+                c.renderWorker = true;
                 c.renderThread = threaded;
             }
         }
@@ -3683,6 +3692,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 m_queued = false;
                 m_busy = true;
                 const uint32_t width = m_width, height = m_height;
+                const bool timed = m_timed;
                 const bool uploadsOnly = m_uploadsOnly; // flushUploads (SOTC_GL_FLUSH_WAIT)
                 m_uploadsOnly = false;
                 lock.unlock();
@@ -3694,13 +3704,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 else
                 {
                     Lock gl;
-                    const uint64_t start = native_renderer::nowUs(), present = r->stats.presentUs;
+                    const uint64_t start = timed ? native_renderer::nowUs() : 0u;
                     ++r->arenaFrame;
                     r->applyUploads();
                     if (!r->hold) // held: the last picture stays on screen
-                        r->render(width, height);
+                        r->render(width, height, timed);
                     r->evictUnused();
-                    r->stats.renderUs += (native_renderer::nowUs() - start) - (r->stats.presentUs - present);
+                    if (timed)
+                        r->stats.renderUs += native_renderer::nowUs() - start - r->stats.presentUs - r->stats.readbackUs;
                 }
                 lock.lock();
                 m_busy = false;
@@ -3745,6 +3756,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         std::function<void()> m_stateCommand;
         bool m_started = false, m_initOk = false;
         bool m_skipStateFrame = false;
+        bool m_timed = false;
         bool m_queued = false; // a frame handed over, not started yet
         bool m_busy = false;   // the render thread drawing
         bool m_uploadsOnly = false; // what is handed over is uploads alone (flushUploads, SOTC_GL_FLUSH_WAIT)

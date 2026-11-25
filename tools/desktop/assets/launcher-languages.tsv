@@ -84,6 +84,10 @@ Ativo: {name}	Active: {name}	Activo: {name}	使用中: {name}
 Não foi possível desativar o shader	Could not disable the shader	No se pudo desactivar el shader	シェーダーを無効化できませんでした
 Configurações do launcher	Launcher settings	Ajustes del iniciador	ランチャー設定
 Idioma do launcher	Launcher language	Idioma del iniciador	ランチャーの言語
+Idioma do menu F1	F1 settings language	Idioma del menú F1	F1 設定の言語
+Automático	Automatic	Automático	自動
+O texto e o áudio da campanha vêm do disco. Na edição PAL, escolha entre os idiomas disponíveis no menu original do jogo.	Campaign text and audio come from the disc. In the PAL edition, choose from the languages available in the original game menu.	El texto y el audio de la campaña provienen del disco. En la edición PAL, elige entre los idiomas disponibles en el menú original del juego.	キャンペーンの文章と音声はディスクに収録されています。PAL 版では、ゲーム内のメニューから対応する言語を選んでください。
+Os ícones personalizados usam as texturas da edição americana original. A edição PAL e as imagens fixas de alguns tutoriais mantêm os ícones do disco.	Custom icons use textures from the original North American edition. The PAL edition and some tutorial artwork keep the disc’s icons.	Los iconos personalizados usan las texturas de la edición norteamericana original. La edición PAL y algunas imágenes de tutorial conservan los iconos del disco.	カスタムアイコンは北米版のオリジナルテクスチャを使用します。PAL 版と一部のチュートリアル画像にはディスクのアイコンが表示されます。
 Ícones dos botões no jogo	In-game button icons	Iconos de botones del juego	ゲーム内のボタンアイコン
 Os ícones mudam na próxima abertura do jogo.	Button icons change the next time you open the game.	Los iconos cambian al volver a abrir el juego.	ボタンアイコンはゲームの次回起動時に切り替わります。
 Aplicar	Apply	Aplicar	適用

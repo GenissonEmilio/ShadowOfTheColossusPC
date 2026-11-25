@@ -23,7 +23,10 @@ LEGACY_PROFILES = (("2", "Alto (legado)"), ("3", "Ultra (legado)"))
 QUALITY_KEYS = {
     "quality_preset", "render_scale", "msaa", "fxaa", "texture_filter", "model_detail", "water_detail", "effect_detail",
 }
-RECOMP_VIDEO_KEYS = ("fullscreen", "screen", "window_resolution", "vsync", "upscale_fsr", "show_fps", "volume")
+# Matches the Automatic, Portuguese and English values used by the F1 menu.
+MENU_LANGUAGES = {"0": "Automático", "1": "Português", "2": "English"}
+RECOMP_SETTINGS_KEYS = ("fullscreen", "screen", "window_resolution", "vsync", "upscale_fsr",
+                        "show_fps", "volume", "language")
 
 
 class Graphics:
@@ -61,6 +64,14 @@ class Graphics:
     def save_fps(self, enabled):
         self._save_settings({"show_fps": int(bool(enabled))}, ("show_fps",))
 
+    def menu_language(self):
+        language = self.settings().get("language")
+        return language if language in MENU_LANGUAGES else "0"
+
+    def save_menu_language(self, language):
+        if language in MENU_LANGUAGES:
+            self._save_settings({"language": language}, ("language",))
+
     def quality_profile(self):
         values = self.settings()
         profile = values.get("quality_preset")
@@ -85,7 +96,7 @@ class Graphics:
         # An external INI writer may use `key = value`. The runtime expects
         # `key=value`. Preserve the native renderer's other settings and order.
         values = self.settings()
-        external = {key: values[key] for key in RECOMP_VIDEO_KEYS if key in values}
+        external = {key: values[key] for key in RECOMP_SETTINGS_KEYS if key in values}
         if external:
             self._save_settings(external, external)
 

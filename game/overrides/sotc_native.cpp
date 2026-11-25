@@ -1838,33 +1838,35 @@ namespace sotc_native
     {
         native_renderer::FrameCounters &c = native_renderer::frameCounters();
         static uint64_t last = 0;
-        const uint64_t now = native_renderer::nowUs();
+        struct Sum
+        {
+            uint64_t frames = 0, period = 0, worst = 0, hooks = 0, decode = 0, tex = 0, mesh = 0;
+            uint64_t render = 0, readback = 0, present = 0, wait = 0, submit = 0, blocked = 0, threaded = 0;
+            uint64_t draws = 0, targets = 0, texUploads = 0, texBytes = 0, meshUploads = 0, meshBytes = 0;
+        };
+        static Sum sum;
         if (!native_renderer::tuning().frameLog)
         {
+            if (last)
+                sum = {};
             last = 0;
             c = {};
             return;
         }
-        struct Sum
-        {
-            uint64_t frames = 0, period = 0, worst = 0, hooks = 0, decode = 0, tex = 0, mesh = 0, render = 0, present = 0, wait = 0, blocked = 0, threaded = 0;
-            uint64_t draws = 0, targets = 0, texUploads = 0, texBytes = 0, meshUploads = 0, meshBytes = 0;
-        };
-        static Sum sum;
+        const uint64_t now = native_renderer::nowUs();
         if (last)
         {
             const uint64_t period = now - last;
-            if (period > 50000u)
-                std::fprintf(stderr, "[frame] slow %llu: %.1f ms: hooks %.1f (decode %.1f, %u textures %.0f KB, up %.1f; %u meshes %.0f KB, up %.1f) render %.1f present %.1f wait %.1f draws %u targets %u async %u/%u held %u\n",
-                             (unsigned long long)g_frame, period / 1000.0, c.hookUs / 1000.0, c.decodeUs / 1000.0, c.texUploads, c.texBytes / 1024.0, c.texUs / 1000.0,
-                             c.meshUploads, c.meshBytes / 1024.0, c.meshUs / 1000.0, c.renderUs / 1000.0, c.presentUs / 1000.0, c.waitUs / 1000.0, c.draws, c.targets,
-                             c.asyncJobs, c.asyncDone, c.heldDraws);
-            // SOTC_FRAME_LOG_ALL=1: every frame on a line of its own (cuts, loads).
+            const uint64_t blocked = c.renderWorker ? c.waitUs + c.submitUs : c.renderUs + c.presentUs;
+            // SOTC_FRAME_LOG_ALL=1 also logs frames below the hitch threshold.
             static const bool all = std::getenv("SOTC_FRAME_LOG_ALL") != nullptr;
-            if (all && period <= 50000u)
-                std::fprintf(stderr, "[frame] each %llu: %.1f ms: hooks %.1f (decode %.1f, %u textures, %u meshes, up %.1f) render %.1f wait %.1f draws %u async %u/%u held %u\n",
-                             (unsigned long long)g_frame, period / 1000.0, c.hookUs / 1000.0, c.decodeUs / 1000.0, c.texUploads, c.meshUploads,
-                             (c.texUs + c.meshUs) / 1000.0, c.renderUs / 1000.0, c.waitUs / 1000.0, c.draws, c.asyncJobs, c.asyncDone, c.heldDraws);
+            if (period > 50000u || all)
+                std::fprintf(stderr, "[frame] %s %llu: %.1f ms: game %.1f hooks %.1f (decode %.1f, %u textures %.0f KB, up %.1f; %u meshes %.0f KB, up %.1f) render %.1f readback %.1f present %.1f wait %.1f submit %.1f draws %u targets %u async %u/%u held %u\n",
+                             period > 50000u ? "slow" : "each", (unsigned long long)g_frame, period / 1000.0,
+                             (period - std::min(period, c.hookUs + blocked)) / 1000.0, c.hookUs / 1000.0, c.decodeUs / 1000.0,
+                             c.texUploads, c.texBytes / 1024.0, c.texUs / 1000.0, c.meshUploads, c.meshBytes / 1024.0, c.meshUs / 1000.0,
+                             c.renderUs / 1000.0, c.readbackUs / 1000.0, c.presentUs / 1000.0, c.waitUs / 1000.0, c.submitUs / 1000.0,
+                             c.draws, c.targets, c.asyncJobs, c.asyncDone, c.heldDraws);
             ++sum.frames;
             sum.period += period;
             sum.worst = std::max(sum.worst, period);
@@ -1873,13 +1875,15 @@ namespace sotc_native
             sum.tex += c.texUs;
             sum.mesh += c.meshUs;
             sum.render += c.renderUs;
+            sum.readback += c.readbackUs;
             sum.present += c.presentUs;
             sum.wait += c.waitUs;
+            sum.submit += c.submitUs;
             // A render thread draws (and shows) the frame before while the
             // game runs: the game thread's own time is what it did not wait.
             sum.threaded += c.renderThread ? 1u : 0u;
             // Without one (Metal) render and present were the game thread's.
-            sum.blocked += c.waitUs ? c.waitUs : c.renderUs + c.presentUs;
+            sum.blocked += blocked;
             sum.draws += c.draws;
             sum.targets += c.targets;
             sum.texUploads += c.texUploads;
@@ -1888,12 +1892,12 @@ namespace sotc_native
             sum.meshBytes += c.meshBytes;
             if (sum.frames == 60u)
             {
-                const double n = 60.0, game = (static_cast<double>(sum.period) - sum.hooks - sum.blocked) / n / 1000.0;
-                std::fprintf(stderr, "[frame] %llu: %.1f ms (%.1f fps, slowest %.1f) | game %.1f hooks %.1f (decode %.2f tex up %.2f mesh up %.2f) render %.1f present %.1f wait %.1f%s | "
+                const double n = 60.0, game = (sum.period - std::min(sum.period, sum.hooks + sum.blocked)) / n / 1000.0;
+                std::fprintf(stderr, "[frame] %llu: %.1f ms (%.1f fps, slowest %.1f) | game %.1f hooks %.1f (decode %.2f tex up %.2f mesh up %.2f) render %.1f readback %.1f present %.1f wait %.1f submit %.1f%s | "
                              "draws %.0f targets %.1f textures %.2f (%.0f KB) meshes %.0f (%.0f KB)\n",
                              (unsigned long long)g_frame, sum.period / n / 1000.0, n * 1e6 / static_cast<double>(sum.period), sum.worst / 1000.0, game, sum.hooks / n / 1000.0,
-                             sum.decode / n / 1000.0, sum.tex / n / 1000.0, sum.mesh / n / 1000.0, sum.render / n / 1000.0, sum.present / n / 1000.0,
-                             sum.wait / n / 1000.0, sum.threaded ? " (render thread)" : "",
+                             sum.decode / n / 1000.0, sum.tex / n / 1000.0, sum.mesh / n / 1000.0, sum.render / n / 1000.0,
+                             sum.readback / n / 1000.0, sum.present / n / 1000.0, sum.wait / n / 1000.0, sum.submit / n / 1000.0, sum.threaded ? " (render thread)" : "",
                              sum.draws / n, sum.targets / n, sum.texUploads / n, sum.texBytes / n / 1024.0, sum.meshUploads / n, sum.meshBytes / n / 1024.0);
                 sum = Sum{};
             }

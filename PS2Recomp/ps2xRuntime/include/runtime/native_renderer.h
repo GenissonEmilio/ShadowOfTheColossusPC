@@ -391,13 +391,13 @@ namespace native_renderer
         // Microseconds: backend endFrame (render: its CPU side, present: the
         // host's swap), uploads into the backend, texture decoding, the
         // native hooks' own work (decoding and uploads included).
-        uint64_t renderUs = 0, presentUs = 0, texUs = 0, meshUs = 0, decodeUs = 0, hookUs = 0;
+        uint64_t renderUs = 0, readbackUs = 0, presentUs = 0, texUs = 0, meshUs = 0, decodeUs = 0, hookUs = 0;
         // A backend drawing on a thread of its own (the OpenGL one): render and
         // present are that thread's, for the last frame it drew (they overlap
         // the game); waitUs is the game thread's wait at endFrame (for the
         // frame before when renderThread, for its own frame when not).
-        uint64_t waitUs = 0;
-        bool renderThread = false;
+        uint64_t waitUs = 0, submitUs = 0;
+        bool renderWorker = false, renderThread = false;
         // buildAsync: draws left out (their mesh or texture still on the
         // worker), jobs handed to it, and finished jobs taken up.
         uint32_t heldDraws = 0, asyncJobs = 0, asyncDone = 0;

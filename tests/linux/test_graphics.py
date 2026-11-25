@@ -43,6 +43,16 @@ class GraphicsTests(unittest.TestCase):
         self.assertEqual(graphics.display(), (True, 3))
         self.assertEqual(graphics.upscaling(), (4, True))
 
+    def test_menu_language_round_trips_without_overwriting_video_settings(self):
+        self.assertEqual(self.graphics.menu_language(), "0")
+        self.graphics.save_display(False, 3)
+        self.graphics.save_menu_language("2")
+        reloaded = Graphics(self.library)
+        self.assertEqual(reloaded.menu_language(), "2")
+        self.assertEqual(reloaded.display(), (False, 3))
+        reloaded.save_menu_language("unsupported")
+        self.assertEqual(reloaded.menu_language(), "2")
+
     def test_quality_profile_replaces_overrides_but_preserves_other_settings(self):
         self.assertEqual(self.graphics.quality_profile(), "1")
         self.graphics.config.parent.mkdir(parents=True)

@@ -13,7 +13,7 @@ import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from model import Library, SAVE_STATES_AVAILABLE, VERSION, assets_directory, atomic_json, program_directory
-from graphics import GRAPHICS_PROFILES, LEGACY_PROFILES, Graphics, WINDOW_RESOLUTIONS
+from graphics import GRAPHICS_PROFILES, LEGACY_PROFILES, MENU_LANGUAGES, Graphics, WINDOW_RESOLUTIONS
 from gamepad import Gamepad
 from language import LANGUAGES, PREFERENCES, PROMPTS, activate, preferences, translate as tr
 from launcher_audio import LauncherAudio
@@ -1146,7 +1146,15 @@ class Launcher:
 
     def settings_page(self):
         page = box(spacing=18)
-        page.pack_start(label(tr("Configurações do launcher"), "section-title"), False, False, 0)
+        title = box(Gtk.Orientation.HORIZONTAL, spacing=12)
+        title.pack_start(label(tr("Configurações do launcher"), "section-title"), True, True, 0)
+        self.preferences_status = label("", "status", wrap=True)
+        title.pack_start(self.preferences_status, False, False, 0)
+        apply = style(Gtk.Button(label=tr("Aplicar")), "secondary")
+        apply.set_valign(Gtk.Align.CENTER)
+        apply.connect("clicked", self.apply_preferences)
+        title.pack_end(apply, False, False, 0)
+        page.pack_start(title, False, False, 0)
         preferences_panel = box(spacing=12, classes=("panel", "graphics-panel"))
         preferences_panel.pack_start(label(tr("Idioma do launcher"), "panel-title"), False, False, 0)
         self.language_choice = style(Gtk.ComboBoxText(), "graphics-select")
@@ -1154,6 +1162,13 @@ class Launcher:
             self.language_choice.append(code, name)
         self.language_choice.set_active_id(self.preferences["language"])
         preferences_panel.pack_start(self.language_choice, False, False, 0)
+        preferences_panel.pack_start(label(tr("Idioma do menu F1"), "panel-title"), False, False, 0)
+        self.menu_language_choice = style(Gtk.ComboBoxText(), "graphics-select")
+        for code, name in MENU_LANGUAGES.items():
+            self.menu_language_choice.append(code, tr(name) if code == "0" else name)
+        self.menu_language_choice.set_active_id(self.graphics.menu_language())
+        preferences_panel.pack_start(self.menu_language_choice, False, False, 0)
+        preferences_panel.pack_start(label(tr("O texto e o áudio da campanha vêm do disco. Na edição PAL, escolha entre os idiomas disponíveis no menu original do jogo."), "muted", wrap=True), False, False, 0)
         preferences_panel.pack_start(label(tr("Ícones dos botões no jogo"), "panel-title"), False, False, 0)
         self.prompts_choice = style(Gtk.ComboBoxText(), "graphics-select")
         for mode, text in (("auto", tr("Automático · último dispositivo usado")),
@@ -1164,6 +1179,7 @@ class Launcher:
         self.prompts_choice.set_active_id(self.preferences["button_prompts"])
         preferences_panel.pack_start(self.prompts_choice, False, False, 0)
         preferences_panel.pack_start(label(tr("No modo Automático, os ícones acompanham o último dispositivo usado durante o jogo. Os atalhos de teclado respeitam seu perfil de controles. A escolha do modo vale na próxima abertura do jogo."), "muted", wrap=True), False, False, 0)
+        preferences_panel.pack_start(label(tr("Os ícones personalizados usam as texturas da edição americana original. A edição PAL e as imagens fixas de alguns tutoriais mantêm os ícones do disco."), "muted", wrap=True), False, False, 0)
         preferences_panel.pack_start(label(tr("Assistências (cheats)"), "panel-title"), False, False, 0)
         self.health_choice = style(Gtk.CheckButton(label=tr("Vida infinita")), "sound-option")
         self.health_choice.set_active(self.preferences["infinite_health"])
@@ -1175,12 +1191,6 @@ class Launcher:
         self.sound_choice = style(Gtk.CheckButton(label=tr("Sons da interface")), "sound-option")
         self.sound_choice.set_active(self.preferences["ui_sounds"])
         preferences_panel.pack_start(self.sound_choice, False, False, 0)
-        apply = style(Gtk.Button(label=tr("Aplicar")), "secondary")
-        apply.set_halign(Gtk.Align.START)
-        apply.connect("clicked", self.apply_preferences)
-        preferences_panel.pack_start(apply, False, False, 0)
-        self.preferences_status = label("", "status", wrap=True)
-        preferences_panel.pack_start(self.preferences_status, False, False, 0)
         page.pack_start(preferences_panel, False, False, 0)
         return page
 
@@ -1216,6 +1226,7 @@ class Launcher:
                   "infinite_grip": self.grip_choice.get_active(),
                   "ui_sounds": self.sound_choice.get_active()}
         try:
+            self.graphics.save_menu_language(self.menu_language_choice.get_active_id())
             atomic_json(self.library.directory / PREFERENCES, values)
         except OSError as exc:
             self.error(tr("Não foi possível salvar as configurações"), str(exc))

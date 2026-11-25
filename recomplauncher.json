@@ -22,7 +22,7 @@
       "id": "main",
       "format": "ini",
       "file": [{ "path": "{local}/ShadowOfTheColossusPC/player/celosia_settings.cfg" }],
-      "new": { "fullscreen": "1", "screen": "0", "window_resolution": "0", "vsync": "1", "upscale_fsr": "0", "show_fps": "1", "volume": "10" }
+      "new": { "fullscreen": "1", "screen": "0", "window_resolution": "0", "vsync": "1", "upscale_fsr": "0", "show_fps": "1", "volume": "10", "language": "0" }
     }
   ],
   "settings": [
@@ -94,6 +94,17 @@
       "choices": [
         { "label": "On", "set": { "show_fps": "1" } },
         { "label": "Off", "set": { "show_fps": "0" } }
+      ]
+    },
+    {
+      "id": "language",
+      "label": "F1 settings language",
+      "help": "Set the port’s F1 settings language. Campaign text and audio come from the original disc.",
+      "defaults": { "language": "0" },
+      "choices": [
+        { "label": "Automatic", "set": { "language": "0" } },
+        { "label": "Português", "set": { "language": "1" } },
+        { "label": "English", "set": { "language": "2" } }
       ]
     },
     {

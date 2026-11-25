@@ -181,6 +181,40 @@ namespace {
         state.pop_back(); restored->state().q = 77;
         check(!restored->restoreState(state, error) && restored->state().q == 77, "truncated VU leaves live context intact");
     }
+    void vuMicrocodeRewrite() {
+        PS2Memory memory;
+        check(memory.initialize(), "initialize VIF microcode memory");
+        GS gs;
+        auto vu = std::make_unique<VU1Interpreter>();
+        constexpr uint32_t nop = 0x000002ffu;
+        constexpr uint32_t end = 0x40000000u;
+        constexpr uint32_t immediate = 0x80000000u;
+        constexpr uint32_t addImmediate = 0x10000000u;
+        const auto upload = [&](uint32_t pair, uint32_t lower, uint32_t upper) {
+            const uint32_t mpg[] = {0x4a010000u | pair, lower, upper};
+            memory.processVIF1Data(reinterpret_cast<const uint8_t *>(mpg), sizeof(mpg));
+        };
+        const auto run = [&] {
+            vu->reset();
+            vu->execute(memory.getVU1Code(), PS2_VU1_CODE_SIZE, memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                        gs, &memory, 0, 0, 0, 16);
+        };
+
+        upload(0, addImmediate | (1u << 16) | 5u, nop | end); // vi1 = 5
+        upload(1, addImmediate | (2u << 16) | (1u << 11) | 1u, nop); // vi2 = vi1 + 1
+        run();
+        const auto cycles = vu->state().cycles;
+        check(vu->state().vi[1] == 5 && vu->state().vi[2] == 6, "VU executes initial MPG and end delay slot");
+        run();
+        check(vu->state().vi[2] == 6 && vu->state().cycles == cycles, "warm VU decode keeps values and cycles");
+        upload(0, addImmediate | (1u << 16) | 9u, nop | end);
+        run();
+        check(vu->state().vi[1] == 9 && vu->state().vi[2] == 10 && vu->state().cycles == cycles,
+              "VIF rewrite uses changed lower word and unchanged delay slot");
+        upload(0, addImmediate | (1u << 16) | 9u, nop | end | immediate);
+        run();
+        check(vu->state().vi[1] == 0 && vu->state().vi[2] == 1, "VIF rewrite sees an upper-word-only I-bit change");
+    }
     void iopState() {
         using namespace ps2x::iop::detail;
         IopMemory memory;
@@ -298,6 +332,6 @@ int main() {
 #if defined(__linux__) && defined(__GLIBC__)
     libcRandomState();
 #endif
-    memoryState(); vuState(); iopState(); gsState(); historyCodec(); legacyCardGuard();
+    memoryState(); vuState(); vuMicrocodeRewrite(); iopState(); gsState(); historyCodec(); legacyCardGuard();
     std::printf("PASS: %u subsystem state checks; no ROM, GPU context or personal files\n", checks);
 }

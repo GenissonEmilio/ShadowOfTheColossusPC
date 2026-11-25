@@ -1703,46 +1703,33 @@ namespace ps2_stubs
             const uint32_t outWidth = align16(width);
             const uint32_t outHeight = align16(height);
             const uint32_t macroblockColumns = outWidth / 16u;
+            constexpr size_t kStripRowBytes = 16u * 4u;
 
             for (uint32_t mbx = 0u; mbx < macroblockColumns; ++mbx)
             {
-                const size_t stripOffset =
-                    static_cast<size_t>(mbx) * static_cast<size_t>(outHeight) * 16u * 4u;
+                const uint32_t srcX = mbx * 16u;
+                const size_t visibleBytes = std::min(16u, width - srcX) * 4u;
+                const size_t stripOffset = static_cast<size_t>(mbx) * outHeight * kStripRowBytes;
                 for (uint32_t y = 0u; y < outHeight; ++y)
                 {
                     uint8_t *dst = getMemPtr(
                         rdram,
-                        destAddr + static_cast<uint32_t>(stripOffset + static_cast<size_t>(y) * 16u * 4u));
+                        destAddr + static_cast<uint32_t>(stripOffset + y * kStripRowBytes));
                     if (!dst)
                     {
                         continue;
                     }
 
-                    for (uint32_t x = 0u; x < 16u; ++x)
+                    const size_t copiedBytes = y < height ? visibleBytes : 0u;
+                    if (copiedBytes)
                     {
-                        const uint32_t srcX = mbx * 16u + x;
-                        const uint8_t *src = nullptr;
-                        if (srcX < width && y < height)
-                        {
-                            src = frame.rgba.data() +
-                                  (static_cast<size_t>(y) * static_cast<size_t>(width) + srcX) * 4u;
-                        }
-
-                        if (src)
-                        {
-                            dst[x * 4u + 0u] = src[0u];
-                            dst[x * 4u + 1u] = src[1u];
-                            dst[x * 4u + 2u] = src[2u];
-                            dst[x * 4u + 3u] = 0x80u;
-                        }
-                        else
-                        {
-                            dst[x * 4u + 0u] = 0u;
-                            dst[x * 4u + 1u] = 0u;
-                            dst[x * 4u + 2u] = 0u;
-                            dst[x * 4u + 3u] = 0x80u;
-                        }
+                        const size_t srcOffset = (static_cast<size_t>(y) * width + srcX) * 4u;
+                        std::memcpy(dst, frame.rgba.data() + srcOffset, copiedBytes);
                     }
+                    if (copiedBytes < kStripRowBytes)
+                        std::memset(dst + copiedBytes, 0, kStripRowBytes - copiedBytes);
+                    for (size_t alpha = 3; alpha < kStripRowBytes; alpha += 4)
+                        dst[alpha] = 0x80u;
                 }
             }
         }

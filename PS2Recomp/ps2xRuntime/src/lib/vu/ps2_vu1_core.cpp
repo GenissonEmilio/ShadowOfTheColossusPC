@@ -1493,8 +1493,6 @@ uint64_t VU1Interpreter::calculatePairReadyCycle(const DecodedInstructionPair &d
         &decoded.lowerUsage};
     for (const InstructionUsage *usage : usages)
     {
-        if (!usage)
-            continue;
         for (uint32_t index = 0; index < usage->vfReadCount; ++index)
         {
             const VfAccess &access = usage->vfRead[index];
@@ -2024,54 +2022,28 @@ VU1Interpreter::DecodedInstructionPair VU1Interpreter::decodeInstructionPair(con
     return decoded;
 }
 
-void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t codeSize,
-                                             const PS2Memory *memory, uint64_t generation)
-{
-    const uint32_t pairCount = std::min<uint32_t>(codeSize / 8u, kMaxDecodedPairs);
-    for (uint32_t i = 0; i < pairCount; ++i)
-        m_decodedCodeCache[i] = decodeInstructionPair(vuCode, i * 8u);
-
-    m_cachedVuCode = vuCode;
-    m_cachedMemory = memory;
-    m_cachedCodeSize = codeSize;
-    m_cachedCodeGeneration = generation;
-    m_decodedCodeCacheValid = true;
-}
-
 const VU1Interpreter::DecodedInstructionPair &VU1Interpreter::getDecodedInstructionPairForPc(
-    const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory, uint32_t pc)
+    const uint8_t *vuCode, uint32_t pc)
 {
-    if ((pc & 7u) != 0u)
-        {
-        m_decodeScratch = decodeInstructionPair(vuCode, pc);
-        return m_decodeScratch;
-    }
-
-    const bool trackedVu1Code = memory != nullptr &&
-                                ((m_unit == Unit::VU1 && vuCode == memory->getVU1Code()) ||
-                                 (m_unit == Unit::VU0 && vuCode == memory->getVU0Code()));
-    if (!trackedVu1Code)
-        {
-        m_decodeScratch = decodeInstructionPair(vuCode, pc);
-        return m_decodeScratch;
-    }
-
-    const uint64_t generation = m_unit == Unit::VU1 ? memory->getVU1CodeGeneration() : memory->getVU0CodeGeneration();
-    if (!m_decodedCodeCacheValid ||
-        m_cachedVuCode != vuCode ||
-        m_cachedMemory != memory ||
-        m_cachedCodeSize != codeSize ||
-        m_cachedCodeGeneration != generation)
-    {
-        rebuildDecodedCodeCache(vuCode, codeSize, memory, generation);
-    }
     const uint32_t pairIndex = pc / 8u;
-    if (pairIndex >= kMaxDecodedPairs)
-        {
+    if ((pc & 7u) != 0u || pairIndex >= kMaxDecodedPairs)
+    {
         m_decodeScratch = decodeInstructionPair(vuCode, pc);
         return m_decodeScratch;
     }
-    return m_decodedCodeCache[pairIndex];
+
+    // VIF uploads often change only part of the microcode. A decoded pair
+    // depends only on its two words, so keep unchanged pairs across uploads.
+    uint32_t lower, upper;
+    std::memcpy(&lower, vuCode + pc, sizeof(lower));
+    std::memcpy(&upper, vuCode + pc + sizeof(lower), sizeof(upper));
+    auto &decoded = m_decodedCodeCache[pairIndex];
+    if (!m_decodedCodeCacheValid[pairIndex] || decoded.lower != lower || decoded.upper != upper)
+    {
+        decoded = decodeInstructionPair(vuCode, pc);
+        m_decodedCodeCacheValid[pairIndex] = true;
+    }
+    return decoded;
 }
 
 void VU1Interpreter::reportReservedInstruction(bool upper, uint32_t instruction)
@@ -2195,6 +2167,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         interpret = result == 2;
     }
     uint64_t interpretedPairs = 0;
+    uint64_t stallCycles = 0;
     if (interpret && !m_recDisabled)
         ps2_stats::vu1InterpRuns.fetch_add(1, std::memory_order_relaxed);
     while (interpret && m_cycle < budgetEnd && !m_stopRequested)
@@ -2205,7 +2178,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         if (m_state.pc + 8u > codeSize)
             break;
 
-        const DecodedInstructionPair &decoded = getDecodedInstructionPairForPc(vuCode, codeSize, memory, m_state.pc);
+        const DecodedInstructionPair &decoded = getDecodedInstructionPairForPc(vuCode, m_state.pc);
         if (decoded.upperUsage.reserved || decoded.lowerUsage.reserved)
         {
             reportReservedInstruction(decoded.upperUsage.reserved, decoded.upperUsage.reserved ? decoded.upper : decoded.lower);
@@ -2220,7 +2193,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                 advanceTo(budgetEnd);
                 break;
             }
-            ps2_stats::vu1StallCycles.fetch_add(readyCycle - m_cycle, std::memory_order_relaxed);
+            stallCycles += readyCycle - m_cycle;
             advanceTo(readyCycle);
             readyCycle = calculatePairReadyCycle(decoded);
         }
@@ -2404,6 +2377,8 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     catchUpXgkick();
     if (interpretedPairs)
         ps2_stats::vu1Instr.fetch_add(interpretedPairs, std::memory_order_relaxed);
+    if (stallCycles)
+        ps2_stats::vu1StallCycles.fetch_add(stallCycles, std::memory_order_relaxed);
     if (!t_vu1InNative)
         t_vu1Fresh = programEnded;
     if (vu1ProfileEnabled())
@@ -2705,8 +2680,7 @@ bool VU1Interpreter::restoreState(const std::vector<uint8_t> &data, std::string 
     // Bindings belong to the current runtime; next execute/resume rebinds them.
     m_activeVuData=nullptr; m_activeVuDataSize=0; m_activeGs=nullptr; m_activeMemory=nullptr;
     m_recFn=nullptr; m_recGeneration=~0ull; m_recCode=nullptr; m_recHash=0;
-    m_cachedVuCode=nullptr; m_cachedMemory=nullptr; m_cachedCodeSize=0; m_cachedCodeGeneration=0;
-    m_decodedCodeCacheValid=false; m_flagScanValid=false; m_flagScanCode=nullptr;
+    m_flagScanValid=false; m_flagScanCode=nullptr;
     m_traceRunData.clear(); m_gifCapture=nullptr; m_gifCaptureOnly=false;
     return true;
 }

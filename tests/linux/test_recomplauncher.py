@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools/desktop"))
-from graphics import RECOMP_VIDEO_KEYS, Graphics
+from graphics import RECOMP_SETTINGS_KEYS, Graphics
 from import_disc import identify_disc
 from model import Library, atomic_json
 from pipeline import BOOT, PAL_BOOT, Pipeline, executable_name
@@ -27,7 +27,7 @@ class RecompLauncherTests(unittest.TestCase):
         self.assertEqual(profile["prepare"]["args"], ["--prepare", "--rom", "{game}", "--data-dir", profile_path])
         self.assertEqual(profile["config"][0]["file"], [{"path": profile_path + "/player/celosia_settings.cfg"}])
         defaults = profile["config"][0]["new"]
-        self.assertEqual(set(defaults), set(RECOMP_VIDEO_KEYS))
+        self.assertEqual(set(defaults), set(RECOMP_SETTINGS_KEYS))
         for option in profile["settings"]:
             for key, value in option["defaults"].items():
                 self.assertEqual(defaults[key], value)
@@ -54,7 +54,7 @@ class RecompLauncherTests(unittest.TestCase):
             atomic_json(work / "complete.json", {"sha256": hashlib.sha256(game.read_bytes()).hexdigest()})
             graphics = Graphics(library)
             graphics.config.parent.mkdir()
-            graphics.config.write_text("render_scale=2.500\nfullscreen = 0\nscreen = 3\nvsync = 0\nvolume = 7\n")
+            graphics.config.write_text("render_scale=2.500\nfullscreen = 0\nscreen = 3\nvsync = 0\nvolume = 7\nlanguage = 2\n")
             output = io.StringIO()
             with (patch("recomp_cli.Library", return_value=library),
                   patch.object(library, "validated_disc", return_value=identify_disc(boot.parent)),
@@ -72,7 +72,7 @@ class RecompLauncherTests(unittest.TestCase):
             self.assertFalse(play.call_args.kwargs["start_new_session"])
             contents = graphics.config.read_text()
             self.assertIn("render_scale=2.500\n", contents)
-            for line in ("fullscreen=0", "screen=3", "vsync=0", "volume=7"):
+            for line in ("fullscreen=0", "screen=3", "vsync=0", "volume=7", "language=2"):
                 self.assertIn(line + "\n", contents)
             self.assertEqual(game.read_bytes(), b"previously compiled fixture")
 
