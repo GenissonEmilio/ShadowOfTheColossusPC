@@ -111,11 +111,6 @@ void VU1Interpreter::reset()
     resetScheduler();
 }
 
-float VU1Interpreter::broadcast(const float *vf, uint8_t bc)
-{
-    return normalizeOperand(vf[bc & 3u]);
-}
-
 float VU1Interpreter::normalizeOperand(float value) const
 {
     uint32_t bits = 0;

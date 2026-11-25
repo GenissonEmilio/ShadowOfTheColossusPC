@@ -1,6 +1,7 @@
 #include "runtime/ps2_vu1.h"
 #include "ps2_vu1_detail.h"
 
+#include <array>
 #include <cmath>
 #if defined(USE_SSE2NEON) || defined(__aarch64__) || defined(__arm64__)
 #include "sse2neon.h"
@@ -14,7 +15,7 @@ namespace
 {
     // Vector form of VU1Interpreter::normalizeOperand: denormals become signed
     // zero and Inf/NaN become signed FLT_MAX.
-    inline void normalizeOperands4(const float *in, float *out)
+    inline std::array<float, 4> normalizeOperands4(const float *in)
     {
         const __m128i bits = _mm_loadu_si128(reinterpret_cast<const __m128i *>(in));
         const __m128i sign = _mm_and_si128(bits, _mm_set1_epi32(static_cast<int>(0x80000000u)));
@@ -25,7 +26,9 @@ namespace
         result = _mm_or_si128(_mm_andnot_si128(isZeroExp, result), _mm_and_si128(isZeroExp, sign));
         const __m128i clamped = _mm_or_si128(sign, _mm_set1_epi32(0x7F7FFFFF));
         result = _mm_or_si128(_mm_andnot_si128(isMaxExp, result), _mm_and_si128(isMaxExp, clamped));
-        _mm_storeu_si128(reinterpret_cast<__m128i *>(out), result);
+        std::array<float, 4> out;
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(out.data()), result);
+        return out;
     }
 
     int32_t vuFloatToInt(float value, float scale)
@@ -52,17 +55,6 @@ void VU1Interpreter::execUpper(uint32_t instr)
     uint8_t op = instr & 0x3F;
 
     float *vd = m_state.vf[fd];
-    alignas(16) float normalizedVs[4];
-    alignas(16) float normalizedVt[4];
-    alignas(16) float normalizedAcc[4];
-    normalizeOperands4(m_state.vf[fs], normalizedVs);
-    normalizeOperands4(m_state.vf[ft], normalizedVt);
-    normalizeOperands4(m_state.acc, normalizedAcc);
-    const float *vs = normalizedVs;
-    const float *vt = normalizedVt;
-    const float *acc = normalizedAcc;
-    const float q = normalizeOperand(m_state.q);
-    const float i = normalizeOperand(m_state.i);
     float result[4];
 
     // Upper opcode decoding (bits 5:0 of upper word)
@@ -73,7 +65,8 @@ void VU1Interpreter::execUpper(uint32_t instr)
     case 0x02:
     case 0x03: // ADDbc
     {
-        float bc = broadcast(vt, op & 3);
+        const auto vs = normalizeOperands4(m_state.vf[fs]);
+        const float bc = normalizeOperand(m_state.vf[ft][op & 3u]);
         for (int c = 0; c < 4; c++)
             result[c] = vs[c] + bc;
         applyFmacDest(vd, result, dest);
@@ -84,7 +77,8 @@ void VU1Interpreter::execUpper(uint32_t instr)
     case 0x06:
     case 0x07: // SUBbc
     {
-        float bc = broadcast(vt, op & 3);
+        const auto vs = normalizeOperands4(m_state.vf[fs]);
+        const float bc = normalizeOperand(m_state.vf[ft][op & 3u]);
         for (int c = 0; c < 4; c++)
             result[c] = vs[c] - bc;
         applyFmacDest(vd, result, dest);
@@ -95,7 +89,9 @@ void VU1Interpreter::execUpper(uint32_t instr)
     case 0x0A:
     case 0x0B: // MADDbc
     {
-        float bc = broadcast(vt, op & 3);
+        const auto vs = normalizeOperands4(m_state.vf[fs]);
+        const auto acc = normalizeOperands4(m_state.acc);
+        const float bc = normalizeOperand(m_state.vf[ft][op & 3u]);
         for (int c = 0; c < 4; c++)
             result[c] = acc[c] + vs[c] * bc;
         applyFmacDest(vd, result, dest);
@@ -106,7 +102,9 @@ void VU1Interpreter::execUpper(uint32_t instr)
     case 0x0E:
     case 0x0F: // MSUBbc
     {
-        float bc = broadcast(vt, op & 3);
+        const auto vs = normalizeOperands4(m_state.vf[fs]);
+        const auto acc = normalizeOperands4(m_state.acc);
+        const float bc = normalizeOperand(m_state.vf[ft][op & 3u]);
         for (int c = 0; c < 4; c++)
             result[c] = acc[c] - vs[c] * bc;
         applyFmacDest(vd, result, dest);
@@ -117,7 +115,8 @@ void VU1Interpreter::execUpper(uint32_t instr)
     case 0x12:
     case 0x13: // MAXbc
     {
-        float bc = broadcast(vt, op & 3);
+        const auto vs = normalizeOperands4(m_state.vf[fs]);
+        const float bc = normalizeOperand(m_state.vf[ft][op & 3u]);
         for (int c = 0; c < 4; c++)
             result[c] = (vs[c] > bc) ? vs[c] : bc;
         applyDest(vd, result, dest);
@@ -128,7 +127,8 @@ void VU1Interpreter::execUpper(uint32_t instr)
     case 0x16:
     case 0x17: // MINIbc
     {
-        float bc = broadcast(vt, op & 3);
+        const auto vs = normalizeOperands4(m_state.vf[fs]);
+        const float bc = normalizeOperand(m_state.vf[ft][op & 3u]);
         for (int c = 0; c < 4; c++)
             result[c] = (vs[c] < bc) ? vs[c] : bc;
         applyDest(vd, result, dest);
@@ -139,114 +139,202 @@ void VU1Interpreter::execUpper(uint32_t instr)
     case 0x1A:
     case 0x1B: // MULbc
     {
-        float bc = broadcast(vt, op & 3);
+        const auto vs = normalizeOperands4(m_state.vf[fs]);
+        const float bc = normalizeOperand(m_state.vf[ft][op & 3u]);
         for (int c = 0; c < 4; c++)
             result[c] = vs[c] * bc;
         applyFmacDest(vd, result, dest);
         return;
     }
     case 0x1C: // MULq
+    {
+        const auto vs = normalizeOperands4(m_state.vf[fs]);
+        const float q = normalizeOperand(m_state.q);
         for (int c = 0; c < 4; c++)
             result[c] = vs[c] * q;
         applyFmacDest(vd, result, dest);
         return;
+    }
     case 0x1D: // MAXi
+    {
+        const auto vs = normalizeOperands4(m_state.vf[fs]);
+        const float i = normalizeOperand(m_state.i);
         for (int c = 0; c < 4; c++)
             result[c] = (vs[c] > i) ? vs[c] : i;
         applyDest(vd, result, dest);
         return;
+    }
     case 0x1E: // MULi
+    {
+        const auto vs = normalizeOperands4(m_state.vf[fs]);
+        const float i = normalizeOperand(m_state.i);
         for (int c = 0; c < 4; c++)
             result[c] = vs[c] * i;
         applyFmacDest(vd, result, dest);
         return;
+    }
     case 0x1F: // MINIi
+    {
+        const auto vs = normalizeOperands4(m_state.vf[fs]);
+        const float i = normalizeOperand(m_state.i);
         for (int c = 0; c < 4; c++)
             result[c] = (vs[c] < i) ? vs[c] : i;
         applyDest(vd, result, dest);
         return;
+    }
     case 0x20: // ADDq
+    {
+        const auto vs = normalizeOperands4(m_state.vf[fs]);
+        const float q = normalizeOperand(m_state.q);
         for (int c = 0; c < 4; c++)
             result[c] = vs[c] + q;
         applyFmacDest(vd, result, dest);
         return;
+    }
     case 0x21: // MADDq
+    {
+        const auto vs = normalizeOperands4(m_state.vf[fs]);
+        const auto acc = normalizeOperands4(m_state.acc);
+        const float q = normalizeOperand(m_state.q);
         for (int c = 0; c < 4; c++)
             result[c] = acc[c] + vs[c] * q;
         applyFmacDest(vd, result, dest);
         return;
+    }
     case 0x22: // ADDi
+    {
+        const auto vs = normalizeOperands4(m_state.vf[fs]);
+        const float i = normalizeOperand(m_state.i);
         for (int c = 0; c < 4; c++)
             result[c] = vs[c] + i;
         applyFmacDest(vd, result, dest);
         return;
+    }
     case 0x23: // MADDi
+    {
+        const auto vs = normalizeOperands4(m_state.vf[fs]);
+        const auto acc = normalizeOperands4(m_state.acc);
+        const float i = normalizeOperand(m_state.i);
         for (int c = 0; c < 4; c++)
             result[c] = acc[c] + vs[c] * i;
         applyFmacDest(vd, result, dest);
         return;
+    }
     case 0x24: // SUBq
+    {
+        const auto vs = normalizeOperands4(m_state.vf[fs]);
+        const float q = normalizeOperand(m_state.q);
         for (int c = 0; c < 4; c++)
             result[c] = vs[c] - q;
         applyFmacDest(vd, result, dest);
         return;
+    }
     case 0x25: // MSUBq
+    {
+        const auto vs = normalizeOperands4(m_state.vf[fs]);
+        const auto acc = normalizeOperands4(m_state.acc);
+        const float q = normalizeOperand(m_state.q);
         for (int c = 0; c < 4; c++)
             result[c] = acc[c] - vs[c] * q;
         applyFmacDest(vd, result, dest);
         return;
+    }
     case 0x26: // SUBi
+    {
+        const auto vs = normalizeOperands4(m_state.vf[fs]);
+        const float i = normalizeOperand(m_state.i);
         for (int c = 0; c < 4; c++)
             result[c] = vs[c] - i;
         applyFmacDest(vd, result, dest);
         return;
+    }
     case 0x27: // MSUBi
+    {
+        const auto vs = normalizeOperands4(m_state.vf[fs]);
+        const auto acc = normalizeOperands4(m_state.acc);
+        const float i = normalizeOperand(m_state.i);
         for (int c = 0; c < 4; c++)
             result[c] = acc[c] - vs[c] * i;
         applyFmacDest(vd, result, dest);
         return;
+    }
     case 0x28: // ADD
+    {
+        const auto vs = normalizeOperands4(m_state.vf[fs]);
+        const auto vt = normalizeOperands4(m_state.vf[ft]);
         for (int c = 0; c < 4; c++)
             result[c] = vs[c] + vt[c];
         applyFmacDest(vd, result, dest);
         return;
+    }
     case 0x29: // MADD
+    {
+        const auto vs = normalizeOperands4(m_state.vf[fs]);
+        const auto vt = normalizeOperands4(m_state.vf[ft]);
+        const auto acc = normalizeOperands4(m_state.acc);
         for (int c = 0; c < 4; c++)
             result[c] = acc[c] + vs[c] * vt[c];
         applyFmacDest(vd, result, dest);
         return;
+    }
     case 0x2A: // MUL
+    {
+        const auto vs = normalizeOperands4(m_state.vf[fs]);
+        const auto vt = normalizeOperands4(m_state.vf[ft]);
         for (int c = 0; c < 4; c++)
             result[c] = vs[c] * vt[c];
         applyFmacDest(vd, result, dest);
         return;
+    }
     case 0x2B: // MAX
+    {
+        const auto vs = normalizeOperands4(m_state.vf[fs]);
+        const auto vt = normalizeOperands4(m_state.vf[ft]);
         for (int c = 0; c < 4; c++)
             result[c] = (vs[c] > vt[c]) ? vs[c] : vt[c];
         applyDest(vd, result, dest);
         return;
+    }
     case 0x2C: // SUB
+    {
+        const auto vs = normalizeOperands4(m_state.vf[fs]);
+        const auto vt = normalizeOperands4(m_state.vf[ft]);
         for (int c = 0; c < 4; c++)
             result[c] = vs[c] - vt[c];
         applyFmacDest(vd, result, dest);
         return;
+    }
     case 0x2D: // MSUB
+    {
+        const auto vs = normalizeOperands4(m_state.vf[fs]);
+        const auto vt = normalizeOperands4(m_state.vf[ft]);
+        const auto acc = normalizeOperands4(m_state.acc);
         for (int c = 0; c < 4; c++)
             result[c] = acc[c] - vs[c] * vt[c];
         applyFmacDest(vd, result, dest);
         return;
+    }
     case 0x2E: // OPMSUB
+    {
+        const auto vs = normalizeOperands4(m_state.vf[fs]);
+        const auto vt = normalizeOperands4(m_state.vf[ft]);
+        const auto acc = normalizeOperands4(m_state.acc);
         result[0] = acc[0] - vs[1] * vt[2];
         result[1] = acc[1] - vs[2] * vt[0];
         result[2] = acc[2] - vs[0] * vt[1];
         result[3] = 0.0f;
         applyFmacDest(vd, result, dest);
         return;
+    }
     case 0x2F: // MINI
+    {
+        const auto vs = normalizeOperands4(m_state.vf[fs]);
+        const auto vt = normalizeOperands4(m_state.vf[ft]);
         for (int c = 0; c < 4; c++)
             result[c] = (vs[c] < vt[c]) ? vs[c] : vt[c];
         applyDest(vd, result, dest);
         return;
+    }
 
     // Upper special group (low op 0x3C..0x3F).
     // Like lower1 special, the real selector is not just bits 5:0.  Dobie decodes:
@@ -267,7 +355,8 @@ void VU1Interpreter::execUpper(uint32_t instr)
         case 0x02:
         case 0x03: // ADDAbc
         {
-            float bc = broadcast(vt, specialOp & 3);
+            const auto vs = normalizeOperands4(m_state.vf[fs]);
+            const float bc = normalizeOperand(m_state.vf[ft][specialOp & 3u]);
             for (int c = 0; c < 4; c++)
                 result[c] = vs[c] + bc;
             applyFmacDestAcc(result, dest);
@@ -278,7 +367,8 @@ void VU1Interpreter::execUpper(uint32_t instr)
         case 0x06:
         case 0x07: // SUBAbc
         {
-            float bc = broadcast(vt, specialOp & 3);
+            const auto vs = normalizeOperands4(m_state.vf[fs]);
+            const float bc = normalizeOperand(m_state.vf[ft][specialOp & 3u]);
             for (int c = 0; c < 4; c++)
                 result[c] = vs[c] - bc;
             applyFmacDestAcc(result, dest);
@@ -289,7 +379,9 @@ void VU1Interpreter::execUpper(uint32_t instr)
         case 0x0A:
         case 0x0B: // MADDAbc
         {
-            float bc = broadcast(vt, specialOp & 3);
+            const auto vs = normalizeOperands4(m_state.vf[fs]);
+            const auto acc = normalizeOperands4(m_state.acc);
+            const float bc = normalizeOperand(m_state.vf[ft][specialOp & 3u]);
             for (int c = 0; c < 4; c++)
                 result[c] = acc[c] + vs[c] * bc;
             applyFmacDestAcc(result, dest);
@@ -300,7 +392,9 @@ void VU1Interpreter::execUpper(uint32_t instr)
         case 0x0E:
         case 0x0F: // MSUBAbc
         {
-            float bc = broadcast(vt, specialOp & 3);
+            const auto vs = normalizeOperands4(m_state.vf[fs]);
+            const auto acc = normalizeOperands4(m_state.acc);
+            const float bc = normalizeOperand(m_state.vf[ft][specialOp & 3u]);
             for (int c = 0; c < 4; c++)
                 result[c] = acc[c] - vs[c] * bc;
             applyFmacDestAcc(result, dest);
@@ -343,6 +437,8 @@ void VU1Interpreter::execUpper(uint32_t instr)
             applyDest(vtDest, result, dest);
             return;
         case 0x14: // FTOI0
+        {
+            const auto vs = normalizeOperands4(m_state.vf[fs]);
             for (int c = 0; c < 4; c++)
             {
                 int32_t iv = vuFloatToInt(vs[c], 1.0f);
@@ -350,7 +446,10 @@ void VU1Interpreter::execUpper(uint32_t instr)
             }
             applyDest(vtDest, result, dest);
             return;
+        }
         case 0x15: // FTOI4
+        {
+            const auto vs = normalizeOperands4(m_state.vf[fs]);
             for (int c = 0; c < 4; c++)
             {
                 int32_t iv = vuFloatToInt(vs[c], 16.0f);
@@ -358,7 +457,10 @@ void VU1Interpreter::execUpper(uint32_t instr)
             }
             applyDest(vtDest, result, dest);
             return;
+        }
         case 0x16: // FTOI12
+        {
+            const auto vs = normalizeOperands4(m_state.vf[fs]);
             for (int c = 0; c < 4; c++)
             {
                 int32_t iv = vuFloatToInt(vs[c], 4096.0f);
@@ -366,7 +468,10 @@ void VU1Interpreter::execUpper(uint32_t instr)
             }
             applyDest(vtDest, result, dest);
             return;
+        }
         case 0x17: // FTOI15
+        {
+            const auto vs = normalizeOperands4(m_state.vf[fs]);
             for (int c = 0; c < 4; c++)
             {
                 int32_t iv = vuFloatToInt(vs[c], 32768.0f);
@@ -374,32 +479,45 @@ void VU1Interpreter::execUpper(uint32_t instr)
             }
             applyDest(vtDest, result, dest);
             return;
+        }
         case 0x18:
         case 0x19:
         case 0x1A:
         case 0x1B: // MULAbc
         {
-            float bc = broadcast(vt, specialOp & 3);
+            const auto vs = normalizeOperands4(m_state.vf[fs]);
+            const float bc = normalizeOperand(m_state.vf[ft][specialOp & 3u]);
             for (int c = 0; c < 4; c++)
                 result[c] = vs[c] * bc;
             applyFmacDestAcc(result, dest);
             return;
         }
         case 0x1C: // MULAq
+        {
+            const auto vs = normalizeOperands4(m_state.vf[fs]);
+            const float q = normalizeOperand(m_state.q);
             for (int c = 0; c < 4; c++)
                 result[c] = vs[c] * q;
             applyFmacDestAcc(result, dest);
             return;
+        }
         case 0x1D: // ABS
+        {
+            const auto vs = normalizeOperands4(m_state.vf[fs]);
             for (int c = 0; c < 4; c++)
                 result[c] = std::fabs(vs[c]);
             applyDest(vtDest, result, dest);
             return;
+        }
         case 0x1E: // MULAi
+        {
+            const auto vs = normalizeOperands4(m_state.vf[fs]);
+            const float i = normalizeOperand(m_state.i);
             for (int c = 0; c < 4; c++)
                 result[c] = vs[c] * i;
             applyFmacDestAcc(result, dest);
             return;
+        }
         case 0x1F: // CLIP
         {
             uint32_t wBits = 0u;
@@ -433,77 +551,139 @@ void VU1Interpreter::execUpper(uint32_t instr)
             return;
         }
         case 0x20: // ADDAq
+        {
+            const auto vs = normalizeOperands4(m_state.vf[fs]);
+            const float q = normalizeOperand(m_state.q);
             for (int c = 0; c < 4; c++)
                 result[c] = vs[c] + q;
             applyFmacDestAcc(result, dest);
             return;
+        }
         case 0x21: // MADDAq
+        {
+            const auto vs = normalizeOperands4(m_state.vf[fs]);
+            const auto acc = normalizeOperands4(m_state.acc);
+            const float q = normalizeOperand(m_state.q);
             for (int c = 0; c < 4; c++)
                 result[c] = acc[c] + vs[c] * q;
             applyFmacDestAcc(result, dest);
             return;
+        }
         case 0x22: // ADDAi
+        {
+            const auto vs = normalizeOperands4(m_state.vf[fs]);
+            const float i = normalizeOperand(m_state.i);
             for (int c = 0; c < 4; c++)
                 result[c] = vs[c] + i;
             applyFmacDestAcc(result, dest);
             return;
+        }
         case 0x23: // MADDAi
+        {
+            const auto vs = normalizeOperands4(m_state.vf[fs]);
+            const auto acc = normalizeOperands4(m_state.acc);
+            const float i = normalizeOperand(m_state.i);
             for (int c = 0; c < 4; c++)
                 result[c] = acc[c] + vs[c] * i;
             applyFmacDestAcc(result, dest);
             return;
+        }
         case 0x24: // SUBAq
+        {
+            const auto vs = normalizeOperands4(m_state.vf[fs]);
+            const float q = normalizeOperand(m_state.q);
             for (int c = 0; c < 4; c++)
                 result[c] = vs[c] - q;
             applyFmacDestAcc(result, dest);
             return;
+        }
         case 0x25: // MSUBAq
+        {
+            const auto vs = normalizeOperands4(m_state.vf[fs]);
+            const auto acc = normalizeOperands4(m_state.acc);
+            const float q = normalizeOperand(m_state.q);
             for (int c = 0; c < 4; c++)
                 result[c] = acc[c] - vs[c] * q;
             applyFmacDestAcc(result, dest);
             return;
+        }
         case 0x26: // SUBAi
+        {
+            const auto vs = normalizeOperands4(m_state.vf[fs]);
+            const float i = normalizeOperand(m_state.i);
             for (int c = 0; c < 4; c++)
                 result[c] = vs[c] - i;
             applyFmacDestAcc(result, dest);
             return;
+        }
         case 0x27: // MSUBAi
+        {
+            const auto vs = normalizeOperands4(m_state.vf[fs]);
+            const auto acc = normalizeOperands4(m_state.acc);
+            const float i = normalizeOperand(m_state.i);
             for (int c = 0; c < 4; c++)
                 result[c] = acc[c] - vs[c] * i;
             applyFmacDestAcc(result, dest);
             return;
+        }
         case 0x28: // ADDA
+        {
+            const auto vs = normalizeOperands4(m_state.vf[fs]);
+            const auto vt = normalizeOperands4(m_state.vf[ft]);
             for (int c = 0; c < 4; c++)
                 result[c] = vs[c] + vt[c];
             applyFmacDestAcc(result, dest);
             return;
+        }
         case 0x29: // MADDA
+        {
+            const auto vs = normalizeOperands4(m_state.vf[fs]);
+            const auto vt = normalizeOperands4(m_state.vf[ft]);
+            const auto acc = normalizeOperands4(m_state.acc);
             for (int c = 0; c < 4; c++)
                 result[c] = acc[c] + vs[c] * vt[c];
             applyFmacDestAcc(result, dest);
             return;
+        }
         case 0x2A: // MULA
+        {
+            const auto vs = normalizeOperands4(m_state.vf[fs]);
+            const auto vt = normalizeOperands4(m_state.vf[ft]);
             for (int c = 0; c < 4; c++)
                 result[c] = vs[c] * vt[c];
             applyFmacDestAcc(result, dest);
             return;
+        }
         case 0x2C: // SUBA
+        {
+            const auto vs = normalizeOperands4(m_state.vf[fs]);
+            const auto vt = normalizeOperands4(m_state.vf[ft]);
             for (int c = 0; c < 4; c++)
                 result[c] = vs[c] - vt[c];
             applyFmacDestAcc(result, dest);
             return;
+        }
         case 0x2D: // MSUBA
+        {
+            const auto vs = normalizeOperands4(m_state.vf[fs]);
+            const auto vt = normalizeOperands4(m_state.vf[ft]);
+            const auto acc = normalizeOperands4(m_state.acc);
             for (int c = 0; c < 4; c++)
                 result[c] = acc[c] - vs[c] * vt[c];
             applyFmacDestAcc(result, dest);
             return;
+        }
         case 0x2E: // OPMULA
+        {
+            const auto vs = normalizeOperands4(m_state.vf[fs]);
+            const auto vt = normalizeOperands4(m_state.vf[ft]);
             result[0] = vs[1] * vt[2];
             result[1] = vs[2] * vt[0];
             result[2] = vs[0] * vt[1];
             result[3] = 0.0f;
             applyFmacDestAcc(result, dest);
             return;
+        }
         case 0x2F:
         case 0x30: // NOP
             return;
