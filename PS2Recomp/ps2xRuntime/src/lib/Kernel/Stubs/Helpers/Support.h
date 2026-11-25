@@ -1,5 +1,10 @@
 #include <mutex>
 #include <vector>
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 #if defined(PLATFORM_VITA)
 #include <psp2/io/fcntl.h>
 #include <psp2/io/stat.h>
@@ -428,6 +433,48 @@ namespace
         return true;
     }
 
+#if defined(__linux__) && !defined(__ANDROID__)
+    void prefetchSequentialCdRead(const std::filesystem::path &path, uint64_t offset, uint64_t byteCount)
+    {
+        // Warm the host page cache without changing when a CD read becomes visible to the guest.
+        static const bool enabled = []
+        {
+            const char *value = std::getenv("PS2X_CD_READ_AHEAD");
+            return value && std::strcmp(value, "1") == 0;
+        }();
+        if (!enabled)
+            return;
+
+        constexpr uint64_t window = 256 * 1024;
+        static thread_local std::filesystem::path previousPath;
+        static thread_local uint64_t nextOffset = 0;
+        static thread_local uint64_t refillAt = 0;
+        const bool sequential = path == previousPath && offset == nextOffset;
+        const uint64_t end = offset + byteCount;
+        nextOffset = end;
+        if (!sequential)
+        {
+            previousPath = path;
+            refillAt = 0;
+            return;
+        }
+        if (end < refillAt || end > static_cast<uint64_t>(std::numeric_limits<off_t>::max()) - window)
+            return;
+
+        // Refill after consuming half of the previous hint to avoid reopening on every read.
+        refillAt = end + window / 2;
+        const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+        if (fd < 0)
+            return;
+
+        struct stat info{};
+        if (::fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_size > static_cast<off_t>(end))
+            ::posix_fadvise(fd, static_cast<off_t>(end),
+                           std::min(static_cast<off_t>(window), info.st_size - static_cast<off_t>(end)), POSIX_FADV_WILLNEED);
+        ::close(fd);
+    }
+#endif
+
     bool readHostRange(const std::filesystem::path &path, uint64_t offsetBytes, uint8_t *dst, size_t byteCount)
     {
         if (!dst)
@@ -492,6 +539,10 @@ namespace
         }
 
         file.read(reinterpret_cast<char *>(dst), static_cast<std::streamsize>(byteCount));
+#if defined(__linux__) && !defined(__ANDROID__)
+        if (file)
+            prefetchSequentialCdRead(path, offsetBytes, byteCount);
+#endif
         g_lastCdError = 0;
         return true;
     }
