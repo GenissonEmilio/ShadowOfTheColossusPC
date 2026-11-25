@@ -1158,6 +1158,13 @@ void PS2Memory::write16(uint32_t address, uint16_t value)
     }
 }
 
+void PS2Memory::reportGsCsrAcknowledgment(uint64_t value)
+{
+    const uint32_t acknowledged = static_cast<uint32_t>(value & 0x3u);
+    if (acknowledged && m_gsCsrAcknowledge)
+        m_gsCsrAcknowledge(acknowledged);
+}
+
 void PS2Memory::write32(uint32_t address, uint32_t value)
 {
     if (address & 3)
@@ -1175,6 +1182,8 @@ void PS2Memory::write32(uint32_t address, uint32_t value)
             // CSR: bits 0..1 of the low dword are write-one-to-clear status bits.
             // Done as a single atomic RMW -- see writeCsrHalf's comment.
             writeCsrHalf(gs_regs.csr, off, value);
+            if (off == 0u)
+                reportGsCsrAcknowledgment(value);
         }
         else if (uint64_t *reg = gsRegPtr(gs_regs, address))
         {
@@ -1235,6 +1244,7 @@ void PS2Memory::write64(uint32_t address, uint64_t value)
             // CSR: bits 0..1 are write-one-to-clear status bits. Done as a single
             // atomic RMW -- see writeCsrFull's comment.
             writeCsrFull(gs_regs.csr, value);
+            reportGsCsrAcknowledgment(value);
         }
         else if (uint64_t *reg = gsRegPtr(gs_regs, address))
         {
@@ -1477,6 +1487,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
         if (regOff == kGsCsrRegOffset)
         {
             writeCsrHalf(gs_regs.csr, off, value);
+            if (off == 0u)
+                reportGsCsrAcknowledgment(value);
         }
         else if (uint64_t *reg = gsRegPtr(gs_regs, address))
         {

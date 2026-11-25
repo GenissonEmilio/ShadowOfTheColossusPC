@@ -390,6 +390,7 @@ public:
     // GS register write for the event registers (SIGNAL/FINISH/LABEL) found
     // in GIF data while the GS rasterizes nothing (GS::skipRaster).
     void setGsEventWriter(std::function<void(uint8_t, uint64_t)> write) { m_gsEventWrite = std::move(write); }
+    void setGsCsrAcknowledgeHook(std::function<void(uint32_t)> hook) { m_gsCsrAcknowledge = std::move(hook); }
 
     using Vu1MscalCallback = std::function<void(uint32_t startPC, uint32_t top, uint32_t itop)>;
     void setVu1MscalCallback(Vu1MscalCallback cb) { m_vu1MscalCallback = std::move(cb); }
@@ -578,6 +579,10 @@ public:
     bool tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr);
     void completeDmacChannel(uint32_t channelBase, uint32_t cause);
     void queueCompletedDmacCause(uint32_t cause);
+
+    // Bound by the owning runtime. Only EE-side CSR stores acknowledge events.
+    std::function<void(uint32_t)> m_gsCsrAcknowledge;
+    void reportGsCsrAcknowledgment(uint64_t value);
 };
 
 #endif // PS2_MEMORY_H

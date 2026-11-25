@@ -353,7 +353,7 @@ public:
     int removeIrqHandler(bool dmac, uint32_t cause, int id);
     int setIrqHandlerEnabled(bool dmac, int id, bool enabled);
     int setIrqCauseEnabled(bool dmac, uint32_t cause, bool enabled);
-    void dispatchIrq(bool dmac, uint32_t cause);
+    bool dispatchIrq(bool dmac, uint32_t cause);
     void setGsVideoMode(uint32_t mode);
     [[nodiscard]] bool palVideoMode() const noexcept { return m_palVideoMode.load(std::memory_order_relaxed); }
     void setVSyncFlag(uint32_t flagAddress, uint32_t tickAddress);

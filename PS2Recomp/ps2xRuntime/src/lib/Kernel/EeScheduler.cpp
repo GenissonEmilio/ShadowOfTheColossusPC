@@ -1424,13 +1424,13 @@ int EeScheduler::setIrqCauseEnabled(bool dmac, uint32_t cause, bool enabled)
     return KE_OK;
 }
 
-void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
+bool EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
 {
     assertExecutor();
     const uint32_t mask = dmac ? m_enabledDmacMask : m_enabledIntcMask;
     if (cause < 32u && (mask & (1u << cause)) == 0u)
     {
-        return;
+        return false;
     }
     {
         static uint64_t counts[2][64] = {};
@@ -1472,6 +1472,7 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
         SET_GPR_U32(&invocation.context, 31, 0u);
         m_checkpointPending.store(true, std::memory_order_release);
     }
+    return matchCount != 0u;
 }
 
 void EeScheduler::setGsVideoMode(uint32_t mode)

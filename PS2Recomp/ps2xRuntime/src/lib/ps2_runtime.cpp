@@ -867,6 +867,8 @@ bool PS2Runtime::syncCoreSubsystems()
     m_memory.setGifArbiter(&m_gifArbiter);
     m_memory.setGsEventWriter([this](uint8_t reg, uint64_t value)
                               { m_gs.writeRegister(reg, value); });
+    m_memory.setGsCsrAcknowledgeHook([this](uint32_t events)
+                                    { m_reportedGsCsrEvents &= ~events; });
     {
         extern uint32_t (*g_ps2MmioCaller)();
         static PS2Runtime *self = nullptr;
@@ -1995,18 +1997,16 @@ void PS2Runtime::drainCompletedDmacHandlers(uint8_t *rdram)
         ps2_syscalls::dispatchDmacHandlersForCause(rdram, this, cause);
     }
 
-    // GS interrupt (INTC cause 0): raised when SIGNAL/FINISH events set CSR bits
-    // that IMR (SIGMSK bit 8, FINISHMSK bit 9) does not mask. The guest handler
-    // acknowledges by writing the bits back to CSR, so only rising edges count.
+    // GS interrupt (INTC cause 0): keep masked SIGNAL/FINISH events pending.
+    // The CSR write re-arms an acknowledged bit immediately. The GIF worker
+    // may set it again before this poll observes it cleared.
     GSRegisters &gs = m_memory.gs();
     const uint32_t events = static_cast<uint32_t>(gs.csr.load(std::memory_order_acquire) & 0x3u);
-    const uint32_t risen = events & ~m_reportedGsCsrEvents;
-    m_reportedGsCsrEvents = events;
+    m_reportedGsCsrEvents &= events;
     const uint32_t unmasked = ~static_cast<uint32_t>(gs.imr >> 8) & 0x3u;
-    if ((risen & unmasked) != 0u)
-    {
-        m_eeScheduler->dispatchIrq(false, 0u);
-    }
+    const uint32_t pending = events & unmasked & ~m_reportedGsCsrEvents;
+    if (pending && m_eeScheduler->dispatchIrq(false, 0u))
+        m_reportedGsCsrEvents |= pending;
 }
 
 void PS2Runtime::handleTrap(uint8_t *rdram, R5900Context *ctx)
@@ -2876,6 +2876,7 @@ void PS2Runtime::HandleIntegerOverflow(R5900Context *ctx)
 
 void PS2Runtime::run()
 {
+    m_reportedGsCsrEvents = 0u;
     m_stopRequested.store(false, std::memory_order_relaxed);
     savestates::bind(nullptr);
     ps2_stubs::resetSifState();

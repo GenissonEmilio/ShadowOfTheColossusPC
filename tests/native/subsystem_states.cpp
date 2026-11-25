@@ -1,5 +1,6 @@
 // ROM-free restoration, malformed-input and unsupported-mode checks.
 #include "runtime/ps2_memory.h"
+#include "runtime/ee_scheduler.h"
 #include "ps2_runtime.h"
 #include "runtime/ps2_vu1.h"
 #include "runtime/gs/gs_frontend.h"
@@ -293,6 +294,52 @@ namespace {
         native_renderer::setShown(true);
         check(gs.prepareStateCapture(error), "completed async image upload accepted at blocking barrier");
     }
+    void gsInterruptRearm() {
+        constexpr uint32_t gsCsr = 0x12001000u;
+        constexpr uint32_t gsImr = 0x12001010u;
+        constexpr uint32_t signal = 1u, finish = 2u;
+        constexpr uint32_t handler = 0x00300100u;
+
+        auto runtime = std::make_unique<PS2Runtime>();
+        auto &memory = runtime->memory();
+        check(memory.initialize() && runtime->syncCoreSubsystems(), "bind GS interrupt callbacks");
+        runtime->eeScheduler().reset(memory.getRDRAM(), R5900Context{});
+        runtime->registerFunction(handler, [](uint8_t *, R5900Context *ctx, PS2Runtime *) { ctx->pc = 0; });
+        check(runtime->eeScheduler().addIrqHandler(false, 0u, handler, true, 0u, 0u, 0u) > 0,
+              "register GS IRQ handler");
+
+        const auto drain = [&] { runtime->drainCompletedDmacHandlers(memory.getRDRAM()); };
+        memory.write32(gsImr, 0x300u);
+        runtime->gs().writeRegister(GS_REG_SIGNAL, 0u);
+        runtime->gs().writeRegister(GS_REG_FINISH, 0u);
+        runtime->eeScheduler().setIrqCauseEnabled(false, 0u, true);
+        drain();
+        check(runtime->m_reportedGsCsrEvents == 0u, "masked GS events are still pending");
+        memory.write32(gsImr, 0x100u);
+        runtime->eeScheduler().setIrqCauseEnabled(false, 0u, false);
+        drain();
+        check(runtime->m_reportedGsCsrEvents == 0u, "disabled INTC leaves unmasked FINISH pending");
+        runtime->eeScheduler().setIrqCauseEnabled(false, 0u, true);
+        drain();
+        check(runtime->m_reportedGsCsrEvents == finish, "enabling INTC delivers unmasked FINISH");
+
+        memory.write32(gsCsr + 4u, signal | finish);
+        check(runtime->m_reportedGsCsrEvents == finish, "upper CSR word does not acknowledge lower bits");
+        memory.write64(gsCsr, finish);
+        check(runtime->m_reportedGsCsrEvents == 0u, "64-bit CSR acknowledgment re-arms FINISH immediately");
+        runtime->gs().writeRegister(GS_REG_FINISH, 0u);
+        // No call to drain() while FINISH was clear. This is the order seen
+        // when a worker submits another FINISH before the next EE checkpoint.
+        drain();
+        check(runtime->m_reportedGsCsrEvents == finish, "FINISH reasserted between polls is delivered");
+        memory.write32(gsImr, 0u);
+        drain();
+        check(runtime->m_reportedGsCsrEvents == (signal | finish), "unmasking delivers already pending SIGNAL");
+        memory.write32(gsCsr, signal);
+        check(runtime->m_reportedGsCsrEvents == finish, "32-bit acknowledgment preserves reported FINISH");
+        check(memory.writeIORegister(gsCsr, finish), "direct CSR MMIO path accepts the write");
+        check(runtime->m_reportedGsCsrEvents == 0u, "direct CSR MMIO acknowledgment also re-arms FINISH");
+    }
     void historyCodec() {
         using namespace native_renderer::detail;
         HistoryState state; state.width = 8; state.height = 4; state.bloom = state.gsBloom = true;
@@ -332,6 +379,6 @@ int main() {
 #if defined(__linux__) && defined(__GLIBC__)
     libcRandomState();
 #endif
-    memoryState(); vuState(); vuMicrocodeRewrite(); iopState(); gsState(); historyCodec(); legacyCardGuard();
+    memoryState(); vuState(); vuMicrocodeRewrite(); iopState(); gsState(); gsInterruptRearm(); historyCodec(); legacyCardGuard();
     std::printf("PASS: %u subsystem state checks; no ROM, GPU context or personal files\n", checks);
 }
