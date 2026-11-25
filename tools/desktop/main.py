@@ -17,7 +17,7 @@ from graphics import GRAPHICS_PROFILES, LEGACY_PROFILES, MENU_LANGUAGES, Graphic
 from gamepad import Gamepad
 from language import LANGUAGES, PREFERENCES, PROMPTS, activate, preferences, translate as tr
 from launcher_audio import LauncherAudio
-from pipeline import CompilationError
+from pipeline import CompilationError, PreparationProgress
 from texture_mods import TextureMods
 from updates import RateLimitedError, check_for_update, confirm_startup, restart_with_update, stage_update
 
@@ -142,6 +142,7 @@ class Launcher:
         self.feedback = LauncherAudio(self.library.program, enabled=self.preferences["ui_sounds"])
         self.presentation_fullscreen = self.preferences["launcher_fullscreen"]
         self.busy = False; self.process = None; self.closing = False; self.failed = False
+        self.progress_determinate = False
         self.prepare_only = False
         self.disposed = False
         self.controller_process = None
@@ -737,6 +738,10 @@ class Launcher:
         self.status.set_ellipsize(Pango.EllipsizeMode.END)
         self.status.set_max_width_chars(30)
         info.pack_start(self.status, False, False, 0)
+        self.prepare_detail = label("", "small", wrap=True)
+        self.prepare_detail.set_max_width_chars(30)
+        self.prepare_detail.set_no_show_all(True)
+        info.pack_start(self.prepare_detail, False, False, 0)
         self.progress = Gtk.ProgressBar()
         self.progress.set_no_show_all(True)
         info.pack_start(self.progress, False, False, 0)
@@ -1478,8 +1483,22 @@ class Launcher:
         return False
 
     def pulse(self):
-        if not self.busy: return False
-        self.progress.pulse(); return True
+        if not self.busy or self.progress_determinate:
+            return False
+        self.progress.pulse()
+        return True
+
+    def update_prepare_progress(self, event):
+        if not isinstance(event, PreparationProgress):
+            self.prepare_detail.hide()
+            return self.update_status(event)
+        self.progress_determinate = True
+        self.progress.set_fraction(event.fraction)
+        self.prepare_detail.set_text(event.detail)
+        self.prepare_detail.show()
+        self.update_status(event.title)
+        self.status.set_tooltip_text(str(event))
+        return False
 
     def prepare(self,path=None):
         if self.busy or self.process or self.controller_process: return False
@@ -1488,13 +1507,15 @@ class Launcher:
         self.refresh_prepare_controls()
         self.choose_button.set_sensitive(False); self.play_button.set_sensitive(False)
         self.status.set_tooltip_text(None)
+        self.progress_determinate = False
+        self.progress.set_fraction(0)
         self.progress.show()
         self.update_status(tr("Compilando em segundo plano…") if self.prepare_only else tr("Preparando seu jogo…"))
         GLib.timeout_add(80,self.pulse)
         def worker():
             error=None
             try:
-                progress = lambda text: GLib.idle_add(self.update_status,text)
+                progress = lambda event: GLib.idle_add(self.update_prepare_progress, event)
                 if self.prepare_only:
                     self.library.prepare_game(progress)
                 else:
@@ -1507,6 +1528,7 @@ class Launcher:
 
     def prepared(self,error):
         self.busy=False; self.progress.hide(); self.choose_button.set_sensitive(True)
+        self.prepare_detail.hide()
         self.refresh_prepare_controls()
         if self.closing: Gtk.main_quit(); return False
         if error:
@@ -1537,11 +1559,13 @@ class Launcher:
         self.busy=True; self.play_button.set_sensitive(False); self.choose_button.set_sensitive(False)
         self.refresh_prepare_controls()
         self.update_status(tr("Abrindo o jogo…"))
+        self.progress_determinate = False
+        self.progress.set_fraction(0)
         self.progress.show(); GLib.timeout_add(80,self.pulse)
         self.display_panel.set_sensitive(False); self.video_panel.set_sensitive(False)
         def worker():
             try:
-                process=self.library.launch(self.args.test_game,lambda text: GLib.idle_add(self.update_status,text))
+                process=self.library.launch(self.args.test_game,lambda event: GLib.idle_add(self.update_prepare_progress, event))
                 GLib.idle_add(self.game_started,process,None)
             except Exception as exc:
                 GLib.idle_add(self.game_started,None,str(exc))
@@ -1550,6 +1574,7 @@ class Launcher:
 
     def game_started(self,process,error):
         self.busy=False; self.progress.hide()
+        self.prepare_detail.hide()
         if self.closing:
             Gtk.main_quit(); return False
         if error:

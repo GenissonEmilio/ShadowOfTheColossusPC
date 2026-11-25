@@ -17,6 +17,7 @@ import time
 import traceback
 
 from main import Gtk, GLib, Launcher
+from pipeline import PreparationProgress
 import model
 
 
@@ -88,7 +89,8 @@ def probe(out):
 
         def prepare(self, disc):
             build_calls.append((disc, threading.get_ident()))
-            self.progress('Compiling fixture')
+            self.progress(PreparationProgress('Step 3/4 · MANAGER',
+                                              '45/80 batches\nEstimated time for this step: 2 min', .62))
             return next(attempts).prepare()
 
     class Game:
@@ -115,9 +117,11 @@ def probe(out):
     try:
         assert app.compile_button.get_visible() and app.compile_button.is_sensitive()
         app.compile_button.clicked()
-        settle(lambda: success.started.is_set() and app.status.get_text() == 'Compiling fixture',
+        settle(lambda: success.started.is_set() and app.status.get_text() == 'Step 3/4 · MANAGER',
                'Compile action did not start the worker or show its progress')
-        assert app.busy and app.progress.get_visible()
+        assert app.busy and app.progress.get_visible() and app.prepare_detail.get_visible()
+        assert app.progress.get_fraction() == .62 and not app.pulse()
+        assert 'Estimated time for this step: 2 min' in app.prepare_detail.get_text()
         assert all(not button.is_sensitive() for button in (app.compile_button, app.play_button, app.choose_button))
         app.compile_button.clicked()
         app.play_button.clicked()

@@ -12,7 +12,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[2] / 'tools/desktop'))
 from import_disc import (Budget, DiscProfile, ImportError_, candidates, extract_zip,
                          import_disc, inspect_disc, profile_from_config, safe_name, validate_disc)
 from model import Library, atomic_json
-from pipeline import Pipeline
+from pipeline import MODULES, STAGE_COUNT, Pipeline, PreparationProgress, executable_name
 
 class ImportTests(unittest.TestCase):
     def test_traversal_and_absolute_paths(self):
@@ -155,6 +155,58 @@ class ImportTests(unittest.TestCase):
             exe.write_bytes(b'corrupt')
             with patch.object(pipeline,'helper',side_effect=RuntimeError('rebuild required')):
                 with self.assertRaisesRegex(RuntimeError,'rebuild required'):pipeline.prepare(p/'disc')
+
+    def test_preparation_progress_counts_all_stages_and_reuses_batches(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            kit = root / 'compiler'
+            (kit / 'source/game').mkdir(parents=True)
+            (kit / 'source/game/scus.toml').write_text('input = "old"\n')
+            (kit / 'manifest.json').write_text(json.dumps({'build_id': 'test', 'link_inputs': ['libbase.a']}))
+            statuses = []
+            pipeline = Pipeline(root, root / 'data', {'SOTC_BUILD_BATCH_SIZE': '1', 'SOTC_BUILD_JOBS': '1'}, statuses.append)
+            compiles = []
+
+            def run(args, cwd=None, env=None):
+                if args[0] == pipeline.tool('ps2_recomp'):
+                    output = cwd / 'output'
+                    output.mkdir(exist_ok=True)
+                    for index in range(3):
+                        (output / f'{index}.cpp').write_text(f'// block {index}\n')
+                elif '-c' in args:
+                    compiles.append(args[-1])
+                    args[-1].touch()
+                else:
+                    objects = [arg.name for arg in args if isinstance(arg, Path) and arg.suffix == '.o']
+                    response = next((Path(arg[1:]) for arg in args if isinstance(arg, str) and arg.startswith('@')), None)
+                    if response:
+                        objects = [Path(line.strip('"')).name for line in response.read_text().splitlines()
+                                   if line.endswith('.o"')]
+                    self.assertEqual(objects[:3], ['batch-0000.o', 'batch-0001.o', 'batch-0002.o'])
+                    args[-1].write_bytes(b'fixture executable')
+
+            with patch.object(pipeline, 'run', side_effect=run), patch.object(pipeline, 'helper'), \
+                 patch.object(pipeline, 'capture', return_value=pipeline.work / 'capture.bin'):
+                result = pipeline.prepare(root / 'disc')
+                self.assertEqual(result.name, executable_name('game'))
+                self.assertEqual(len(compiles), STAGE_COUNT * 3)
+                stages = [event for event in statuses if isinstance(event, PreparationProgress)]
+                self.assertEqual(len({event.title for event in stages}), STAGE_COUNT)
+                for index, module in enumerate(MODULES, 2):
+                    self.assertTrue(any(f'{index}/{STAGE_COUNT} · {module}' in event.title for event in stages))
+                self.assertEqual([event.fraction for event in stages], sorted(event.fraction for event in stages))
+                self.assertTrue(any('1/3' in event.detail and ' s' in event.detail for event in stages))
+                self.assertEqual(stages[-1].fraction, 1)
+
+                statuses.clear()
+                self.assertEqual(pipeline.prepare(root / 'disc'), result)
+                self.assertEqual(len(statuses), 1)
+                self.assertIs(type(statuses[0]), str)
+
+                (pipeline.work / 'complete.json').unlink()
+                statuses.clear()
+                self.assertEqual(pipeline.prepare(root / 'disc'), result)
+                self.assertEqual(len(compiles), STAGE_COUNT * 3)
 
     def test_frozen_gui_environment_does_not_leak_into_game(self):
         with patch.dict(os.environ,{'LD_LIBRARY_PATH':'/tmp/frozen','GI_TYPELIB_PATH':'/tmp/frozen','LP_NUM_THREADS':'2'}):
