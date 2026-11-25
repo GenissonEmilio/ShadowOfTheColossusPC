@@ -156,6 +156,7 @@ private:
     size_t m_textureCacheBytes = 0;
     std::array<uint64_t, 512> m_pageEpoch{}; // last write to each 8 KiB VRAM page
     std::array<uint64_t, 6> m_lastPresentKey{}; // display setup + newest write of the last capture
+    std::array<uint64_t, 4> m_nativePresentKey{}; // PMODE, DISPFB, DISPLAY, native frame revision
     uint64_t m_epochCounter = 1;
     std::vector<const DecodedTexture *> m_pendingTexture;
     std::vector<uint8_t> m_feedbackVram; // pre-draw texture copy for feedback draws

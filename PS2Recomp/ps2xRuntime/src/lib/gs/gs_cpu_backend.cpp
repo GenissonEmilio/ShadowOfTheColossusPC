@@ -650,6 +650,7 @@ void GSCpuBackend::ResetUnlocked()
     m_localToHostReadPos = 0u;
     m_textureCache.clear();
     m_textureCacheBytes = 0;
+    m_nativePresentKey = {};
     markVramWritten(0u, static_cast<uint64_t>(m_pageEpoch.size()) * 8192u);
 }
 
@@ -3391,6 +3392,8 @@ bool GSCpuBackend::CopyFrameToHostRgba(const GSFrameReg &frame,
 
 PresentationFrame GSCpuBackend::Present(const GSPresentationRequest &request)
 {
+    static const bool dumpCaptures = std::getenv("PS2X_CAPTURE_DUMP") != nullptr;
+    const bool reuseNativeCapture = request.skipIfUnchanged && !dumpCaptures;
     // The native renderer's picture is the one shown: no need to read the
     // display buffer out of local memory, only its size and place.
     if (native_renderer::shown())
@@ -3402,33 +3405,49 @@ PresentationFrame GSCpuBackend::Present(const GSPresentationRequest &request)
         decodeDisplaySize(display, width, height);
         thread_local std::vector<uint8_t> native;
         uint32_t nw = 0, nh = 0;
-        if ((pmode.enableCrt1 || pmode.enableCrt2) && width && height && width <= kHostFrameWidth && height <= kHostFrameHeight &&
-            native_renderer::latestFrame(native, nw, nh) && nw && nh)
+        if ((pmode.enableCrt1 || pmode.enableCrt2) && width && height && width <= kHostFrameWidth && height <= kHostFrameHeight)
         {
-            PresentationFrame frame;
-            frame.width = width;
-            frame.height = height;
-            frame.displayFbp = decodeDisplayFrame(dispfb).fbp;
-            frame.sourceFbp = frame.displayFbp;
-            frame.vsyncTick = request.vsyncTick;
-            frame.pixels.assign(static_cast<size_t>(kHostFrameWidth) * kHostFrameHeight * 4u, 0u);
-            // The horizontal map is identical on every row. Keep the
-            // division out of the copy loop on high internal resolutions.
-            std::array<uint32_t, kHostFrameWidth> sourceColumns;
-            for (uint32_t x = 0; x < width; ++x)
-                sourceColumns[x] = x * nw / width;
-            for (uint32_t y = 0; y < height; ++y)
+            std::array<uint64_t, 4> key{request.pmode, dispfb, display, 0};
+            if (reuseNativeCapture)
             {
-                const uint32_t sy = y * nh / height;
-                const uint8_t *src = native.data() + static_cast<size_t>(sy) * nw * 4u;
-                uint8_t *dst = frame.pixels.data() + static_cast<size_t>(y) * kHostFrameWidth * 4u;
-                for (uint32_t x = 0; x < width; ++x)
-                {
-                    std::memcpy(dst + x * 4u, src + sourceColumns[x] * 4u, 4u);
-                    dst[x * 4u + 3u] = 255u; // the CRTC shows colour only
-                }
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (std::equal(key.begin(), key.end() - 1, m_nativePresentKey.begin()))
+                    key.back() = m_nativePresentKey.back();
             }
-            return frame;
+            const auto result = native_renderer::readFrame(native, nw, nh, key.back());
+            if (result == native_renderer::FrameRead::Unchanged)
+                return {};
+            if (result == native_renderer::FrameRead::Updated && nw && nh)
+            {
+                PresentationFrame frame;
+                frame.width = width;
+                frame.height = height;
+                frame.displayFbp = decodeDisplayFrame(dispfb).fbp;
+                frame.sourceFbp = frame.displayFbp;
+                frame.vsyncTick = request.vsyncTick;
+                frame.pixels.assign(static_cast<size_t>(kHostFrameWidth) * kHostFrameHeight * 4u, 0u);
+                // The horizontal map is identical on every row.
+                std::array<uint32_t, kHostFrameWidth> sourceColumns;
+                for (uint32_t x = 0; x < width; ++x)
+                    sourceColumns[x] = x * nw / width;
+                for (uint32_t y = 0; y < height; ++y)
+                {
+                    const uint32_t sy = y * nh / height;
+                    const uint8_t *src = native.data() + static_cast<size_t>(sy) * nw * 4u;
+                    uint8_t *dst = frame.pixels.data() + static_cast<size_t>(y) * kHostFrameWidth * 4u;
+                    for (uint32_t x = 0; x < width; ++x)
+                    {
+                        std::memcpy(dst + x * 4u, src + sourceColumns[x] * 4u, 4u);
+                        dst[x * 4u + 3u] = 255u; // the CRTC shows colour only
+                    }
+                }
+                if (reuseNativeCapture)
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    m_nativePresentKey = key;
+                }
+                return frame;
+            }
         }
     }
     if (request.skipIfUnchanged)
@@ -3436,6 +3455,7 @@ PresentationFrame GSCpuBackend::Present(const GSPresentationRequest &request)
         // The display memory's last write plus the display setup identify
         // the frame: unchanged means the game has not finished a new one.
         std::lock_guard<std::mutex> lock(m_mutex);
+        m_nativePresentKey = {};
         uint64_t newest = 0;
         const std::pair<uint64_t, uint64_t> outputs[2] = {{request.dispfb1, request.display1}, {request.dispfb2, request.display2}};
         for (const auto &[dispfb, display] : outputs)
