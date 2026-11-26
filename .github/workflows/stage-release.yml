@@ -1,0 +1,69 @@
+name: Stage desktop release assets
+run-name: Stage desktop release ${{ inputs.tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing draft release tag (vMAJOR.MINOR.PATCH)
+        required: true
+        type: string
+      windows_run_id:
+        description: Successful Windows push run ID for the release commit
+        required: true
+        type: string
+      linux_run_id:
+        description: Successful Linux push run ID for the release commit
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: desktop-release-staging
+  cancel-in-progress: false
+
+jobs:
+  stage:
+    if: github.repository == 'GenissonEmilio/ShadowOfTheColossusPC' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      WINDOWS_RUN_ID: ${{ inputs.windows_run_id }}
+      LINUX_RUN_ID: ${{ inputs.linux_run_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify the draft release and source runs
+        id: verify
+        env:
+          STAGING_TOKEN: ${{ github.token }}
+        run: python3 tools/desktop/release/stage_release.py verify
+      - name: Download verified Windows build artifact
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.verify.outputs.windows_run_id }}
+          name: ShadowOfTheColossusPC-windows-x86_64
+          path: ${{ runner.temp }}/desktop-stage/windows
+      - name: Download verified Linux build artifact
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.verify.outputs.linux_run_id }}
+          name: ShadowOfTheColossusPC-linux-x86_64
+          path: ${{ runner.temp }}/desktop-stage/linux
+      - name: Validate packages and stage assets in the draft
+        env:
+          STAGING_TOKEN: ${{ github.token }}
+        run: python3 tools/desktop/release/stage_release.py stage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: staging-report
+          path: ${{ runner.temp }}/desktop-stage/staging.json
+          if-no-files-found: error
