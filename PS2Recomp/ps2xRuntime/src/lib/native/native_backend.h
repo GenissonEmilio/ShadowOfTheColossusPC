@@ -33,6 +33,12 @@ namespace native_renderer::detail
         FrameRead read(std::vector<uint8_t> &rgba, uint32_t &w, uint32_t &h, uint64_t *seen)
         {
             const std::lock_guard lock(mutex);
+            return readLocked(rgba, w, h, seen);
+        }
+
+        // Caller holds mutex when checking the shared texture and pixel buffer together.
+        FrameRead readLocked(std::vector<uint8_t> &rgba, uint32_t &w, uint32_t &h, uint64_t *seen)
+        {
             if (!revision)
                 return FrameRead::Missing;
             w = width;
@@ -104,6 +110,15 @@ namespace native_renderer::detail
         {
             return readFrame(rgba, width, height, nullptr) == FrameRead::Updated;
         }
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+        virtual FrameRead readPresentationFrame(PresentationFrame &frame, std::vector<uint8_t> &rgba, uint64_t &revision)
+        {
+            frame = {};
+            return readFrame(rgba, frame.width, frame.height, &revision);
+        }
+        virtual void releasePresentationFrame(uint32_t) {}
+        virtual bool sharedFrameReady() { return false; }
+#endif
 #if defined(__ANDROID__)
         virtual AndroidFrameStats androidFrameStats() { return {}; }
 #endif
@@ -129,7 +144,7 @@ namespace native_renderer::detail
     // nullptr when the platform or the device does not have it.
     Backend *createMetalBackend();
     // makeCurrent: makes the OpenGL context current (on the thread that will draw).
-    Backend *createGlBackend(std::function<void()> makeCurrent);
+    Backend *createGlBackend(std::function<void()> makeCurrent, bool sharePresentation);
     // The host's present hook (native_renderer::setPresentHook), for the GL backend.
     const std::function<void(uint32_t, uint32_t, uint32_t)> &presentHook();
 }

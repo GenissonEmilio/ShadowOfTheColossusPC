@@ -54,6 +54,7 @@
 #include <thread>
 #include <unordered_map>
 #include <sstream>
+#include <utility>
 #if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
 #include <psp2/kernel/cpu.h>
 #include <psp2/kernel/threadmgr.h>
@@ -423,6 +424,23 @@ namespace
 // as they are (id 0: the frame is in the uploaded texture).
 static Texture2D g_directFrame{};
 
+#ifdef PS2X_DESKTOP_VIDEO
+static GLFWwindow *g_nativeGlContext = nullptr;
+
+static void shutdownNativeDesktopGl()
+{
+    native_renderer::shutdownGl();
+    if (g_nativeGlContext)
+        glfwDestroyWindow(std::exchange(g_nativeGlContext, nullptr));
+}
+
+static Texture2D viewNativeFrame(const native_renderer::PresentationFrame &frame)
+{
+    return {frame.texture, static_cast<int>(frame.width), static_cast<int>(frame.height),
+            1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+}
+#endif
+
 static void waitDirectFrame(uint64_t fence)
 {
 #if defined(_WIN32) || defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__))
@@ -688,6 +706,8 @@ PS2Runtime::~PS2Runtime()
         {
 #if defined(__ANDROID__)
             ps2x::android::shutdownRenderer();
+#elif defined(PS2X_DESKTOP_VIDEO)
+            shutdownNativeDesktopGl();
 #endif
             CloseWindow();
         }
@@ -1087,12 +1107,30 @@ bool PS2Runtime::initialize(const char *title)
             glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
             glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
             GLFWwindow *mainWindow = glfwGetCurrentContext();
-            GLFWwindow *nativeContext = glfwCreateWindow(16, 16, "native", nullptr, nullptr);
+            bool shared = false;
+            GLFWwindow *nativeContext = nullptr;
+#ifdef PS2X_DESKTOP_VIDEO
+            const char *sharedTexture = std::getenv("SOTC_NATIVE_SHARED_TEXTURE");
+            if (mainWindow && (!sharedTexture || sharedTexture[0] != '0') &&
+                glfwGetProcAddress("glFenceSync") && glfwGetProcAddress("glWaitSync") &&
+                glfwGetProcAddress("glDeleteSync"))
+            {
+                nativeContext = glfwCreateWindow(16, 16, "native", nullptr, mainWindow);
+                shared = nativeContext != nullptr;
+                if (!shared)
+                    std::cerr << "[native] could not share the GL context; using frame readback" << std::endl;
+            }
+#endif
+            if (!nativeContext)
+                nativeContext = glfwCreateWindow(16, 16, "native", nullptr, nullptr);
             glfwWindowHint(GLFW_VISIBLE, GLFW_TRUE);
             glfwMakeContextCurrent(mainWindow);
+#ifdef PS2X_DESKTOP_VIDEO
+            g_nativeGlContext = nativeContext;
+#endif
             if (nativeContext)
                 native_renderer::setGlContext([nativeContext]
-                                              { glfwMakeContextCurrent(nativeContext); });
+                                              { glfwMakeContextCurrent(nativeContext); }, shared);
             else
                 std::cerr << "[native] could not create the OpenGL context" << std::endl;
         }
@@ -3168,6 +3206,7 @@ void PS2Runtime::run()
     uint64_t nativeRevision = 0;
 #endif
 #ifdef PS2X_DESKTOP_VIDEO
+    native_renderer::PresentationFrame sharedNative{};
     Texture2D previousNativeTex{};
     Texture2D midpoint{};
     double previousNativeArrival = -1.0;
@@ -3181,7 +3220,7 @@ void PS2Runtime::run()
     struct DisplayTiming
     {
         uint64_t readUs = 0, uploadUs = 0, gsUs = 0, gsMaxUs = 0, interpolationUs = 0;
-        uint64_t uploads = 0, gsPolls = 0, interpolations = 0;
+        uint64_t uploads = 0, shared = 0, gsPolls = 0, interpolations = 0;
     } displayTiming;
 #endif
 #if defined(PLATFORM_VITA)
@@ -3341,16 +3380,29 @@ void PS2Runtime::run()
             realFrameSlot = 0;
         }
         uint64_t midpointSlots = 0;
+        Texture2D interpolationPrevious{};
+        uint32_t retiredSharedTexture = 0;
+        if (!nativeRequested && sharedNative.texture)
+        {
+            native_renderer::releasePresentationFrame(sharedNative.texture);
+            sharedNative = {};
+            nativeRevision = 0;
+        }
 #endif
         if (nativeRequested)
         {
             uint32_t nw = 0, nh = 0;
+            bool cpuFrame = true;
 #ifdef PS2X_DESKTOP_VIDEO
+            native_renderer::PresentationFrame frame{};
             const uint64_t lastRevision = nativeRevision;
             const uint64_t readStart = logStats ? native_renderer::nowUs() : 0;
             const auto frameRead = presentingPair ? native_renderer::FrameRead::Unchanged :
-                native_renderer::readFrame(nativePixels, nw, nh, nativeRevision);
-            const uint64_t readUs = logStats && frameRead == native_renderer::FrameRead::Updated ?
+                native_renderer::readPresentationFrame(frame, nativePixels, nativeRevision);
+            nw = frame.width;
+            nh = frame.height;
+            cpuFrame = frame.texture == 0;
+            const uint64_t readUs = logStats && cpuFrame && frameRead == native_renderer::FrameRead::Updated ?
                 native_renderer::nowUs() - readStart : 0;
 #elif defined(__ANDROID__)
             uint64_t serial = reuseNativeFrame ? nativeFrameSerial : 0u;
@@ -3358,9 +3410,15 @@ void PS2Runtime::run()
 #else
             const auto frameRead = native_renderer::readFrame(nativePixels, nw, nh, nativeRevision);
 #endif
-            if (frameRead == native_renderer::FrameRead::Updated && nw && nh && nativePixels.size() >= static_cast<size_t>(nw) * nh * 4u)
+            if (frameRead == native_renderer::FrameRead::Updated && nw && nh &&
+                (!cpuFrame || nativePixels.size() >= static_cast<size_t>(nw) * nh * 4u))
             {
 #ifdef PS2X_DESKTOP_VIDEO
+                interpolationPrevious = sharedNative.texture ? viewNativeFrame(sharedNative) : nativeTex;
+                retiredSharedTexture = sharedNative.texture;
+                sharedNative = frame;
+                if (!cpuFrame && logStats)
+                    ++displayTiming.shared;
                 if (interpolationEnabled)
                 {
                     const double arrived = GetTime();
@@ -3370,49 +3428,57 @@ void PS2Runtime::run()
                         midpointSlots = desktop_video::midpointHold(slots, period, nativeRevision == lastRevision + 1u);
                     previousNativeArrival = arrived;
                     previousNativeSlot = hostFrames;
-                    std::swap(nativeTex, previousNativeTex);
+                    if (cpuFrame && !retiredSharedTexture)
+                        std::swap(nativeTex, previousNativeTex);
                 }
-                const uint64_t uploadStart = logStats ? native_renderer::nowUs() : 0;
 #endif
-                // The display shows colour only (the PS2's CRTC ignores alpha):
-                // drawn blended over black, the picture's alpha darkened it.
-                for (size_t i = 3; i < static_cast<size_t>(nw) * nh * 4u; i += 4)
-                    nativePixels[i] = 255u;
-                if (nativeTex.id == 0 || nativeTex.width != static_cast<int>(nw) || nativeTex.height != static_cast<int>(nh))
+                if (cpuFrame)
                 {
-                    if (nativeTex.id)
-                        UnloadTexture(nativeTex);
-                    Image image{nativePixels.data(), static_cast<int>(nw), static_cast<int>(nh), 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
-                    nativeTex = LoadTextureFromImage(image);
-                    SetTextureFilter(nativeTex, TEXTURE_FILTER_BILINEAR);
-                }
-                else
-                    UpdateTexture(nativeTex, nativePixels.data());
 #ifdef PS2X_DESKTOP_VIDEO
-                if (logStats)
-                {
-                    displayTiming.readUs += readUs;
-                    displayTiming.uploadUs += native_renderer::nowUs() - uploadStart;
-                    ++displayTiming.uploads;
-                }
+                    const uint64_t uploadStart = logStats ? native_renderer::nowUs() : 0;
 #endif
-                if (nativeTex.id != 0)
-                {
-                    ++nativeFrameUploads;
+                    // The display ignores framebuffer alpha.
+                    for (size_t i = 3; i < static_cast<size_t>(nw) * nh * 4u; i += 4)
+                        nativePixels[i] = 255u;
+                    if (nativeTex.id == 0 || nativeTex.width != static_cast<int>(nw) || nativeTex.height != static_cast<int>(nh))
+                    {
+                        if (nativeTex.id)
+                            UnloadTexture(nativeTex);
+                        Image image{nativePixels.data(), static_cast<int>(nw), static_cast<int>(nh), 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+                        nativeTex = LoadTextureFromImage(image);
+                        SetTextureFilter(nativeTex, TEXTURE_FILTER_BILINEAR);
+                    }
+                    else
+                        UpdateTexture(nativeTex, nativePixels.data());
+#ifdef PS2X_DESKTOP_VIDEO
+                    if (logStats)
+                    {
+                        displayTiming.readUs += readUs;
+                        displayTiming.uploadUs += native_renderer::nowUs() - uploadStart;
+                        ++displayTiming.uploads;
+                    }
+#endif
+                    if (nativeTex.id != 0)
+                    {
+                        ++nativeFrameUploads;
 #if defined(__ANDROID__)
-                    uploadedNativeFrame = true;
-                    nativeFrameSerial = serial;
+                        uploadedNativeFrame = true;
+                        nativeFrameSerial = serial;
 #endif
-                }
-                else
-                {
-                    nativeRevision = 0; // Retry if the graphics driver could not allocate the texture.
+                    }
+                    else
+                        nativeRevision = 0; // Retry if the graphics driver could not allocate the texture.
                 }
             }
-            if (frameRead != native_renderer::FrameRead::Missing && nativeTex.id != 0)
+#ifdef PS2X_DESKTOP_VIDEO
+            const Texture2D picture = sharedNative.texture ? viewNativeFrame(sharedNative) : nativeTex;
+#else
+            const Texture2D &picture = nativeTex;
+#endif
+            if (frameRead != native_renderer::FrameRead::Missing && picture.id != 0)
             {
-                presentWidth = static_cast<uint32_t>(nativeTex.width);
-                presentHeight = static_cast<uint32_t>(nativeTex.height);
+                presentWidth = static_cast<uint32_t>(picture.width);
+                presentHeight = static_cast<uint32_t>(picture.height);
                 nativeOnScreen = true;
             }
         }
@@ -3464,10 +3530,11 @@ void PS2Runtime::run()
             }
             previousNativeArrival = -1.0;
         }
+        const Texture2D picture = sharedNative.texture ? viewNativeFrame(sharedNative) : nativeTex;
         if (nativeOnScreen && midpointSlots != 0)
         {
             const uint64_t start = logStats ? native_renderer::nowUs() : 0;
-            midpoint = desktop_video::interpolate(previousNativeTex, nativeTex);
+            midpoint = desktop_video::interpolate(interpolationPrevious, picture);
             if (logStats)
             {
                 displayTiming.interpolationUs += native_renderer::nowUs() - start;
@@ -3476,8 +3543,11 @@ void PS2Runtime::run()
             if (midpoint.id)
                 realFrameSlot = hostFrames + midpointSlots;
         }
+        native_renderer::releasePresentationFrame(retiredSharedTexture);
+#else
+        const Texture2D &picture = nativeTex;
 #endif
-        const Texture2D &shownTex = nativeOnScreen ? nativeTex : (g_directFrame.id ? g_directFrame : frameTex);
+        const Texture2D &shownTex = nativeOnScreen ? picture : (g_directFrame.id ? g_directFrame : frameTex);
         // F9: the same moment twice, for comparing: the emulated picture (the
         // native one hidden for a few frames so the GS draws), the native one,
         // and the list of the native draws of that frame, in shots/f8_<n>_*.
@@ -3581,6 +3651,7 @@ void PS2Runtime::run()
                       << " nativeCopyMs=" << averageMs(displayTiming.readUs, displayTiming.uploads)
                       << " nativeUploadMs=" << averageMs(displayTiming.uploadUs, displayTiming.uploads)
                       << " nativeSamples=" << displayTiming.uploads
+                      << " nativeShared=" << displayTiming.shared
                       << " gsPollMs=" << averageMs(displayTiming.gsUs, displayTiming.gsPolls)
                       << " gsPollMaxMs=" << displayTiming.gsMaxUs / 1000.0
                       << " gsPolls=" << displayTiming.gsPolls
@@ -3843,6 +3914,16 @@ void PS2Runtime::run()
                     nextSnapshot += snapshotPeriod;
                 Image shot = LoadImageFromTexture(shownTex);
                 ImageCrop(&shot, Rectangle{0.0f, 0.0f, static_cast<float>(presentWidth), static_cast<float>(presentHeight)});
+#ifdef PS2X_DESKTOP_VIDEO
+                if (nativeOnScreen && sharedNative.texture && shot.data)
+                {
+                    // Texture sampling supplies opaque alpha. Raw image reads
+                    // use the stored RGBA, including the game's alpha channel.
+                    auto *rgba = static_cast<uint8_t *>(shot.data);
+                    for (size_t i = 3; i < static_cast<size_t>(shot.width) * shot.height * 4u; i += 4)
+                        rgba[i] = 255u;
+                }
+#endif
                 const std::string path = std::string(snapshotDir) + "/frame_" + std::to_string(snapshotIndex) + ".png";
                 ExportImage(shot, path.c_str());
                 UnloadImage(shot);
@@ -3957,8 +4038,10 @@ void PS2Runtime::run()
     if (nativeTex.id) UnloadTexture(nativeTex);
 #endif
 #ifdef PS2X_DESKTOP_VIDEO
+    native_renderer::releasePresentationFrame(sharedNative.texture);
     if (previousNativeTex.id) UnloadTexture(previousNativeTex);
     desktop_video::shutdown();
+    shutdownNativeDesktopGl();
 #endif
     CloseWindow();
 

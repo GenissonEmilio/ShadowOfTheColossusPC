@@ -35,6 +35,8 @@
 #define GL_GLEXT_PROTOTYPES 1
 #include <GL/gl.h>
 #include <GL/glext.h>
+#define GLFW_INCLUDE_NONE
+#include "GLFW/glfw3.h"
 #include <malloc.h>
 #else
 #include <mutex>
@@ -47,6 +49,10 @@
 std::recursive_mutex &ps2xVitaGlMutex();
 extern "C" unsigned int _pthread_stack_default_user; // ps2_vita_runtime.cpp
 extern "C" unsigned int _newlib_heap_size_user;      // ps2_vita_runtime.cpp
+#endif
+
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+#define PS2X_NATIVE_GL_SHARED 1
 #endif
 
 #include "ThreadNaming.h"
@@ -67,6 +73,7 @@ extern "C" unsigned int _newlib_heap_size_user;      // ps2_vita_runtime.cpp
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace
@@ -1152,6 +1159,21 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 
         native_renderer::detail::FrameOutput output;
         std::vector<uint8_t> readbackPixels;
+#ifdef PS2X_NATIVE_GL_SHARED
+        struct PresentationSlot
+        {
+            Target target;
+            GLsync ready = nullptr;  // producer finished writing
+            GLsync sampled = nullptr; // presenter finished reading
+            bool leased = false;
+        };
+        // The presenter can keep the current and previous frames for
+        // interpolation. Leave room for a published frame and one more write.
+        std::array<PresentationSlot, 4> sharedSlots;
+        int sharedLatest = -1;
+        uint64_t pixelRevision = 0;
+        bool sharePresentation = false;
+#endif
 #if defined(__ANDROID__)
         uint64_t readbackUs = 0;
 #endif
@@ -1603,8 +1625,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             makeTarget(snapshot, w, h, false);
             makeTarget(shadowMask, w, h, false);
             makeTarget(previous, w, h, false);
-            for (Target &t : shownFrame)
-                makeTarget(t, w, h, false);
+            if (native_renderer::detail::presentHook())
+                for (Target &t : shownFrame)
+                    makeTarget(t, w, h, false);
             makeTarget(glowLayer, w, h, false);
             for (int i = 0; i < 4; ++i)
                 makeTarget(glowSmall[i], i == 0 ? 256u : (i == 1 ? 128u : 64u), i == 0 ? 256u : (i == 1 ? 128u : 64u), false);
@@ -1652,6 +1675,95 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             width = w;
             height = h;
         }
+
+#ifdef PS2X_NATIVE_GL_SHARED
+        bool publishShared(uint32_t w, uint32_t h)
+        {
+            int index = -1;
+            {
+                const std::lock_guard lock(output.mutex);
+                for (size_t i = 0; i < sharedSlots.size(); ++i)
+                    if (static_cast<int>(i) != sharedLatest && !sharedSlots[i].leased)
+                    {
+                        index = static_cast<int>(i);
+                        break;
+                    }
+            }
+            if (index < 0)
+                return false;
+
+            auto &slot = sharedSlots[index];
+            if (slot.ready)
+                glDeleteSync(std::exchange(slot.ready, nullptr));
+            if (slot.sampled)
+            {
+                glWaitSync(slot.sampled, 0, GL_TIMEOUT_IGNORED);
+                glDeleteSync(std::exchange(slot.sampled, nullptr));
+            }
+            auto &target = slot.target;
+            if (target.width != w || target.height != h)
+            {
+                if (!makeTarget(target, w, h, false))
+                {
+                    sharePresentation = false;
+                    return false;
+                }
+                // The PS2's CRTC shows only RGB. Keep the stored alpha for
+                // diagnostic reads, and make the window's sampling opaque.
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_A, GL_ONE);
+            }
+
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, colorPlain.fbo);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, target.fbo);
+            // Match the top-row-first upload used by the other window path.
+            glBlitFramebuffer(0, 0, w, h, 0, h, w, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+            slot.ready = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+            if (!slot.ready)
+            {
+                sharePresentation = false;
+                return false;
+            }
+            glFlush(); // the window context can now wait for this fence
+            const std::lock_guard lock(output.mutex);
+            sharedLatest = index;
+            output.width = w;
+            output.height = h;
+            ++output.revision;
+            return true;
+        }
+
+        void captureSharedPixels()
+        {
+            // Called on the render worker with output.mutex held. This reads
+            // the published slot even if a state restore resized the scene.
+            const Target &target = sharedSlots[sharedLatest].target;
+            output.pixels.resize(static_cast<size_t>(target.width) * target.height * 4u);
+            glBindFramebuffer(GL_FRAMEBUFFER, target.fbo);
+            glReadPixels(0, 0, target.width, target.height, GL_RGBA, GL_UNSIGNED_BYTE, output.pixels.data());
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            boundFbo = ~0u;
+            pixelRevision = output.revision;
+        }
+
+        void destroySharedFrames()
+        {
+            for (auto &slot : sharedSlots)
+            {
+                if (slot.ready)
+                    glDeleteSync(slot.ready);
+                if (slot.sampled)
+                {
+                    glWaitSync(slot.sampled, 0, GL_TIMEOUT_IGNORED);
+                    glDeleteSync(slot.sampled);
+                }
+                destroyTarget(slot.target);
+            }
+            // The context will be detached immediately after this.
+            glFlush();
+        }
+#endif
 
         bool captureHistory(std::vector<uint8_t> &out, std::string &error)
         {
@@ -3403,6 +3515,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 stats.presentUs += native_renderer::nowUs() - start;
             return;
         }
+#ifdef PS2X_NATIVE_GL_SHARED
+        if (sharePresentation && publishShared(w, h))
+            return;
+#endif
         // Read back, top row first (the GL picture is y-up).
         readbackPixels.resize(static_cast<size_t>(w) * h * 4u);
         glBindFramebuffer(GL_FRAMEBUFFER, color.fbo);
@@ -3424,6 +3540,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             std::memcpy(output.pixels.data() + static_cast<size_t>(y) * row, readbackPixels.data() + static_cast<size_t>(h - 1u - y) * row, row);
         output.width = w;
         output.height = h;
+#ifdef PS2X_NATIVE_GL_SHARED
+        sharedLatest = -1;
+#endif
         ++output.revision;
 #if defined(__ANDROID__)
         if (measureReadback)
@@ -3499,6 +3618,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 loop(makeCurrent, initThere);
 #if defined(__ANDROID__)
                 eglReleaseThread();
+#elif defined(PS2X_NATIVE_GL_SHARED)
+                glfwMakeContextCurrent(nullptr);
 #endif
             });
 #if defined(PS2X_NATIVE_VITA)
@@ -3746,8 +3867,82 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         void holdFrame() override { m_rec.hold = true; }
         native_renderer::FrameRead readFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height, uint64_t *seen) override
         {
+#ifdef PS2X_NATIVE_GL_SHARED
+            {
+                const std::lock_guard lock(r->output.mutex);
+                const auto revision = r->output.revision;
+                if (r->sharedLatest < 0 || r->pixelRevision == revision || (seen && *seen == revision))
+                    return r->output.readLocked(rgba, width, height, seen);
+            }
+            // Screenshots and explicit captures still receive the full RGBA
+            // frame. Only the worker can read its framebuffer object.
+            auto result = native_renderer::FrameRead::Missing;
+            std::string error;
+            stateCommand([&] {
+                const std::lock_guard lock(r->output.mutex);
+                const auto revision = r->output.revision;
+                if (r->sharedLatest >= 0 && r->pixelRevision != revision && (!seen || *seen != revision))
+                    r->captureSharedPixels();
+                result = r->output.readLocked(rgba, width, height, seen);
+                return true;
+            }, error);
+            return result;
+#else
             return r->output.read(rgba, width, height, seen);
+#endif
         }
+
+#ifdef PS2X_NATIVE_GL_SHARED
+        native_renderer::FrameRead readPresentationFrame(native_renderer::PresentationFrame &frame,
+            std::vector<uint8_t> &rgba, uint64_t &revision) override
+        {
+            using native_renderer::FrameRead;
+            GLsync ready = nullptr;
+            {
+                const std::lock_guard lock(r->output.mutex);
+                frame = {};
+                if (r->sharedLatest < 0)
+                    return r->output.readLocked(rgba, frame.width, frame.height, &revision);
+                auto &slot = r->sharedSlots[r->sharedLatest];
+                frame = {slot.target.texture, slot.target.width, slot.target.height};
+                if (revision == r->output.revision && slot.leased)
+                    return FrameRead::Unchanged;
+                slot.leased = true;
+                ready = std::exchange(slot.ready, nullptr);
+                revision = r->output.revision;
+            }
+            if (ready)
+            {
+                glWaitSync(ready, 0, GL_TIMEOUT_IGNORED);
+                glDeleteSync(ready);
+            }
+            return FrameRead::Updated;
+        }
+
+        void releasePresentationFrame(uint32_t texture) override
+        {
+            const std::lock_guard lock(r->output.mutex);
+            for (auto &slot : r->sharedSlots)
+                if (slot.leased && slot.target.texture == texture)
+                {
+                    if (slot.sampled)
+                        glDeleteSync(slot.sampled); // the new fence also covers earlier sampling
+                    slot.sampled = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+                    if (slot.sampled)
+                        glFlush();
+                    else
+                        glFinish();
+                    slot.leased = false;
+                    break;
+                }
+        }
+
+        bool sharedFrameReady() override
+        {
+            const std::lock_guard lock(r->output.mutex);
+            return r->sharedLatest >= 0;
+        }
+#endif
 
 #if defined(__ANDROID__)
         native_renderer::detail::AndroidFrameStats androidFrameStats() override
@@ -4118,7 +4313,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 while (!m_queued && m_side.empty() && !m_stopping && !m_stateCommand)
                     m_work.wait_for(lock, kRecheck);
                 if (m_stopping)
+                {
+#ifdef PS2X_NATIVE_GL_SHARED
+                    lock.unlock();
+                    r->destroySharedFrames();
+#endif
                     return;
+                }
                 if (m_stateCommand)
                 {
                     auto operation = std::move(m_stateCommand);
@@ -4252,9 +4453,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 
 namespace native_renderer::detail
 {
-    Backend *createGlBackend(std::function<void()> makeCurrent)
+    Backend *createGlBackend(std::function<void()> makeCurrent, bool sharePresentation)
     {
         auto *renderer = new Renderer();
+#ifdef PS2X_NATIVE_GL_SHARED
+        renderer->sharePresentation = sharePresentation;
+#else
+        (void)sharePresentation;
+#endif
 #if defined(PS2X_NATIVE_VITA)
         // Built here, on the main thread (the CG compiler needs its stack).
         if (!renderer->init())

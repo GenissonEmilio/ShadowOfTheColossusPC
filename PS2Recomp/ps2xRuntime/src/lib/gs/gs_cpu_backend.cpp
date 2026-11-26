@@ -3398,6 +3398,12 @@ PresentationFrame GSCpuBackend::Present(const GSPresentationRequest &request)
     // display buffer out of local memory, only its size and place.
     if (native_renderer::shown())
     {
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+        // The window already presents these frames on the GPU. The queued
+        // VBlank capture is only needed for the GS and diagnostic paths.
+        if (reuseNativeCapture && native_renderer::sharedFrameReady())
+            return {};
+#endif
         const GSPmodeState pmode = decodePmode(request.pmode);
         const bool first = pmode.enableCrt1;
         const uint64_t dispfb = first ? request.dispfb1 : request.dispfb2, display = first ? request.display1 : request.display2;
