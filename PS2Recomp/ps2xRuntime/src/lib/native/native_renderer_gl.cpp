@@ -2431,8 +2431,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             };
             cache.blend = cache.depthTest = cache.depthMask = -1;
             cache.buffer = cache.texture = ~0u;
-            for (const uint64_t key : drawOrder)
+            // Keys are sorted by layer and then submission index. Visit only
+            // this pass's layers while preserving the original order within each layer.
+            auto first = std::lower_bound(drawOrder.begin(), drawOrder.end(), uint64_t{fromOrder} << 32);
+            const auto last = std::lower_bound(first, drawOrder.end(), uint64_t{toOrder} << 32);
+            for (; first != last; ++first)
             {
+                const uint64_t key = *first;
                 const Draw &d = draws[static_cast<size_t>(key & 0xFFFFFFFFu)];
                 if (backgroundOnly && !d.state.background)
                     continue;
@@ -2441,8 +2446,6 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 if (d.state.reflectionSample && !haveMirror)
                     continue;
                 if (!backgroundOnly && fogOn && d.state.background)
-                    continue;
-                if (d.state.order < fromOrder || d.state.order >= toOrder)
                     continue;
                 if (shadowAmount && d.state.order > shadowOrder)
                     resolveShadows();
@@ -3077,6 +3080,12 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         if (haveRefraction) copyOrders.push_back(9u);
         std::sort(copyOrders.begin(), copyOrders.end());
         copyOrders.erase(std::unique(copyOrders.begin(), copyOrders.end()), copyOrders.end());
+#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+        const bool usesFullSizeEffectSource = (haveRefraction && waterFrom == 1) ||
+            (!screenCopyOrders.empty() && static_cast<int>(native_renderer::tuning().hazeSource + 0.5f) == 1);
+#else
+        const bool usesFullSizeEffectSource = true;
+#endif
         auto doRefraction = [&]([[maybe_unused]] uint32_t order)
         {
             // The copies the chosen sources need (Tuning hazeSource / waterSource).
@@ -3087,19 +3096,22 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #if defined(__linux__) && !defined(__ANDROID__)
             traceWaterCopy("screen-source", color, nullptr, order);
 #endif
-            snapshotColor();
+            if (usesFullSizeEffectSource)
+                snapshotColor();
 #if defined(__linux__) && !defined(__ANDROID__)
-            traceWaterCopy("screen-snapshot", snapshot, &color, order);
+            if (usesFullSizeEffectSource)
+                traceWaterCopy("screen-snapshot", snapshot, &color, order);
 #endif
+            const Target &source = usesFullSizeEffectSource ? snapshot : colorPlain;
             if (enhancedWater && order == 9u)
-                copyWaterRefraction(snapshot);
+                copyWaterRefraction(source);
             const bool legacyCopy = enhancedWater ? (haze == 0 && std::binary_search(screenCopyOrders.begin(), screenCopyOrders.end(), order))
                                                   : (haze == 0 || waterFrom == 0);
             if (legacyCopy)
             {
-                copy(snapshot, refraction);
+                copy(source, refraction);
 #if defined(__linux__) && !defined(__ANDROID__)
-                traceWaterCopy("screen-256", refraction, &snapshot, order);
+                traceWaterCopy("screen-256", refraction, &source, order);
 #endif
                 copy(refraction, refractionHalf);
 #if defined(__linux__) && !defined(__ANDROID__)
@@ -3121,8 +3133,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         };
         auto doDof = [&]
         {
-            snapshotColor();
-            copy(snapshot, refraction);
+            // These targets are separate from the main picture. Downsample the
+            // live color directly unless a later draw reads the full-size snapshot.
+            if (usesFullSizeEffectSource)
+                snapshotColor();
+            copy(usesFullSizeEffectSource ? snapshot : colorPlain, refraction);
             for (int i = 0; i < dof.rounds; ++i)
             {
                 copy(refraction, refractionHalf);
