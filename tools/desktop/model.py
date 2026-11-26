@@ -9,7 +9,7 @@ import subprocess
 import sys
 import tempfile
 from import_disc import PROFILES, import_disc, validate_disc
-from language import preferences, translate as tr
+from language import preferences, preferred_language, translate as tr
 from pipeline import CompilationError, PAL_BOOT, Pipeline, PROCESS_FLAGS, WINDOWS, compiler_tool
 
 VERSION = "1.2.7"
@@ -83,12 +83,47 @@ class Library:
         boot = self.disc
         return boot is not None and boot.name == PAL_BOOT
 
+    @property
+    def original_media(self):
+        name = self.state.get("source")
+        if isinstance(name, str):
+            path = Path(name)
+            if path.is_absolute() and path.is_file():
+                return path
+        return None
+
+    @property
+    def portuguese_directory(self):
+        boot = self.disc
+        if boot and boot.name == "SCUS_974.72":
+            return self.directory / "campaign-languages" / boot.parent.name / "pt-BR"
+        return None
+
+    def portuguese_boot(self):
+        from campaign_locale import is_portuguese_ready
+        directory = self.portuguese_directory
+        return directory / "SCUS_974.72" if directory and is_portuguese_ready(directory) else None
+
+    def install_portuguese(self, source=None, progress=lambda text: None):
+        from campaign_locale import prepare_portuguese
+        destination = self.portuguese_directory
+        if not destination:
+            raise ValueError(tr("A tradução brasileira requer a edição americana SCUS-97472."))
+        installed = self.portuguese_boot()
+        if installed:
+            return installed
+        source = source or self.original_media
+        if not source:
+            raise ValueError(tr("Selecione a mídia original americana para instalar a tradução."))
+        return prepare_portuguese(source, self.verify(), destination, progress)
+
     def game_environment(self, test=False, *, boot=None):
         environment = dict(os.environ)
         original_ld = environment.get("LD_LIBRARY_PATH_ORIG")
         for name in ("LD_LIBRARY_PATH", "LD_LIBRARY_PATH_ORIG", "GI_TYPELIB_PATH", "GTK_DATA_PREFIX",
                      "GTK_EXE_PREFIX", "GDK_PIXBUF_MODULE_FILE", "GDK_PIXBUF_MODULEDIR", "GIO_EXTRA_MODULES",
-                     "FONTCONFIG_FILE", "DOTNET_ROOT", "DOTNET_ROOT_X64"):
+                     "FONTCONFIG_FILE", "DOTNET_ROOT", "DOTNET_ROOT_X64",
+                     "SOTC_CAMPAIGN_PT_BR_BOOT", "SOTC_CAMPAIGN_SYSTEM_PT"):
             environment.pop(name, None)
         if original_ld:
             environment["LD_LIBRARY_PATH"] = original_ld
@@ -151,7 +186,7 @@ class Library:
                                   progress, boot_name=boot.name).prepare(destination)
         except subprocess.CalledProcessError as exc:
             raise CompilationError(tr("A compilação não terminou. Consulte {path}").format(path=self.directory / "last-prepare.log")) from exc
-        state = {"disc": str(boot.relative_to(self.directory)), "name": source.name,
+        state = {"disc": str(boot.relative_to(self.directory)), "name": source.name, "source": str(source),
                  "serial": SERIAL_BY_BOOT[boot.name], "executable": str(executable)}
         atomic_json(self.config, state)
         self.state = state
@@ -184,6 +219,10 @@ class Library:
         graphics.normalize_external_settings()
         graphics.save_display(*graphics.display())
         environment = self.game_environment(test)
+        if translated := self.portuguese_boot():
+            environment["SOTC_CAMPAIGN_PT_BR_BOOT"] = str(translated)
+            if preferred_language() == "pt":
+                environment["SOTC_CAMPAIGN_SYSTEM_PT"] = "1"
         from texture_mods import TextureMods
         environment.update(TextureMods(self).environment())
         gpu_status = None

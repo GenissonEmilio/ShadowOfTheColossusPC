@@ -43,7 +43,9 @@ and in the port’s in-game settings menu.** The two settings are independent.
 | Launcher | Open **Settings → Launcher language** (**Configurações → Idioma do launcher**), choose **English** or **Português**, and select **Apply** (**Aplicar**). The launcher also offers **Español** and **日本語**. It initially uses the system language if supported, with English as the fallback. |
 | In-game settings | Choose **Settings → F1 settings language** in the launcher, or **System → Language** in the F1 menu. Choose **English**, **Português**, or **Automatic** to follow the system language. With a controller, press **Select/Back** twice quickly to open the F1 menu. |
 
-The original game’s text and audio come from your disc. On PAL, choose an available campaign language in the game’s original options.
+On the USA edition (SCUS-97472), select **Settings → Install Brazilian Portuguese** in the desktop launcher. The launcher downloads the translation and applies it locally using your original ISO. The next time you start the game, choose **Automatic**, **English**, or **Português (Brasil)**. To change the selection later, open **F1 → System → Game language** and restart the game. [Gledson999’s text and graphics patch](https://www.retro-jogos.com/ps2-shadow-of-the-colossus/)
+
+The original ISO and imported English disc stay intact. Switching the campaign language reuses the same compiled executable and memory card. Brazilian Portuguese save states are kept in a separate folder. On PAL, choose a campaign language from the game’s original menu.
 
 ## Campaign validation
 

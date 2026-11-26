@@ -1,6 +1,10 @@
 #include <memory>
 #include "ps2_runtime.h"
 #include "games_database.h"
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+#include "runtime/host_menu.h"
+#include "runtime/state_manager.h"
+#endif
 #if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
 #include "ps2_debug_panel.h"
 #endif
@@ -530,6 +534,40 @@ int main(int argc, char *argv[])
             std::cerr << "Failed to initialize PS2 runtime" << std::endl;
             return 1;
         }
+
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+#if defined(_WIN32)
+        const auto *translatedBoot = _wgetenv(L"SOTC_CAMPAIGN_PT_BR_BOOT");
+#else
+        const auto *translatedBoot = std::getenv("SOTC_CAMPAIGN_PT_BR_BOOT");
+#endif
+        if (normalizedId == "SCUS-97472" && translatedBoot && *translatedBoot)
+        {
+            const std::filesystem::path localized(translatedBoot);
+            std::error_code status;
+            if (localized.filename() == pathObj.filename() && std::filesystem::is_regular_file(localized, status))
+            {
+                const bool systemPortuguese = std::getenv("SOTC_CAMPAIGN_SYSTEM_PT") != nullptr;
+                const auto language = hostmenu::chooseCampaignLanguage(systemPortuguese);
+                if (language == hostmenu::CampaignLanguage::Cancel)
+                    std::_Exit(0);
+                if (language == hostmenu::CampaignLanguage::PortugueseBrazil)
+                {
+                    filePathStr = localized.string();
+                    // Snapshots contain game RAM and cached resources from the selected disc.
+                    const auto statePath = savestates::directory() / "pt-BR";
+#if defined(_WIN32)
+                    _wputenv_s(L"PS2X_STATE_DIR", statePath.c_str());
+#else
+                    setenv("PS2X_STATE_DIR", statePath.c_str(), 1);
+#endif
+                    std::cout << "[campaign-language] pt-BR" << std::endl;
+                }
+                else
+                    std::cout << "[campaign-language] en" << std::endl;
+            }
+        }
+#endif
 
         std::cout << "[main] runtime initialized, loading " << filePathStr << std::endl;
         if (!runtime.loadELF(filePathStr))

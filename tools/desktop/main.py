@@ -26,7 +26,7 @@ if len(sys.argv) > 1 and sys.argv[1] == "--pipeline-helper":
     helper(sys.argv[2], sys.argv[3], sys.argv[4:])
     raise SystemExit(0)
 
-if __name__ == "__main__" and sys.argv[1:2] in (["--prepare"], ["--play"]):
+if __name__ == "__main__" and sys.argv[1:2] in (["--prepare"], ["--play"], ["--install-pt-br"]):
     from recomp_cli import run
     raise SystemExit(run(sys.argv[1:]))
 
@@ -1173,7 +1173,12 @@ class Launcher:
             self.menu_language_choice.append(code, tr(name) if code == "0" else name)
         self.menu_language_choice.set_active_id(self.graphics.menu_language())
         preferences_panel.pack_start(self.menu_language_choice, False, False, 0)
-        preferences_panel.pack_start(label(tr("O texto e o áudio da campanha vêm do disco. Na edição PAL, escolha entre os idiomas disponíveis no menu original do jogo."), "muted", wrap=True), False, False, 0)
+        preferences_panel.pack_start(label(tr("Idioma da campanha"), "panel-title"), False, False, 0)
+        preferences_panel.pack_start(label(tr("No disco USA, a tradução de Gledson999 adiciona Português (Brasil) na abertura. No PAL, escolha o idioma no menu original do jogo."), "muted", wrap=True), False, False, 0)
+        self.portuguese_button = style(FocusButton(label=tr("Instalar Português (Brasil)")), "secondary")
+        self.portuguese_button.set_halign(Gtk.Align.START)
+        self.portuguese_button.connect("clicked", self.choose_portuguese_media)
+        preferences_panel.pack_start(self.portuguese_button, False, False, 0)
         preferences_panel.pack_start(label(tr("Ícones dos botões no jogo"), "panel-title"), False, False, 0)
         self.prompts_choice = style(Gtk.ComboBoxText(), "graphics-select")
         for mode, text in (("auto", tr("Automático · último dispositivo usado")),
@@ -1436,6 +1441,22 @@ class Launcher:
         else:
             dialog.destroy()
 
+    def choose_portuguese_media(self, *_):
+        if self.busy or self.process or self.controller_process:
+            return
+        source = self.library.original_media
+        if source is None:
+            dialog = Gtk.FileChooserDialog(title=tr("Selecione a mídia original americana para instalar a tradução."),
+                                           parent=self.window, action=Gtk.FileChooserAction.OPEN)
+            dialog.add_buttons(tr("Cancelar"), Gtk.ResponseType.CANCEL, tr("Selecionar ROM"), Gtk.ResponseType.OK)
+            dialog.set_default_response(Gtk.ResponseType.OK)
+            self.configure_file_chooser(dialog)
+            if dialog.run() == Gtk.ResponseType.OK:
+                source = dialog.get_filename()
+            dialog.destroy()
+        if source is not None:
+            self.prepare(source, translation=True)
+
     def dropped(self,widget,context,x,y,selection,info,time):
         uris=selection.get_uris()
         accepted=False
@@ -1474,6 +1495,10 @@ class Launcher:
         idle = not (self.busy or self.process or self.controller_process)
         self.compile_button.set_sensitive(bool(self.library.disc) and idle)
         self.texture_panel.set_sensitive(idle)
+        portuguese_installed = self.library.portuguese_boot()
+        self.portuguese_button.set_sensitive(idle and bool(self.library.portuguese_directory) and not portuguese_installed)
+        self.portuguese_button.set_label(tr("Português (Brasil) instalado") if portuguese_installed
+                                         else tr("Instalar Português (Brasil)"))
         self.more_options.refresh()
 
     def compile_game(self, *_):
@@ -1500,9 +1525,9 @@ class Launcher:
         self.status.set_tooltip_text(str(event))
         return False
 
-    def prepare(self,path=None):
+    def prepare(self, path=None, *, translation=False):
         if self.busy or self.process or self.controller_process: return False
-        self.prepare_only = path is None
+        self.prepare_only = path is None and not translation
         self.busy=True; self.failed=False
         self.refresh_prepare_controls()
         self.choose_button.set_sensitive(False); self.play_button.set_sensitive(False)
@@ -1510,30 +1535,37 @@ class Launcher:
         self.progress_determinate = False
         self.progress.set_fraction(0)
         self.progress.show()
-        self.update_status(tr("Compilando em segundo plano…") if self.prepare_only else tr("Preparando seu jogo…"))
+        self.update_status(tr("Instalando tradução…") if translation else
+                           tr("Compilando em segundo plano…") if self.prepare_only else tr("Preparando seu jogo…"))
         GLib.timeout_add(80,self.pulse)
         def worker():
             error=None
             try:
                 progress = lambda event: GLib.idle_add(self.update_prepare_progress, event)
-                if self.prepare_only:
+                if translation:
+                    self.library.install_portuguese(path, progress)
+                elif self.prepare_only:
                     self.library.prepare_game(progress)
                 else:
                     self.library.prepare(path,progress)
             except Exception as exc:
                 error=exc
-            GLib.idle_add(self.prepared,error)
+            GLib.idle_add(self.prepared, error, translation)
         threading.Thread(target=worker,daemon=False).start()
         return False
 
-    def prepared(self,error):
+    def prepared(self, error, translation=False):
         self.busy=False; self.progress.hide(); self.choose_button.set_sensitive(True)
         self.prepare_detail.hide()
         self.refresh_prepare_controls()
         if self.closing: Gtk.main_quit(); return False
         if error:
             self.failed=True
-            if self.prepare_only:
+            if translation:
+                title = tr("Não foi possível instalar a tradução.")
+                self.update_status(title, True)
+                self.error(title, str(error))
+            elif self.prepare_only:
                 self.update_status(tr("A compilação falhou. Tente novamente. Detalhes em last-prepare.log."), True)
                 self.status.set_tooltip_text(str(error))
             elif isinstance(error, CompilationError):
@@ -1546,7 +1578,9 @@ class Launcher:
             self.play_button.set_sensitive(bool(self.library.disc))
         else:
             self.set_ready()
-            if self.prepare_only:
+            if translation:
+                self.update_status(tr("Português (Brasil) disponível ao iniciar o jogo."))
+            elif self.prepare_only:
                 self.update_status(tr("Compilação pronta. Inicie o jogo quando quiser."))
                 self.status.get_style_context().add_class("ready")
             elif self.args.test_game: GLib.idle_add(self.play)
