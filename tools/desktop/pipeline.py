@@ -58,6 +58,14 @@ def compiler_tool(program, name):
     return Path(program) / "compiler" / "bin" / executable_name(name)
 
 
+def relative_path(path, directory):
+    try:
+        return Path(os.path.relpath(path, directory))
+    except ValueError:
+        # Windows cannot express a relative path between drives or shares.
+        return Path(path)
+
+
 @contextmanager
 def build_lock(path):
     with path.open("a+b") as stream:
@@ -122,7 +130,11 @@ class Pipeline:
         return compiler_tool(self.program, name)
 
     def helper(self, name, args, cwd=None):
-        entry = [sys.executable] if getattr(sys,"frozen",False) else [sys.executable,str(Path(__file__).with_name("main.py"))]
+        entry = [sys.executable]
+        if not getattr(sys, "frozen", False):
+            if WINDOWS:
+                entry += ["-X", "utf8"]
+            entry.append(str(Path(__file__).with_name("main.py")))
         self.run([*entry, "--pipeline-helper", self.source, name, *args], cwd)
 
     def compiler_env(self):
@@ -193,6 +205,10 @@ class Pipeline:
             expected = key.hexdigest()
             cached = obj.is_file() and stamp.is_file() and stamp.read_text() == expected
             if not cached:
+                # A failed compiler may truncate/replace the old object. Never
+                # leave its old key behind: a later source/flag rollback could
+                # otherwise reuse that partial object as the previous build.
+                stamp.unlink(missing_ok=True)
                 try:
                     self.run([*flags,"-c",unity,"-o",obj],env=self.compiler_env())
                     stamp.write_text(expected)
@@ -271,6 +287,7 @@ class Pipeline:
         if self.boot_name == PAL_BOOT:
             env.update(SOTC_NATIVE="0", PS2X_NATIVE_IOP_BOOT="0")
         started = time.monotonic()
+        launch_error = None
         with self.log.open("a", encoding="utf-8") as stream:
             print(f"\n[capture] {name}: starting {executable}", file=stream, flush=True)
             try:
@@ -287,6 +304,7 @@ class Pipeline:
             except OSError as exc:
                 code = None
                 status = f"could not start ({exc})"
+                launch_error = getattr(exc, "winerror", None)
             size = output.stat().st_size if output.is_file() else 0
             print(f"\n[capture] {name}: {status}; {size}/{RAM_BYTES} bytes; "
                   f"{time.monotonic() - started:.1f}s", file=stream)
@@ -294,6 +312,9 @@ class Pipeline:
             return output
         output.unlink(missing_ok=True)
         partial.unlink(missing_ok=True)
+        if WINDOWS and launch_error in (4551, 577):
+            raise CompilationError(tr("O Windows bloqueou a execução do jogo compilado (erro {code}). Consulte {path}")
+                                   .format(code=launch_error, path=self.log))
         raise CompilationError(tr("Não foi possível carregar {name}. Consulte {path}").format(name=name, path=self.log))
 
     def prepare(self, disc):
@@ -319,7 +340,7 @@ class Pipeline:
             self.helper("funcmap_elf",[disc_boot,symbols,boot / "functions.csv"])
             config = (self.source / "game" / (self.boot_config + ".toml")).read_text()
             import re
-            boot_path = Path(os.path.relpath(disc_boot, boot)).as_posix() if WINDOWS else str(disc_boot)
+            boot_path = relative_path(disc_boot, boot).as_posix() if WINDOWS else str(disc_boot)
             config = re.sub(r'^input = .*$', lambda _: "input = " + json.dumps(boot_path, ensure_ascii=False),
                             config, flags=re.M)
             (boot / "config.toml").write_text(config, encoding="utf-8")
@@ -331,9 +352,9 @@ class Pipeline:
                 captures.append((disc / (module+'.XFF'), capture))
                 folder = self.work / module.lower()
                 folder.mkdir(exist_ok=True)
-                specs = [f"{os.path.relpath(xff, folder)}@auto@{os.path.relpath(ram, folder)}"
+                specs = [[str(relative_path(xff, folder)), "auto", str(relative_path(ram, folder))]
                          for xff, ram in captures]
-                self.helper("build_elf",[folder,disc_boot,symbols,*specs], cwd=folder)
+                self.helper("build_elf", [folder, disc_boot, symbols, "--modules-json", json.dumps(specs)], cwd=folder)
                 config_args = [folder, boot / "config.toml"]
                 if self.boot_name == PAL_BOOT:
                     config_args.append(self.boot_config)

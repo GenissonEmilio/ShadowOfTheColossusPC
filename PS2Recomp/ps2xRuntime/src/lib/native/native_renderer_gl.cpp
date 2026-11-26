@@ -30,6 +30,7 @@
 #include "external/glad.h" // the loader initialized by the desktop raylib window
 #define GLFW_INCLUDE_NONE
 #include "GLFW/glfw3.h"
+#include "runtime/ps2_thread_load.h"
 #elif defined(__linux__) && !defined(__ANDROID__)
 #define GL_GLEXT_PROTOTYPES 1
 #include <GL/gl.h>
@@ -1517,7 +1518,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 
         bool captureHistory(std::vector<uint8_t> &out, std::string &error)
         {
-#if defined(__linux__) && !defined(__ANDROID__)
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
             native_renderer::detail::HistoryState state;
             state.width = width; state.height = height;
             state.bloom = bloomHistory; state.gsBloom = gsBloomHistory;
@@ -1565,13 +1566,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             ps2state::Writer writer(out, error, native_renderer::detail::HistoryStateLimit);
             return native_renderer::detail::historyStateCodec(writer, state);
 #else
-            (void)out; error = "Temporal history snapshots currently require desktop Linux OpenGL."; return false;
+            (void)out; error = "Temporal history snapshots require desktop OpenGL on Windows or Linux."; return false;
 #endif
         }
 
         bool restoreHistory(const native_renderer::detail::HistoryState &state, std::string &error)
         {
-#if defined(__linux__) && !defined(__ANDROID__)
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
             GLint framebuffer = 0, readFramebuffer = 0, texture = 0, alignment = 0, rowLength = 0, skipRows = 0, skipPixels = 0, buffer = 0;
             glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &framebuffer); glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFramebuffer);
             glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture); glGetIntegerv(GL_UNPACK_ALIGNMENT, &alignment);
@@ -1586,9 +1587,6 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     glPixelStorei(GL_UNPACK_SKIP_PIXELS, skipPixels); glBindBuffer(GL_PIXEL_UNPACK_BUFFER, buffer);
                 }
             } restore{framebuffer, readFramebuffer, texture, alignment, rowLength, skipRows, skipPixels, buffer};
-            // Those bindings can name targets deleted by ensureTargets or
-            // by the history swap. The next render rebuilds its GL bindings.
-            restore.framebuffer = restore.readFramebuffer = restore.texture = 0;
             Target staged[3]{};
             struct DeleteTargets {
                 Target *targets;
@@ -1617,16 +1615,33 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             if (!upload(staged[0], state.width, state.height, state.previous) ||
                 (state.bloom && !upload(staged[1], std::max(state.width / 4u, 1u), std::max(state.height / 4u, 1u), state.bloomPixels)) ||
                 (state.gsBloom && !upload(staged[2], 64, 64, state.gsBloomPixels))) return false;
+            // Resizing can delete and reuse scene target names. On a same-size
+            // restore, keep the bindings to objects that survive the swap.
+            if (!color.texture || width != state.width || height != state.height)
+            {
+                restore.framebuffer = restore.readFramebuffer = restore.texture = 0;
+                boundFbo = boundProgram = ~0u;
+                cache = {};
+            }
             ensureTargets(state.width, state.height);
             if (glGetError() != GL_NO_ERROR) { error = "Cannot prepare native state dimensions."; return false; }
             std::swap(previous, staged[0]);
             if (state.bloom) std::swap(bloomTex[2], staged[1]);
             if (state.gsBloom) std::swap(gsBloom[4], staged[2]);
+            for (const Target &replaced : staged)
+            {
+                if (static_cast<GLuint>(restore.framebuffer) == replaced.fbo)
+                    restore.framebuffer = 0;
+                if (static_cast<GLuint>(restore.readFramebuffer) == replaced.fbo)
+                    restore.readFramebuffer = 0;
+                if (static_cast<GLuint>(restore.texture) == replaced.texture)
+                    restore.texture = 0;
+            }
             bloomHistory = state.bloom; gsBloomHistory = state.gsBloom;
             boundFbo = boundProgram = ~0u; cache = {};
             return true;
 #else
-            (void)state; error = "Temporal history snapshots currently require desktop Linux OpenGL."; return false;
+            (void)state; error = "Temporal history snapshots require desktop OpenGL on Windows or Linux."; return false;
 #endif
         }
 
@@ -3374,11 +3389,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         }
         bool validateState(const std::vector<uint8_t> &data, std::string &error) const override
         {
-#if defined(__linux__) && !defined(__ANDROID__)
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
             native_renderer::detail::HistoryState state;
             return native_renderer::detail::decodeHistoryState(data, state, error);
 #else
-            (void)data; error = "Temporal history snapshots currently require desktop Linux OpenGL."; return false;
+            (void)data; error = "Temporal history snapshots require desktop OpenGL on Windows or Linux."; return false;
 #endif
         }
         bool restoreState(const std::vector<uint8_t> &data, std::string &error) override
@@ -3731,6 +3746,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         void loop(const std::function<void()> &makeCurrent, bool initThere)
         {
             ThreadNaming::SetCurrentThreadName("RenderThread");
+#if defined(_WIN32)
+            ps2_load::setThreadSlot(ps2_load::kRender);
+#endif
 #if defined(PS2X_NATIVE_VITA)
             // A core of its own: the game thread keeps to the other two (ps2_runtime.cpp).
             sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), SCE_KERNEL_CPU_MASK_USER_2);

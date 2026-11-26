@@ -2,12 +2,13 @@
 and emit the matching function map CSV + symbol list.
 
 Usage: build_elf.py out_dir boot_elf boot_syms XFF@hdr@ram_dump [...]
+       build_elf.py out_dir boot_elf boot_syms --modules-json '[["XFF", "hdr", "ram_dump"], ...]'
 
 hdr is the module header address, or "auto" to locate it in the dump.
 
 Each module is captured from a RAM dump taken when the game jumps to its entry.
 """
-import bisect, pathlib, re, sys, struct
+import bisect, json, pathlib, re, sys, struct
 from elfmini import Elf
 from modimage import LoadedModule, find_header
 import funcmap_elf
@@ -52,6 +53,20 @@ def write_elf(path, entry, sections):
     open(path, "wb").write(out)
 
 
+def module_specs(arguments):
+    if arguments[:1] != ["--modules-json"]:
+        return [spec.split("@") for spec in arguments]
+    if len(arguments) != 2:
+        raise ValueError("--modules-json requires one JSON list of module specifications")
+    specs = json.loads(arguments[1])
+    if not isinstance(specs, list) or any(
+        not isinstance(spec, list) or len(spec) != 3 or not all(isinstance(field, str) for field in spec)
+        for spec in specs
+    ):
+        raise ValueError("Expected a list of [XFF path, header, RAM dump path] strings")
+    return specs
+
+
 def main(out_dir, boot_path, boot_syms, mods):
     boot = Elf(boot_path)
     sections = []
@@ -76,8 +91,7 @@ def main(out_dir, boot_path, boot_syms, mods):
     syms = [l.split() for l in open(boot_syms)]
     dynamic = set()
 
-    for spec in mods:
-        path, hdr, ram_path = spec.split("@")
+    for path, hdr, ram_path in module_specs(mods):
         ram = open(ram_path, "rb").read()
         m = LoadedModule(path, ram, find_header(path, ram) if hdr == "auto" else int(hdr, 0))
         tag = m.name.split(".")[0]

@@ -75,6 +75,11 @@ namespace
         std::copy(rng.words.begin() + 1, rng.words.end(), saved.words.begin());
         return true;
     }
+#elif defined(_WIN32)
+    // The Windows CRT starts rand() with seed 1. Keep its 32-bit state in
+    // guest libc so the exact sequence can be restored with the game.
+    constexpr uint32_t kWindowsRandomDefault = 1u;
+    uint32_t g_windowsRandomState = kWindowsRandomDefault;
 #else
     bool g_stateHostRandomTouched = false;
 #endif
@@ -1254,6 +1259,9 @@ namespace ps2_stubs
         if (::random_r(&guestRandom().engine, &value) != 0)
             throw std::runtime_error("Cannot advance guest glibc random state.");
         setReturnS32(ctx, value & 0x7FFF);
+#elif defined(_WIN32)
+        g_windowsRandomState = g_windowsRandomState * 214013u + 2531011u;
+        setReturnS32(ctx, (g_windowsRandomState >> 16) & 0x7fffu);
 #else
         g_stateHostRandomTouched = true;
         setReturnS32(ctx, std::rand() & 0x7FFF);
@@ -1266,6 +1274,8 @@ namespace ps2_stubs
 #if defined(__linux__) && defined(__GLIBC__)
         if (::srandom_r(getRegU32(ctx, 4), &guestRandom().engine) != 0)
             throw std::runtime_error("Cannot seed guest glibc random state.");
+#elif defined(_WIN32)
+        g_windowsRandomState = getRegU32(ctx, 4);
 #else
         g_stateHostRandomTouched = true;
         std::srand(getRegU32(ctx, 4));
@@ -1382,16 +1392,28 @@ namespace ps2_stubs {
             uint32_t next = 0;
 #if defined(__linux__) && defined(__GLIBC__)
             LibcRandomSnapshot random;
+#elif defined(_WIN32)
+            uint32_t random = kWindowsRandomDefault;
 #endif
         };
         template<class Archive> bool visitLibcState(Archive &ar, LibcStateChunk &state) {
+            constexpr uint32_t legacyMagic = 0x3143424c;
 #if defined(__linux__) && defined(__GLIBC__)
             constexpr uint32_t expectedMagic = 0x3243424c;
+#elif defined(_WIN32)
+            constexpr uint32_t expectedMagic = 0x3343424c;
 #else
-            constexpr uint32_t expectedMagic = 0x3143424c;
+            constexpr uint32_t expectedMagic = legacyMagic;
 #endif
             uint32_t magic = expectedMagic;
-            if (!ar.pod(magic) || !ar.pod(state.next) || magic != expectedMagic || !state.next)
+            if (!ar.pod(magic) || !ar.pod(state.next) || !state.next)
+                return ar.fail("Invalid C library state.");
+#if defined(_WIN32)
+            // Windows only wrote the legacy chunk before the first guest rand/srand.
+            if (magic == legacyMagic)
+                return ar.finish();
+#endif
+            if (magic != expectedMagic)
                 return ar.fail("Invalid C library state.");
 #if defined(__linux__) && defined(__GLIBC__)
             auto &rng = state.random;
@@ -1404,6 +1426,8 @@ namespace ps2_stubs {
                 rng.separation != kRandomSeparation || rng.rear >= kRandomDegree)
                 return ar.fail("Invalid guest glibc random metadata.");
             for (auto &word : rng.words) if (!ar.pod(word)) return false;
+#elif defined(_WIN32)
+            if (!ar.pod(state.random)) return false;
 #endif
             return ar.finish();
         }
@@ -1417,6 +1441,8 @@ namespace ps2_stubs {
         LibcStateChunk state; state.next = g_next_file_handle;
 #if defined(__linux__) && defined(__GLIBC__)
         if (!captureRandom(state.random, error)) return false;
+#elif defined(_WIN32)
+        state.random = g_windowsRandomState;
 #else
         if (g_stateHostRandomTouched) { error="Host C random state is not serializable for this game profile."; return false; }
 #endif
@@ -1439,6 +1465,8 @@ namespace ps2_stubs {
         g_file_map.clear(); g_next_file_handle=state.next;
 #if defined(__linux__) && defined(__GLIBC__)
         g_guestRandom.swap(replacement);
+#elif defined(_WIN32)
+        g_windowsRandomState = state.random;
 #else
         g_stateHostRandomTouched=false;
 #endif

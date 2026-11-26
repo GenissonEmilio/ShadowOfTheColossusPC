@@ -175,7 +175,7 @@ for new versions.
 
 ## Save states
 
-On Linux, press **F5** to quick save and **F8** to quick load. In **F1 → States**,
+On Windows and Linux, press **F5** to quick save and **F8** to quick load. In **F1 → States**,
 choose the quick slot or one of five manual slots to save, load, or delete a
 state. The manager displays timestamps and file sizes and asks for confirmation
 before overwriting or deleting a slot. Files are stored in `player/savestates`.
@@ -184,8 +184,8 @@ The launcher displays the shortcuts and opens the folder from **My saves**.
 Save states capture execution state, memory, audio, and native services. They
 require the same runtime executable and disc edition. The loader rejects
 states from other builds and incomplete files before touching the running game.
-Writes are atomic. The initial implementation supports the launcher’s default
-Linux native mode. If the game reports an unsupported save point, wait for the
+Writes are atomic. Save states support the launcher's default native mode on
+Windows and Linux. If the game reports an unsupported save point, wait for the
 video or loading operation to finish. Rendering caches are rebuilt on load.
 
 Keep saving at shrines. The memory card is how you carry progress between
