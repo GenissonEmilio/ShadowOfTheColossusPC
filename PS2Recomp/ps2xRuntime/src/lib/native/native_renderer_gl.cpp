@@ -72,6 +72,24 @@ extern "C" unsigned int _newlib_heap_size_user;      // ps2_vita_runtime.cpp
 namespace
 {
     constexpr float kNearW = 0.1f;
+#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+    bool alphaBatching()
+    {
+        static const bool enabled = [] {
+            const char *value = std::getenv("SOTC_GL_ALPHA_BATCH");
+            return !value || std::strcmp(value, "0") != 0;
+        }();
+        return enabled;
+    }
+
+    using AlphaPosition = std::array<float, 3>;
+
+    struct AlphaSkinPosition
+    {
+        AlphaPosition position;
+        float bone[3], weight[3];
+    };
+#endif
 #if defined(__ANDROID__)
     // GL_EXT_depth_clamp and GL_NV_depth_clamp use the same enum value.
     constexpr GLenum kGlesDepthClamp = 0x864F;
@@ -615,6 +633,27 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         uint64_t bytes = 0;
         uint8_t alphaMin = 0, alphaMax = 255;
         std::vector<std::array<uint8_t, 2>> triangleAlpha;
+#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+        // The CPU copy keeps only the inputs needed to bound screen coverage.
+        // Frame-arena meshes can use the original frame vertices and indices.
+        std::vector<AlphaPosition> alphaPositions;
+        std::vector<AlphaSkinPosition> alphaSkinPositions;
+        std::vector<uint32_t> alphaIndices;
+
+        uint64_t alphaPositionBytes() const
+        {
+            return alphaPositions.capacity() * sizeof(AlphaPosition) +
+                   alphaSkinPositions.capacity() * sizeof(AlphaSkinPosition) +
+                   alphaIndices.capacity() * sizeof(uint32_t);
+        }
+
+        void clearAlphaPositions()
+        {
+            std::vector<AlphaPosition>().swap(alphaPositions);
+            std::vector<AlphaSkinPosition>().swap(alphaSkinPositions);
+            std::vector<uint32_t>().swap(alphaIndices);
+        }
+#endif
     };
 
     struct Texture
@@ -659,6 +698,100 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         native_renderer::DrawState state;
         float clip[16];
     };
+
+#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+    struct AlphaBounds
+    {
+        double left = 0, right = 0, bottom = 0, top = 0;
+        bool valid = false, computed = false;
+
+        bool overlaps(const AlphaBounds &other) const
+        {
+            return left <= other.right && other.left <= right && bottom <= other.top && other.bottom <= top;
+        }
+
+        bool offscreen() const
+        {
+            return valid && (right < -1 || left > 1 || top < -1 || bottom > 1);
+        }
+    };
+
+    // Bound the shader's 32-bit position arithmetic, including fused and
+    // separately rounded multiply/add. Magnitudes give an absolute error
+    // even when the result nearly cancels. Reject inputs outside the range
+    // covered by the bound, and triangles near the clip plane.
+    constexpr double kAlphaPositionError = 0x1p-18;
+    constexpr float kAlphaPositionLimit = 0x1p32f;
+
+    bool validAlphaInput(float value, float limit = kAlphaPositionLimit)
+    {
+        // Keep the nonfinite check even in builds that enable fast math.
+        uint32_t bits, limitBits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        std::memcpy(&limitBits, &limit, sizeof(limitBits));
+        return (bits & 0x7FFFFFFFu) <= limitBits;
+    }
+
+    AlphaBounds projectAlphaPosition(const AlphaPosition &vertex, const AlphaSkinPosition *skin, const Draw &draw,
+                                     const float *palette, uint32_t paletteCount, double padX, double padY)
+    {
+        std::array<double, 3> position = {vertex[0], vertex[1], vertex[2]}, error = {};
+        if (!std::all_of(vertex.begin(), vertex.end(), [](float n) { return validAlphaInput(n); }))
+            return {};
+        if (skin)
+        {
+            position = {};
+            for (int k = 0; k < 3; ++k)
+            {
+                if (!validAlphaInput(skin->bone[k], static_cast<float>(paletteCount)) || !validAlphaInput(skin->weight[k], 2.0f))
+                    return {};
+                const float bone = skin->bone[k] + 0.5f;
+                if (bone < 0 || bone >= static_cast<float>(paletteCount - 3))
+                    return {};
+                const float *matrix = palette + static_cast<uint32_t>(bone) * 4u;
+                const double weight = skin->weight[k];
+                if (!weight)
+                    continue; // the uploaded palette was checked for finite values
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    const double x = matrix[axis] * static_cast<double>(vertex[0]);
+                    const double y = matrix[axis + 4] * static_cast<double>(vertex[1]);
+                    const double z = matrix[axis + 8] * static_cast<double>(vertex[2]);
+                    const double t = matrix[axis + 12];
+                    position[axis] += weight * (x + y + z + t);
+                    error[axis] += std::abs(weight) * (std::abs(x) + std::abs(y) + std::abs(z) + std::abs(t));
+                }
+            }
+            for (double &v : error)
+                v *= kAlphaPositionError;
+        }
+        double coord[3], margin[3];
+        for (int component = 0; component < 3; ++component)
+        {
+            const int row = component == 2 ? 3 : component; // x, y and w
+            coord[component] = draw.clip[12 + row];
+            double magnitude = std::abs(coord[component]), inputError = 0;
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                const double coefficient = draw.clip[4 * axis + row];
+                const double term = coefficient * position[axis];
+                inputError += std::abs(coefficient) * error[axis];
+                coord[component] += term;
+                magnitude += std::abs(term);
+            }
+            if (!(magnitude + inputError <= kAlphaPositionLimit))
+                return {};
+            margin[component] = inputError + kAlphaPositionError * (magnitude + inputError + 1);
+        }
+        const double w = coord[2] - margin[2];
+        if (w < 2 * kNearW)
+            return {};
+        const double x = coord[0] / coord[2], y = coord[1] / coord[2];
+        const double dx = (margin[0] + std::abs(x) * margin[2]) / w + kAlphaPositionError * (std::abs(x) + 1) + padX;
+        const double dy = (margin[1] + std::abs(y) * margin[2]) / w + kAlphaPositionError * (std::abs(y) + 1) + padY;
+        return {x - dx, x + dx, y - dy, y + dy, true};
+    }
+#endif
 
     // A colour target, with the framebuffer that draws into it (and its
     // depth/stencil when it has one).
@@ -862,6 +995,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         }
         std::vector<Draw> draws;
         std::vector<uint64_t> drawOrder; // layer << 32 | index: the draws in layer order, stable (sorting the draws themselves moved ~450 bytes each)
+#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+        // Indexed skin vertices are shared by multiple triangles of a draw.
+        std::vector<AlphaBounds> alphaVertexBounds;
+#endif
         // The draw loop's state as last set (pass() forgets it whenever
         // something else may have changed it): a call is made only for a
         // change. vitaGL redoes work on every call (a blend change patches
@@ -1777,6 +1914,67 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 
         void render(uint32_t w, uint32_t h, bool timed);
 
+#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+        const float *alphaSkinPalette(const Draw &d, uint32_t count)
+        {
+            if (count < 4)
+                return nullptr;
+            const size_t at = static_cast<size_t>(d.state.skinPalette - 1u) * 4u;
+            if (at > palettes.size() || count * 4u > palettes.size() - at)
+                return nullptr;
+            const float *palette = palettes.data() + at;
+            return std::all_of(palette, palette + count * 4, [](float v) { return validAlphaInput(v); }) ? palette : nullptr;
+        }
+
+        AlphaBounds alphaTriangleBounds(const Mesh &m, const Draw &d, uint32_t tri, const float *palette, uint32_t paletteCount,
+                                        double padX, double padY)
+        {
+            AlphaBounds bounds;
+            for (uint32_t i = tri * 3u; i < tri * 3u + 3u; ++i)
+            {
+                AlphaBounds v;
+                if (m.dynamic)
+                {
+                    const size_t index = static_cast<size_t>(m.firstIndex) + i;
+                    const size_t vertex = m.indexed ? (index < indexArena.size() ? indexArena.data()[index] : arena.size())
+                                                   : static_cast<size_t>(m.first) + i;
+                    if (vertex >= arena.size())
+                        return {};
+                    const auto &p = arena.data()[vertex];
+                    v = projectAlphaPosition({p.x, p.y, p.z}, nullptr, d, nullptr, 0, padX, padY);
+                }
+                else if (m.skinned)
+                {
+                    const uint32_t vertex = m.alphaIndices[i];
+                    if (vertex >= m.alphaSkinPositions.size())
+                        return {};
+                    auto &cached = alphaVertexBounds[vertex];
+                    if (!cached.computed)
+                    {
+                        const auto &p = m.alphaSkinPositions[vertex];
+                        cached = projectAlphaPosition(p.position, &p, d, palette, paletteCount, padX, padY);
+                        cached.computed = true;
+                    }
+                    v = cached;
+                }
+                else
+                    v = projectAlphaPosition(m.alphaPositions[i], nullptr, d, nullptr, 0, padX, padY);
+                if (!v.valid)
+                    return {};
+                if (!bounds.valid)
+                    bounds = v;
+                else
+                {
+                    bounds.left = std::min(bounds.left, v.left);
+                    bounds.right = std::max(bounds.right, v.right);
+                    bounds.bottom = std::min(bounds.bottom, v.bottom);
+                    bounds.top = std::max(bounds.top, v.top);
+                }
+            }
+            return bounds;
+        }
+#endif
+
         // A mesh's triangles: the list as it is, or the indexed one's
         // indices (the frame's index buffer, bound with the frame's
         // vertices: the indices count from the start of the arena).
@@ -1879,6 +2077,24 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         });
         mesh.bytes = static_cast<uint64_t>(count) * sizeof(native_renderer::Vertex)
                    + mesh.triangleAlpha.capacity() * sizeof(mesh.triangleAlpha[0]);
+#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+        mesh.clearAlphaPositions();
+        if (alphaBatching() && count >= 3u)
+        {
+            try
+            {
+                mesh.alphaPositions.resize(count);
+                std::transform(vertices, vertices + count, mesh.alphaPositions.begin(), [](const native_renderer::Vertex &v) {
+                    return AlphaPosition{v.x, v.y, v.z};
+                });
+            }
+            catch (const std::bad_alloc &)
+            {
+                mesh.clearAlphaPositions();
+            }
+        }
+        mesh.bytes += mesh.alphaPositionBytes();
+#endif
         meshBytes += mesh.bytes;
         cache.buffer = ~0u;
     }
@@ -1907,6 +2123,25 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         });
         mesh.bytes = static_cast<uint64_t>(count) * sizeof(native_renderer::SkinVertex) + static_cast<uint64_t>(indexCount) * 4u
                    + mesh.triangleAlpha.capacity() * sizeof(mesh.triangleAlpha[0]);
+#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+        mesh.clearAlphaPositions();
+        if (alphaBatching() && indexCount >= 3u)
+        {
+            try
+            {
+                mesh.alphaSkinPositions.resize(count);
+                std::transform(vertices, vertices + count, mesh.alphaSkinPositions.begin(), [](const native_renderer::SkinVertex &v) {
+                    return AlphaSkinPosition{{v.x, v.y, v.z}, {v.bone[0], v.bone[1], v.bone[2]}, {v.weight[0], v.weight[1], v.weight[2]}};
+                });
+                mesh.alphaIndices.assign(indices, indices + indexCount);
+            }
+            catch (const std::bad_alloc &)
+            {
+                mesh.clearAlphaPositions();
+            }
+        }
+        mesh.bytes += mesh.alphaPositionBytes();
+#endif
         meshBytes += mesh.bytes;
         skinnedBytes += mesh.bytes;
         cache.buffer = ~0u;
@@ -2009,6 +2244,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             const uint64_t oldAlphaBytes = mesh.triangleAlpha.capacity() * sizeof(mesh.triangleAlpha[0]);
             meshBytes -= oldAlphaBytes;
             mesh.bytes -= oldAlphaBytes;
+#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+            const uint64_t oldPositionBytes = mesh.alphaPositionBytes();
+            meshBytes -= oldPositionBytes;
+            mesh.bytes -= oldPositionBytes;
+            if (oldPositionBytes)
+                mesh.clearAlphaPositions();
+#endif
             meshAlphaBounds(mesh, f.count, [&](uint32_t i) {
                 const size_t offset = static_cast<size_t>(f.firstIndex) + i;
                 const size_t vertex = f.indexed ? (offset < indexArena.size() ? indexArena.data()[offset] : arena.size())
@@ -2026,7 +2268,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     void Renderer::render(uint32_t w, uint32_t h, bool timed)
     {
         ensureTargets(w, h);
-        uint32_t alphaSplitTriangles = 0, alphaRangeDraws = 0;
+        uint32_t alphaSplitTriangles = 0, alphaRangeDraws = 0, alphaDepthDraws = 0, alphaCulledTriangles = 0;
         boundFbo = boundProgram = ~0u;
 #if defined(__linux__) && !defined(__ANDROID__)
         static const bool waterCopyTrace = std::getenv("SOTC_WATER_COPY_TRACE") != nullptr;
@@ -2215,7 +2457,6 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 useProgram(skinned ? skinProgram : mainProgram);
 #if !defined(PS2X_NATIVE_VITA)
                 const float noAlphaTest[4] = {};
-                uniform4(uAlphaTest, noAlphaTest, 1);
 #endif
                 if (skinned)
                 {
@@ -2278,6 +2519,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 {
                     if (backgroundOnly)
                         continue;
+#if !defined(PS2X_NATIVE_VITA)
+                    uniform4(uAlphaTest, noAlphaTest, 1);
+#endif
                     // The count where the faces pass the depth test: front +1, back -1.
                     const float misc[4] = {0, 1, 0, 0}, none[4] = {0, 0, 0, 0};
                     uniform4(uMisc, misc, 1);
@@ -2512,11 +2756,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     {
                         const float texMin = tex != textures.end() ? tex->second.alphaMin : 128.0f;
                         const float texMax = tex != textures.end() ? tex->second.alphaMax : 128.0f;
-                        const auto classify = [&](uint32_t triangle) {
+                        const auto classify = [&](const std::array<uint8_t, 2> &range) {
                             if (!d.state.alphaReference) return 1;
                             if (!std::isfinite(d.state.opacity) || d.state.opacity < 0.0f || d.state.opacity > 2.0f) return 0;
-                            const auto range = m.triangleAlpha.empty() ? std::array<uint8_t, 2>{m.alphaMin, m.alphaMax}
-                                                                     : m.triangleAlpha[triangle];
                             // Texture filtering and vertex interpolation stay inside these
                             // bounds. Keep a margin for floating-point interpolation at AREF.
                             const float lo = texMin * (static_cast<float>(range[0]) / 128.0f) * d.state.opacity;
@@ -2525,40 +2767,118 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                             if (hi < d.state.alphaReference - 0.01f) return -1;
                             return 0;
                         };
-                        if (m.count >= 3u)
+                        const uint32_t triangles = m.count / 3u;
+                        const int meshKind = classify({m.alphaMin, m.alphaMax});
+                        if (triangles)
                             bindMeshIndices(m);
-                        for (uint32_t i = 0; i < m.count / 3u;)
+#if !defined(__ANDROID__)
+                        const bool batch = !meshKind && alphaBatching() && target.width && target.height &&
+                                           std::all_of(std::begin(d.clip), std::end(d.clip), [](float v) { return validAlphaInput(v); }) &&
+                                           (m.dynamic ? m.frame == arenaFrame : m.skinned ? m.alphaIndices.size() == m.count : m.alphaPositions.size() == m.count);
+                        const uint32_t paletteCount = std::min(d.state.skinPaletteCount, native_renderer::kSkinPaletteQwords);
+                        const float *palette = batch && m.skinned ? alphaSkinPalette(d, paletteCount) : nullptr;
+                        const double padX = 2.0 / target.width, padY = 2.0 / target.height; // one pixel for clipping and raster subpixel rounding
+                        bool useBounds = batch && (!m.skinned || palette);
+                        if (useBounds && m.skinned)
                         {
-                            const int kind = classify(i);
+                            try
+                            {
+                                alphaVertexBounds.assign(m.alphaSkinPositions.size(), {});
+                            }
+                            catch (const std::bad_alloc &)
+                            {
+                                useBounds = false;
+                            }
+                        }
+                        AlphaBounds nextBounds;
+                        uint32_t nextTriangle = triangles;
+                        const auto bounds = [&](uint32_t triangle) {
+                            if (nextTriangle != triangle)
+                            {
+                                nextBounds = alphaTriangleBounds(m, d, triangle, palette, paletteCount, padX, padY);
+                                nextTriangle = triangle;
+                            }
+                            return nextBounds;
+                        };
+#endif
+                        const auto triangleKind = [&](uint32_t triangle) {
+                            return meshKind || m.triangleAlpha.empty() ? meshKind : classify(m.triangleAlpha[triangle]);
+                        };
+                        bool depthWrites = true;
+                        const auto writeDepth = [&](bool enabled) {
+                            if (enabled != depthWrites)
+                            {
+                                glDepthMask(enabled ? GL_TRUE : GL_FALSE);
+                                depthWrites = enabled;
+                            }
+                        };
+                        for (uint32_t i = 0; i < triangles;)
+                        {
+                            const int kind = triangleKind(i);
                             uint32_t end = i + 1u;
-                            if (kind) // only proven all-pass/all-fail runs can share a draw
-                                while (end < m.count / 3u && classify(end) == kind) ++end;
-                            glDepthMask(kind > 0 ? GL_TRUE : GL_FALSE);
+                            if (meshKind)
+                                end = triangles;
+                            else if (kind)
+                                while (end < triangles && triangleKind(end) == kind) ++end;
+#if !defined(__ANDROID__)
+                            else if (useBounds)
+                            {
+                                const AlphaBounds first = bounds(i);
+                                if (first.offscreen())
+                                {
+                                    ++alphaCulledTriangles;
+                                    ++i;
+                                    continue;
+                                }
+                                if (first.valid)
+                                {
+                                    // The colour-only range and its conditional Z replay
+                                    // can commute solely where their sample coverage is
+                                    // disjoint. Keep submission order within both ranges.
+                                    std::array<AlphaBounds, 16> group;
+                                    group[0] = first;
+                                    while (end < triangles && end - i < group.size() && !triangleKind(end))
+                                    {
+                                        const AlphaBounds next = bounds(end);
+                                        if (!next.valid || std::any_of(group.begin(), group.begin() + (end - i),
+                                                                       [&](const AlphaBounds &previous) { return previous.overlaps(next); }))
+                                            break;
+                                        group[end - i] = next;
+                                        ++end;
+                                    }
+                                }
+                            }
+#endif
+                            writeDepth(kind > 0);
                             drawMeshRange(m, firstVertex, i * 3u, (end - i) * 3u);
                             ++alphaRangeDraws;
                             if (!kind)
                             {
-                                ++alphaSplitTriangles;
-                                // Do not reorder overlapping primitives: finish this
-                                // triangle's conditional Z before the next triangle's colour.
+                                alphaSplitTriangles += end - i;
+                                ++alphaDepthDraws;
                                 glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
-                                glDepthMask(GL_TRUE);
+                                writeDepth(true);
                                 alphaTest[2] = 1.0f;
                                 uniform4(uAlphaTest, alphaTest, 1);
-                                drawMeshRange(m, firstVertex, i * 3u, 3u);
+                                drawMeshRange(m, firstVertex, i * 3u, (end - i) * 3u);
                                 glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
                                 alphaTest[2] = 0.0f;
                                 uniform4(uAlphaTest, alphaTest, 1);
                             }
                             i = end;
                         }
-                        glDepthMask(GL_TRUE);
+                        writeDepth(true);
                         cache.depthMask = 1;
                     }
                 }
                 else
-#endif
+                {
+                    uniform4(uAlphaTest, noAlphaTest, 1);
                     drawMesh(mesh->second, firstVertex);
+                }
+#else
+                drawMesh(mesh->second, firstVertex);
+#endif
 #if defined(__linux__) && !defined(__ANDROID__)
                 if (traceHaze) {
                     if (traceQueryStarted) {
@@ -3052,8 +3372,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         static const bool alphaTrace = std::getenv("SOTC_ALPHA_DEPTH_TRACE") != nullptr;
         static uint32_t alphaTraceRows = 0;
         if (alphaTrace && arenaFrame % 60u == 0u && alphaTraceRows++ < 120u)
-            std::fprintf(stderr, "[alpha-depth] frame=%llu mixed_triangles=%u range_draws=%u extra_depth_draws=%u\n",
-                         static_cast<unsigned long long>(arenaFrame), alphaSplitTriangles, alphaRangeDraws, alphaSplitTriangles);
+            std::fprintf(stderr, "[alpha-depth] frame=%llu mixed_triangles=%u range_draws=%u extra_depth_draws=%u offscreen_mixed_triangles=%u\n",
+                         static_cast<unsigned long long>(arenaFrame), alphaSplitTriangles, alphaRangeDraws, alphaDepthDraws, alphaCulledTriangles);
         if (const auto &hook = native_renderer::detail::presentHook())
         {
             // The host shows a copy of its own: the next frame starts drawing
