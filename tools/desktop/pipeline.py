@@ -12,6 +12,7 @@ from pathlib import Path
 import runpy
 import subprocess
 import sys
+import tempfile
 import time
 import threading
 
@@ -23,6 +24,10 @@ STAGE_COUNT = 1 + len(MODULES)
 WINDOWS = os.name == "nt"
 PROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if WINDOWS else 0
 RAM_BYTES = 32 * 1024 * 1024
+GENERATED_HEADER_PREFIX = ('#include <stdexcept>\n'
+                           '#include "ps2_runtime_macros.h"\n'
+                           '#include "ps2_runtime.h"\n')
+GENERATED_HEADER_PREFIX_BYTES = GENERATED_HEADER_PREFIX.encode("ascii")
 
 
 class CompilationError(ValueError):
@@ -38,6 +43,36 @@ class PreparationProgress(str):
         event.detail = detail
         event.fraction = fraction
         return event
+
+
+class PrecompiledHeader:
+    def __init__(self, directory):
+        self.path = directory / "generated-prefix.hpp"
+        self.ready = None
+        self.lock = threading.Lock()
+
+    def flags(self, pipeline, compiler_flags, environment):
+        with self.lock:
+            if self.ready is None:
+                started = time.monotonic()
+                compiled = self.path.with_suffix(".hpp.gch")
+                try:
+                    self.path.write_text(GENERATED_HEADER_PREFIX, encoding="utf-8")
+                    pipeline.run([*compiler_flags, "-x", "c++-header", self.path,
+                                  "-o", compiled], env=environment)
+                    self.ready = compiled.is_file()
+                except (OSError, subprocess.CalledProcessError):
+                    self.ready = False
+                pipeline.log_timing("precompiled-header", started, ready=self.ready)
+            if self.ready:
+                # GCC can fall back to parsing the same headers if its PCH is
+                # invalid in a child process (for example due to address layout).
+                return ["-include", self.path, "-Winvalid-pch"]
+            return []
+
+    def disable(self):
+        with self.lock:
+            self.ready = False
 
 
 def remaining_time(seconds):
@@ -126,6 +161,11 @@ class Pipeline:
             subprocess.run(list(map(str,args)), cwd=cwd or self.work, env=env or self.env,
                            stdout=stream, stderr=subprocess.STDOUT, creationflags=PROCESS_FLAGS, check=True)
 
+    def log_timing(self, phase, started, **fields):
+        details = "".join(f" {name}={value}" for name, value in fields.items())
+        with self.log.open("a", encoding="utf-8") as stream:
+            print(f"[prepare] {phase}{details} elapsed={time.monotonic() - started:.2f}s", file=stream)
+
     def tool(self, name):
         return compiler_tool(self.program, name)
 
@@ -154,7 +194,7 @@ class Pipeline:
         title = tr("Etapa {step}/{stages} · {name}").format(step=step, stages=STAGE_COUNT, name=name)
         self.progress(PreparationProgress(title, detail, (step - 1 + fraction) / STAGE_COUNT))
 
-    def compile(self, directory, *, step=None):
+    def compile(self, directory, *, step=None, precompiled=None):
         generated = directory / "output"
         cpp = sorted(generated.glob("*.cpp"))
         if not cpp:
@@ -178,6 +218,7 @@ class Pipeline:
         flags += ["-std=c++20", "-O2", "-DNDEBUG", "-msse4.1", "-fno-strict-aliasing",
                   *["-I"+str(p) for p in includes],
                   "-DPS2_RUNTIME_LOGS=1", "-DPS2X_ENABLE_IOP_RPC_TRACE=0", "-DPS2X_VU1_TRUST_FPU=1"]
+        environment = self.compiler_env()
         objects = directory / "objects"
         objects.mkdir(exist_ok=True)
         # A smaller unity batch lets memory-capped build/QA machines compile
@@ -199,8 +240,16 @@ class Pipeline:
             unity.write_text("\n".join('#include "'+Path(os.path.relpath(f, objects)).as_posix()+'"' for f in files)+"\n")
             obj = unity.with_suffix(".o")
             key = header_key.copy()
-            for source in files:
-                key.update(source.name.encode()); key.update(source.read_bytes())
+            matching_prefix = False
+            for position, source in enumerate(files):
+                content = source.read_bytes()
+                key.update(source.name.encode())
+                key.update(content)
+                if position == 0 and precompiled is not None:
+                    # Keep the first source's include order and leave special
+                    # generated units with a different prefix on the usual path.
+                    prefix = content[:len(GENERATED_HEADER_PREFIX) + 3].replace(b"\r\n", b"\n")
+                    matching_prefix = prefix.startswith(GENERATED_HEADER_PREFIX_BYTES)
             stamp = obj.with_suffix(".key")
             expected = key.hexdigest()
             cached = obj.is_file() and stamp.is_file() and stamp.read_text() == expected
@@ -210,7 +259,17 @@ class Pipeline:
                 # otherwise reuse that partial object as the previous build.
                 stamp.unlink(missing_ok=True)
                 try:
-                    self.run([*flags,"-c",unity,"-o",obj],env=self.compiler_env())
+                    prefix_flags = precompiled.flags(self, flags, environment) if matching_prefix else ()
+                    target = ["-c", unity, "-o", obj]
+                    try:
+                        self.run([*flags, *prefix_flags, *target], env=environment)
+                    except subprocess.CalledProcessError:
+                        if not prefix_flags:
+                            raise
+                        precompiled.disable()
+                        fallback = time.monotonic()
+                        self.run([*flags, *target], env=environment)
+                        self.log_timing("precompiled-header-fallback", fallback, stage=directory.name)
                     stamp.write_text(expected)
                 except Exception:
                     failed.set()
@@ -247,6 +306,8 @@ class Pipeline:
                 fresh += not cached
                 if done < len(batches):
                     report_batches(done, fresh, started)
+        self.log_timing("compile", started, stage=directory.name, built=fresh,
+                        cached=len(batches) - fresh, workers=workers)
         self.report_stage(step, tr("Montando o executável…"), len(batches) / (len(batches) + 1))
         executable = directory / executable_name("game")
         libs = [self.bundle / p for p in self.manifest["link_inputs"]]
@@ -267,14 +328,18 @@ class Pipeline:
             response.write_text("\n".join(f'"{a.as_posix()}"' if isinstance(a, Path) else a
                                             for a in inputs), encoding="utf-8")
             inputs = ["@" + str(response)]
+        started = time.monotonic()
         self.run([*flags, *inputs, "-static-libstdc++", "-static-libgcc",
-                  *link, "-pthread", "-o", executable], env=self.compiler_env())
+                  *link, "-pthread", "-o", executable], env=environment)
+        self.log_timing("link", started, stage=directory.name)
         return executable
 
-    def stage(self, folder, *, step):
+    def stage(self, folder, *, step, precompiled=None):
         self.report_stage(step, tr("Gerando código para compilar…"))
+        started = time.monotonic()
         self.run([self.tool("ps2_recomp"), folder / "config.toml"],cwd=folder)
-        return self.compile(folder, step=step)
+        self.log_timing("generate", started, stage=folder.name)
+        return self.compile(folder, step=step, precompiled=precompiled)
 
     def capture(self, executable, disc, name):
         output = self.work / "captures" / (name.lower()+".bin")
@@ -331,35 +396,12 @@ class Pipeline:
                     self.progress(tr("Compilação já pronta. Reutilizando o cache…"))
                     return final
             self.log.write_text("Local static recompilation — "+self.build_id+"\n", encoding="utf-8")
-            self.report_stage(1, tr("Lendo os arquivos do disco…"))
-            boot = self.work / "boot"
-            boot.mkdir(exist_ok=True)
-            symbols = self.work / "symbols.txt"
-            self.helper("symbols",[disc / "KERNEL.XFF",symbols])
-            disc_boot = disc / self.boot_name
-            self.helper("funcmap_elf",[disc_boot,symbols,boot / "functions.csv"])
-            config = (self.source / "game" / (self.boot_config + ".toml")).read_text()
-            import re
-            boot_path = relative_path(disc_boot, boot).as_posix() if WINDOWS else str(disc_boot)
-            config = re.sub(r'^input = .*$', lambda _: "input = " + json.dumps(boot_path, ensure_ascii=False),
-                            config, flags=re.M)
-            (boot / "config.toml").write_text(config, encoding="utf-8")
-            executable = self.stage(boot, step=1)
-            captures = []
-            for step, module in enumerate(MODULES, 2):
-                self.report_stage(step, tr("Carregando o módulo {name}…").format(name=module))
-                capture = self.capture(executable,disc,module)
-                captures.append((disc / (module+'.XFF'), capture))
-                folder = self.work / module.lower()
-                folder.mkdir(exist_ok=True)
-                specs = [[str(relative_path(xff, folder)), "auto", str(relative_path(ram, folder))]
-                         for xff, ram in captures]
-                self.helper("build_elf", [folder, disc_boot, symbols, "--modules-json", json.dumps(specs)], cwd=folder)
-                config_args = [folder, boot / "config.toml"]
-                if self.boot_name == PAL_BOOT:
-                    config_args.append(self.boot_config)
-                self.helper("gen_config",config_args)
-                executable = self.stage(folder, step=step)
+            started = time.monotonic()
+            if self.env.get("SOTC_BUILD_PCH") == "0":
+                self.prepare_stages(disc, None)
+            else:
+                with tempfile.TemporaryDirectory(dir=self.work, prefix=".pch-") as temporary:
+                    self.prepare_stages(disc, PrecompiledHeader(Path(temporary)))
             self.report_stage(STAGE_COUNT, tr("Verificando a compilação…"), 1.0)
             pending = stamp.with_suffix(".tmp")
             try:
@@ -367,4 +409,36 @@ class Pipeline:
                 pending.replace(stamp)
             finally:
                 pending.unlink(missing_ok=True)
+            self.log_timing("total", started)
             return final
+
+    def prepare_stages(self, disc, precompiled):
+        self.report_stage(1, tr("Lendo os arquivos do disco…"))
+        boot = self.work / "boot"
+        boot.mkdir(exist_ok=True)
+        symbols = self.work / "symbols.txt"
+        self.helper("symbols",[disc / "KERNEL.XFF",symbols])
+        disc_boot = disc / self.boot_name
+        self.helper("funcmap_elf",[disc_boot,symbols,boot / "functions.csv"])
+        config = (self.source / "game" / (self.boot_config + ".toml")).read_text()
+        import re
+        boot_path = relative_path(disc_boot, boot).as_posix() if WINDOWS else str(disc_boot)
+        config = re.sub(r'^input = .*$', lambda _: "input = " + json.dumps(boot_path, ensure_ascii=False),
+                        config, flags=re.M)
+        (boot / "config.toml").write_text(config, encoding="utf-8")
+        executable = self.stage(boot, step=1, precompiled=precompiled)
+        captures = []
+        for step, module in enumerate(MODULES, 2):
+            self.report_stage(step, tr("Carregando o módulo {name}…").format(name=module))
+            capture = self.capture(executable,disc,module)
+            captures.append((disc / (module+'.XFF'), capture))
+            folder = self.work / module.lower()
+            folder.mkdir(exist_ok=True)
+            specs = [[str(relative_path(xff, folder)), "auto", str(relative_path(ram, folder))]
+                     for xff, ram in captures]
+            self.helper("build_elf", [folder, disc_boot, symbols, "--modules-json", json.dumps(specs)], cwd=folder)
+            config_args = [folder, boot / "config.toml"]
+            if self.boot_name == PAL_BOOT:
+                config_args.append(self.boot_config)
+            self.helper("gen_config",config_args)
+            executable = self.stage(folder, step=step, precompiled=precompiled)
