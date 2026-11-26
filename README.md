@@ -43,7 +43,7 @@ and in the port’s in-game settings menu.** The two settings are independent.
 | Launcher | Open **Settings → Launcher language** (**Configurações → Idioma do launcher**), choose **English** or **Português**, and select **Apply** (**Aplicar**). The launcher also offers **Español** and **日本語**. It initially uses the system language if supported, with English as the fallback. |
 | In-game settings | Choose **Settings → F1 settings language** in the launcher, or **System → Language** in the F1 menu. Choose **English**, **Português**, or **Automatic** to follow the system language. With a controller, press **Select/Back** twice quickly to open the F1 menu. |
 
-After importing your disc, open **Settings → Campaign language** in the desktop launcher. The USA edition (SCUS-97472) supports English and Brazilian Portuguese when the package includes the Brazilian localization. The launcher applies the included translation offline when you select it and play. [Text and graphics translation by Gledson999 and Mumm-Ra](https://www.retro-jogos.com/ps2-shadow-of-the-colossus/)
+After importing your disc, open **Settings → Campaign language** in the desktop launcher. The USA edition (SCUS-97472) offers English and **Português (Brasil)**. The Linux and Windows packages include the Brazilian Portuguese translation, and the launcher applies it offline when you select it and play. [Original translation release](https://www.retro-jogos.com/ps2-shadow-of-the-colossus/)
 
 The PAL edition (SCES-53326) offers English, French, German, Italian, and Spanish, plus the original game menu. **Automatic** uses the launcher language when the edition supports it and falls back to English. Your choice is saved per edition. The original disc files stay intact, language changes reuse the compiled game, and the memory card is shared. Explicit non-English languages keep separate save states.
 
@@ -363,9 +363,8 @@ XFF modules, generated game code, and saves. The Linux workflow runs these tests
 and builds on every push and pull request. Gameplay is validated locally with a
 user-supplied disc. CI runs without game files.
 
-For a build with the optional Brazilian Portuguese campaign, stage the verified
-v1.0 Xdelta at `tools/desktop/assets/campaign/pt-BR.xdelta` before packaging the
-launcher. Both desktop packagers include it as a launcher resource. The launcher
+Both desktop packagers include the authorized v1.0 Xdelta at
+`tools/desktop/assets/campaign/pt-BR.xdelta` as a launcher resource. The launcher
 checks its SHA-256 before applying it to the imported USA disc.
 
 CI also tests OpenGL presentation on virtual 16:9 and ultrawide monitors. It
@@ -387,6 +386,9 @@ release package to use the graphical launcher.
 - The Linux launcher and original vector illustration are by GenissonEmilio
   under the MIT license. The flow was adapted from the ForbiddenMemoriesPC
   and CrashBandicootPC launchers. [Launcher license](tools/desktop/LICENSE)
+- The Brazilian Portuguese text and graphics patch v1.0 is by **Gledson999**
+  (translation and ROM hacking) and **Mumm-Ra / STR Brasil** (tools).
+  This project includes the original patch with permission. [Original release on Retro-Jogos](https://www.retro-jogos.com/ps2-shadow-of-the-colossus/)
 - [Tenkaichi3Decomp](https://github.com/stufno102/Tenkaichi3Decomp) was a reference
   for PS2 disc import and compilation. Its game code is specific to Dragon Ball.
 - Compiler libraries keep their licenses and version information in
