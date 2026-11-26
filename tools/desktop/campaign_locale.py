@@ -14,6 +14,7 @@ from disc import DiscImage
 from import_disc import Budget, ImportError_, PROFILES, candidates, extract_archive, sha256, validate_disc
 from language import translate as tr
 from pipeline import build_lock
+from updates import https_context
 
 PORTUGUESE_PATCH_PAGE = "https://www.retro-jogos.com/ps2-shadow-of-the-colossus/"
 PORTUGUESE_PATCH_URL = "https://www.retro-jogos.com/wp-content/uploads/2020/11/Shadow-of-the-Colossus-BR.7z"
@@ -55,7 +56,7 @@ def _download_patch(work):
     path = work / "translation.7z"
     request = urllib.request.Request(PORTUGUESE_PATCH_URL, headers={"User-Agent": "ShadowOfTheColossusPC"})
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=30, context=https_context()) as response:
             archive = response.read(ARCHIVE_SIZE + 1)
     except OSError as error:
         raise ImportError_(tr("Não foi possível baixar a tradução de Gledson999.")) from error

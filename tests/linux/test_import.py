@@ -16,6 +16,20 @@ from model import Library, atomic_json
 from pipeline import MODULES, STAGE_COUNT, Pipeline, PreparationProgress, executable_name
 
 class ImportTests(unittest.TestCase):
+    def test_portuguese_patch_download_uses_platform_trust(self):
+        archive = b'verified translation archive'
+        payload = b'verified translation patch'
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(campaign_locale, 'https_context') as context, \
+                patch.object(campaign_locale.urllib.request, 'urlopen', return_value=io.BytesIO(archive)) as download, \
+                patch.object(campaign_locale, 'ARCHIVE_SIZE', len(archive)), \
+                patch.object(campaign_locale, 'ARCHIVE_SHA256', hashlib.sha256(archive).hexdigest()), \
+                patch.object(campaign_locale, 'PATCH_SHA256', hashlib.sha256(payload).hexdigest()), \
+                patch.object(campaign_locale, 'extract_archive') as extract:
+            extract.side_effect = lambda path, destination, budget: (destination / campaign_locale.PATCH_NAME).write_bytes(payload)
+            self.assertEqual(campaign_locale._download_patch(Path(temporary)), payload)
+            self.assertIs(download.call_args.kwargs['context'], context.return_value)
+
     def test_portuguese_disc_verification_without_python_311_hash_api(self):
         data = b'\x01' * (1024 * 1024 + 128)
         digest = hashlib.md5(data, usedforsecurity=False).hexdigest()
