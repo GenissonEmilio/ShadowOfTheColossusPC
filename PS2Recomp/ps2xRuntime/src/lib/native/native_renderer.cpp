@@ -1267,11 +1267,11 @@ namespace native_renderer
     }
 
 #ifdef PS2X_DESKTOP_VIDEO
-    FrameRead readPresentationFrame(PresentationFrame &frame, std::vector<uint8_t> &rgba, uint64_t &revision)
+    FrameRead readPresentationFrame(PresentationFrame &frame, std::vector<uint8_t> &rgba, uint64_t &revision, bool waitForFreshFrame)
     {
         const std::shared_lock lock(g_presentationLifetime);
         const auto ready = g_publishedBackend.load(std::memory_order_acquire);
-        return ready ? ready->readPresentationFrame(frame, rgba, revision) : FrameRead::Missing;
+        return ready ? ready->readPresentationFrame(frame, rgba, revision, waitForFreshFrame) : FrameRead::Missing;
     }
 
     void releasePresentationFrame(uint32_t texture)

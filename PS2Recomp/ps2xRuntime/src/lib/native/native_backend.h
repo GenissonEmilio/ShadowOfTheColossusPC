@@ -111,7 +111,7 @@ namespace native_renderer::detail
             return readFrame(rgba, width, height, nullptr) == FrameRead::Updated;
         }
 #if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
-        virtual FrameRead readPresentationFrame(PresentationFrame &frame, std::vector<uint8_t> &rgba, uint64_t &revision)
+        virtual FrameRead readPresentationFrame(PresentationFrame &frame, std::vector<uint8_t> &rgba, uint64_t &revision, bool)
         {
             frame = {};
             return readFrame(rgba, frame.width, frame.height, &revision);

@@ -3398,7 +3398,8 @@ void PS2Runtime::run()
             const uint64_t lastRevision = nativeRevision;
             const uint64_t readStart = logStats ? native_renderer::nowUs() : 0;
             const auto frameRead = presentingPair ? native_renderer::FrameRead::Unchanged :
-                native_renderer::readPresentationFrame(frame, nativePixels, nativeRevision);
+                native_renderer::readPresentationFrame(frame, nativePixels, nativeRevision,
+                    !frameGeneration && !hostmenu::isOpen() && !savestates::busy());
             nw = frame.width;
             nh = frame.height;
             cpuFrame = frame.texture == 0;

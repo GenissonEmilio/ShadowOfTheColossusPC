@@ -392,7 +392,8 @@ namespace native_renderer
     // Called on the window's current GL context. An updated texture is leased
     // until releasePresentationFrame, after all draws that sample it. A zero
     // texture on Updated means the frame is in the top-row-first RGBA buffer.
-    FrameRead readPresentationFrame(PresentationFrame &frame, std::vector<uint8_t> &rgba, uint64_t &revision);
+    FrameRead readPresentationFrame(PresentationFrame &frame, std::vector<uint8_t> &rgba, uint64_t &revision,
+                                    bool waitForFreshFrame = false);
     void releasePresentationFrame(uint32_t texture);
     bool sharedFrameReady();
 #endif

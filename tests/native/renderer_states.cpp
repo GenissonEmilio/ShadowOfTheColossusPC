@@ -75,7 +75,7 @@ int main(int argc, char **argv) {
         using native_renderer::FrameRead;
         const auto expectedRead = held ? FrameRead::Unchanged : FrameRead::Updated;
         native_renderer::PresentationFrame windowFrame;
-        check(native_renderer::readPresentationFrame(windowFrame, pixels, windowRevision) == expectedRead &&
+        check(native_renderer::readPresentationFrame(windowFrame, pixels, windowRevision, shared && held) == expectedRead &&
                   windowFrame.width == side && windowFrame.height == side, "finished window frame");
         check(native_renderer::sharedFrameReady() == shared && bool(windowFrame.texture) == shared,
               "window and renderer agree on the presentation path");

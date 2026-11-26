@@ -1171,6 +1171,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // interpolation. Leave room for a published frame and one more write.
         std::array<PresentationSlot, 4> sharedSlots;
         int sharedLatest = -1;
+        std::condition_variable sharedFramePublished;
         uint64_t pixelRevision = 0;
         bool sharePresentation = false;
 #endif
@@ -1726,11 +1727,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 return false;
             }
             glFlush(); // the window context can now wait for this fence
-            const std::lock_guard lock(output.mutex);
-            sharedLatest = index;
-            output.width = w;
-            output.height = h;
-            ++output.revision;
+            {
+                const std::lock_guard lock(output.mutex);
+                sharedLatest = index;
+                output.width = w;
+                output.height = h;
+                ++output.revision;
+            }
+            sharedFramePublished.notify_one();
             return true;
         }
 
@@ -3894,13 +3898,19 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 
 #ifdef PS2X_NATIVE_GL_SHARED
         native_renderer::FrameRead readPresentationFrame(native_renderer::PresentationFrame &frame,
-            std::vector<uint8_t> &rgba, uint64_t &revision) override
+            std::vector<uint8_t> &rgba, uint64_t &revision, bool waitForFreshFrame) override
         {
             using native_renderer::FrameRead;
             GLsync ready = nullptr;
             {
-                const std::lock_guard lock(r->output.mutex);
+                std::unique_lock lock(r->output.mutex);
                 frame = {};
+                // Both loops can run at 60 Hz with slightly different phases.
+                // Give an imminent frame time to arrive before repeating one.
+                if (waitForFreshFrame && r->sharedLatest >= 0 && r->output.revision == revision)
+                    r->sharedFramePublished.wait_for(lock, std::chrono::milliseconds(2), [&] {
+                        return r->output.revision != revision;
+                    });
                 if (r->sharedLatest < 0)
                     return r->output.readLocked(rgba, frame.width, frame.height, &revision);
                 auto &slot = r->sharedSlots[r->sharedLatest];
