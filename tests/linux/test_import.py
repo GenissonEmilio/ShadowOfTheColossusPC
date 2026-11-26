@@ -9,12 +9,33 @@ from unittest.mock import MagicMock, patch
 import zipfile
 import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[2] / 'tools/desktop'))
+import campaign_locale
 from import_disc import (Budget, DiscProfile, ImportError_, candidates, extract_zip,
                          import_disc, inspect_disc, profile_from_config, safe_name, validate_disc)
 from model import Library, atomic_json
 from pipeline import MODULES, STAGE_COUNT, Pipeline, PreparationProgress, executable_name
 
 class ImportTests(unittest.TestCase):
+    def test_portuguese_disc_verification_without_python_311_hash_api(self):
+        data = b'\x01' * (1024 * 1024 + 128)
+        digest = hashlib.md5(data, usedforsecurity=False).hexdigest()
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(campaign_locale, 'ISO_SIZE', len(data)), \
+                patch.object(campaign_locale, 'ISO_MD5', digest), \
+                patch.object(campaign_locale, 'DiscImage') as disc, \
+                patch.dict(hashlib.__dict__):
+            hashlib.__dict__.pop('file_digest', None)
+            root = Path(temporary)
+            iso = root / 'disc.iso'
+            iso.write_bytes(data)
+            image = disc.return_value.__enter__.return_value
+            image.sector, image.skip = 2048, 0
+            image.find.side_effect = lambda name: campaign_locale.REPLACEMENTS[name][:2]
+            self.assertEqual(campaign_locale._verified_iso(iso, root), iso)
+            iso.write_bytes(b'\x00' + data[1:])
+            with self.assertRaises(ImportError_):
+                campaign_locale._verified_iso(iso, root)
+
     def test_traversal_and_absolute_paths(self):
         for path in ('../escape.iso','/tmp/escape.iso','x/../../bad','C:/escape.iso','x\\..\\bad'):
             with self.subTest(path=path),self.assertRaises(ImportError_):safe_name(path)

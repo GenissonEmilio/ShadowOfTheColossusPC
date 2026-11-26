@@ -265,9 +265,11 @@ def _verified_iso(source, work):
         raise ImportError_(tr("Esperado exatamente um disco; encontrados {count}.").format(count=len(images)))
     iso = images[0]
     if iso.stat().st_size == ISO_SIZE:
+        digest = hashlib.md5(usedforsecurity=False)
         with iso.open("rb") as image:
-            digest = hashlib.file_digest(image, lambda: hashlib.md5(usedforsecurity=False)).hexdigest()
-        if digest == ISO_MD5:
+            for block in iter(lambda: image.read(1024 * 1024), b""):
+                digest.update(block)
+        if digest.hexdigest() == ISO_MD5:
             with DiscImage(iso) as disc:
                 if (disc.sector, disc.skip) == (2048, 0) and all(
                     disc.find(name) == (sector, size) for name, (sector, size, _) in REPLACEMENTS.items()
