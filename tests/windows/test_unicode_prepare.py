@@ -76,7 +76,7 @@ def check_module_paths(program, temporary):
                     f"{expected}: RAM path {ram!r} from {cwd} resolves to {actual_capture}, expected {expected_capture}"
                 )
 
-    def stage(folder, *, step):
+    def stage(folder, *, step, precompiled=None):
         result = folder / "game.exe"
         result.write_bytes(b"MZ synthetic helper-protocol fixture")
         return result
