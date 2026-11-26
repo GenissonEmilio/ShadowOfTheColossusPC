@@ -41,6 +41,18 @@ file name. The legacy module format remains accepted for existing callers.
 An interrupted object rebuild also invalidates its old key before compilation,
 so reverting source or flags cannot make a partial object look cached.
 
+Real-module validation also found that the XFF reader extracted basenames by
+splitting only on `/`. Windows backslashes could leak the directory into ELF
+section and anonymous-function names, especially with absolute paths on another
+volume. The reader now uses the native path basename. A ROM-free XFF/RAM fixture
+requires identical ELF and map outputs for forward, backward and mixed
+separators under a directory containing dots, commas, `@`, accents and CJK.
+The helper is included in the Windows compiler identity and prior-kit reuse
+gate. With the three private real captures, the corrected helper produced
+identical outputs for both separators; allocated game-section bytes, addresses,
+function ranges, dynamic sites and merged entry points match v1.2.6. Module
+section names and anonymous-function prefixes are now canonical.
+
 [Report #38](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/issues/38)
 
 ## Other reports

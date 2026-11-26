@@ -59,7 +59,7 @@ jobs:
         run: |
           git fetch --no-tags --depth=1 origin "refs/tags/$COMPILER_VERSION"
           git diff --exit-code FETCH_HEAD HEAD -- PS2Recomp game \
-            tools/build_elf.py tools/elfmini.py tools/funcmap_elf.py tools/gen_config.py tools/xff.py \
+            tools/build_elf.py tools/elfmini.py tools/funcmap_elf.py tools/gen_config.py tools/xff.py tools/modimage.py \
             tools/desktop/pipeline.py tools/linux/input_tool.cpp tools/linux/video_tool.cpp \
             tools/windows/CMakeLists.txt tools/windows/utf8.rc tools/windows/utf8.manifest \
             tools/windows/package.py tools/windows/compiler_manifest.py

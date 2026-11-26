@@ -5,6 +5,7 @@ After the game's loader runs, the in-RAM header has absolute section addresses
 """
 import struct
 from dataclasses import dataclass
+from pathlib import Path
 from xff import Xff
 
 RAM_MASK = 0x1FFFFFF
@@ -40,7 +41,7 @@ def find_header(xff_path, ram):
 class LoadedModule:
     def __init__(self, xff_path, ram, header_addr):
         self.xff = x = Xff(xff_path)
-        self.name = xff_path.split("/")[-1]
+        self.name = Path(xff_path).name
         self.base = header_addr
         u32 = lambda a: struct.unpack_from("<I", ram, a & RAM_MASK)[0]
         if ram[header_addr:header_addr + 4] != b"xff2":

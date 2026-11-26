@@ -10,13 +10,15 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / "tools"), str(ROOT / "tools/desktop")]
-from build_elf import module_specs, write_elf
+from build_elf import main as build_module_elf, module_specs, write_elf
 from model import Library
+from modimage import LoadedModule
 from pipeline import BOOT, CompilationError, Pipeline, relative_path
 
 
@@ -90,6 +92,52 @@ def check_module_paths(program, temporary):
     assert [len(specs) for specs in calls] == [1, 2, 3], calls
     config = tomllib.loads((pipeline.work / "boot/config.toml").read_text(encoding="utf-8"))
     assert Path(config["general"]["input"]) == disc / BOOT
+
+
+def check_module_names(temporary):
+    folder = temporary / "Módulos.v1, @ Eudásio 文字"
+    folder.mkdir()
+    module = folder / "KERNEL.XFF"
+    forward_path = module.as_posix()
+    paths = (forward_path, forward_path.replace("/", "\\"), folder.as_posix() + "\\" + module.name)
+    with patch("modimage.Xff", return_value=SimpleNamespace(sections=[], symbols=[])):
+        for path in paths:
+            assert LoadedModule(path, b"xff2", 0).name == "KERNEL.XFF", path
+
+    # An original XFF with one unnamed function and a matching relocated RAM image.
+    code = struct.pack("<II", 0x03E00008, 0)  # jr $ra; nop
+    xff = bytearray(0xB4)
+    xff[:4] = b"xff2"
+    struct.pack_into("<I", xff, 0x14, len(xff))
+    struct.pack_into("<I", xff, 0x40, 1)  # section count
+    struct.pack_into("<I", xff, 0x5C, 0x80)  # section table offset
+    struct.pack_into("<II", xff, 0x68, 0xA0, 0xA4)  # section name offsets and string table
+    struct.pack_into("<8I", xff, 0x80, 0, 0, len(code), 4, 1, 6, 0, 0xAC)
+    xff[0xA4:0xAA] = b".text\0"
+    xff[0xAC:] = code
+    module.write_bytes(xff)
+    ram = bytearray(0x208)
+    ram[:len(xff)] = xff
+    struct.pack_into("<I", ram, 0x80, 0x200)
+    ram[0x200:] = code
+    dump = folder / "captura @ 文字.bin"
+    dump.write_bytes(ram)
+    boot = folder / BOOT
+    write_elf(boot, 0x100000, [(".text", 0x100000, len(code), code, 6)])
+    symbols = folder / "boot-symbols.txt"
+    symbols.touch()
+
+    filenames = ("SOTC.elf", "functions.csv", "symbols.txt", "dynamic_imm.txt", "merged_entries.txt")
+    artifacts = []
+    for index, path in enumerate(paths):
+        output = folder / f"helper-{index}"
+        output.mkdir()
+        arguments = ["--modules-json", json.dumps([[path, "auto", str(dump)]])]
+        build_module_elf(output, boot, symbols, arguments)
+        artifacts.append(tuple((output / filename).read_bytes() for filename in filenames))
+    assert b".text.KERNEL\0" in artifacts[0][0]
+    assert b"kernel_sub_00000200," in artifacts[0][1]
+    assert all(artifact == artifacts[0] for artifact in artifacts[1:]), "Module artifacts depend on path separators"
 
 
 def native_environment(program, scratch):
@@ -211,6 +259,7 @@ def main():
     assert module_specs(["KERNEL.XFF@auto@kernel.bin"]) == [["KERNEL.XFF", "auto", "kernel.bin"]]
     with tempfile.TemporaryDirectory(prefix="unicode-", dir=args.work_dir) as folder:
         check_module_paths(args.program.resolve(), Path(folder))
+        check_module_names(Path(folder))
         check_link_response_file(args.program.resolve(), Path(folder))
         check_prepare(args.program.resolve(), Path(folder))
         check_launch_error(args.program.resolve(), Path(folder))

@@ -231,7 +231,7 @@ def stage_compiler(build, prefix, root):
     versions = run("pacman", "-Q", *(UCRT_PACKAGE + name for name in (*COMPILER_PACKAGES, "ffmpeg")))
     fingerprint = hashlib.sha256(versions.encode("utf-8"))
     helpers = ("tools/desktop/pipeline.py", "tools/build_elf.py", "tools/elfmini.py",
-               "tools/funcmap_elf.py", "tools/gen_config.py", "tools/xff.py",
+               "tools/funcmap_elf.py", "tools/gen_config.py", "tools/xff.py", "tools/modimage.py",
                "game/scus.toml", "game/sces.toml",
                "tools/windows/compiler_manifest.py", "tools/windows/utf8.manifest")
     for relative in ("bin/ps2_recomp.exe", "lib/utf8.o", *link_inputs,
