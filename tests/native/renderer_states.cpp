@@ -20,8 +20,13 @@ namespace {
 }
 int main(int argc, char **) {
     const bool oldBloom = argc > 1;
+#if defined(_WIN32)
+    check(_putenv_s("SOTC_NATIVE_GL", "1") == 0, "set native OpenGL");
+    check(_putenv_s("SOTC_BLOOM_OLD", oldBloom ? "1" : "") == 0, "set bloom path");
+#else
     setenv("SOTC_NATIVE_GL", "1", 1);
     if (oldBloom) setenv("SOTC_BLOOM_OLD", "1", 1); else unsetenv("SOTC_BLOOM_OLD");
+#endif
     SetTraceLogLevel(LOG_WARNING); SetConfigFlags(FLAG_WINDOW_HIDDEN);
     InitWindow(160, 120, "SotC temporal history state fixture"); check(IsWindowReady(), "host GL context");
     auto *host = glfwGetCurrentContext();
@@ -34,7 +39,7 @@ int main(int argc, char **) {
     const float clip[] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     unsigned frameNumber = 0;
     uint64_t presentationRevision = 0;
-    auto frame = [&](uint8_t r, uint8_t g, uint8_t b, bool held = false) {
+    auto frame = [&](uint8_t r, uint8_t g, uint8_t b, bool held = false, uint32_t side = 64) {
         using V = native_renderer::Vertex;
         V vertices[] = {{-1,-1,0,0,0,1,0,0,r,g,b,128}, {1,-1,0,0,0,1,1,0,r,g,b,128}, {1,1,0,0,0,1,1,1,r,g,b,128},
                         {-1,-1,0,0,0,1,0,0,r,g,b,128}, {1,1,0,0,0,1,1,1,r,g,b,128}, {-1,1,0,0,0,1,0,1,r,g,b,128}};
@@ -51,12 +56,12 @@ int main(int argc, char **) {
             draw.opacity = 0.2f; draw.order = 29;
             native_renderer::draw(1, clip, draw);
         }
-        native_renderer::endFrame(64, 64);
+        native_renderer::endFrame(side, side);
         std::string error; check(native_renderer::stateBarrier(error), error);
         std::vector<uint8_t> pixels; uint32_t w = 0, h = 0;
         using native_renderer::FrameRead;
         const auto expectedRead = held ? FrameRead::Unchanged : FrameRead::Updated;
-        check(native_renderer::readFrame(pixels, w, h, presentationRevision) == expectedRead && w == 64 && h == 64,
+        check(native_renderer::readFrame(pixels, w, h, presentationRevision) == expectedRead && w == side && h == side,
               held ? "discarded partial frame keeps the previous picture" : "finished frame readback");
         std::vector<uint8_t> untouched;
         check(native_renderer::readFrame(untouched, w, h, presentationRevision) == FrameRead::Unchanged && untouched.empty(),
@@ -66,6 +71,7 @@ int main(int argc, char **) {
     frame(220, 20, 10); frame(180, 50, 20);
     std::string error; std::vector<uint8_t> saved, expectedHistory, actualHistory;
     check(native_renderer::captureState(saved, error), error);
+    check(native_renderer::validateState(saved, error), error);
     native_renderer::detail::HistoryState decoded;
     check(native_renderer::detail::decodeHistoryState(saved, decoded, error), error);
     check(oldBloom ? decoded.bloom : decoded.gsBloom, "the exercised bloom history is active");
@@ -86,6 +92,10 @@ int main(int argc, char **) {
     const auto actual = frame(25, 200, 40);
     check(actual == expected, "same next whole frame renders identical RGBA8 after restore");
     check(native_renderer::captureState(actualHistory, error) && actualHistory == expectedHistory, "next-frame temporal state matches uninterrupted execution");
+    frame(10, 20, 230, false, 96);
+    check(native_renderer::resetStateFrame(error), error);
+    check(native_renderer::restoreState(saved, error), error);
+    check(native_renderer::captureState(actualHistory, error) && actualHistory == saved, "restoring at a different target size rebuilds the saved history");
     std::printf("PASS: %u native GPU state checks, %s bloom, owner-thread capture/restore\n", checks, oldBloom ? "legacy" : "GS");
     std::fflush(nullptr); std::_Exit(0);
 }

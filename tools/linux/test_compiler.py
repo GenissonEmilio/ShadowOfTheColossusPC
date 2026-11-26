@@ -24,8 +24,15 @@ with tempfile.TemporaryDirectory(prefix='sotc-compiler-check-') as t:
 #include "ps2_syscalls.h"
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
+#include "Stubs/LibC.h"
+#include "runtime/host_state.h"
+#include <algorithm>
+#include <array>
+#include <cstring>
 #include <thread>
 
 static LONG WINAPI continue_fixture_access_violation(EXCEPTION_POINTERS *exception) {
@@ -33,6 +40,85 @@ static LONG WINAPI continue_fixture_access_violation(EXCEPTION_POINTERS *excepti
     return record.ExceptionCode == EXCEPTION_ACCESS_VIOLATION && record.NumberParameters == 2 &&
            record.ExceptionInformation[1] == 0x4321
         ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
+}
+
+static void check_windows_libc_random() {
+    R5900Context context{};
+    const auto seed = [&](uint32_t value) {
+        context.r[4] = _mm_set_epi64x(0, value);
+        ps2_stubs::srand(nullptr, &context, nullptr);
+    };
+    const auto draw = [&]() {
+        ps2_stubs::rand(nullptr, &context, nullptr);
+        return static_cast<uint32_t>(_mm_extract_epi32(context.r[2], 0));
+    };
+    const auto require = [](bool ok, const char *message) {
+        if (ok) return;
+        std::fprintf(stderr, "Windows libc RNG: %s\\n", message);
+        std::abort();
+    };
+    const auto compare = [&](unsigned count) {
+        for (unsigned i = 0; i < count; ++i)
+            require(draw() == static_cast<uint32_t>(std::rand()), "sequence differs from the bundled CRT");
+    };
+    std::vector<uint8_t> saved, restored;
+    std::string error;
+    const auto capture = [&] {
+        const bool ok = ps2_stubs::captureLibcState(saved, error);
+        require(ok, error.c_str());
+    };
+
+    const auto first = draw();
+    capture();
+    std::srand(1);
+    require(first == static_cast<uint32_t>(std::rand()), "default seed differs from the bundled CRT");
+    compare(4095);
+    for (uint32_t value : {0u, 1u, 2u, 0x7fffffffu, 0x80000000u, 0x80000001u, 0xfffffffeu, 0xffffffffu}) {
+        seed(value);
+        std::srand(value);
+        compare(4096);
+    }
+    for (uint32_t i = 1; i <= 32; ++i) {
+        const uint32_t value = i * 0x9e3779b9u;
+        seed(value);
+        std::srand(value);
+        compare(4096);
+    }
+
+    capture();
+    require(saved.size() == 12 && std::memcmp(saved.data(), "LBC3", 4) == 0 &&
+            ps2_stubs::validateLibcState(saved, error), "Windows state should store one uint32 of RNG state in LBC3");
+    std::array<uint32_t, 1024> continuation{};
+    for (auto &value : continuation) value = static_cast<uint32_t>(std::rand());
+    for (const auto value : continuation)
+        require(draw() == value, "capture advanced guest RNG");
+
+    seed(0);
+    require(ps2_stubs::restoreLibcState(saved, error), "could not restore LBC3 state");
+    auto truncated = saved;
+    truncated.pop_back();
+    auto trailing = saved;
+    trailing.push_back(0);
+    auto invalidHandle = saved;
+    std::fill_n(invalidHandle.begin() + 4, 4, 0);
+    auto invalidMagic = saved;
+    invalidMagic[3] = '2';
+    for (const auto *bad : {&truncated, &trailing, &invalidHandle, &invalidMagic}) {
+        require(!ps2_stubs::validateLibcState(*bad, error) && !ps2_stubs::restoreLibcState(*bad, error),
+                "invalid LBC3 state accepted");
+        require(ps2_stubs::captureLibcState(restored, error) && restored == saved,
+                "rejected state changed live libc state");
+    }
+    for (const auto value : continuation)
+        require(draw() == value, "restored RNG did not resume its saved sequence");
+
+    const std::vector<uint8_t> legacy{'L', 'B', 'C', '1', 7, 0, 0, 0};
+    require(ps2_stubs::validateLibcState(legacy, error) && ps2_stubs::restoreLibcState(legacy, error),
+            "legacy LBC1 state rejected");
+    require(ps2_stubs::captureLibcState(restored, error) && restored.size() == 12 && restored[4] == 7,
+            "legacy LBC1 file handle was not restored");
+    std::srand(1);
+    compare(4096);
 }
 
 #if defined(__x86_64__) && defined(__GNUC__) && !defined(__clang__)
@@ -86,6 +172,8 @@ void original_test_function(uint8_t* ram, R5900Context* ctx, PS2Runtime* runtime
         ram[0x1001] = 43;
     }
 #endif
+    check_windows_libc_random();
+    ram[0x1002] = 44;
 #endif
     ram[0x1000] = 42;
     runtime->dispatchGuestBranch(ram, ctx, 0x100100, 0x100000, 0x100008,
@@ -188,5 +276,6 @@ struct InstallFixture {
         assert stream.read(1) == b'\x2a', 'Scheduler did not run the fixture before the RAM dump'
         if os.name == 'nt':
             assert stream.read(1) == b'\x2b', 'Win64 stack bound and unwind fixture did not complete'
+            assert stream.read(1) == b'\x2c', 'Windows CRT-compatible random state fixture did not complete'
     assert '[capture] core ready without host video or audio' in pipeline.log.read_text(encoding='utf-8')
     print('Headless module capture passed with the portable runtime')

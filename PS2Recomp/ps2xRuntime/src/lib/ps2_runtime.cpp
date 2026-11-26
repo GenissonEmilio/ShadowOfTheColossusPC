@@ -155,7 +155,7 @@ namespace
     // thread_local: on the Vita every access would be an emutls call.
     DispatchHistory g_dispatchHistory;
 
-    bool computeFileCrc32(const std::string &path, uint32_t &crcOut)
+    bool computeFileCrc32(const std::filesystem::path &path, uint32_t &crcOut)
     {
         std::ifstream file(path, std::ios::binary);
         if (!file.is_open())

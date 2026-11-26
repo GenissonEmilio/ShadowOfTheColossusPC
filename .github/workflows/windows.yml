@@ -74,12 +74,14 @@ jobs:
             -DPS2X_ENABLE_IOP_RPC_TRACE=OFF
       - name: Build the native launcher and any required compiler targets
         run: |
-          targets=(ShadowOfTheColossusPC sotc-thread-load-test)
+          targets=(ShadowOfTheColossusPC sotc-thread-load-test sotc-windows-state-file-test)
           if [[ -z "$COMPILER_VERSION" ]]; then
             targets+=(ps2_recomp sotc-windows-base sotc-video-tool sotc-input-tool)
           fi
           cmake --build build/windows --parallel 2 --target "${targets[@]}"
           build/windows/ps2xRuntime/sotc-thread-load-test.exe
+          build/windows/ps2xRuntime/sotc-windows-state-file-test.exe \
+            "$(cygpath -am "$RUNNER_TEMP")/sotc-state-file-check"
       - name: Package native launcher and compiler
         run: |
           reuse=()

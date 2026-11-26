@@ -9,6 +9,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#elif defined(_WIN32)
+#include "ps2_runtime_state_windows.h"
 #endif
 
 bool PS2Runtime::captureRuntimeState(std::vector<uint8_t> &out, std::string &error)
@@ -189,14 +191,19 @@ namespace {
     constexpr uint64_t kStateFileMagic=0x31545343544f5355ull;
     constexpr uint32_t kStateFileVersion=1;
     bool stateCoreIdentity(uint32_t &core,uint64_t &coreBytes,uint32_t &game,std::string &error) {
-#if defined(__linux__) && !defined(__ANDROID__)
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
         static uint32_t cachedCore=0; static uint64_t cachedSize=0;
         if (!cachedSize) {
-            std::error_code ec; cachedSize=std::filesystem::file_size("/proc/self/exe",ec);
-            if (ec || !computeFileCrc32("/proc/self/exe",cachedCore)) { error="Cannot identify the current runtime."; cachedSize=0; return false; }
+#if defined(_WIN32)
+            const auto executable=ps2state::windows_file::currentExecutable();
+#else
+            const std::filesystem::path executable="/proc/self/exe";
+#endif
+            std::error_code ec; cachedSize=std::filesystem::file_size(executable,ec);
+            if (ec || !computeFileCrc32(executable,cachedCore)) { error="Cannot identify the current runtime."; cachedSize=0; return false; }
         }
         core=cachedCore; coreBytes=cachedSize;
-        if (!computeFileCrc32(PS2Runtime::getIoPaths().elfPath.string(),game)) { error="Cannot identify the game disc."; return false; }
+        if (!computeFileCrc32(PS2Runtime::getIoPaths().elfPath,game)) { error="Cannot identify the game disc."; return false; }
         return true;
 #else
         error="Save states are currently supported on native Linux."; return false;
@@ -228,6 +235,8 @@ namespace {
             ::close(directory);
         }
         return true;
+#elif defined(_WIN32)
+        return ps2state::windows_file::writeAtomic(path,bytes,error);
 #else
         error="Save states are currently supported on native Linux."; return false;
 #endif

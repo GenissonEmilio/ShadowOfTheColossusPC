@@ -17,7 +17,11 @@ namespace {
 }
 std::filesystem::path directory()
 {
+#if defined(_WIN32)
+    if (const wchar_t *path = _wgetenv(L"PS2X_STATE_DIR"); path && *path) return path;
+#else
     if (const char *path = std::getenv("PS2X_STATE_DIR"); path && *path) return path;
+#endif
     return std::filesystem::current_path() / "savestates";
 }
 void bind(PS2Runtime *runtime)

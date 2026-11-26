@@ -72,6 +72,33 @@ Texture-download, language and gameplay-assist requests are not treated as
 Windows crash reports. No issue is automatically closed based solely on this
 investigation.
 
+## Windows player save states
+
+The real F5 test exposed three Linux-only pieces behind the shared player
+shortcut: host CRT random state was not serializable, executable identity and
+atomic file publication lacked a Windows backend, and the OpenGL temporal
+history codec was disabled on Windows. Windows now owns the same UCRT random
+stream explicitly, publishes a synchronized temporary file with a same-folder
+wide-character rename, and captures/restores GPU history on the renderer's
+owner thread. CRC, runtime/disc identity, size limits and scripted-debug-session
+rejection remain enforced. The launcher now exposes the supported shortcuts on
+Windows as well as Linux; PAL still retains its existing native-mode restriction.
+
+The Windows fixture compares 167,936 random values with the shipped CRT,
+checks 1,024 resumed values, legacy chunks and malformed-state rejection without
+mutation. The file fixture exercises Unicode creation, replacement, a locked
+destination, invalid parent directories and temporary-file cleanup. The renderer
+fixture checks both bloom paths and restoration after resizing its targets.
+
+In the real, hidden and muted Windows session without a debug input script,
+F5 wrote a roughly 51.6 MB state in an accented/CJK directory and F8 resumed the
+running renderer. Locking the destination made a subsequent F5 fail while
+preserving the original SHA-256 and leaving no temporary file. After unlocking,
+overwrite and load succeeded. A deliberately damaged private QA copy was
+rejected by checksum before mutation; the intact QA slot was restored afterward.
+Loading the same state after a clean process restart also succeeded and the
+renderer continued producing frames. Every session remained hidden and muted.
+
 ## Regression checks
 
 - `tests/windows/test_unicode_prepare.py` uses the shipped recompiler, Python,
@@ -96,6 +123,11 @@ runtime fixture and real boot/KERNEL captures did execute successfully. This
 is recorded per executable, not generalized to every locally built program.
 
 The provided SCUS-97472 ISO and all extracted/generated game data are private.
-The full local preparation is a separate, long-running check; its final result
-and any gameplay measurements belong in the PR's validation record. They are
-not implied by the ROM-free CI or by earlier Linux campaign validation.
+The full v1.2.6 baseline preparation completed in about 87 min 15 s (two workers,
+batches of 16, `-O2`). A subsequent cache check took 0.272 s with the executable,
+completion marker and preparation log unchanged. A separate candidate-runtime
+link with all 568 copied EE objects also passed under Unicode paths after
+checking the toolchain, CRT and 21 consumed runtime headers. All actual game
+sessions used hidden windows at the user's request. Detailed validation and
+performance measurements belong in the PR; these checks do not imply a full
+Windows campaign validation or a hardware-independent FPS improvement.

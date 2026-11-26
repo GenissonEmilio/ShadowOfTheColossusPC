@@ -484,11 +484,16 @@ add_library(ps2_runtime STATIC
 # SOTC_NATIVE_GL=1, the Vita through vitaGL).
 target_sources(ps2_runtime PRIVATE src/lib/native/native_renderer.cpp src/lib/native/native_renderer_gl.cpp)
 if(WIN32)
-    target_sources(ps2_runtime PRIVATE src/lib/ps2_thread_load_windows.cpp)
+    target_sources(ps2_runtime PRIVATE src/lib/ps2_thread_load_windows.cpp src/lib/ps2_runtime_state_windows.cpp)
     add_executable(sotc-thread-load-test EXCLUDE_FROM_ALL
         src/lib/ps2_thread_load_windows.cpp
         ../../tests/native/windows_thread_load.cpp)
     target_include_directories(sotc-thread-load-test PRIVATE include)
+    add_executable(sotc-windows-state-file-test EXCLUDE_FROM_ALL
+        src/lib/ps2_runtime_state_windows.cpp
+        ../../tests/native/windows_state_file.cpp)
+    target_include_directories(sotc-windows-state-file-test PRIVATE src/lib)
+    target_link_options(sotc-windows-state-file-test PRIVATE -municode)
 endif()
 if(WIN32 OR (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID))
     find_package(OpenGL REQUIRED)
