@@ -236,6 +236,7 @@ Falha na compilação	Compilation failed	Error de compilación	コンパイル�
 Escolha sua ROM para continuar. Os arquivos locais estão ausentes ou incompletos.	Choose your disc image again. The local files are missing or incomplete.	Vuelve a elegir la imagen del disco. Faltan archivos locales o están incompletos.	ディスクイメージを選び直してください。ローカルファイルが存在しないか、不完全です。
 O recompilador não produziu código.	The recompiler did not generate code.	El recompilador no generó código.	再コンパイラーがコードを生成しませんでした。
 Não foi possível carregar {name}. Consulte {path}	Could not load {name}. See {path}	No se pudo cargar {name}. Consulta {path}	{name} を読み込めませんでした。{path} を確認してください。
+O Windows bloqueou a execução do jogo compilado (erro {code}). Consulte {path}	Windows blocked the compiled game from starting (error {code}). See {path}	Windows bloqueó el inicio del juego compilado (error {code}). Consulta {path}	Windows がコンパイル済みのゲームの起動をブロックしました（エラー {code}）。{path} を確認してください。
 Compilação já pronta. Reutilizando o cache…	Game already compiled. Reusing its cache…	El juego ya está compilado. Reutilizando la caché…	コンパイル済みのキャッシュを使用中…
 Carregando o módulo {name}…	Loading module {name}…	Cargando el módulo {name}…	モジュール {name} を読み込み中…
 Escolha um fragment shader GLSL 330: .frag, .fs ou .glsl.	Choose a GLSL 330 fragment shader: .frag, .fs or .glsl.	Elige un shader de fragmentos GLSL 330: .frag, .fs o .glsl.	GLSL 330 のフラグメントシェーダー (.frag、.fs、.glsl) を選択してください。

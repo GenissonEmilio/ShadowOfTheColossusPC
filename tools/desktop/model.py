@@ -199,15 +199,21 @@ class Library:
             shots.mkdir(exist_ok=True)
             environment.update(PS2X_SNAPSHOT_DIR=str(shots), PS2X_SNAPSHOT_SECONDS="5",
                                PS2X_EXIT_AT_FRAME="600")
-        with (self.directory / "last-game.log").open("w") as output:
+        with (self.directory / "last-game.log").open("w", encoding="utf-8", errors="backslashreplace") as output:
             print(f"[launcher] version={VERSION} disc={SERIAL_BY_BOOT[boot.name]} "
                   f"prompts={environment['SOTC_BUTTON_PROMPTS']} f1Language={graphics.menu_language()}",
                   file=output, flush=True)
             if gpu_status:
                 print(f"[gpu] {gpu_status}", file=output, flush=True)
-            return subprocess.Popen([str(executable), str(boot)], cwd=self.player_directory,
-                                    env=environment, stdout=output, stderr=subprocess.STDOUT,
-                                    start_new_session=not WINDOWS and not attached, creationflags=PROCESS_FLAGS)
+            try:
+                return subprocess.Popen([str(executable), str(boot)], cwd=self.player_directory,
+                                        env=environment, stdout=output, stderr=subprocess.STDOUT,
+                                        start_new_session=not WINDOWS and not attached, creationflags=PROCESS_FLAGS)
+            except OSError as error:
+                winerror = getattr(error, "winerror", None)
+                code = f" winerror={winerror}" if winerror is not None else ""
+                print(f"[launcher] could not start {executable}{code}: {error}", file=output, flush=True)
+                raise
 
     def install_desktop_entry(self, applications=None):
         if WINDOWS:

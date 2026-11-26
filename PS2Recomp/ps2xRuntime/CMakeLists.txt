@@ -483,6 +483,13 @@ add_library(ps2_runtime STATIC
 # Native renderer: the front picks Metal (macOS) or OpenGL (macOS with
 # SOTC_NATIVE_GL=1, the Vita through vitaGL).
 target_sources(ps2_runtime PRIVATE src/lib/native/native_renderer.cpp src/lib/native/native_renderer_gl.cpp)
+if(WIN32)
+    target_sources(ps2_runtime PRIVATE src/lib/ps2_thread_load_windows.cpp)
+    add_executable(sotc-thread-load-test EXCLUDE_FROM_ALL
+        src/lib/ps2_thread_load_windows.cpp
+        ../../tests/native/windows_thread_load.cpp)
+    target_include_directories(sotc-thread-load-test PRIVATE include)
+endif()
 if(WIN32 OR (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID))
     find_package(OpenGL REQUIRED)
     target_link_libraries(ps2_runtime PUBLIC OpenGL::GL glfw)

@@ -57,6 +57,41 @@ namespace
     std::atomic_flag firstChanceLogLock = ATOMIC_FLAG_INIT;
     using MappedFileName = DWORD (WINAPI *)(HANDLE, LPVOID, LPWSTR, DWORD);
     MappedFileName mappedFileName = nullptr;
+    using ThreadStackLimits = void (WINAPI *)(PULONG_PTR, PULONG_PTR);
+    ThreadStackLimits threadStackLimits = nullptr;
+    VS_FIXEDFILEINFO ntdllVersion{};
+
+    void cacheNtdllVersion()
+    {
+        // Read the loaded DLL's VS_VERSIONINFO root before installing handlers.
+        constexpr wchar_t versionKey[] = L"VS_VERSION_INFO";
+        struct VersionResource
+        {
+            WORD length;
+            WORD valueLength;
+            WORD type;
+            wchar_t key[sizeof(versionKey) / sizeof(wchar_t)];
+            VS_FIXEDFILEINFO value;
+        };
+
+        const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        const HRSRC resource = ntdll ? FindResourceW(ntdll, MAKEINTRESOURCEW(VS_VERSION_INFO),
+                                                     reinterpret_cast<LPCWSTR>(RT_VERSION)) : nullptr;
+        const DWORD size = resource ? SizeofResource(ntdll, resource) : 0;
+        if (size < sizeof(VersionResource))
+            return;
+        const HGLOBAL loaded = LoadResource(ntdll, resource);
+        const void *data = loaded ? LockResource(loaded) : nullptr;
+        if (!data)
+            return;
+
+        VersionResource root;
+        std::memcpy(&root, data, sizeof(root));
+        if (root.length >= sizeof(root) && root.length <= size && root.valueLength >= sizeof(root.value) &&
+            root.type == 0 && std::memcmp(root.key, versionKey, sizeof(versionKey)) == 0 &&
+            root.value.dwSignature == VS_FFI_SIGNATURE)
+            ntdllVersion = root.value;
+    }
 
     void writeWindowsAccessViolation(const EXCEPTION_POINTERS &exception, DWORD thread,
                                      std::string_view phase) noexcept
@@ -64,7 +99,7 @@ namespace
         // Bypass buffered stdio, heap allocation and the DLL loader lock.
         const auto &record = *exception.ExceptionRecord;
         const DWORD lastError = GetLastError();
-        char line[384];
+        char line[512];
         char *next = line;
         char *const end = line + sizeof(line);
         const auto append = [&](std::string_view text) {
@@ -73,8 +108,8 @@ namespace
                 std::memcpy(next, text.data(), size);
             next += size;
         };
-        const auto number = [&](uintptr_t value) {
-            next = std::to_chars(next, end, value, 16).ptr;
+        const auto number = [&](uintptr_t value, int base = 16) {
+            next = std::to_chars(next, end, value, base).ptr;
         };
         append("[crash] 0xc0000005 phase=");
         append(phase);
@@ -84,9 +119,20 @@ namespace
         append(" instruction=0x");
         number(instruction);
 #if defined(__x86_64__) || defined(_M_X64)
+        append(" rip=0x");
+        number(exception.ContextRecord->Rip);
         append(" stack=0x");
         number(exception.ContextRecord->Rsp);
 #endif
+        if (threadStackLimits)
+        {
+            ULONG_PTR low = 0, high = 0;
+            threadStackLimits(&low, &high);
+            append(" stack_low=0x");
+            number(low);
+            append(" stack_high=0x");
+            number(high);
+        }
         MEMORY_BASIC_INFORMATION mapping{};
         if (VirtualQuery(record.ExceptionAddress, &mapping, sizeof(mapping)) && mapping.Type == MEM_IMAGE)
         {
@@ -110,6 +156,17 @@ namespace
             }
             append(" rva=0x");
             number(instruction - reinterpret_cast<uintptr_t>(mapping.AllocationBase));
+        }
+        if (ntdllVersion.dwSignature == VS_FFI_SIGNATURE)
+        {
+            append(" ntdll_version=");
+            number(HIWORD(ntdllVersion.dwFileVersionMS), 10);
+            append(".");
+            number(LOWORD(ntdllVersion.dwFileVersionMS), 10);
+            append(".");
+            number(HIWORD(ntdllVersion.dwFileVersionLS), 10);
+            append(".");
+            number(LOWORD(ntdllVersion.dwFileVersionLS), 10);
         }
         if (record.NumberParameters >= 2)
         {
@@ -402,7 +459,11 @@ int main(int argc, char *argv[])
 #if defined(_WIN32)
     const HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
     if (kernel)
+    {
         mappedFileName = reinterpret_cast<MappedFileName>(GetProcAddress(kernel, "K32GetMappedFileNameW"));
+        threadStackLimits = reinterpret_cast<ThreadStackLimits>(GetProcAddress(kernel, "GetCurrentThreadStackLimits"));
+    }
+    cacheNtdllVersion();
     AddVectoredExceptionHandler(1, logFirstChanceWindowsAccessViolation);
     SetUnhandledExceptionFilter(logUnhandledWindowsAccessViolation);
 #endif

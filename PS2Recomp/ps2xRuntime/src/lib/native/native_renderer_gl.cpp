@@ -30,6 +30,7 @@
 #include "external/glad.h" // the loader initialized by the desktop raylib window
 #define GLFW_INCLUDE_NONE
 #include "GLFW/glfw3.h"
+#include "runtime/ps2_thread_load.h"
 #elif defined(__linux__) && !defined(__ANDROID__)
 #define GL_GLEXT_PROTOTYPES 1
 #include <GL/gl.h>
@@ -3731,6 +3732,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         void loop(const std::function<void()> &makeCurrent, bool initThere)
         {
             ThreadNaming::SetCurrentThreadName("RenderThread");
+#if defined(_WIN32)
+            ps2_load::setThreadSlot(ps2_load::kRender);
+#endif
 #if defined(PS2X_NATIVE_VITA)
             // A core of its own: the game thread keeps to the other two (ps2_runtime.cpp).
             sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), SCE_KERNEL_CPU_MASK_USER_2);

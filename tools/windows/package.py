@@ -17,6 +17,7 @@ PLATFORM = "windows-x86_64"
 UCRT_PACKAGE = "mingw-w64-ucrt-x86_64-"
 COMPILER_PACKAGES = ("gcc", "crt", "headers", "binutils", "winpthreads", "windows-default-manifest")
 sys.path[:0] = [str(ROOT / "tools" / part) for part in ("desktop", "linux")]
+from compiler_manifest import enable_utf8
 from model import VERSION
 from stage_source import stage_source
 
@@ -159,6 +160,15 @@ def stage_compiler(build, prefix, root):
                  "include/stdint.h", "lib/crt2.o", "lib/libstdc++.a"):
         if not (kit / name).is_file():
             raise FileNotFoundError(f"Toolchain file {name} was not staged")
+    # The GCC driver emits UTF-8 arguments. Its assembler and linker helpers
+    # must use the same code page when Windows turns those arguments into paths.
+    tools = [kit / "bin" / name for name in ("g++.exe", "as.exe", "ld.exe")]
+    tools.extend(exactly_one(kit / "lib/gcc", name) for name in ("cc1plus.exe", "collect2.exe"))
+    for executable in tools:
+        try:
+            enable_utf8(executable)
+        except Exception as error:
+            raise RuntimeError(f"Could not configure the UTF-8 manifest in {executable}") from error
     for name in ("SDL2.dll", "python.exe"):
         copy(prefix / "bin" / name, kit / "bin" / name)
     # sdl2-compat can load SDL3 by name at runtime instead of importing it.
@@ -222,7 +232,8 @@ def stage_compiler(build, prefix, root):
     fingerprint = hashlib.sha256(versions.encode("utf-8"))
     helpers = ("tools/desktop/pipeline.py", "tools/build_elf.py", "tools/elfmini.py",
                "tools/funcmap_elf.py", "tools/gen_config.py", "tools/xff.py",
-               "game/scus.toml", "game/sces.toml")
+               "game/scus.toml", "game/sces.toml",
+               "tools/windows/compiler_manifest.py", "tools/windows/utf8.manifest")
     for relative in ("bin/ps2_recomp.exe", "lib/utf8.o", *link_inputs,
                      *("source/" + helper for helper in helpers)):
         fingerprint.update(bytes.fromhex(sha256(compiler / relative)))

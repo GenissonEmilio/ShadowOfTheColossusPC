@@ -26,6 +26,7 @@ with tempfile.TemporaryDirectory(prefix='sotc-compiler-check-') as t:
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <thread>
 
 static LONG WINAPI continue_fixture_access_violation(EXCEPTION_POINTERS *exception) {
     const auto &record = *exception->ExceptionRecord;
@@ -68,9 +69,11 @@ void original_test_function(uint8_t* ram, R5900Context* ctx, PS2Runtime* runtime
     if (std::getenv("SOTC_TEST_EXCEPTION_LOG")) {
         SetErrorMode(SEM_NOGPFAULTERRORBOX);
         const auto handler = AddVectoredExceptionHandler(0, continue_fixture_access_violation);
-        const ULONG_PTR handled[] = {0, 0x4321};
-        for (int repeat = 0; repeat < 12; ++repeat)
-            RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 2, handled);
+        std::thread([] {
+            const ULONG_PTR handled[] = {0, 0x4321};
+            for (int repeat = 0; repeat < 12; ++repeat)
+                RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 2, handled);
+        }).join();
         RemoveVectoredExceptionHandler(handler);
         const ULONG_PTR information[] = {0, 0x1234};
         RaiseException(EXCEPTION_ACCESS_VIOLATION, EXCEPTION_NONCONTINUABLE, 2, information);
@@ -135,8 +138,30 @@ struct InstallFixture {
         assert "phase=first-chance " in crash_lines[1], crash.stderr
         assert crash_lines[1].endswith("access=0x0 target=0x1234"), crash.stderr
         assert crash_lines[1].replace("phase=first-chance ", "phase=unhandled ") == crash_lines[2], crash.stderr
-        assert all(re.search(r" stack=0x[0-9a-f]+ module=[^ ]+\.dll rva=0x[0-9a-f]+ ", line, re.I)
-                   for line in crash_lines), crash.stderr
+        version = ctypes.WinDLL("version.dll")
+        ntdll = str(Path(os.environ["SystemRoot"]) / "System32" / "ntdll.dll")
+        version_size = version.GetFileVersionInfoSizeW(ntdll, None)
+        assert version_size > 0
+        version_buffer = ctypes.create_string_buffer(version_size)
+        assert version.GetFileVersionInfoW(ntdll, 0, version_size, version_buffer)
+        fixed_info = ctypes.c_void_p()
+        fixed_size = ctypes.c_uint()
+        assert version.VerQueryValueW(version_buffer, "\\", ctypes.byref(fixed_info), ctypes.byref(fixed_size))
+        assert fixed_size.value >= 16
+        fixed_words = ctypes.cast(fixed_info, ctypes.POINTER(ctypes.c_uint32))
+        version_ms, version_ls = fixed_words[2], fixed_words[3]
+        ntdll_version = f"{version_ms >> 16}.{version_ms & 0xffff}.{version_ls >> 16}.{version_ls & 0xffff}"
+        stacks = []
+        for line in crash_lines:
+            diagnostic = re.search(
+                r" rip=0x([0-9a-f]+) stack=0x([0-9a-f]+) stack_low=0x([0-9a-f]+) stack_high=0x([0-9a-f]+)"
+                r" module=[^ ]+\.dll rva=0x[0-9a-f]+ ntdll_version=([0-9.]+) ", line, re.I)
+            assert diagnostic, line
+            rip, stack, low, high = (int(value, 16) for value in diagnostic.groups()[:4])
+            assert rip != 0 and low <= stack < high, line
+            assert diagnostic[5] == ntdll_version, line
+            stacks.append((low, high))
+        assert stacks[0][1] <= stacks[1][0] or stacks[1][1] <= stacks[0][0], crash.stderr
         # Scope to the disposable fixture's absolute path in the runner's hive.
         registry_path = r"Software\Microsoft\DirectX\UserGpuPreferences"
         filename = str(result.resolve())

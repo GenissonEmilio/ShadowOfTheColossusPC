@@ -3189,6 +3189,11 @@ void PS2Runtime::run()
 #else
     static const bool statsEnabled = std::getenv("PS2X_STATS") != nullptr;
 #endif
+#if defined(_WIN32)
+    ps2_load::setThreadSlot(ps2_load::kHost);
+    auto lastThreadCpu = ps2_load::readWindowsThreadCpu();
+    auto lastLoad = std::chrono::steady_clock::now();
+#endif
 #if defined(__ANDROID__)
     bool audioPaused = false;
     float audioVolumeBeforePause = 1.0f;
@@ -3521,15 +3526,29 @@ void PS2Runtime::run()
             lastStatsTime = statsTime;
             nextStats = statsTime + 5.0;
             {
-                // Busy share of each emulation thread over the window (wall time
-                // minus the time spent at its waits).
+#if defined(_WIN32)
+                const auto now = std::chrono::steady_clock::now();
+                const double windowUs = std::chrono::duration<double, std::micro>(now - lastLoad).count();
+                const auto threadCpu = ps2_load::readWindowsThreadCpu();
+                std::string line = "[load] source=thread-cpu";
+                for (size_t i = 0; i < threadCpu.size(); ++i)
+                {
+                    const auto percent = ps2_load::threadCpuPercent(lastThreadCpu[i], threadCpu[i], windowUs);
+                    line += std::string(" ") + ps2_load::kNames[i] + "=" +
+                        (percent ? std::to_string(*percent) + "%" : "n/a");
+                }
+                lastThreadCpu = threadCpu;
+                lastLoad = now;
+                std::cerr << line << std::endl;
+#else
+                // Estimate work from wall time minus completed instrumented waits.
                 static auto lastLoad = std::chrono::steady_clock::now();
                 static uint64_t lastWait[ps2_load::kSlots] = {};
                 static uint64_t lastGlWait = 0;
                 const auto now = std::chrono::steady_clock::now();
                 const double windowUs = std::max(1.0, static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(now - lastLoad).count()));
                 lastLoad = now;
-                std::string line = "[load]";
+                std::string line = "[load] source=wait-estimate";
                 for (int i = 0; i < ps2_load::kSlots; ++i)
                 {
                     const uint64_t wait = ps2_load::waitUs[i].load(std::memory_order_relaxed);
@@ -3541,6 +3560,7 @@ void PS2Runtime::run()
                 line += " gsWaitsHostGl=" + std::to_string(static_cast<int>(100.0 * (glWait - lastGlWait) / windowUs + 0.5)) + "%";
                 lastGlWait = glWait;
                 std::cerr << line << std::endl;
+#endif
             }
             const uint64_t statChains = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
             // GS captures can continue while the native picture is on screen.

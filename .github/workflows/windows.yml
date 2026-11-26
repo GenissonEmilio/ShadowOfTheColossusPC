@@ -61,7 +61,8 @@ jobs:
           git diff --exit-code FETCH_HEAD HEAD -- PS2Recomp game \
             tools/build_elf.py tools/elfmini.py tools/funcmap_elf.py tools/gen_config.py tools/xff.py \
             tools/desktop/pipeline.py tools/linux/input_tool.cpp tools/linux/video_tool.cpp \
-            tools/windows/CMakeLists.txt tools/windows/utf8.rc tools/windows/utf8.manifest
+            tools/windows/CMakeLists.txt tools/windows/utf8.rc tools/windows/utf8.manifest \
+            tools/windows/package.py tools/windows/compiler_manifest.py
       - name: Configure the native Windows build
         run: |
           cmake -S PS2Recomp -B build/windows -G Ninja \
@@ -73,11 +74,12 @@ jobs:
             -DPS2X_ENABLE_IOP_RPC_TRACE=OFF
       - name: Build the native launcher and any required compiler targets
         run: |
-          targets=(ShadowOfTheColossusPC)
+          targets=(ShadowOfTheColossusPC sotc-thread-load-test)
           if [[ -z "$COMPILER_VERSION" ]]; then
             targets+=(ps2_recomp sotc-windows-base sotc-video-tool sotc-input-tool)
           fi
           cmake --build build/windows --parallel 2 --target "${targets[@]}"
+          build/windows/ps2xRuntime/sotc-thread-load-test.exe
       - name: Package native launcher and compiler
         run: |
           reuse=()
@@ -94,7 +96,7 @@ jobs:
           $archive = (Get-ChildItem dist/windows/*.zip).FullName
           $expected = (Get-Content "$archive.sha256").Split(' ')[0]
           if ((Get-FileHash $archive).Hash -ne $expected) { throw 'Package SHA-256 mismatch' }
-          $testRoot = Join-Path $env:RUNNER_TEMP 'SotC relocated package'
+          $testRoot = Join-Path $env:RUNNER_TEMP 'SotC relocated package á 文字'
           Expand-Archive -LiteralPath $archive -DestinationPath $testRoot
           "SOTC_TEST_ROOT=$testRoot" >> $env:GITHUB_ENV
       - name: Open the relocated launcher and graphics profiles
@@ -147,6 +149,10 @@ jobs:
           $env:PYTHONHOME = Join-Path $program 'compiler/toolchain'
           $env:PYTHONDONTWRITEBYTECODE = '1'
           & "$bin/python.exe" -X utf8 tools/linux/test_compiler.py --program $program
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$bin/python.exe" -X utf8 tests/windows/test_unicode_prepare.py --program $program
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$bin/python.exe" -X utf8 -m unittest discover -s tests/windows -p 'test_compiler_manifest.py' -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & "$bin/python.exe" -X utf8 tools/desktop/release/test_recomplauncher.py --program $program
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
