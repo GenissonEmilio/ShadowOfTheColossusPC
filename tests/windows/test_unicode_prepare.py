@@ -68,7 +68,11 @@ def check_module_paths(program, temporary):
                 expected = ("KERNEL", "MANAGER", "GAMECORE")[index]
                 assert Path(xff) == disc / (expected + ".XFF"), specs
                 assert load == "auto", specs
-                assert (Path(cwd) / ram).resolve() == pipeline.work / "captures" / (expected.lower() + ".bin"), specs
+                actual_capture = (Path(cwd) / ram).resolve()
+                expected_capture = (pipeline.work / "captures" / (expected.lower() + ".bin")).resolve()
+                assert actual_capture == expected_capture, (
+                    f"{expected}: RAM path {ram!r} from {cwd} resolves to {actual_capture}, expected {expected_capture}"
+                )
 
     def stage(folder, *, step):
         result = folder / "game.exe"
