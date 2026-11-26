@@ -116,6 +116,37 @@ int main() {
             }
         }
     }
+
+    auto depthOfFieldFrame = [&](bool snapshot) {
+        t.midFrameRedraw = 0;
+        t.waterSource = snapshot ? 1 : 0;
+        native_renderer::beginFrame();
+        draw(2, 2); draw(3, 4);
+        // An invisible draw still requests the water source. Use it to retain
+        // the full-size capture without changing the visible picture.
+        native_renderer::DrawState invisible;
+        invisible.order = 9;
+        invisible.refractionSample = true;
+        native_renderer::draw(999, clip, invisible);
+        native_renderer::DepthOfField dof;
+        dof.enabled = true;
+        dof.focusZ = 1;
+        dof.slices = 2;
+        dof.rounds = 2;
+        native_renderer::setDepthOfField(dof);
+        native_renderer::endFrame(515, 449);
+        std::vector<uint8_t> rgba;
+        uint32_t width = 0, height = 0;
+        check(native_renderer::latestFrame(rgba, width, height) &&
+              width == 515 && height == 449 && rgba.size() == 515u * 449u * 4u,
+              "DoF frame readback at an odd render size");
+        check(glGetError() == GL_NO_ERROR, "DoF completes without GL errors");
+        return rgba;
+    };
+    const auto snapshotDof = depthOfFieldFrame(true);
+    const auto directDof = depthOfFieldFrame(false);
+    check(!snapshotDof.empty() && directDof == snapshotDof,
+          "direct DoF downsample matches the full-size copy pixel for pixel");
     std::fflush(nullptr);
     std::_Exit(failures ? 1 : 0);
 }
