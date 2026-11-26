@@ -331,19 +331,12 @@ Gerando código para compilar…	Generating source code…	Generando el código 
 Lendo os arquivos do disco…	Reading disc files…	Leyendo los archivos del disco…	ディスクのファイルを読み込み中…
 Verificando a compilação…	Verifying the build…	Comprobando la compilación…	ビルドを検証中…
 Idioma da campanha	Campaign language	Idioma de la campaña	キャンペーンの言語
-No disco USA, a tradução de Gledson999 adiciona Português (Brasil) na abertura. No PAL, escolha o idioma no menu original do jogo.	On the USA disc, Gledson999's translation adds Brazilian Portuguese at startup. On PAL, choose a language in the original game menu.	En el disco de EE. UU., la traducción de Gledson999 añade portugués de Brasil al iniciar. En PAL, elige el idioma en el menú original.	米国版では、Gledson999 の翻訳を導入すると起動時にブラジルポルトガル語を選べます。PAL 版では、元のゲームメニューで言語を選択します。
-Instalar Português (Brasil)	Install Brazilian Portuguese	Instalar portugués de Brasil	ブラジルポルトガル語を導入
-Português (Brasil) instalado	Brazilian Portuguese installed	Portugués de Brasil instalado	ブラジルポルトガル語を導入済み
-A tradução brasileira requer a edição americana SCUS-97472.	The Brazilian Portuguese translation requires the USA edition SCUS-97472.	La traducción al portugués de Brasil requiere la edición de EE. UU. SCUS-97472.	ブラジルポルトガル語の翻訳には米国版 SCUS-97472 が必要です。
-Selecione a mídia original americana para instalar a tradução.	Select the original USA disc image to install the translation.	Selecciona la imagen original del disco de EE. UU. para instalar la traducción.	翻訳を導入するには米国版の元のディスクイメージを選択してください。
-Instalando tradução…	Installing translation…	Instalando la traducción…	翻訳を導入中…
-Não foi possível instalar a tradução.	Could not install the translation.	No se pudo instalar la traducción.	翻訳を導入できませんでした。
-Português (Brasil) disponível ao iniciar o jogo.	Brazilian Portuguese is available at game startup.	El portugués de Brasil está disponible al iniciar el juego.	ゲームの起動時にブラジルポルトガル語を選べます。
-Não foi possível baixar a tradução de Gledson999.	Could not download the Gledson999 translation.	No se pudo descargar la traducción de Gledson999.	Gledson999 の翻訳をダウンロードできませんでした。
 O arquivo da tradução não corresponde à versão verificada.	The translation file does not match the verified version.	El archivo de traducción no coincide con la versión verificada.	翻訳ファイルが確認済みのバージョンと一致しません。
-A tradução precisa da ISO original americana SCUS-97472 (MD5 {md5}).	The translation requires the original USA ISO SCUS-97472 (MD5 {md5}).	La traducción requiere la ISO original de EE. UU. SCUS-97472 (MD5 {md5}).	翻訳には米国版の元の ISO SCUS-97472 が必要です（MD5 {md5}）。
-Verificando a mídia original da campanha…	Verifying the original campaign disc…	Verificando el disco original de la campaña…	キャンペーンの元のディスクを確認中…
-Baixando a tradução brasileira de Gledson999…	Downloading Gledson999's Brazilian Portuguese translation…	Descargando la traducción al portugués de Brasil de Gledson999…	Gledson999 のブラジルポルトガル語翻訳をダウンロード中…
 Não foi possível aplicar a tradução ao disco original.	Could not apply the translation to the original disc.	No se pudo aplicar la traducción al disco original.	元のディスクに翻訳を適用できませんでした。
 Aplicando tradução brasileira… {percent}%	Applying Brazilian Portuguese… {percent}%	Aplicando la traducción brasileña… {percent}%	ブラジルポルトガル語を適用中… {percent}%
 A tradução precisa da edição americana SCUS-97472.	The translation requires the USA edition SCUS-97472.	La traducción requiere la edición de EE. UU. SCUS-97472.	翻訳には米国版 SCUS-97472 が必要です。
+Menu original do jogo	Original game menu	Menú original del juego	ゲーム内の言語メニュー
+Importe sua ROM	Import your disc	Importa tu disco	ディスクをインポート
+A edição importada determina os idiomas. A escolha vale na próxima abertura do jogo.	Languages depend on the imported edition. Changes apply next time you play.	Los idiomas dependen de la edición importada. El cambio se aplica la próxima vez que juegues.	選べる言語はインポートした版によって異なります。選択は次回起動時に適用されます。
+Não foi possível abrir a tradução integrada.	Could not open the bundled translation.	No se pudo abrir la traducción integrada.	同梱の翻訳を開けませんでした。
+Verificando a mídia original da campanha…	Verifying the original campaign disc…	Verificando el disco original de la campaña…	キャンペーンの元のディスクを確認中…

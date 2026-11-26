@@ -9,7 +9,7 @@ import subprocess
 import sys
 import tempfile
 from import_disc import PROFILES, import_disc, validate_disc
-from language import preferences, preferred_language, translate as tr
+from language import preferences, translate as tr
 from pipeline import CompilationError, PAL_BOOT, Pipeline, PROCESS_FLAGS, WINDOWS, compiler_tool
 
 VERSION = "1.2.8"
@@ -17,6 +17,8 @@ SOURCE_ROOT = Path(__file__).resolve().parents[2]
 APPLICATION_ID = "io.github.GenissonEmilio.ShadowOfTheColossusPC"
 SAVE_STATES_AVAILABLE = WINDOWS or sys.platform.startswith("linux")
 SERIAL_BY_BOOT = {profile.boot: profile.serial for profile in PROFILES.values()}
+PAL_CAMPAIGN_LANGUAGES = {"en": "English", "fr": "Français", "de": "Deutsch",
+                          "it": "Italiano", "es": "Español"}
 
 
 def assets_directory():
@@ -84,13 +86,8 @@ class Library:
         return boot is not None and boot.name == PAL_BOOT
 
     @property
-    def original_media(self):
-        name = self.state.get("source")
-        if isinstance(name, str):
-            path = Path(name)
-            if path.is_absolute() and path.is_file():
-                return path
-        return None
+    def campaign_patch(self):
+        return assets_directory() / "campaign/pt-BR.xdelta"
 
     @property
     def portuguese_directory(self):
@@ -104,18 +101,40 @@ class Library:
         directory = self.portuguese_directory
         return directory / "SCUS_974.72" if directory and is_portuguese_ready(directory) else None
 
-    def install_portuguese(self, source=None, progress=lambda text: None):
-        from campaign_locale import prepare_portuguese
-        destination = self.portuguese_directory
-        if not destination:
-            raise ValueError(tr("A tradução brasileira requer a edição americana SCUS-97472."))
-        installed = self.portuguese_boot()
-        if installed:
-            return installed
-        source = source or self.original_media
-        if not source:
-            raise ValueError(tr("Selecione a mídia original americana para instalar a tradução."))
-        return prepare_portuguese(source, self.verify(), destination, progress)
+    def campaign_language_options(self):
+        boot = self.disc
+        if not boot:
+            return {}
+        if boot.name == PAL_BOOT:
+            return {"original": tr("Menu original do jogo"), "auto": tr("Automático"),
+                    **PAL_CAMPAIGN_LANGUAGES}
+        if boot.name != "SCUS_974.72":
+            return {}
+        options = {"auto": tr("Automático"), "en": "English"}
+        if self.campaign_patch.is_file() or self.portuguese_boot():
+            options["pt-BR"] = "Português (Brasil)"
+        return options
+
+    def campaign_language_choice(self, options, selected_preferences):
+        if not options:
+            return None
+        serial = SERIAL_BY_BOOT[self.disc.name]
+        selected = selected_preferences["campaign_languages"].get(serial)
+        if selected is None and serial == "SCUS-97472":
+            from graphics import Graphics
+            legacy = Graphics(self).settings().get("campaign_language")
+            selected = {"1": "auto", "2": "en", "3": "pt-BR"}.get(legacy)
+        return selected if isinstance(selected, str) and selected in options else next(iter(options))
+
+    def campaign_language(self):
+        options = self.campaign_language_options()
+        selected_preferences = preferences(self.directory)
+        selected = self.campaign_language_choice(options, selected_preferences)
+        if selected != "auto":
+            return selected
+        interface_language = selected_preferences["language"]
+        detected = "pt-BR" if interface_language == "pt" else interface_language
+        return detected if detected in options else "en"
 
     def game_environment(self, test=False, *, boot=None):
         environment = dict(os.environ)
@@ -123,7 +142,8 @@ class Library:
         for name in ("LD_LIBRARY_PATH", "LD_LIBRARY_PATH_ORIG", "GI_TYPELIB_PATH", "GTK_DATA_PREFIX",
                      "GTK_EXE_PREFIX", "GDK_PIXBUF_MODULE_FILE", "GDK_PIXBUF_MODULEDIR", "GIO_EXTRA_MODULES",
                      "FONTCONFIG_FILE", "DOTNET_ROOT", "DOTNET_ROOT_X64",
-                     "SOTC_CAMPAIGN_PT_BR_BOOT", "SOTC_CAMPAIGN_SYSTEM_PT"):
+                     "SOTC_CAMPAIGN_PT_BR_BOOT", "SOTC_CAMPAIGN_SYSTEM_PT",
+                     "SOTC_CAMPAIGN_PAL_LANGUAGE"):
             environment.pop(name, None)
         if original_ld:
             environment["LD_LIBRARY_PATH"] = original_ld
@@ -219,10 +239,16 @@ class Library:
         graphics.normalize_external_settings()
         graphics.save_display(*graphics.display())
         environment = self.game_environment(test)
-        if translated := self.portuguese_boot():
-            environment["SOTC_CAMPAIGN_PT_BR_BOOT"] = str(translated)
-            if preferred_language() == "pt":
-                environment["SOTC_CAMPAIGN_SYSTEM_PT"] = "1"
+        campaign_language = self.campaign_language()
+        if campaign_language == "pt-BR":
+            from campaign_locale import prepare_portuguese
+            boot = self.portuguese_boot() or prepare_portuguese(
+                boot.parent, self.portuguese_directory, self.campaign_patch, progress)
+            environment["PS2X_STATE_DIR"] = str(Path(environment["PS2X_STATE_DIR"]) / "pt-BR")
+        elif boot.name == PAL_BOOT and campaign_language in PAL_CAMPAIGN_LANGUAGES:
+            environment["SOTC_CAMPAIGN_PAL_LANGUAGE"] = campaign_language
+            if campaign_language != "en":
+                environment["PS2X_STATE_DIR"] = str(Path(environment["PS2X_STATE_DIR"]) / campaign_language)
         from texture_mods import TextureMods
         environment.update(TextureMods(self).environment())
         gpu_status = None
@@ -240,7 +266,8 @@ class Library:
                                PS2X_EXIT_AT_FRAME="600")
         with (self.directory / "last-game.log").open("w", encoding="utf-8", errors="backslashreplace") as output:
             print(f"[launcher] version={VERSION} disc={SERIAL_BY_BOOT[boot.name]} "
-                  f"prompts={environment['SOTC_BUTTON_PROMPTS']} f1Language={graphics.menu_language()}",
+                  f"prompts={environment['SOTC_BUTTON_PROMPTS']} f1Language={graphics.menu_language()} "
+                  f"campaignLanguage={campaign_language}",
                   file=output, flush=True)
             if gpu_status:
                 print(f"[gpu] {gpu_status}", file=output, flush=True)

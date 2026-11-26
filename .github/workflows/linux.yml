@@ -54,6 +54,9 @@ jobs:
           docker run --rm --init --cpus=2 --memory=1000m --memory-swap=1000m --network=none \
             -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
             sotc-linux-builder bash tools/linux/test_desktop_input.sh
+          docker run --rm --init --cpus=1 --memory=512m --memory-swap=512m --network=none \
+            -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src:z" \
+            sotc-linux-builder bash tools/linux/test_pal_campaign_language.sh
       - name: Native Celosia math, curves, textures and heap (no ROM)
         run: |
           docker run --rm --init --cpus=1 --memory=1600m --memory-swap=1600m --network=none \

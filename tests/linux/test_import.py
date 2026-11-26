@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 import zipfile
+import zlib
 import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[2] / 'tools/desktop'))
 import campaign_locale
@@ -16,39 +17,71 @@ from model import Library, atomic_json
 from pipeline import MODULES, STAGE_COUNT, Pipeline, PreparationProgress, executable_name
 
 class ImportTests(unittest.TestCase):
-    def test_portuguese_patch_download_uses_platform_trust(self):
-        archive = b'verified translation archive'
+    def test_portuguese_patch_requires_verified_local_asset(self):
         payload = b'verified translation patch'
         with tempfile.TemporaryDirectory() as temporary, \
-                patch.object(campaign_locale, 'https_context') as context, \
-                patch.object(campaign_locale.urllib.request, 'urlopen', return_value=io.BytesIO(archive)) as download, \
-                patch.object(campaign_locale, 'ARCHIVE_SIZE', len(archive)), \
-                patch.object(campaign_locale, 'ARCHIVE_SHA256', hashlib.sha256(archive).hexdigest()), \
-                patch.object(campaign_locale, 'PATCH_SHA256', hashlib.sha256(payload).hexdigest()), \
-                patch.object(campaign_locale, 'extract_archive') as extract:
-            extract.side_effect = lambda path, destination, budget: (destination / campaign_locale.PATCH_NAME).write_bytes(payload)
-            self.assertEqual(campaign_locale._download_patch(Path(temporary)), payload)
-            self.assertIs(download.call_args.kwargs['context'], context.return_value)
-
-    def test_portuguese_disc_verification_without_python_311_hash_api(self):
-        data = b'\x01' * (1024 * 1024 + 128)
-        digest = hashlib.md5(data, usedforsecurity=False).hexdigest()
-        with tempfile.TemporaryDirectory() as temporary, \
-                patch.object(campaign_locale, 'ISO_SIZE', len(data)), \
-                patch.object(campaign_locale, 'ISO_MD5', digest), \
-                patch.object(campaign_locale, 'DiscImage') as disc, \
-                patch.dict(hashlib.__dict__):
-            hashlib.__dict__.pop('file_digest', None)
-            root = Path(temporary)
-            iso = root / 'disc.iso'
-            iso.write_bytes(data)
-            image = disc.return_value.__enter__.return_value
-            image.sector, image.skip = 2048, 0
-            image.find.side_effect = lambda name: campaign_locale.REPLACEMENTS[name][:2]
-            self.assertEqual(campaign_locale._verified_iso(iso, root), iso)
-            iso.write_bytes(b'\x00' + data[1:])
+                patch.object(campaign_locale, 'PATCH_SIZE', len(payload)), \
+                patch.object(campaign_locale, 'PATCH_SHA256', hashlib.sha256(payload).hexdigest()):
+            asset = Path(temporary) / 'pt-BR.xdelta'
             with self.assertRaises(ImportError_):
-                campaign_locale._verified_iso(iso, root)
+                campaign_locale._load_patch(asset)
+            asset.write_bytes(payload)
+            self.assertEqual(campaign_locale._load_patch(asset), payload)
+            for invalid in (payload.upper(), payload + b'extra', payload[:-1]):
+                asset.write_bytes(invalid)
+                with self.subTest(invalid=invalid), self.assertRaises(ImportError_):
+                    campaign_locale._load_patch(asset)
+
+    def test_portuguese_prepares_from_imported_files_and_reuses_cache(self):
+        def window(position, literal, checksum_output):
+            # A source COPY of seven bytes, then an ADD of a one-byte literal.
+            instructions = b'\x13\x07\x02'
+            checksum = zlib.adler32(checksum_output).to_bytes(4, 'big')
+            body = b'\x08\x00\x01\x03\x01' + checksum + literal + instructions + b'\0'
+            return bytes((5, 8, position, len(body))) + body
+
+        patch_data = (b'\xd6\xc3\xc4\x00\x04\x00' + window(0, b'E', b'metacorE')
+                      + window(8, b'O', b'\0\0\0\0nicO') + window(16, b'?', b'ignored!'))
+        extents = {'GAMECORE.XFF': (1, 4), 'NICO.DAT': (3, 4), 'SYSTEM.CNF': (4, 2)}
+        replacements = {name: hashlib.sha256(data).hexdigest() for name, data in
+                        {'GAMECORE.XFF': b'corE', 'NICO.DAT': b'nicO'}.items()}
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.multiple(campaign_locale, SECTOR_SIZE=4, ISO_SIZE=24, ISO_EXTENTS=extents,
+                               PATCH_SIZE=len(patch_data), PATCH_SHA256=hashlib.sha256(patch_data).hexdigest(),
+                               FIRST_WINDOW_CHECKSUM=zlib.adler32(b'\0\0\0\0corE'),
+                               REPLACEMENTS=replacements, REQUIRED_SIZES={'GAMECORE.XFF': 4, 'NICO.DAT': 4}), \
+                patch.object(campaign_locale, 'validate_disc', return_value=campaign_locale.USA), \
+                patch.object(campaign_locale, '_clone_nico', return_value=False):
+            root = Path(temporary)
+            original = root / 'imported'
+            original.mkdir()
+            asset = root / 'pt-BR.xdelta'
+            asset.write_bytes(patch_data)
+            contents = {'GAMECORE.XFF': b'core', 'NICO.DAT': b'nico', 'SYSTEM.CNF': b'cn'}
+            for name, data in contents.items():
+                (original / name).write_bytes(data)
+            target = root / 'campaign' / 'pt-BR'
+
+            self.assertEqual(campaign_locale.prepare_portuguese(original, target, asset), target / campaign_locale.BOOT)
+            self.assertEqual((target / 'GAMECORE.XFF').read_bytes(), b'corE')
+            self.assertEqual((target / 'NICO.DAT').read_bytes(), b'nicO')
+            for name, data in contents.items():
+                self.assertEqual((original / name).read_bytes(), data)
+
+            corrupt_target = target.with_name('broken')
+            with patch.object(campaign_locale, 'REPLACEMENTS', {**replacements, 'NICO.DAT': 'invalid digest'}):
+                with self.assertRaises(ImportError_):
+                    campaign_locale.prepare_portuguese(original, corrupt_target, asset)
+            self.assertFalse(corrupt_target.exists())
+            self.assertFalse(list(target.parent.glob('.campaign-ptbr-*')))
+
+            (original / 'NICO.DAT').write_bytes(b'Xico')
+            with self.assertRaises(ImportError_):
+                campaign_locale.prepare_portuguese(original, corrupt_target, asset)
+            self.assertFalse(corrupt_target.exists())
+
+            asset.unlink()
+            self.assertEqual(campaign_locale.prepare_portuguese(original, target, asset), target / campaign_locale.BOOT)
 
     def test_traversal_and_absolute_paths(self):
         for path in ('../escape.iso','/tmp/escape.iso','x/../../bad','C:/escape.iso','x\\..\\bad'):

@@ -32,7 +32,9 @@ def preferences(directory):
         config = {}
     language = config.get("language")
     prompts = config.get("button_prompts")
+    campaign = config.get("campaign_languages")
     return {"language": language if isinstance(language, str) and language in LANGUAGES else preferred_language(),
+            "campaign_languages": campaign if isinstance(campaign, dict) else {},
             "button_prompts": prompts if prompts in PROMPTS else PROMPTS[0],
             "infinite_health": config.get("infinite_health") is True,
             "infinite_grip": config.get("infinite_grip") is True,

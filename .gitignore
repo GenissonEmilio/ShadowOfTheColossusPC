@@ -40,6 +40,7 @@ celosia_settings.cfg
 *.rar
 *.elf
 *.ps2
+/tools/desktop/assets/campaign/pt-BR.xdelta
 
 # Android output, machine paths and private game preparation
 .gradle/

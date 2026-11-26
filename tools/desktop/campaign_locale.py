@@ -1,37 +1,56 @@
 """Prepare Gledson999's Brazilian Portuguese campaign as a separate USA disc view."""
 from __future__ import annotations
 
+from contextlib import ExitStack
 import hashlib
 import os
 from pathlib import Path
 import shutil
 import sys
 import tempfile
-import urllib.request
 import zlib
 
-from disc import DiscImage
-from import_disc import Budget, ImportError_, PROFILES, candidates, extract_archive, sha256, validate_disc
+from import_disc import ImportError_, PROFILES, incompatible_file, sha256, validate_disc
 from language import translate as tr
 from pipeline import build_lock
-from updates import https_context
 
 PORTUGUESE_PATCH_PAGE = "https://www.retro-jogos.com/ps2-shadow-of-the-colossus/"
-PORTUGUESE_PATCH_URL = "https://www.retro-jogos.com/wp-content/uploads/2020/11/Shadow-of-the-Colossus-BR.7z"
 PORTUGUESE_PATCH_CREDITS = "Gledson999 · Mumm-Ra (STR Brasil) · v1.0"
-ARCHIVE_SIZE = 937984
-ARCHIVE_SHA256 = "8ff3352ccef2d902c511e37f92e133e63f1ea5e2f76296662deeb0db4a2e6b78"
-PATCH_NAME = "Shadow of the Colossus (BR).xdelta"
+PATCH_SIZE = 1812074
 PATCH_SHA256 = "d6a849c552b346d8f3357b18bc52ee7458245fc6e0ec8975ff89c1f6ca546546"
 ISO_SIZE = 2693955584
-ISO_MD5 = "6d4a7a9d9c139a9d93db37538ba6d984"  # This release's published original-disc identifier.
+SECTOR_SIZE = 2048
+ISO_EXTENTS = {
+    "MODULES2/MCMAN.IRX": (291, 96181),
+    "MODULES2/MCSERV.IRX": (338, 7385),
+    "MODULES/DBCMAN.IRX": (342, 15653),
+    "MODULES/DS1O_D.IRX": (350, 10469),
+    "MODULES/LIBSD.IRX": (356, 30085),
+    "MODULES/MC2_D.IRX": (371, 20269),
+    "MODULES/PL2303.IRX": (381, 4269),
+    "MODULES/SIO2D.IRX": (384, 11289),
+    "MODULES/SIO2MAN.IRX": (390, 6641),
+    "MODULES/USBD.IRX": (394, 34993),
+    "GAMECORE.XFF": (412, 2141864),
+    "IOPRP300.IMG": (1458, 275345),
+    "KERNEL.XFF": (1593, 415908),
+    "MANAGER.XFF": (1797, 1650876),
+    "NICO.DAT": (2604, 2667340678),
+    "SCUS_974.72": (1305017, 242940),
+    "SG2IOPM1.IRX": (1305136, 27661),
+    "STARTUP.XFF": (1305150, 26),
+    "SYSTEM.CNF": (1305151, 57),
+}
 USA = PROFILES["SCUS-97472"]
 BOOT = USA.boot
 MARKER = ".ptbr-patch"
 REPLACEMENTS = {
-    "GAMECORE.XFF": (412, 2141864, "48ec03d95b9ad2051f504f5a139ea67de392e9ebc5297e1f6f6f8dd7257c9f9a"),
-    "NICO.DAT": (2604, 2667340678, "11828b8608438630a7064a496043277befcb265be34e846033db03d03908a166"),
+    "GAMECORE.XFF": "48ec03d95b9ad2051f504f5a139ea67de392e9ebc5297e1f6f6f8dd7257c9f9a",
+    "NICO.DAT": "11828b8608438630a7064a496043277befcb265be34e846033db03d03908a166",
 }
+# The first window also copies ISO filesystem metadata before the first file.
+# Its checksum after zero-filling those unavailable sectors is pinned separately.
+FIRST_WINDOW_CHECKSUM = 0xF93FBBAF
 MARKER_VALUE = f"1 {PATCH_SHA256}"
 MAX_WINDOW_SIZE = 8 * 1024**2
 # The largest source segment in the published patch is 69,946,601 bytes.
@@ -52,22 +71,13 @@ def is_portuguese_ready(target):
         return False
 
 
-def _download_patch(work):
-    path = work / "translation.7z"
-    request = urllib.request.Request(PORTUGUESE_PATCH_URL, headers={"User-Agent": "ShadowOfTheColossusPC"})
+def _load_patch(path):
     try:
-        with urllib.request.urlopen(request, timeout=30, context=https_context()) as response:
-            archive = response.read(ARCHIVE_SIZE + 1)
+        with Path(path).open("rb") as source:
+            patch = source.read(PATCH_SIZE + 1)
     except OSError as error:
-        raise ImportError_(tr("Não foi possível baixar a tradução de Gledson999.")) from error
-    if len(archive) != ARCHIVE_SIZE or hashlib.sha256(archive).hexdigest() != ARCHIVE_SHA256:
-        raise ImportError_(tr("O arquivo da tradução não corresponde à versão verificada."))
-    path.write_bytes(archive)
-    contents = work / "patch"
-    contents.mkdir()
-    extract_archive(path, contents, Budget(maximum=3 * 1024**2))
-    patch = (contents / PATCH_NAME).read_bytes()
-    if hashlib.sha256(patch).hexdigest() != PATCH_SHA256:
+        raise ImportError_(tr("Não foi possível abrir a tradução integrada.")) from error
+    if len(patch) != PATCH_SIZE or hashlib.sha256(patch).hexdigest() != PATCH_SHA256:
         raise ImportError_(tr("O arquivo da tradução não corresponde à versão verificada."))
     return patch
 
@@ -161,7 +171,35 @@ def _decode_window(source, literals, instructions, addresses, length):
     return output
 
 
-def _patch_windows(image, patch):
+def _read_extent(file, offset, length):
+    file.seek(offset)
+    data = file.read(length)
+    if len(data) != length:
+        raise incompatible_file(Path(file.name).name)
+    return data
+
+
+def _read_source(files, position, size):
+    """Read a source range across imported ISO file extents and zero-filled gaps."""
+    chunks = []
+    end = position + size
+    for start, stop, file in files:
+        if stop <= position:
+            continue
+        if start >= end:
+            break
+        if position < start:
+            chunks.append(bytes(start - position))
+            position = start
+        length = min(stop, end) - position
+        chunks.append(_read_extent(file, position - start, length))
+        position += length
+    if position < end:
+        chunks.append(bytes(end - position))
+    return b"".join(chunks)
+
+
+def _patch_windows(files, patch, ranges):
     # This pinned xdelta uses the default code table, an application header,
     # Adler-32 per window, and no secondary compression.
     if patch[:5] != b"\xd6\xc3\xc4\x00\x04":
@@ -174,15 +212,11 @@ def _patch_windows(image, patch):
         offset += 1
         if flags not in (4, 5):
             raise _invalid_patch()
-        source = b""
+        source_size = source_position = 0
         if flags & 1:
             source_size, offset = _number(patch, offset)
             source_position, offset = _number(patch, offset)
             if source_size > MAX_SOURCE_SIZE or source_position + source_size > ISO_SIZE:
-                raise _invalid_patch()
-            image.seek(source_position)
-            source = image.read(source_size)
-            if len(source) != source_size:
                 raise _invalid_patch()
         delta_size, offset = _number(patch, offset)
         end = offset + delta_size
@@ -200,11 +234,13 @@ def _patch_windows(image, patch):
         address_start = instruction_start + instruction_size
         if address_start + address_size != end:
             raise _invalid_patch()
-        decoded = _decode_window(source, patch[data_start:instruction_start],
-                                 patch[instruction_start:address_start], patch[address_start:end], length)
-        if zlib.adler32(decoded) != checksum:
-            raise _invalid_patch()
-        yield target_position, decoded
+        if any(start < target_position + length and target_position < stop for start, stop in ranges):
+            source = _read_source(files, source_position, source_size)
+            decoded = _decode_window(source, patch[data_start:instruction_start],
+                                     patch[instruction_start:address_start], patch[address_start:end], length)
+            if zlib.adler32(decoded) != (checksum if target_position else FIRST_WINDOW_CHECKSUM):
+                raise _invalid_patch()
+            yield target_position, decoded
         target_position += length
         offset = end
     if target_position != ISO_SIZE:
@@ -226,15 +262,28 @@ def _clone_nico(original, target):
     return True
 
 
-def _apply_patch(iso, patch, disc, compare_nico, progress):
-    with (iso.open("rb") as image, (disc / "GAMECORE.XFF").open("xb") as gamecore,
-          (disc / "NICO.DAT").open("r+b" if compare_nico else "xb") as nico):
-        outputs = {"GAMECORE.XFF": gamecore, "NICO.DAT": nico}
+def _apply_patch(original_disc, patch, disc, compare_nico, progress):
+    with ExitStack() as stack:
+        files = []
+        ranges = {}
+        for name, (sector, size) in ISO_EXTENTS.items():
+            path = original_disc / name
+            if not path.is_file() or path.stat().st_size != size:
+                raise incompatible_file(name)
+            start = sector * SECTOR_SIZE
+            stop = start + size
+            files.append((start, stop, stack.enter_context(path.open("rb"))))
+            if name in REPLACEMENTS:
+                ranges[name] = (start, stop)
+        files.sort()
+        outputs = {
+            name: stack.enter_context((disc / name).open("r+b" if name == "NICO.DAT" and compare_nico else "xb"))
+            for name in REPLACEMENTS
+        }
         last_progress = -10
-        for position, data in _patch_windows(image, patch):
-            for name, (sector, size, _) in REPLACEMENTS.items():
-                start = sector * 2048
-                left, right = max(start, position), min(start + size, position + len(data))
+        for position, data in _patch_windows(files, patch, ranges.values()):
+            for name, (start, stop) in ranges.items():
+                left, right = max(start, position), min(stop, position + len(data))
                 if left >= right:
                     continue
                 window = memoryview(data)[left - position:right - position]
@@ -250,38 +299,20 @@ def _apply_patch(iso, patch, disc, compare_nico, progress):
                                 file.write(block)
                 else:
                     file.write(window)
-            percent = (position + len(data)) * 100 // ISO_SIZE
+            percent = min(99, (position + len(data)) * 100 // ISO_SIZE)
             if percent >= last_progress + 10:
                 progress(tr("Aplicando tradução brasileira… {percent}%").format(percent=percent))
                 last_progress = percent
-    for name, (_, size, digest) in REPLACEMENTS.items():
+    for name, digest in REPLACEMENTS.items():
         path = disc / name
-        if path.stat().st_size != size or sha256(path) != digest:
+        if path.stat().st_size != ISO_EXTENTS[name][1] or sha256(path) != digest:
             raise _invalid_patch()
+    progress(tr("Aplicando tradução brasileira… {percent}%").format(percent=100))
 
 
-def _verified_iso(source, work):
-    images = list(candidates(source, work, Budget()))
-    if len(images) != 1:
-        raise ImportError_(tr("Esperado exatamente um disco; encontrados {count}.").format(count=len(images)))
-    iso = images[0]
-    if iso.stat().st_size == ISO_SIZE:
-        digest = hashlib.md5(usedforsecurity=False)
-        with iso.open("rb") as image:
-            for block in iter(lambda: image.read(1024 * 1024), b""):
-                digest.update(block)
-        if digest.hexdigest() == ISO_MD5:
-            with DiscImage(iso) as disc:
-                if (disc.sector, disc.skip) == (2048, 0) and all(
-                    disc.find(name) == (sector, size) for name, (sector, size, _) in REPLACEMENTS.items()
-                ):
-                    return iso
-    raise ImportError_(tr("A tradução precisa da ISO original americana SCUS-97472 (MD5 {md5}).").format(md5=ISO_MD5))
-
-
-def prepare_portuguese(source, original_disc, target, progress=lambda _: None):
-    """Create and validate a private translated disc from the original ISO/archives."""
-    source, original_disc, target = Path(source), Path(original_disc), Path(target)
+def prepare_portuguese(original_disc, target, patch_path, progress=lambda _: None):
+    """Create and validate a private translated disc from the imported USA files."""
+    original_disc, target = Path(original_disc), Path(target)
     if original_disc.is_file():
         original_disc = original_disc.parent
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -290,19 +321,17 @@ def prepare_portuguese(source, original_disc, target, progress=lambda _: None):
             return target / BOOT
         if target.exists() or target.is_symlink():
             raise ImportError_(tr("A pasta de destino já existe. Os dados foram preservados."))
+        progress(tr("Verificando a mídia original da campanha…"))
         if validate_disc(original_disc) != USA:
             raise ImportError_(tr("A tradução precisa da edição americana SCUS-97472."))
+        patch = _load_patch(patch_path)
         with tempfile.TemporaryDirectory(prefix=".campaign-ptbr-", dir=target.parent) as temporary:
             work = Path(temporary)
-            progress(tr("Verificando a mídia original da campanha…"))
-            iso = _verified_iso(source, work)
-            progress(tr("Baixando a tradução brasileira de Gledson999…"))
-            patch = _download_patch(work)
             disc = work / "disc"
             shutil.copytree(original_disc, disc,
                             ignore=shutil.ignore_patterns(*REPLACEMENTS, "mc0", "mc1"))
             compare_nico = _clone_nico(original_disc / "NICO.DAT", disc / "NICO.DAT")
-            _apply_patch(iso, patch, disc, compare_nico, progress)
+            _apply_patch(original_disc, patch, disc, compare_nico, progress)
             (disc / MARKER).write_text(MARKER_VALUE + "\n", encoding="ascii")
             os.replace(disc, target)
     return target / BOOT

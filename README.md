@@ -43,9 +43,9 @@ and in the port’s in-game settings menu.** The two settings are independent.
 | Launcher | Open **Settings → Launcher language** (**Configurações → Idioma do launcher**), choose **English** or **Português**, and select **Apply** (**Aplicar**). The launcher also offers **Español** and **日本語**. It initially uses the system language if supported, with English as the fallback. |
 | In-game settings | Choose **Settings → F1 settings language** in the launcher, or **System → Language** in the F1 menu. Choose **English**, **Português**, or **Automatic** to follow the system language. With a controller, press **Select/Back** twice quickly to open the F1 menu. |
 
-On the USA edition (SCUS-97472), select **Settings → Install Brazilian Portuguese** in the desktop launcher. The launcher downloads the translation and applies it locally using your original ISO. The next time you start the game, choose **Automatic**, **English**, or **Português (Brasil)**. To change the selection later, open **F1 → System → Game language** and restart the game. [Gledson999’s text and graphics patch](https://www.retro-jogos.com/ps2-shadow-of-the-colossus/)
+After importing your disc, open **Settings → Campaign language** in the desktop launcher. The USA edition (SCUS-97472) supports English and Brazilian Portuguese when the package includes the Brazilian localization. The launcher applies the included translation offline when you select it and play. [Text and graphics translation by Gledson999 and Mumm-Ra](https://www.retro-jogos.com/ps2-shadow-of-the-colossus/)
 
-The original ISO and imported English disc stay intact. Switching the campaign language reuses the same compiled executable and memory card. Brazilian Portuguese save states are kept in a separate folder. On PAL, choose a campaign language from the game’s original menu.
+The PAL edition (SCES-53326) offers English, French, German, Italian, and Spanish, plus the original game menu. **Automatic** uses the launcher language when the edition supports it and falls back to English. Your choice is saved per edition. The original disc files stay intact, language changes reuse the compiled game, and the memory card is shared. Explicit non-English languages keep separate save states.
 
 ## Campaign validation
 
@@ -362,6 +362,11 @@ and compilation kit. The packaging checks exclude disc images, PS2 executables,
 XFF modules, generated game code, and saves. The Linux workflow runs these tests
 and builds on every push and pull request. Gameplay is validated locally with a
 user-supplied disc. CI runs without game files.
+
+For a build with the optional Brazilian Portuguese campaign, stage the verified
+v1.0 Xdelta at `tools/desktop/assets/campaign/pt-BR.xdelta` before packaging the
+launcher. Both desktop packagers include it as a launcher resource. The launcher
+checks its SHA-256 before applying it to the imported USA disc.
 
 CI also tests OpenGL presentation on virtual 16:9 and ultrawide monitors. It
 checks native resolution, side bars, stretching, filtered pixels, rejection of

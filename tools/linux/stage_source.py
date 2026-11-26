@@ -29,7 +29,7 @@ def stage_source(root, build, output):
             target.parent.mkdir(parents=True, exist_ok=True)
             if source.is_dir():
                 shutil.copytree(source, target,
-                                ignore=shutil.ignore_patterns('__pycache__', '.git', 'out'))
+                                ignore=shutil.ignore_patterns('__pycache__', '.git', 'out', 'pt-BR.xdelta'))
             else:
                 shutil.copy2(source, target, follow_symlinks=True)
 

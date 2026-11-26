@@ -17,8 +17,6 @@ def run(arguments):
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--prepare", action="store_true")
     mode.add_argument("--play", action="store_true")
-    mode.add_argument("--install-pt-br", action="store_true",
-                      help="Prepare the Brazilian Portuguese campaign from the imported USA disc")
     parser.add_argument("--rom", type=Path)
     parser.add_argument("--data-dir", type=Path, default=os.environ.get("SOTC_DATA_DIR"))
     args = parser.parse_args(arguments)
@@ -29,10 +27,6 @@ def run(arguments):
     activate(preferences(library.directory)["language"])
     graphics = Graphics(library)
     try:
-        if args.install_pt_br:
-            library.install_portuguese(args.rom, lambda message: print(message, flush=True))
-            print("Português (Brasil) disponível no jogo.", flush=True)
-            return 0
         if args.prepare:
             def progress(message):
                 fraction = 0.05 + 0.94 * getattr(message, "fraction", 0.0)
