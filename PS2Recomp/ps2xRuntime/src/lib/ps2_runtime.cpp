@@ -424,6 +424,14 @@ namespace
 // as they are (id 0: the frame is in the uploaded texture).
 static Texture2D g_directFrame{};
 
+#if defined(__ANDROID__)
+static bool androidReusesNativeFrame()
+{
+    const char *option = std::getenv("SOTC_REUSE_NATIVE_FRAME");
+    return !option || option[0] != '0';
+}
+#endif
+
 #ifdef PS2X_DESKTOP_VIDEO
 #if !defined(__ANDROID__)
 static GLFWwindow *g_nativeGlContext = nullptr;
@@ -1064,6 +1072,8 @@ bool PS2Runtime::initialize(const char *title)
 #endif
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
 #if defined(__ANDROID__)
+        // Keep the renderer.env reference mode on the traditional CPU path.
+        if (!androidReusesNativeFrame()) setenv("SOTC_SHARED_PRESENT", "0", 1);
         if (!IsWindowReady() || !ps2x::android::initializeRenderer())
         {
             std::cerr << "Could not initialize the Android GLES renderer" << std::endl;
@@ -3247,13 +3257,11 @@ void PS2Runtime::run()
 #if defined(__ANDROID__)
     bool audioPaused = false;
     float audioVolumeBeforePause = 1.0f;
-    const char *reuseOption = std::getenv("SOTC_REUSE_NATIVE_FRAME");
-    const bool reuseNativeFrame = !reuseOption || reuseOption[0] != '0';
-    uint64_t nativeFrameSerial = 0;
+    const bool reuseNativeFrame = androidReusesNativeFrame();
     const bool logAndroidFrames = native_renderer::detail::androidFrameStatsEnabled();
     native_renderer::detail::AndroidFrameStats lastAndroidFrameStats;
     double androidFrameWindowStart = GetTime();
-    uint64_t androidHostFrames = 0, androidUploads = 0, androidReusedFrames = 0;
+    uint64_t androidHostFrames = 0, androidUploads = 0, androidSharedFrames = 0, androidReusedFrames = 0;
 #endif
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
     {
@@ -3375,6 +3383,7 @@ void PS2Runtime::run()
         bool nativeOnScreen = false;
 #if defined(__ANDROID__)
         bool uploadedNativeFrame = false;
+        bool acquiredSharedFrame = false;
 #endif
 #ifdef PS2X_DESKTOP_VIDEO
         if (!interpolationEnabled)
@@ -3409,16 +3418,28 @@ void PS2Runtime::run()
             native_renderer::PresentationFrame frame{};
             const uint64_t lastRevision = nativeRevision;
             const uint64_t readStart = logStats ? native_renderer::nowUs() : 0;
-            const auto frameRead = presentingPair ? native_renderer::FrameRead::Unchanged :
-                native_renderer::readPresentationFrame(frame, nativePixels, nativeRevision);
+            auto frameRead = native_renderer::FrameRead::Unchanged;
+            if (!presentingPair)
+            {
+#if defined(__ANDROID__)
+                if (!reuseNativeFrame)
+                {
+                    // Refresh the upload even when the worker is still on the
+                    // same revision. Keep the real revision for interpolation.
+                    uint64_t readRevision = 0;
+                    frameRead = native_renderer::readFrame(nativePixels, frame.width, frame.height, readRevision);
+                    if (frameRead == native_renderer::FrameRead::Updated)
+                        nativeRevision = readRevision;
+                }
+                else
+#endif
+                    frameRead = native_renderer::readPresentationFrame(frame, nativePixels, nativeRevision);
+            }
             nw = frame.width;
             nh = frame.height;
             cpuFrame = frame.texture == 0;
             const uint64_t readUs = logStats && cpuFrame && frameRead == native_renderer::FrameRead::Updated ?
                 native_renderer::nowUs() - readStart : 0;
-#elif defined(__ANDROID__)
-            uint64_t serial = reuseNativeFrame ? nativeFrameSerial : 0u;
-            const auto frameRead = native_renderer::readFrame(nativePixels, nw, nh, serial);
 #else
             const auto frameRead = native_renderer::readFrame(nativePixels, nw, nh, nativeRevision);
 #endif
@@ -3429,9 +3450,12 @@ void PS2Runtime::run()
                 interpolationPrevious = sharedNative.texture ? viewNativeFrame(sharedNative) : nativeTex;
                 retiredSharedTexture = sharedNative.texture;
                 sharedNative = frame;
+#if defined(__ANDROID__)
+                acquiredSharedFrame = !cpuFrame;
+#endif
                 if (!cpuFrame && logStats)
                     ++displayTiming.shared;
-                if (interpolationEnabled)
+                if (interpolationEnabled && nativeRevision != lastRevision)
                 {
                     const double arrived = GetTime();
                     const double period = arrived - previousNativeArrival;
@@ -3475,9 +3499,6 @@ void PS2Runtime::run()
                         ++nativeFrameUploads;
 #if defined(__ANDROID__)
                         uploadedNativeFrame = true;
-#if !defined(PS2X_DESKTOP_VIDEO)
-                        nativeFrameSerial = serial;
-#endif
 #endif
                     }
                     else
@@ -3501,7 +3522,8 @@ void PS2Runtime::run()
         {
             ++androidHostFrames;
             androidUploads += uploadedNativeFrame;
-            androidReusedFrames += nativeOnScreen && !uploadedNativeFrame;
+            androidSharedFrames += acquiredSharedFrame;
+            androidReusedFrames += nativeOnScreen && !uploadedNativeFrame && !acquiredSharedFrame;
             const double now = GetTime();
             const double window = now - androidFrameWindowStart;
             if (window >= 5.0)
@@ -3513,15 +3535,17 @@ void PS2Runtime::run()
                 };
                 const auto published = stats.published - lastAndroidFrameStats.published;
                 std::fprintf(stderr,
-                             "[android:frame] %.1f s | threaded=%d reuse=%d | host %.1f fps native %.1f fps | uploads %llu reused %llu | "
+                             "[android:frame] %.1f s | threaded=%d reuse=%d | host %.1f fps native %.1f fps | "
+                             "uploads %llu shared %llu reused %llu | "
                              "render %.2f ms readback %.2f ms handoff %.2f ms\n",
                              window, native_renderer::tuning().renderThread, reuseNativeFrame, androidHostFrames / window, published / window,
-                             static_cast<unsigned long long>(androidUploads), static_cast<unsigned long long>(androidReusedFrames),
+                             static_cast<unsigned long long>(androidUploads), static_cast<unsigned long long>(androidSharedFrames),
+                             static_cast<unsigned long long>(androidReusedFrames),
                              averageMs(stats.renderUs - lastAndroidFrameStats.renderUs, stats.rendered - lastAndroidFrameStats.rendered),
                              averageMs(stats.readbackUs - lastAndroidFrameStats.readbackUs, published),
                              averageMs(stats.handoffUs - lastAndroidFrameStats.handoffUs, stats.submitted - lastAndroidFrameStats.submitted));
                 androidFrameWindowStart = now;
-                androidHostFrames = androidUploads = androidReusedFrames = 0;
+                androidHostFrames = androidUploads = androidSharedFrames = androidReusedFrames = 0;
                 lastAndroidFrameStats = stats;
             }
         }

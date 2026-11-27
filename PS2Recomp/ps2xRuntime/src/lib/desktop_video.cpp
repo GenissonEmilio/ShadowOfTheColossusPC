@@ -15,6 +15,7 @@
 #include <EGL/egl.h>
 #include "runtime/ps2_android_runtime.h"
 #include "Kernel/Stubs/MPEG.h"
+extern "C" unsigned int sotcAndroidSurfaceGeneration(void);
 #endif
 
 namespace desktop_video
@@ -39,6 +40,11 @@ namespace
     int frameLimit = 0;
     int refreshRate = 60;
     double nextRefreshCheck = 0.0;
+#if defined(__ANDROID__)
+    EGLSurface swapSurface = EGL_NO_SURFACE;
+    unsigned int swapSurfaceGeneration = 0;
+    int swapInterval = -1;
+#endif
 
     struct BuiltinShader
     {
@@ -251,11 +257,23 @@ void setFullscreen(bool enabled)
 void updatePresentation(bool vsync, bool cap30, bool frameGeneration)
 {
 #if defined(__ANDROID__)
-    static int swapInterval = -1;
+    const EGLSurface surface = eglGetCurrentSurface(EGL_DRAW);
+    const unsigned int generation = sotcAndroidSurfaceGeneration();
     const int wantedInterval = vsync ? 1 : 0;
-    if (swapInterval != wantedInterval && eglGetCurrentDisplay() != EGL_NO_DISPLAY)
+    if (surface == EGL_NO_SURFACE)
     {
-        if (eglSwapInterval(eglGetCurrentDisplay(), wantedInterval)) swapInterval = wantedInterval;
+        swapSurface = EGL_NO_SURFACE;
+        swapInterval = -1;
+    }
+    else if (swapSurface != surface || swapSurfaceGeneration != generation ||
+             swapInterval != wantedInterval || IsWindowResized())
+    {
+        if (eglSwapInterval(eglGetCurrentDisplay(), wantedInterval))
+        {
+            swapSurface = surface;
+            swapSurfaceGeneration = generation;
+            swapInterval = wantedInterval;
+        }
     }
     // Android's raylib backend does not expose monitor enumeration.
     // Querying refresh through a Java UI thread is unnecessary in this loop.
@@ -500,6 +518,10 @@ void shutdown()
     windowResolution = 0;
     restoreFrames = frameLimit = 0;
     nextRefreshCheck = 0.0;
+#if defined(__ANDROID__)
+    swapSurface = EGL_NO_SURFACE;
+    swapInterval = -1;
+#endif
 }
 }
 #endif

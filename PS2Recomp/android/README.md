@@ -304,6 +304,9 @@ For frame timing comparisons, `files/renderer.env` in the app's private storage
 accepts only `SOTC_RENDER_THREAD`, `SOTC_REUSE_NATIVE_FRAME` and
 `SOTC_ANDROID_FRAME_STATS`, each as `0` or `1`. Restart the game process after a
 change. Compare `0/0/1` with `1/1/1` in the same scene and at the same resolution.
-The optional five-second log separates published native frames from host
-presentation, texture uploads, reused frames and readback/handoff time. Normal
-defaults enable parallel rendering and texture reuse, with diagnostics disabled.
+`SOTC_REUSE_NATIVE_FRAME=0` selects CPU readback and uploads the current frame
+on each host query, even when its revision has not changed. With `1`, the host
+uses shared textures when available and otherwise uploads each CPU revision once.
+The optional five-second log reports native publications, host presentation,
+CPU uploads, newly acquired shared frames, reused frames and timing averages.
+Normal defaults enable parallel rendering and texture reuse with diagnostics disabled.
