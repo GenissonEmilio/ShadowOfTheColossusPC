@@ -4003,20 +4003,39 @@ namespace sotc_native
         uint64_t lodWord;
         std::memcpy(&lodWord, rdram + ((instance + 0x250u) & 0x1FFFFF8u), 8);
         uint32_t lod = static_cast<uint32_t>((lodWord >> 40) & 7u);
-        if ((word(header + 0x18u) & 1u) && lod >= word(header + 0x1Cu) && word(header + 0x1Cu) != 0u)
+        const bool lodModel = (word(header + 0x18u) & 1u) != 0u;
+        const bool partCulled = !lodModel && word(header + 0x54u) != 1u;
+        if (lodModel && lod >= word(header + 0x1Cu) && word(header + 0x1Cu) != 0u)
             lod = word(header + 0x1Cu) - 1u;
-        // Quality "Model detail" (SOTC_MODEL_DETAIL): one level finer than
-        // the game's, or always level 0 (the finest; far hills and colossi
-        // lose their blocky outlines). The parts are then tested here, as
-        // the game's results (+0x2c) are for its own level's table.
+        // The 32-byte packet list ends at a packet of size 0.
+        const uint32_t packets = word(header + 0x60u), count = 0x10000u;
+        if (g_palNativeCompare && !palComparisonSpan(packets, 32u))
+            return;
+        const auto partTable = [&](uint32_t level) { return word(header + 0x30u + level * 4u); };
+        // Use a finer level only when the model supplies packets for it.
+        // The part table is optional for models that skip part clipping.
         const uint32_t gameLod = lod;
         if (const int finer = static_cast<int>(native_renderer::tuning().modelDetail + 0.5f); finer > 0 && lod > 0u)
         {
-            lod = finer >= 2 ? 0u : lod - 1u;
-            if (word(header + 0x30u + lod * 4u) == 0u && word(header + 0x30u + gameLod * 4u) != 0u)
-                lod = gameLod; // no part table there: as the game has it
+            const uint32_t finest = finer >= 2 ? 0u : lod - 1u;
+            for (uint32_t k = 0; k < count && lod != finest; ++k)
+            {
+                const uint32_t pk = packets + k * 32u;
+                if ((g_palNativeCompare && !palComparisonSpan(pk, 32u)) || word(pk) == 0u)
+                    break;
+                const uint32_t candidate = word(pk + 4u);
+                if (candidate < finest || candidate >= lod)
+                    continue;
+                if (partCulled)
+                {
+                    const uint32_t table = partTable(candidate);
+                    if (table == 0u || (g_palNativeCompare && !palComparisonSpan(table, 0x30u)))
+                        continue;
+                }
+                lod = candidate;
+            }
         }
-        const uint32_t table = word(header + 0x30u + lod * 4u);
+        const uint32_t table = partTable(lod);
         // modelDisp (0x1097118) tests the parts against the camera only when
         // the model has bit 0 of +0x18 clear and +0x54 != 1; otherwise every
         // packet of the LOD is drawn. The test is made here again rather than
@@ -4025,7 +4044,6 @@ namespace sotc_native
         // manager_sub_01099A08 returns with pc there, the rest of modelDisp
         // runs after), so +0x2c still held another instance's or an earlier
         // frame's result (on-screen parts skipped, off-screen ones drawn).
-        const bool partCulled = (word(header + 0x18u) & 1u) == 0u && word(header + 0x54u) != 1u;
         if (partCulled && (table == 0u || (g_palNativeCompare && !palComparisonSpan(table, 0x30u))))
             return; // modelDisp returns too (bVar4 stays set): nothing drawn
         static std::vector<uint8_t> partVisible;
@@ -4081,13 +4099,9 @@ namespace sotc_native
                 if (word(table + link) != 0xFFFFFFFFu)
                     visit(visit, word(table + link), root, 1);
         }
-        // Its packet list ends at a packet of size 0 (32 bytes each), not at a count.
-        const uint32_t packets = word(header + 0x60u), count = 0x10000u;
         static std::vector<native_renderer::Vertex> vertices;
         static std::vector<Strip> strips;
         static VuPalette palette;
-        if (g_palNativeCompare && !palComparisonSpan(packets, 32u))
-            return;
         const bool hasPalette = (!g_palNativeCompare || g_palNativeSkinCompare) && readPalette(instance, palette);
         const bool fast = native_renderer::tuning().fastHooks;
         uint32_t paletteHandle = 0, paletteLo = 0, paletteHi = 0; // this instance's palette as last sent

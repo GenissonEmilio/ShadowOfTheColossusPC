@@ -205,6 +205,50 @@ namespace {
         check(near(firstX(draws[0]), 32), "a later kick cannot rewrite completed draws");
     }
 
+    void verifyModelDetail(unsigned detail, uint32_t gameLod, std::initializer_list<uint32_t> lods,
+                           unsigned clipTables, uint32_t expectedLod, const char *message, bool partCulled = false) {
+        setup(false, false, false, false);
+        native_renderer::tuning().modelDetail = static_cast<float>(detail);
+        if (partCulled) {
+            put(header + 0x18, 0u);
+            put(header + 0x54, 2u);
+        }
+        put(header + 0x1c, 4u);
+        put(instance + 0x250, static_cast<uint64_t>(gameLod) << 40);
+        constexpr uint32_t clipTable = 0x7000u;
+        put(clipTable + 0x20, 0xffffffffu);
+        put(clipTable + 0x24, 0xffffffffu);
+        for (uint32_t lod = 0; lod < 4; ++lod)
+            if (clipTables & (1u << lod))
+                put(header + 0x30 + lod * 4, clipTable);
+
+        const uint32_t size = sotc_native::word(packets);
+        uint32_t slot = packets;
+        for (const uint32_t lod : lods) {
+            const uint32_t vertices = data + 0x100u * (lod + 1u);
+            std::memcpy(ram.data() + vertices, ram.data() + data, size);
+            put(vertices + 8, 0.25f * (lod + 1u));
+            put(slot, size);
+            put(slot + 4, lod);
+            put(slot + 12, 0xffffffffu);
+            put(slot + 16, vertices);
+            slot += 32;
+        }
+        put(slot, 0u);
+
+        R5900Context ctx{};
+        SET_GPR_U32(&ctx, 4, instance);
+        SET_GPR_U32(&ctx, 5, matrix);
+        sotc_native::modelDispHook(ram.data(), &ctx, nullptr);
+        if (draws.size() != 1) {
+            check(false, message);
+            return;
+        }
+        const auto mesh = meshes.find(draws[0].mesh);
+        const float expectedX = 0.25f * (expectedLod + 1u);
+        check(mesh != meshes.end() && !mesh->second.vertices.empty() && near(mesh->second.vertices[0].x, expectedX), message);
+    }
+
     void verifyAlphaMetadata() {
         setup(true,true,true,true);
         native_renderer::DrawState state;
@@ -305,6 +349,13 @@ int main(){
     verifySharedPaletteAtKick(true, true);
     verifySharedPaletteAtKick(true, false);
     verifySharedPaletteAtKick(false, false);
+    verifyModelDetail(0, 3, {0, 3}, 1u << 3, 3, "original detail keeps the game's level");
+    verifyModelDetail(2, 3, {3, 0}, 1u << 3, 0, "a fine unculled packet does not need a clip table");
+    verifyModelDetail(2, 3, {3, 1, 2}, 1u << 0, 1, "finest skips an empty level and picks the finest supplied packet");
+    verifyModelDetail(1, 3, {1, 3}, (1u << 2) | (1u << 3), 3, "finer keeps visible geometry if the next level is missing");
+    verifyModelDetail(1, 3, {0, 2, 3}, 1u << 3, 2, "finer promotes one level even without a clip table");
+    verifyModelDetail(2, 3, {3}, 1u << 0, 3, "finest keeps the game's level when no finer packet exists");
+    verifyModelDetail(2, 3, {0, 1, 3}, (1u << 1) | (1u << 3), 1, "a culled model needs a clip table for the chosen packet", true);
     verifyAlphaMetadata();
     std::printf("%s: %u checks; %u failures (synthetic skinned/rigid materials, no GPU)\n",failures?"FAIL":"PASS",checks,failures);
     return failures?1:0;
