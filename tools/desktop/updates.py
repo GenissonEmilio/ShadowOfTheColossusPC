@@ -4,6 +4,7 @@ from __future__ import annotations
 import ctypes
 from dataclasses import dataclass
 import hashlib
+from http.client import IncompleteRead
 import json
 import os
 from pathlib import Path
@@ -18,7 +19,7 @@ import tarfile
 import tempfile
 import time
 from urllib.parse import urlsplit
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 import zipfile
 
@@ -30,6 +31,8 @@ RELEASES = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=20"
 MANIFEST = f"https://github.com/{REPOSITORY}/releases/latest/download/update-manifest.json"
 MANIFEST_HOSTS = ("github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com")
 MAX_DOWNLOAD = 3 * 1024**3
+DOWNLOAD_ATTEMPTS = 3
+DOWNLOAD_BLOCK = 1024 * 1024
 MAX_EXPANDED = 8 * 1024**3
 MAX_METADATA = 2 * 1024**2
 STARTUP_MARKER = "launcher-ready"
@@ -176,19 +179,69 @@ def check_for_update(current):
 
 
 def download(update, destination, progress):
-    request = Request(update.url, headers={"User-Agent": NAME})
+    context = https_context()
     digest = hashlib.sha256()
-    total = 0
-    with urlopen(request, timeout=20, context=https_context()) as response, destination.open("xb") as output:
-        if urlsplit(response.geturl()).scheme != "https":
-            raise ValueError("The release download must use HTTPS")
-        while block := response.read(1024 * 1024):
-            total += len(block)
-            if total > update.size:
-                raise ValueError("The release download is larger than expected")
-            digest.update(block)
-            output.write(block)
-            progress(total / update.size)
+    total = reported = 0
+    allow_range = True
+    with destination.open("xb") as output:
+        for attempt in range(DOWNLOAD_ATTEMPTS):
+            last_attempt = attempt + 1 == DOWNLOAD_ATTEMPTS
+            offset = total if allow_range and total < update.size else 0
+            headers = {"User-Agent": NAME, "Accept-Encoding": "identity"}
+            if offset:
+                headers["Range"] = f"bytes={offset}-"
+            request = Request(update.url, headers=headers)
+            try:
+                with urlopen(request, timeout=20, context=context) as response:
+                    if urlsplit(response.geturl()).scheme != "https":
+                        raise ValueError("The release download must use HTTPS")
+                    if response.headers.get("Content-Encoding", "identity").lower() != "identity":
+                        raise ValueError("Unexpected encoding in the release download")
+                    if response.status == 206:
+                        expected_range = f"bytes {offset}-{update.size - 1}/{update.size}"
+                        if not offset or response.headers.get("Content-Range") != expected_range:
+                            if not offset or last_attempt:
+                                raise ValueError("Invalid Content-Range in the release download")
+                            allow_range = False
+                            continue
+                    elif response.status == 200:
+                        if total:
+                            # A server may ignore Range and send the entire asset.
+                            output.seek(0)
+                            output.truncate()
+                            digest = hashlib.sha256()
+                            total = reported = 0
+                            progress(0)
+                        allow_range = True
+                    else:
+                        raise ValueError(f"Unexpected HTTP status in the release download: {response.status}")
+
+                    # read1 keeps bytes already received if the following read times out.
+                    while block := response.read1(DOWNLOAD_BLOCK):
+                        if total + len(block) > update.size:
+                            raise ValueError("The release download is larger than expected")
+                        output.write(block)
+                        digest.update(block)
+                        total += len(block)
+                        if not reported or total - reported >= DOWNLOAD_BLOCK or total == update.size:
+                            progress(total / update.size)
+                            reported = total
+                if total != update.size:
+                    raise EOFError(f"The release download ended after {total} of {update.size} bytes")
+                break
+            except HTTPError as error:
+                with error:
+                    if last_attempt:
+                        raise
+                    if error.code == 416 and offset:
+                        allow_range = False
+                    elif error.code not in (408, 500, 502, 503, 504):
+                        raise
+            except (ConnectionError, EOFError, IncompleteRead, TimeoutError, URLError, ssl.SSLEOFError) as error:
+                if last_attempt or (isinstance(error, URLError)
+                                    and isinstance(error.reason, ssl.SSLCertVerificationError)):
+                    raise
+            time.sleep(2**attempt)
     if total != update.size or digest.hexdigest() != update.sha256:
         raise ValueError("The release download failed its SHA-256 check")
 
