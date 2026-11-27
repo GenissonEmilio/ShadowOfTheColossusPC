@@ -1,0 +1,30 @@
+{
+  "date": "2026-11-27",
+  "device": {"android_api": 36, "gpu": "Adreno 810", "memory_kib": 7556364},
+  "scope": "Isolated compiler measurements, not complete preparation timings or gameplay FPS.",
+  "execution": "Packaged Bionic ARM64 Clang, app UID through run-as; shell scheduling group, launcher backgrounded. Other foreground workload and thermal conditions were not controlled.",
+  "sample": {"functions": 256, "source_bytes": 3296529, "selection": "Evenly spaced across the sorted generated MANAGER functions, excluding registration and individual sources over 256 KiB."},
+  "compiler": {"target": "aarch64-linux-android28", "optimization": "-O2", "pch": "Same existing full MANAGER PCH for every sample", "flags": "Identical PIC, section, include and runtime macro flags in all variants"},
+  "memory_note": "Peak sum of compiler child RSS, in KiB; shared mappings can be counted more than once. This is not app PSS or a whole-preparation memory bound.",
+  "samples": [
+    {"workers": 2, "batch": 8, "seconds": 78.454, "peak_child_rss_kib": 353144, "object_bytes": 3993192},
+    {"workers": 2, "batch": 32, "seconds": 67.012, "peak_child_rss_kib": 429364, "object_bytes": 3795848},
+    {"workers": 2, "batch": 64, "seconds": 61.403, "peak_child_rss_kib": 488364, "object_bytes": 3761376},
+    {"workers": 2, "batch": 64, "seconds": 54.055, "peak_child_rss_kib": 537416, "object_bytes": 3761376},
+    {"workers": 2, "batch": 32, "seconds": 67.060, "peak_child_rss_kib": 457644, "object_bytes": 3795848},
+    {"workers": 2, "batch": 8, "seconds": 80.161, "peak_child_rss_kib": 344916, "object_bytes": 3993192},
+    {"workers": 4, "batch": 32, "seconds": 54.294, "peak_child_rss_kib": 687276, "object_bytes": 3795848},
+    {"workers": 4, "batch": 64, "seconds": 45.689, "peak_child_rss_kib": 766524, "object_bytes": 3761376},
+    {"workers": 4, "batch": 64, "seconds": 38.349, "peak_child_rss_kib": 787272, "object_bytes": 3761376},
+    {"workers": 4, "batch": 32, "seconds": 44.446, "peak_child_rss_kib": 669324, "object_bytes": 3795848}
+  ],
+  "registration_sample": {
+    "scope": "The exact original phone-generated MANAGER registration map was re-emitted compactly on the host for this isolated benchmark; these files were not used by the ISO-only app preparation.",
+    "equivalence": "All 26,889 mapped PCs, handlers, bounds and holes matched.",
+    "original_source_bytes": 2461984,
+    "compact_source_bytes": 883970,
+    "original": [{"seconds": 1.890, "peak_child_rss_kib": 337080, "object_bytes": 35530464}, {"seconds": 1.809, "peak_child_rss_kib": 337048, "object_bytes": 35530464}],
+    "compact": [{"seconds": 1.403, "peak_child_rss_kib": 168316, "object_bytes": 940376}, {"seconds": 1.378, "peak_child_rss_kib": 168404, "object_bytes": 940376}]
+  },
+  "full_preparation": "Pending on the optimized APK. Frozen batch reuse, projected declarations and comment suppression were not enabled in the isolated throughput samples."
+}

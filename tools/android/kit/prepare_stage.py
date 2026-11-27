@@ -59,6 +59,9 @@ def main(disc, work, stage_number):
                    for name in MODULES[:stage_number]]
         run_helper("build_elf", [stage, disc / BOOT, symbols, "--modules-json", json.dumps(modules)])
         run_helper("gen_config", [stage, boot_config])
+    config_path = stage / "config.toml"
+    config_path.write_text(config_path.read_text().replace(
+        "[general]\n", "[general]\nemit_instruction_comments = false\n", 1))
 
 
 if __name__ == "__main__":

@@ -66,18 +66,23 @@ jobs:
           python3 tools/android/stage_on_device_kit.py \
             --ndk "$ANDROID_NDK_HOME" --runtime-stage "$RUNNER_TEMP/sotc-kit-build/android-kit/stage" \
             --downloads "$RUNNER_TEMP/sotc-kit-downloads" --output "$RUNNER_TEMP/sotc-apk-kit"
-      - name: Input and disc regression tests
+      - name: Input, disc and preparation cache regression tests
         run: |
           mkdir -p /tmp/sotc-java-tests
           javac -encoding UTF-8 -d /tmp/sotc-java-tests \
             PS2Recomp/android/app/src/main/java/com/genisson/sotc/TouchInputState.java \
             PS2Recomp/android/app/src/main/java/com/genisson/sotc/DiscImageImporter.java \
             PS2Recomp/android/app/src/main/java/com/genisson/sotc/DiscRepository.java \
+            PS2Recomp/android/app/src/main/java/com/genisson/sotc/StageObjectCache.java \
+            PS2Recomp/android/app/src/main/java/com/genisson/sotc/PreparationWorkers.java \
             tests/android/TouchInputStateTest.java tests/android/DiscImageImporterTest.java \
-            tests/android/DiscRepositoryTest.java
+            tests/android/DiscRepositoryTest.java tests/android/StageObjectCacheTest.java \
+            tests/android/PreparationWorkersTest.java
           java -cp /tmp/sotc-java-tests com.genisson.sotc.TouchInputStateTest
           java -cp /tmp/sotc-java-tests com.genisson.sotc.DiscImageImporterTest
           java -cp /tmp/sotc-java-tests com.genisson.sotc.DiscRepositoryTest
+          java -cp /tmp/sotc-java-tests com.genisson.sotc.StageObjectCacheTest
+          java -cp /tmp/sotc-java-tests com.genisson.sotc.PreparationWorkersTest
       - name: Compile ARM64 runtime and Android instrumentation without game data
         working-directory: PS2Recomp/android
         run: bash gradlew assembleDebug assembleDebugAndroidTest lintDebug --no-daemon --max-workers=2

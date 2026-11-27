@@ -222,8 +222,9 @@ def stage(args):
     digest = hashlib.sha256()
     for source in sorted((*jni.glob("*.so"), assets / "sotc-ondevice.zip")):
         digest.update(bytes.fromhex(sha256(source)))
-    logic = REPO / "PS2Recomp/android/app/src/main/java/com/genisson/sotc/OnDevicePreparation.java"
-    digest.update(bytes.fromhex(sha256(logic)))
+    logic = REPO / "PS2Recomp/android/app/src/main/java/com/genisson/sotc"
+    for name in ("OnDevicePreparation.java", "StageObjectCache.java", "PreparationWorkers.java"):
+        digest.update(bytes.fromhex(sha256(logic / name)))
     identity.write_bytes((digest.hexdigest() + "\n").encode("ascii"))
 
 

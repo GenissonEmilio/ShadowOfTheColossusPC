@@ -85,6 +85,11 @@ target_link_libraries(ps2x_tests PRIVATE
     ps2_runtime
 )
 
+if(BUILD_TESTING)
+    add_test(NAME compact_codegen COMMAND ps2x_tests --compact-codegen)
+    set_tests_properties(compact_codegen PROPERTIES TIMEOUT 30)
+endif()
+
 # Execute actual compiler output against the real context/register helpers.
 # This narrow runner never starts the graphics/runtime test suites or needs ROMs.
 if(BUILD_TESTING AND UNIX AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")

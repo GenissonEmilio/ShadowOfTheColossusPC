@@ -24,6 +24,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.function.IntConsumer;
 import java.util.zip.ZipInputStream;
@@ -45,15 +46,32 @@ final class OnDevicePreparation {
     };
     private static final long RAM_BYTES = 32L * 1024 * 1024;
     private static final long NICO_BYTES = 2_667_340_678L;
-    private static final int BATCH_SIZE = 8;
+    private static final int BATCH_MEMBERS = 64;
+    private static final int BATCH_BYTES = 512 * 1024;
+    private static final String SHARED_PREFIX = """
+            #include "ps2_runtime_macros.h"
+            """;
+    private static final String FULL_PREFIX = SHARED_PREFIX + """
+            #include <ps2_recompiled_functions.h>
+            #include <ps2_recompiled_stubs.h>
+            #include "ps2_syscalls.h"
+            #include "ps2_stubs.h"
+            """;
+    private static final List<String> COMPILER_OPTIONS = Arrays.asList(
+            "--target=aarch64-linux-android28", "-std=c++20", "-O2", "-fintegrated-cc1", "-fPIC", "-DNDEBUG",
+            "-fno-strict-aliasing", "-ffunction-sections", "-fdata-sections", "-fvisibility=hidden",
+            "-DUSE_SSE2NEON", "-DPLATFORM_ANDROID", "-DPS2_RUNTIME_LOGS=1",
+            "-DPS2X_ENABLE_IOP_RPC_TRACE=0", "-DPS2X_VU1_TRUST_FPU=1");
     private static PublishedRunner checkedRunner;
     private static boolean checkedRunnerValid;
     private final Context context;
     private final Path kit;
     private final Path work;
+    private final Path objectCache;
     private final File nativeDirectory;
     private final File disc;
     private final IntConsumer progress;
+    private String compilerKey;
 
     private record PublishedRunner(Path path, String hash, Object identity, long size, FileTime modified) { }
 
@@ -61,6 +79,10 @@ final class OnDevicePreparation {
         this.context = context.getApplicationContext();
         kit = directory.resolve("kit");
         work = directory.resolve("work");
+        Path productionRoot = context.getFilesDir().toPath().resolve("on-device");
+        // The instrumentation uses a scratch directory and leaves no production objects behind.
+        objectCache = productionRoot.equals(directory.getParent())
+                ? productionRoot.resolve("guest-objects") : directory.resolve("guest-objects");
         nativeDirectory = new File(context.getApplicationInfo().nativeLibraryDir);
         this.disc = disc;
         this.progress = progress;
@@ -258,45 +280,66 @@ final class OnDevicePreparation {
         try (var entries = Files.newDirectoryStream(generated, "*.cpp")) {
             for (Path entry : entries) sources.add(entry);
         }
-        sources.sort(Path::compareTo);
         Path directory = stage.resolve("objects");
         Files.createDirectories(directory);
-        Path header = directory.resolve("prefix.h");
-        if (!Files.isRegularFile(header)) {
-            Path partial = directory.resolve("prefix.h.part");
-            writeText(partial, "#include \"ps2_runtime_macros.h\"\n#include <ps2_recompiled_functions.h>\n"
-                    + "#include <ps2_recompiled_stubs.h>\n#include \"ps2_syscalls.h\"\n#include \"ps2_stubs.h\"\n");
-            Files.move(partial, header, StandardCopyOption.ATOMIC_MOVE);
+        if (compilerKey == null) {
+            compilerKey = StageObjectCache.compilerKey(new File(nativeDirectory, "libSotcClang.so").toPath(),
+                    kit, COMPILER_OPTIONS, SHARED_PREFIX + "\n" + FULL_PREFIX);
         }
+        List<StageObjectCache.PriorBatch> prior = new ArrayList<>();
+        for (int previous = index - 1; previous >= 0; previous--) {
+            prior.addAll(StageObjectCache.readPlan(work.resolve(STAGES[previous]).resolve("batches.plan")));
+        }
+        List<StageObjectCache.Batch> batches = StageObjectCache.plan(sources, generated, compilerKey,
+                prior, BATCH_MEMBERS, BATCH_BYTES, index);
+        StageObjectCache.writePlan(stage.resolve("batches.plan"), batches);
 
-        List<String> flags = Arrays.asList("--target=aarch64-linux-android28", "--sysroot=" + kit.resolve("sysroot"),
-                "-resource-dir=" + kit.resolve("resource"), "-std=c++20", "-O2", "-fPIC", "-DNDEBUG",
-                "-fno-strict-aliasing", "-ffunction-sections", "-fdata-sections", "-fvisibility=hidden",
-                "-DUSE_SSE2NEON", "-DPLATFORM_ANDROID", "-DPS2_RUNTIME_LOGS=1",
-                "-DPS2X_ENABLE_IOP_RPC_TRACE=0", "-DPS2X_VU1_TRUST_FPU=1",
-                "-I" + generated, "-I" + kit.resolve("include"));
-        Path precompiled = directory.resolve("prefix.pch");
-        if (!Files.isRegularFile(precompiled)) {
-            Path partial = directory.resolve("prefix.pch.part");
-            clang(directory, directory.resolve("prefix.log"), flags,
-                    Arrays.asList("-x", "c++-header", header.toString(), "-o", partial.toString()));
-            Files.move(partial, precompiled, StandardCopyOption.ATOMIC_MOVE);
+        List<String> sharedFlags = compilerFlags();
+        List<String> stageFlags = new ArrayList<>(sharedFlags);
+        stageFlags.add(0, "-I" + generated);
+        stageFlags.add("-ffile-prefix-map=" + generated + "=/sotc/generated");
+        // The stage-local registration key already covers the full generated
+        // headers and compiler ABI. Clang also checks the header timestamps.
+        String registerKey = batches.get(batches.size() - 1).key();
+        String fullKey = StageObjectCache.prefixKey(registerKey, kit.resolve(".complete"),
+                generated.resolve(StageObjectCache.FUNCTION_HEADER),
+                generated.resolve(StageObjectCache.STUB_HEADER));
+        Path fullPch = precompile(directory, FULL_PREFIX, stageFlags, fullKey);
+        Path sharedPch = null;
+        if (batches.stream().anyMatch(StageObjectCache.Batch::reusable)) {
+            String sharedKey = StageObjectCache.prefixKey(compilerKey, kit.resolve(".complete"));
+            sharedPch = precompile(work.resolve("guest-prefix"), SHARED_PREFIX, sharedFlags, sharedKey);
         }
-        int batchCount = (sources.size() + BATCH_SIZE - 1) / BATCH_SIZE;
+        int batchCount = batches.size();
         List<Path> objects = new ArrayList<>(batchCount);
-        ExecutorService pool = Executors.newFixedThreadPool(compilerWorkers());
-        var completed = new ExecutorCompletionService<Path>(pool);
+        int workers = compilerWorkers();
+        ExecutorService pool = Executors.newFixedThreadPool(workers);
+        Semaphore compilerSlots = new Semaphore(workers, true);
+        var completed = new ExecutorCompletionService<Boolean>(pool);
+        int hits = 0;
         try {
-            for (int batch = 0; batch < batchCount; ++batch) {
-                int start = batch * BATCH_SIZE;
-                List<Path> group = sources.subList(start, Math.min(start + BATCH_SIZE, sources.size()));
-                String name = String.format(Locale.ROOT, "batch-%05d", batch);
-                Path object = directory.resolve(name + ".o");
+            for (int position = 0; position < batchCount; position++) {
+                StageObjectCache.Batch batch = batches.get(position);
+                String name = String.format(Locale.ROOT, "batch-%05d", position);
+                Path bucket = batch.reusable() ? objectCache.resolve(batch.key().substring(0, 2)) : directory;
+                Path object = bucket.resolve(batch.key() + ".o");
                 objects.add(object);
-                completed.submit(() -> compileBatch(directory, name, object, group, precompiled, flags));
+                Path pch = batch.reusable() ? sharedPch : fullPch;
+                List<String> flags = batch.reusable() ? sharedFlags : stageFlags;
+                // Registration and unusually large functions can consume all
+                // available compiler memory. Run each in isolation.
+                int slots = batch.bytes() > BATCH_BYTES ? workers : 1;
+                completed.submit(() -> {
+                    compilerSlots.acquire(slots);
+                    try {
+                        return compileBatch(directory, name, object, batch, pch, flags, generated);
+                    } finally {
+                        compilerSlots.release(slots);
+                    }
+                });
             }
             for (int count = 1; count <= batchCount; ++count) {
-                completed.take().get();
+                if (completed.take().get()) hits++;
                 progress.accept(index * 25 + 4 + 18 * count / batchCount);
             }
         } catch (ExecutionException error) {
@@ -304,32 +347,87 @@ final class OnDevicePreparation {
             if (reason instanceof IOException ioException) throw ioException;
             throw new IOException("Compiler worker failed", reason);
         } finally {
-            pool.shutdownNow();
-            pool.awaitTermination(10, TimeUnit.SECONDS);
+            PreparationWorkers.stop(pool);
         }
+        writeText(stage.resolve("compile.log"), "Batches: " + batchCount + ", compiled: " + (batchCount - hits)
+                + ", reused: " + hits + ", workers: " + workers + "\n");
         return objects;
+    }
+
+    private List<String> compilerFlags() {
+        List<String> flags = new ArrayList<>(COMPILER_OPTIONS);
+        flags.add("--sysroot=" + kit.resolve("sysroot"));
+        flags.add("-resource-dir=" + kit.resolve("resource"));
+        flags.add("-I" + kit.resolve("include"));
+        flags.add("-ffile-prefix-map=" + kit + "=/sotc/kit");
+        return flags;
+    }
+
+    private Path precompile(Path directory, String prefix, List<String> flags, String key)
+            throws IOException, InterruptedException {
+        Files.createDirectories(directory);
+        Path header = directory.resolve("prefix-" + key + ".h");
+        Path pch = directory.resolve("prefix-" + key + ".pch");
+        byte[] definition = prefix.getBytes(StandardCharsets.UTF_8);
+        if (!Files.isRegularFile(header) || !Arrays.equals(Files.readAllBytes(header), definition)) {
+            // Interrupted writes never leave a prefix whose content and PCH disagree.
+            Files.deleteIfExists(pch);
+            Path pending = directory.resolve("prefix.h.part");
+            Files.write(pending, definition);
+            Files.move(pending, header, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        }
+        if (!StageObjectCache.hasArtifact(pch)) {
+            Path partial = Files.createTempFile(directory, ".prefix-", ".pch.part");
+            try {
+                clang(directory, directory.resolve("prefix.log"), flags,
+                        Arrays.asList("-x", "c++-header", header.toString(), "-o", partial.toString()));
+                StageObjectCache.publishArtifact(partial, pch);
+            } finally {
+                Files.deleteIfExists(partial);
+            }
+        }
+        return pch;
     }
 
     private int compilerWorkers() {
         ActivityManager manager = context.getSystemService(ActivityManager.class);
-        if (manager == null || Runtime.getRuntime().availableProcessors() < 2) return 1;
+        int cores = Runtime.getRuntime().availableProcessors();
+        if (manager == null || cores < 2) return 1;
         ActivityManager.MemoryInfo memory = new ActivityManager.MemoryInfo();
         manager.getMemoryInfo(memory);
-        return !memory.lowMemory && memory.totalMem >= 6L * 1024 * 1024 * 1024
-                && memory.availMem >= 1536L * 1024 * 1024 ? 2 : 1;
+        long gibibyte = 1024L * 1024 * 1024;
+        if (memory.lowMemory || memory.availMem < gibibyte) return 1;
+        return cores >= 6 && memory.totalMem >= 6 * gibibyte && memory.availMem >= 2 * gibibyte ? 4 : 2;
     }
 
-    private Path compileBatch(Path directory, String name, Path object, List<Path> sources,
-                              Path pch, List<String> flags) throws IOException, InterruptedException {
-        if (Files.isRegularFile(object)) return object;
+    private boolean compileBatch(Path directory, String name, Path object, StageObjectCache.Batch batch,
+                                 Path pch, List<String> flags, Path generated)
+            throws IOException, InterruptedException {
+        if (StageObjectCache.hasArtifact(object)) return true;
+        Files.createDirectories(object.getParent());
         Path source = directory.resolve(name + ".cpp");
         StringBuilder contents = new StringBuilder();
-        for (Path file : sources) contents.append("#include \"").append(file).append("\"\n");
+        for (Path file : batch.sources()) contents.append("#include \"").append(file).append("\"\n");
         writeText(source, contents.toString());
-        Path partial = directory.resolve(name + ".o.part");
-        clang(directory, directory.resolve(name + ".log"), flags,
-                Arrays.asList("-include-pch", pch.toString(), "-c", source.toString(), "-o", partial.toString()));
-        return Files.move(partial, object, StandardCopyOption.ATOMIC_MOVE);
+        List<String> localFlags = new ArrayList<>(flags);
+        localFlags.add("-ffile-prefix-map=" + directory + "=/sotc/objects");
+        if (batch.reusable()) {
+            Path declarations = directory.resolve(name + "-headers");
+            Files.createDirectories(declarations);
+            writeText(declarations.resolve(StageObjectCache.FUNCTION_HEADER), batch.functions());
+            writeText(declarations.resolve(StageObjectCache.STUB_HEADER), batch.stubs());
+            localFlags.add(0, "-I" + declarations);
+            localFlags.add("-ffile-prefix-map=" + generated + "=/sotc/generated");
+        }
+        Path partial = Files.createTempFile(directory, name + "-", ".o.part");
+        try {
+            clang(directory, directory.resolve(name + ".log"), localFlags,
+                    Arrays.asList("-include-pch", pch.toString(), "-c", source.toString(), "-o", partial.toString()));
+            StageObjectCache.publishArtifact(partial, object);
+        } finally {
+            Files.deleteIfExists(partial);
+        }
+        return false;
     }
 
     private void clang(Path directory, Path log, List<String> flags, List<String> task)
@@ -419,7 +517,7 @@ final class OnDevicePreparation {
             if (!process.waitFor(seconds, TimeUnit.SECONDS)) throw new IOException("Timed out. See " + log);
             if (process.exitValue() != 0) throw new IOException("Exited " + process.exitValue() + ". See " + log);
         } finally {
-            if (process.isAlive()) process.destroyForcibly();
+            PreparationWorkers.stop(process);
         }
     }
 

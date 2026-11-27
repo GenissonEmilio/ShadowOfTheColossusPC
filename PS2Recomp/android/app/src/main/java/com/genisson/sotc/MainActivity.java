@@ -45,6 +45,7 @@ public final class MainActivity extends Activity {
     private final ReentrantLock discCommit = new ReentrantLock();
     private DiscRepository.Verification verifiedDisc = DiscRepository.Verification.MISSING;
     private FutureTask<Void> diskTask;
+    private PreparationService.Session preparation;
     private volatile int diskTaskId;
     private boolean recoverOnVerify = true;
     private DiskStatus diskMessage;
@@ -246,6 +247,11 @@ public final class MainActivity extends Activity {
                         new DiskStatus(R.string.launcher_disc_access_failed));
             }
         }, null);
+        if (importing && canPrepare) {
+            preparation = PreparationService.begin(this, progress.text(localized), () -> {
+                if (!isDestroyed() && diskTaskId == id) cancelImport();
+            });
+        }
         DISK_WORKER.execute(diskTask);
         refresh();
     }
@@ -268,8 +274,14 @@ public final class MainActivity extends Activity {
             }
             DISK_WORKER.remove(diskTask);
             diskTask = null;
+            stopPreparationService();
             getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         }
+    }
+
+    private void stopPreparationService() {
+        PreparationService.finish(preparation);
+        preparation = null;
     }
 
     private void verifyActiveDisc() {
@@ -321,10 +333,15 @@ public final class MainActivity extends Activity {
     }
 
     private void publishDiskProgress(int id, DiskStatus progress) {
+        publishDiskProgress(id, progress, -1);
+    }
+
+    private void publishDiskProgress(int id, DiskStatus progress, int percent) {
         runOnUiThread(() -> {
             if (isDestroyed() || diskTaskId != id || diskTask == null) return;
             diskProgress = progress;
             showStatus(progress);
+            PreparationService.update(preparation, progress.text(localized), percent);
         });
     }
 
@@ -333,6 +350,7 @@ public final class MainActivity extends Activity {
         runOnUiThread(() -> {
             if (isDestroyed() || diskTaskId != id) return;
             diskTask = null;
+            stopPreparationService();
             getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             importing = false;
             verifiedDisc = result;
@@ -432,7 +450,7 @@ public final class MainActivity extends Activity {
             if (gameRunning()) throw new DiskFailure(R.string.launcher_disc_running);
             publishDiskProgress(id, new DiskStatus(R.string.launcher_prepare_starting));
             File runner = OnDevicePreparation.prepare(this, directory, percent ->
-                    publishDiskProgress(id, new DiskStatus(R.string.launcher_prepare_percent, percent)));
+                    publishDiskProgress(id, new DiskStatus(R.string.launcher_prepare_percent, percent), percent));
             if (runner == null) return new DiskStatus(R.string.launcher_prepare_failed);
             return new DiskStatus(R.string.launcher_prepare_ready);
         } catch (DiskFailure error) {
