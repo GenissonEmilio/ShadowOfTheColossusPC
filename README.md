@@ -13,23 +13,30 @@ OpenGL ES 3.0. It includes a mobile launcher, customizable touch controls, a
 swipe camera, and **Adaptive fullscreen**, which shows more of the scene at
 the sides while preserving the vertical framing and interface proportions.
 
-Download the Android ARM64 APK from the same release as the Linux and Windows
-packages. After installing it, use your own **SCUS-97472** disc image to prepare
-a game bundle on your computer, then import the bundle and the ISO on Android.
-Use the Android source release linked in the download notes to build your bundle.
-[Latest downloads](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases/latest)
-· [Android setup guide](PS2Recomp/android/README.md)
+With an ARM64 APK that includes the preparation kit, install the app and select
+**Import ISO** with your own North American **SCUS-97472** disc image. Keep the
+launcher open during the first build, which can take a while. Select **Play**
+when preparation finishes. Later launches can reuse the prepared game offline.
+[Android setup guide](PS2Recomp/android/README.md#playing-on-android)
+
+Tap **Map** for the original PS2 Start action and **Menu** for the port settings
+available through F1 on desktop. The Android launcher and port menu offer
+**Português**, **English**, **日本語**, and **Español**. These interface settings
+leave the campaign language as provided by the disc.
+[Android controls and options](PS2Recomp/android/README.md#controls)
 
 ![Opening shrine in adaptive fullscreen on Android with touch controls](docs/android-widescreen.png)
 
 ## How it works
 
-The disc’s MIPS executable and the KERNEL, MANAGER, and GAMECORE modules are
-translated to C++ and compiled on your computer for x86_64 on desktop or
-ARM64 on Android. The port reads models,
-textures, animations, and audio from your disc and runs without PCSX2 or a BIOS.
-The runtime implements the PS2 services the game uses. Manual decompilation
-continues upstream in Celosia.
+The recompiler translates the disc’s MIPS executable and the KERNEL, MANAGER,
+and GAMECORE modules to C++. Desktop builds compile that code for x86_64 on
+your computer. On Android, the APK with the preparation kit compiles the
+SCUS-97472 code for ARM64 on the phone and caches the resulting runner.
+
+The port reads models, textures, animations, and audio from your disc and runs
+without PCSX2 or a BIOS. The runtime implements the PS2 services the game uses.
+Manual decompilation continues upstream in Celosia.
 
 **No ROM, BIOS, or generated game code is distributed.**
 

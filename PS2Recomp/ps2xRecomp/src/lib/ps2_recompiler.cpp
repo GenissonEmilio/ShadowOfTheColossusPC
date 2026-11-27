@@ -1040,7 +1040,7 @@ namespace ps2recomp
             }
             m_codeGenerator->setBootstrapInfo(m_bootstrapInfo);
             m_codeGenerator->setConfiguredJumpTables(m_config.jumpTables);
-            m_codeGenerator->setEmitInstructionComments(true);
+            m_codeGenerator->setEmitInstructionComments(m_config.emitInstructionComments);
 
             fs::create_directories(m_config.outputPath);
 

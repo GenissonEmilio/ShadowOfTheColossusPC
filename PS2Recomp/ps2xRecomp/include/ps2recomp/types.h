@@ -182,6 +182,7 @@ namespace ps2recomp
         // game's own dynamic linker at run time (one hex address per line).
         std::string dynamicImmediatesPath;
         bool singleFileOutput = false;
+        bool emitInstructionComments = true;
         bool lowMemoryMode = false;
         uint32_t outputWorkerThreads = 0;
         bool patchSyscalls = false;

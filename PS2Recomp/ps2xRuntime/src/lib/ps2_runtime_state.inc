@@ -3,6 +3,9 @@
 #include "runtime/state_manager.h"
 #include "runtime/host_state.h"
 #include "Kernel/Syscalls/HostState.h"
+#if defined(__ANDROID__)
+#include "runtime/android_state_identity.h"
+#endif
 #include <array>
 #include <cerrno>
 #if defined(__linux__)
@@ -189,9 +192,17 @@ bool PS2Runtime::restoreMachineState(const std::vector<uint8_t> &blob,std::strin
 
 namespace {
     constexpr uint64_t kStateFileMagic=0x31545343544f5355ull;
+#if defined(__ANDROID__)
+    constexpr uint32_t kStateFileVersion=2; // includes the complete ELF GNU build ID
+    bool stateGameIdentity(uint32_t &game, std::string &error) {
+        if (computeFileCrc32(PS2Runtime::getIoPaths().elfPath,game)) return true;
+        error="Cannot identify the game disc.";
+        return false;
+    }
+#else
     constexpr uint32_t kStateFileVersion=1;
     bool stateCoreIdentity(uint32_t &core,uint64_t &coreBytes,uint32_t &game,std::string &error) {
-#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+#if defined(_WIN32) || defined(__linux__)
         static uint32_t cachedCore=0; static uint64_t cachedSize=0;
         if (!cachedSize) {
 #if defined(_WIN32)
@@ -206,11 +217,12 @@ namespace {
         if (!computeFileCrc32(PS2Runtime::getIoPaths().elfPath,game)) { error="Cannot identify the game disc."; return false; }
         return true;
 #else
-        error="Save states are currently supported on native Linux."; return false;
+        error="Save states are unavailable on this platform."; return false;
 #endif
     }
+#endif
     bool atomicStateFile(const std::filesystem::path &path,const std::vector<uint8_t> &bytes,std::string &error) {
-#if defined(__linux__) && !defined(__ANDROID__)
+#if defined(__linux__)
         std::error_code ec; std::filesystem::create_directories(path.parent_path(),ec);
         if (ec) { error="Cannot create the save-state folder: "+ec.message(); return false; }
         static uint64_t sequence=0;
@@ -238,7 +250,7 @@ namespace {
 #elif defined(_WIN32)
         return ps2state::windows_file::writeAtomic(path,bytes,error);
 #else
-        error="Save states are currently supported on native Linux."; return false;
+        error="Save states are unavailable on this platform."; return false;
 #endif
     }
     bool readStateFile(const std::filesystem::path &path,std::vector<uint8_t> &payload,std::string &error) {
@@ -248,14 +260,29 @@ namespace {
         std::ifstream input(path,std::ios::binary); std::vector<uint8_t> data(static_cast<size_t>(size));
         if (!input.read(reinterpret_cast<char *>(data.data()),data.size())) { error="Cannot read the save state."; return false; }
         ps2state::Reader r(data,error,ps2state::DefaultLimit+4096);
-        uint64_t magic=0,coreBytes=0; uint32_t version=0,endian=0,context=0,core=0,game=0,crc=0; uint64_t stamp=0;
-        r.pod(magic); r.pod(version); r.pod(endian); r.pod(context); r.pod(core); r.pod(coreBytes); r.pod(game); r.pod(stamp); r.pod(crc); r.vector(payload);
-        if (!r.finish() || magic!=kStateFileMagic || version!=kStateFileVersion || endian!=0x12345678 || context!=sizeof(R5900Context))
+        uint64_t magic=0,stamp=0; uint32_t version=0,endian=0,context=0,game=0,crc=0;
+        r.pod(magic); r.pod(version); r.pod(endian); r.pod(context);
+        if (!r.good() || magic!=kStateFileMagic || version!=kStateFileVersion || endian!=0x12345678 || context!=sizeof(R5900Context))
+        { error="Unsupported or damaged save-state format."; return false; }
+#if defined(__ANDROID__)
+        if (!ps2state::android::verifyBuildId(r,ps2x::android::runnerBuildId())) return false;
+#else
+        uint32_t core=0; uint64_t coreBytes=0;
+        r.pod(core); r.pod(coreBytes);
+#endif
+        r.pod(game); r.pod(stamp); r.pod(crc); r.vector(payload);
+        if (!r.finish())
         { error="Unsupported or damaged save-state format."; return false; }
         if (savestates::checksum(payload)!=crc) { error="Save-state checksum failed. No game data was changed."; return false; }
+#if defined(__ANDROID__)
+        uint32_t currentGame=0;
+        if (!stateGameIdentity(currentGame,error)) return false;
+        if (game!=currentGame)
+#else
         uint32_t currentCore=0,currentGame=0; uint64_t currentSize=0;
         if (!stateCoreIdentity(currentCore,currentSize,currentGame,error)) return false;
         if (core!=currentCore || coreBytes!=currentSize || game!=currentGame)
+#endif
         { error="Este estado pertence a outra versão do runtime ou do disco. Use o save normal do jogo."; return false; }
         return true;
     }
@@ -277,14 +304,29 @@ void PS2Runtime::processStateRequest()
         std::vector<uint8_t> payload;
         if (action==savestates::Action::Save) {
             if (!captureMachineState(payload,error) || !validateMachineState(payload,error)) { savestates::complete("Não foi possível salvar: "+error); return; }
-            uint32_t core=0,game=0; uint64_t coreBytes=0;
+            uint32_t game=0;
+#if defined(__ANDROID__)
+            if (!stateGameIdentity(game,error)) { savestates::complete(error); return; }
+#else
+            uint32_t core=0; uint64_t coreBytes=0;
             if (!stateCoreIdentity(core,coreBytes,game,error)) { savestates::complete(error); return; }
+#endif
             std::vector<uint8_t> file;
             ps2state::Writer w(file,error,ps2state::DefaultLimit+4096);
             w.pod(kStateFileMagic); w.pod(kStateFileVersion); w.pod(uint32_t{0x12345678}); w.pod(uint32_t(sizeof(R5900Context)));
-            w.pod(core); w.pod(coreBytes); w.pod(game); w.pod(uint64_t(std::time(nullptr))); w.pod(savestates::checksum(payload)); w.vector(payload);
+#if defined(__ANDROID__)
+            ps2state::android::writeBuildId(w,ps2x::android::runnerBuildId());
+#else
+            w.pod(core); w.pod(coreBytes);
+#endif
+            w.pod(game); w.pod(uint64_t(std::time(nullptr))); w.pod(savestates::checksum(payload)); w.vector(payload);
             if (!w.finish() || !atomicStateFile(path,file,error)) { savestates::complete("Não foi possível salvar: "+error); return; }
-            savestates::complete(!error.empty()?error:slot==0?"Estado rápido salvo — F8 carrega.":"Estado salvo no slot "+std::to_string(slot)+".");
+#if defined(__ANDROID__)
+            const char *quickSaved = "Estado rápido salvo.";
+#else
+            const char *quickSaved = "Estado rápido salvo — F8 carrega.";
+#endif
+            savestates::complete(!error.empty()?error:slot==0?quickSaved:"Estado salvo no slot "+std::to_string(slot)+".");
         } else {
             if (!readStateFile(path,payload,error) || !validateMachineState(payload,error)) { savestates::complete("Não foi possível carregar: "+error); return; }
             // A failed restore must not leave a half-restored running machine.

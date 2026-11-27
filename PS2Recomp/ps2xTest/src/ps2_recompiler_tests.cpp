@@ -1,3 +1,4 @@
+#include "GeneratedRegistration.h"
 #include "MiniTest.h"
 #include "ps2recomp/ps2_recompiler.h"
 #include "ps2recomp/config_manager.h"
@@ -744,8 +745,151 @@ static bool writeRecompilerTestConfig(const std::filesystem::path &configPath,
     return static_cast<bool>(config);
 }
 
+void register_compact_recompiler_tests()
+{
+    MiniTest::Case("CompactRecompiler", [](TestCase &tc) {
+        tc.Run("config manager parses jump_tables table entries", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path configPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-jump-table-" + uniqueSuffix + ".toml");
+
+            std::ofstream configFile(configPath);
+            t.IsTrue(static_cast<bool>(configFile), "temp config file should be writable");
+            if (!configFile)
+            {
+                return;
+            }
+
+            configFile << "[general]\n";
+            configFile << "input = \"dummy.elf\"\n";
+            configFile << "output = \"out\"\n\n";
+            configFile << "[jump_tables]\n";
+            configFile << "[[jump_tables.table]]\n";
+            configFile << "address = \"0x200000\"\n";
+            configFile << "base_register = 9\n";
+            configFile << "entries = [\n";
+            configFile << "  { index = 0, target = \"0x1620\" },\n";
+            configFile << "  { index = 1, target = \"0x1630\" },\n";
+            configFile << "]\n";
+            configFile.close();
+
+            ConfigManager manager(configPath.string());
+            RecompilerConfig config = manager.loadConfig();
+
+            t.IsTrue(config.emitInstructionComments, "instruction comments remain enabled by default");
+            t.Equals(config.jumpTables.size(), static_cast<size_t>(1),
+                     "one configured jump table should be loaded");
+            if (!config.jumpTables.empty())
+            {
+                const JumpTable &table = config.jumpTables.front();
+                t.Equals(table.address, 0x200000u, "table address should parse from hex string");
+                t.Equals(table.baseRegister, 9u, "base register should parse");
+                t.Equals(table.entries.size(), static_cast<size_t>(2),
+                         "two jump table entries should parse");
+                if (table.entries.size() >= 2)
+                {
+                    t.Equals(table.entries[0].index, 0u, "first entry index should parse");
+                    t.Equals(table.entries[0].target, 0x1620u, "first entry target should parse");
+                    t.Equals(table.entries[1].index, 1u, "second entry index should parse");
+                    t.Equals(table.entries[1].target, 0x1630u, "second entry target should parse");
+                }
+            }
+
+            std::error_code removeError;
+            std::filesystem::remove(configPath, removeError);
+        });
+
+        tc.Run("config manager loads modern and legacy guest entry hints", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path configPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-entry-hints-" + uniqueSuffix + ".toml");
+
+            std::ofstream configFile(configPath);
+            t.IsTrue(static_cast<bool>(configFile), "temp config file should be writable");
+            if (!configFile)
+            {
+                return;
+            }
+
+            configFile << "[general]\n";
+            configFile << "input = \"dummy.elf\"\n";
+            configFile << "output = \"out\"\n";
+            configFile << "emit_instruction_comments = false\n";
+            configFile << "entry_points = [\"callback@0x7008\"]\n";
+            configFile << "untracked_stubs = [\"legacy_callback@0x7018\"]\n";
+            configFile.close();
+
+            ConfigManager manager(configPath.string());
+            const RecompilerConfig config = manager.loadConfig();
+
+            t.IsTrue(!config.emitInstructionComments, "instruction comments can be disabled");
+            manager.saveConfig(config);
+            t.IsTrue(!manager.loadConfig().emitInstructionComments, "saving config retains the comment option");
+            t.Equals(config.entryPointHints.size(), static_cast<size_t>(2),
+                     "modern and legacy entry metadata should be merged");
+            t.IsTrue(std::find(config.entryPointHints.begin(), config.entryPointHints.end(),
+                               "callback@0x7008") != config.entryPointHints.end(),
+                     "modern entry_points metadata should load");
+            t.IsTrue(std::find(config.entryPointHints.begin(), config.entryPointHints.end(),
+                               "legacy_callback@0x7018") != config.entryPointHints.end(),
+                     "legacy untracked_stubs metadata should remain compatible");
+
+            std::error_code removeError;
+            std::filesystem::remove(configPath, removeError);
+        });
+
+        tc.Run("configured entry hint synthesizes an omitted standalone function", [](TestCase &t) {
+            const std::string uniqueSuffix =
+                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+            const std::filesystem::path tempRoot =
+                std::filesystem::temp_directory_path() / ("ps2recomp-entry-synthesis-" + uniqueSuffix);
+            const std::filesystem::path elfPath = tempRoot / "entry-hint.elf";
+            const std::filesystem::path configPath = tempRoot / "entry-hint.toml";
+            const std::filesystem::path outputPath = tempRoot / "output";
+            std::filesystem::create_directories(tempRoot);
+
+            const bool elfWritten = writeMinimalMipsElfWithUnmappedEntryHint(elfPath);
+            const bool configWritten = writeRecompilerTestConfig(
+                configPath,
+                elfPath,
+                outputPath,
+                {},
+                {"InitAlarm@0x00100008"},
+                {"omitted_callback@0x00100010"});
+            t.IsTrue(elfWritten && configWritten,
+                     "standalone entry regression inputs should be generated");
+
+            if (elfWritten && configWritten)
+            {
+                PS2Recompiler recompiler(configPath.string());
+                t.IsTrue(recompiler.initialize(),
+                         "standalone entry regression config should initialize");
+                t.IsTrue(recompiler.recompile(),
+                         "configured executable entry should be decoded even without a symbol");
+                recompiler.generateOutput();
+
+                const std::filesystem::path registrationPath = outputPath / "register_functions.cpp";
+                std::ifstream registrationFile(registrationPath);
+                const std::string registration{
+                    std::istreambuf_iterator<char>(registrationFile),
+                    std::istreambuf_iterator<char>()};
+                t.IsTrue(ps2recomp_tests::registeredFunctions(registration).contains(0x100010u),
+                         "synthesized entry address should be registered for guest dispatch");
+                t.IsTrue(recompiler.reportCounters().additionalEntryPoints >= 1u,
+                         "synthesized entry should be visible in the report");
+            }
+
+            std::error_code removeError;
+            std::filesystem::remove_all(tempRoot, removeError);
+        });
+    });
+}
+
 void register_ps2_recompiler_tests()
 {
+    register_compact_recompiler_tests();
     MiniTest::Case("PS2Recompiler", [](TestCase &tc)
                    {
         tc.Run("game helpers are not classified as runtime stubs", [](TestCase &t) {
@@ -1278,138 +1422,6 @@ void register_ps2_recompiler_tests()
                              "entry slice should start at 0x10A0");
                 }
             }
-        });
-
-        tc.Run("config manager parses jump_tables table entries", [](TestCase &t) {
-            const auto uniqueSuffix = std::to_string(
-                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
-            const std::filesystem::path configPath =
-                std::filesystem::temp_directory_path() / ("ps2recomp-jump-table-" + uniqueSuffix + ".toml");
-
-            std::ofstream configFile(configPath);
-            t.IsTrue(static_cast<bool>(configFile), "temp config file should be writable");
-            if (!configFile)
-            {
-                return;
-            }
-
-            configFile << "[general]\n";
-            configFile << "input = \"dummy.elf\"\n";
-            configFile << "output = \"out\"\n\n";
-            configFile << "[jump_tables]\n";
-            configFile << "[[jump_tables.table]]\n";
-            configFile << "address = \"0x200000\"\n";
-            configFile << "base_register = 9\n";
-            configFile << "entries = [\n";
-            configFile << "  { index = 0, target = \"0x1620\" },\n";
-            configFile << "  { index = 1, target = \"0x1630\" },\n";
-            configFile << "]\n";
-            configFile.close();
-
-            ConfigManager manager(configPath.string());
-            RecompilerConfig config = manager.loadConfig();
-
-            t.Equals(config.jumpTables.size(), static_cast<size_t>(1),
-                     "one configured jump table should be loaded");
-            if (!config.jumpTables.empty())
-            {
-                const JumpTable &table = config.jumpTables.front();
-                t.Equals(table.address, 0x200000u, "table address should parse from hex string");
-                t.Equals(table.baseRegister, 9u, "base register should parse");
-                t.Equals(table.entries.size(), static_cast<size_t>(2),
-                         "two jump table entries should parse");
-                if (table.entries.size() >= 2)
-                {
-                    t.Equals(table.entries[0].index, 0u, "first entry index should parse");
-                    t.Equals(table.entries[0].target, 0x1620u, "first entry target should parse");
-                    t.Equals(table.entries[1].index, 1u, "second entry index should parse");
-                    t.Equals(table.entries[1].target, 0x1630u, "second entry target should parse");
-                }
-            }
-
-            std::error_code removeError;
-            std::filesystem::remove(configPath, removeError);
-        });
-
-        tc.Run("config manager loads modern and legacy guest entry hints", [](TestCase &t) {
-            const auto uniqueSuffix = std::to_string(
-                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
-            const std::filesystem::path configPath =
-                std::filesystem::temp_directory_path() / ("ps2recomp-entry-hints-" + uniqueSuffix + ".toml");
-
-            std::ofstream configFile(configPath);
-            t.IsTrue(static_cast<bool>(configFile), "temp config file should be writable");
-            if (!configFile)
-            {
-                return;
-            }
-
-            configFile << "[general]\n";
-            configFile << "input = \"dummy.elf\"\n";
-            configFile << "output = \"out\"\n";
-            configFile << "entry_points = [\"callback@0x7008\"]\n";
-            configFile << "untracked_stubs = [\"legacy_callback@0x7018\"]\n";
-            configFile.close();
-
-            ConfigManager manager(configPath.string());
-            const RecompilerConfig config = manager.loadConfig();
-
-            t.Equals(config.entryPointHints.size(), static_cast<size_t>(2),
-                     "modern and legacy entry metadata should be merged");
-            t.IsTrue(std::find(config.entryPointHints.begin(), config.entryPointHints.end(),
-                               "callback@0x7008") != config.entryPointHints.end(),
-                     "modern entry_points metadata should load");
-            t.IsTrue(std::find(config.entryPointHints.begin(), config.entryPointHints.end(),
-                               "legacy_callback@0x7018") != config.entryPointHints.end(),
-                     "legacy untracked_stubs metadata should remain compatible");
-
-            std::error_code removeError;
-            std::filesystem::remove(configPath, removeError);
-        });
-
-        tc.Run("configured entry hint synthesizes an omitted standalone function", [](TestCase &t) {
-            const std::string uniqueSuffix =
-                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
-            const std::filesystem::path tempRoot =
-                std::filesystem::temp_directory_path() / ("ps2recomp-entry-synthesis-" + uniqueSuffix);
-            const std::filesystem::path elfPath = tempRoot / "entry-hint.elf";
-            const std::filesystem::path configPath = tempRoot / "entry-hint.toml";
-            const std::filesystem::path outputPath = tempRoot / "output";
-            std::filesystem::create_directories(tempRoot);
-
-            const bool elfWritten = writeMinimalMipsElfWithUnmappedEntryHint(elfPath);
-            const bool configWritten = writeRecompilerTestConfig(
-                configPath,
-                elfPath,
-                outputPath,
-                {},
-                {"InitAlarm@0x00100008"},
-                {"omitted_callback@0x00100010"});
-            t.IsTrue(elfWritten && configWritten,
-                     "standalone entry regression inputs should be generated");
-
-            if (elfWritten && configWritten)
-            {
-                PS2Recompiler recompiler(configPath.string());
-                t.IsTrue(recompiler.initialize(),
-                         "standalone entry regression config should initialize");
-                t.IsTrue(recompiler.recompile(),
-                         "configured executable entry should be decoded even without a symbol");
-                recompiler.generateOutput();
-
-                const std::filesystem::path registrationPath = outputPath / "register_functions.cpp";
-                std::ifstream registrationFile(registrationPath);
-                const std::string registration{
-                    std::istreambuf_iterator<char>(registrationFile),
-                    std::istreambuf_iterator<char>()};
-                t.IsTrue(registration.find("// 0x100010") != std::string::npos,
-                         "synthesized entry address should be registered for guest dispatch");
-                t.IsTrue(recompiler.reportCounters().additionalEntryPoints >= 1u,
-                         "synthesized entry should be visible in the report");
-            }
-
-            std::error_code removeError;
-            std::filesystem::remove_all(tempRoot, removeError);
         });
 
         tc.Run("elf parser ignores STT_FUNC symbols in non-executable sections", [](TestCase &t) {

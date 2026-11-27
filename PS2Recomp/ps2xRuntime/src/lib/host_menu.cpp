@@ -808,7 +808,7 @@ void load()
     std::fclose(f);
 }
 
-#ifdef PS2X_DESKTOP_VIDEO
+#if defined(PS2X_DESKTOP_VIDEO) && !defined(__ANDROID__)
 CampaignLanguage chooseCampaignLanguage(bool systemPortuguese)
 {
     g_campaignTranslationAvailable = true;
@@ -997,7 +997,13 @@ void update()
         {
             const int k = tuningIndex(g_item);
             if (k < 0)
+#if defined(__ANDROID__)
+                native_renderer::updateTuning([](native_renderer::Tuning &tuning) {
+                    tuning = native_renderer::defaultTuning();
+                });
+#else
                 native_renderer::tuning() = native_renderer::defaultTuning();
+#endif
             else
                 native_renderer::tuningStep(native_renderer::tuningItems()[k], dir);
             save();

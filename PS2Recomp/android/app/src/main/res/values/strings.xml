@@ -1,16 +1,43 @@
 <resources>
-    <string name="app_name">Shadow of the Colossus</string>
-    <string name="launcher_title">SHADOW\nOF THE COLOSSUS</string>
+    <string name="app_name" translatable="false">Shadow of the Colossus</string>
+    <string name="launcher_title" translatable="false">SHADOW\nOF THE COLOSSUS</string>
     <string name="launcher_disc_heading">Disco do jogo</string>
     <string name="launcher_play">Jogar</string>
     <string name="launcher_continue">Continuar</string>
-    <string name="launcher_import">Importar meu disco</string>
+    <string name="launcher_import">Importar ISO</string>
     <string name="launcher_controls">Controles</string>
+    <string name="launcher_language">Idioma</string>
+    <string name="launcher_language_save_failed">Não foi possível guardar o idioma selecionado.</string>
+    <string name="launcher_touch_title">Controles touch</string>
+    <string name="launcher_touch_help">Mova Wander com o analógico esquerdo. Arraste a área livre à direita para olhar ao redor.\n\nSegure Agarrar para escalar e combine com Pular. Use Atacar para a espada ou o arco. Agro chama ou estimula o cavalo.\n\nToque em Mapa para abrir o mapa do jogo. Toque em Menu para abrir as opções e ajustar os controles.</string>
+    <string name="launcher_ok">Entendi</string>
     <string name="launcher_disc_edition">Disco de PS2 · edição americana SCUS‑97472</string>
     <string name="launcher_saves">Seus saves ficam separados dos arquivos do jogo.</string>
     <string name="game_adaptive_widescreen">Tela cheia adaptada</string>
     <string name="launcher_disc_running">A jornada está em andamento. Saia do jogo antes de trocar o disco.</string>
     <string name="launcher_disc_importing">Lendo seu disco… mantenha o aplicativo aberto.</string>
+    <string name="launcher_disc_copying_mb">Copiando a ISO… %1$d MB</string>
+    <string name="launcher_disc_extracting_mb">Extraindo os arquivos do jogo… %1$d MB</string>
+    <string name="launcher_disc_verifying">Verificando os arquivos do disco…</string>
+    <string name="launcher_disc_ready">Seu disco está pronto para jogar.</string>
+    <string name="launcher_disc_missing">Importe sua ISO americana para começar.</string>
+    <string name="launcher_disc_incompatible">O disco importado difere desta compilação. Importe a edição compatível.</string>
+    <string name="launcher_disc_imported">Disco importado. Seus saves foram preservados.</string>
+    <string name="launcher_disc_import_failed">Não foi possível importar a ISO. Confira a edição do disco e o espaço livre no aparelho.</string>
+    <string name="launcher_disc_open_failed">Não foi possível abrir a ISO selecionada.</string>
+    <string name="launcher_disc_size_failed">Espaço insuficiente ou imagem maior que o suportado.</string>
+    <string name="launcher_disc_commit_failed">Não foi possível guardar a importação.</string>
+    <string name="launcher_disc_access_failed">Não foi possível acessar os arquivos do disco.</string>
+    <string name="launcher_disc_verify_failed">Não foi possível verificar o disco importado.</string>
+    <string name="launcher_import_cancelled">Operação cancelada.</string>
+    <string name="launcher_build_pending">Preparação do jogo pendente nesta compilação.</string>
+    <string name="launcher_prepare_pending">A ISO está importada. Prepare o jogo neste aparelho para jogar.</string>
+    <string name="launcher_prepare_starting">Iniciando a preparação… mantenha o aplicativo aberto.</string>
+    <string name="launcher_prepare_percent">Preparando o jogo neste aparelho… %1$d%%</string>
+    <string name="launcher_prepare_retry">Preparar jogo</string>
+    <string name="launcher_prepare_cancel">Cancelar</string>
+    <string name="launcher_prepare_ready">O jogo está pronto para jogar neste aparelho.</string>
+    <string name="launcher_prepare_failed">A preparação falhou. Os arquivos do jogo foram mantidos para você tentar novamente.</string>
     <string name="launcher_disc_imported_waiting_for_player">Disco importado. Importe o pacote .sotcplay preparado no computador.</string>
     <string name="launcher_player_heading">Preparação do jogo</string>
     <string name="launcher_player_import">Importar pacote do jogo</string>
@@ -19,7 +46,7 @@
     <string name="launcher_player_importing">Validando o pacote do jogo… mantenha o aplicativo aberto.</string>
     <string name="launcher_player_imported">Pacote instalado. Importe sua ISO americana para jogar.</string>
     <string name="launcher_player_imported_ready">Pacote instalado. Seu disco está pronto para jogar.</string>
-    <string name="launcher_player_import_failed">Não foi possível importar o pacote: %1$s</string>
+    <string name="launcher_player_import_failed">Não foi possível importar o pacote. Selecione um .sotcplay compatível com esta versão.</string>
     <string name="game_start_failed">Não foi possível iniciar o jogo</string>
     <string name="game_player_incompatible">Prepare um novo pacote .sotcplay com a versão do preparador correspondente a este aplicativo e importe-o novamente.</string>
     <string name="game_close">Fechar</string>

@@ -92,6 +92,7 @@ else()
 
     if(PS2X_IS_ANDROID)
         set(PLATFORM "Android" CACHE STRING "" FORCE)
+        set(OPENGL_VERSION "ES 3.0" CACHE STRING "" FORCE)
     endif()
 
     FetchContent_Declare(
@@ -795,4 +796,9 @@ if(PS2X_BUILD_WINDOWS_KIT)
     endif()
     add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../tools/windows"
                      "${CMAKE_BINARY_DIR}/desktop-windows")
+endif()
+
+if(PS2X_IS_ANDROID AND PS2X_BUILD_ANDROID_KIT)
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../tools/android/kit"
+                     "${CMAKE_BINARY_DIR}/android-kit")
 endif()

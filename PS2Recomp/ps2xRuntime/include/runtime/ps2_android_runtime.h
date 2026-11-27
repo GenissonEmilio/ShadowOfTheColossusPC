@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace ps2x::android
 {
@@ -34,6 +35,11 @@ namespace ps2x::android
     bool paused();
     std::chrono::steady_clock::duration waitWhilePaused(const std::atomic<bool> &stopRequested);
     void wakeGuest();
+    void initializeOptions();
+    void setPresentationOptions(bool fxaa, bool frameGeneration, bool fsr);
+    void setMaxAnisotropy(float amount);
+    float displayRefreshRate();
+    const std::vector<uint8_t> &runnerBuildId();
     bool initializeRenderer();
     void shutdownRenderer();
 }

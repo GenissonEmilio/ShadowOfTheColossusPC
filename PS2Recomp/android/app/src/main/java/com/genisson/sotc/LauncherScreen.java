@@ -46,7 +46,10 @@ final class LauncherScreen extends ScrollView {
     final Button playButton;
     final Button importButton;
     final Button playerButton;
+    final Button prepareButton;
+    final Button cancelButton;
     final Button controlsButton;
+    final Button languageButton;
     final TextView status;
     final ProgressBar progress;
 
@@ -57,6 +60,8 @@ final class LauncherScreen extends ScrollView {
     private final LinearLayout menuColumn;
     private final LinearLayout menu;
     private final LinearLayout card;
+    private final TextView heading;
+    private final TextView footer;
     private Button primaryAction;
 
     LauncherScreen(Context context) {
@@ -108,8 +113,7 @@ final class LauncherScreen extends ScrollView {
         LinearLayout discHeading = new LinearLayout(context);
         discHeading.setGravity(Gravity.CENTER_VERTICAL);
         add(card, discHeading, 0);
-        TextView heading = text(getResources().getText(BuildConfig.PORTABLE
-                ? R.string.launcher_player_heading : R.string.launcher_disc_heading), 16, GOLD);
+        heading = text("", 16, GOLD);
         heading.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         heading.setAccessibilityHeading(true);
         discHeading.addView(heading, new LinearLayout.LayoutParams(0, WRAP, 1f));
@@ -130,17 +134,28 @@ final class LauncherScreen extends ScrollView {
         add(card, playButton, 14);
         importButton = action(R.string.launcher_import, R.drawable.ic_launcher_disc);
         add(card, importButton, 8);
+        prepareButton = action(R.string.launcher_prepare_retry, R.drawable.ic_launcher_sigil);
+        prepareButton.setVisibility(GONE);
+        add(card, prepareButton, 8);
         playerButton = action(R.string.launcher_player_import, R.drawable.ic_launcher_sigil);
-        if (!BuildConfig.PORTABLE) playerButton.setVisibility(GONE);
         add(card, playerButton, 8);
+        cancelButton = action(R.string.launcher_prepare_cancel, 0);
+        styleAction(cancelButton, false);
+        cancelButton.setVisibility(GONE);
+        add(card, cancelButton, 8);
         controlsButton = action(R.string.launcher_controls, R.drawable.ic_launcher_controls);
         styleAction(controlsButton, false);
-        add(card, controlsButton, 8);
+        LinearLayout settings = new LinearLayout(context);
+        add(menu, settings, 8);
+        settings.addView(controlsButton, new LinearLayout.LayoutParams(0, MATCH, 1));
+        languageButton = action(R.string.launcher_language, 0);
+        styleAction(languageButton, false);
+        LinearLayout.LayoutParams languageParams = new LinearLayout.LayoutParams(0, MATCH, 1);
+        languageParams.setMarginStart(dp(8));
+        settings.addView(languageButton, languageParams);
         setPrimaryAction(playButton);
 
-        String footnote = getResources().getString(R.string.launcher_disc_edition) + "\n"
-                + getResources().getString(R.string.launcher_saves);
-        TextView footer = text(footnote, 12, MUTED);
+        footer = text("", 12, MUTED);
         footer.setGravity(Gravity.CENTER);
         footer.setLineSpacing(dp(3), 1f);
         add(menu, footer, 12);
@@ -154,6 +169,20 @@ final class LauncherScreen extends ScrollView {
             }
             return insets;
         });
+    }
+
+    void applyLanguage(Context localized, boolean canPrepare) {
+        heading.setText(localized.getText(BuildConfig.PORTABLE && !canPrepare
+                ? R.string.launcher_player_heading : R.string.launcher_disc_heading));
+        importButton.setText(localized.getText(R.string.launcher_import));
+        prepareButton.setText(localized.getText(R.string.launcher_prepare_retry));
+        playerButton.setText(localized.getText(R.string.launcher_player_import));
+        playerButton.setVisibility(BuildConfig.PORTABLE && !canPrepare ? VISIBLE : GONE);
+        cancelButton.setText(localized.getText(R.string.launcher_prepare_cancel));
+        controlsButton.setText(localized.getText(R.string.launcher_controls));
+        languageButton.setText(localized.getText(R.string.launcher_language));
+        footer.setText(localized.getString(R.string.launcher_disc_edition) + "\n"
+                + localized.getString(R.string.launcher_saves));
     }
 
     void updateLayout(Configuration config) {
@@ -186,6 +215,7 @@ final class LauncherScreen extends ScrollView {
         primaryAction = action;
         styleAction(playButton, action == playButton);
         styleAction(importButton, action == importButton);
+        styleAction(prepareButton, action == prepareButton);
         styleAction(playerButton, action == playerButton);
     }
 

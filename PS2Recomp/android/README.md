@@ -4,16 +4,54 @@ Android ARM64 adaptation of the North American PS2 SCUS-97472 port. The renderer
 uses OpenGL ES 3.0, and the touch HUD feeds the same DualShock 2 input packets as
 the game. The desktop launcher remains available separately.
 
+## Playing on Android
+
+1. Install the ARM64 APK that includes the on-device preparation kit. It
+   requires Android 9 or later and OpenGL ES 3.0.
+2. Copy your own North American **SCUS-97472** PS2 ISO to the phone. Open the
+   launcher and select **Import ISO** (**Importar ISO**).
+3. Keep the launcher open while the app extracts the disc and prepares the
+   ARM64 game runner. The first build can take a while. Leave enough free
+   storage for the temporary ISO copy, extracted game files and build cache.
+4. Select **Play** (**Jogar**) when the launcher says the game is ready.
+
+The kit compiles locally from the imported disc. Once the APK and ISO are on
+the phone, preparation and subsequent launches can run offline. The launcher
+shows progress during import and compilation and offers **Cancel**
+(**Cancelar**). If preparation stops after extraction, select **Prepare game**
+(**Preparar jogo**) to try again using the extracted files. Matching stages
+and object files can be reused. Later launches reuse the verified runner for
+the current disc and kit. [Preparation kit details](../../tools/android/kit/README.md)
+
+The portable APK uses the application ID `com.genisson.sotc.mobile`. The
+memory card stays in app-private `files/memcards` across disc imports, retries
+and signed app updates under that ID. Back up your memory card before
+uninstalling. Development APKs under `com.genisson.sotc` have separate storage.
+
+### Interface language
+
+Open **Language** (**Idioma**) in the launcher and select **Português**,
+**English**, **日本語**, or **Español**. The launcher remembers the selection
+and applies it while import or preparation continues. The initial language
+follows the device when supported and otherwise defaults to Portuguese.
+
+The port menu and HUD follow the launcher by default. To choose their language
+independently, open **Menu → Display and sound → Menu language**. These
+settings apply to the Android interface. The game uses the campaign language
+from the SCUS-97472 disc.
+
 ## Controls
 
-- Left stick: move Wander or Agro.
+- Use the left stick to move Wander or Agro.
 - Start a drag in an empty area on the right to move the camera. The same finger
   can cross buttons without activating them.
-- Focar (L1), Arma (D-pad left/right), Mapa (Select), and Pausa (Start) retain
-  their labeled controls.
-- The diamond sigil opens touch settings. Move controls in edit mode and tap the
-  sigil again to finish. Scale, opacity, sensitivity, axis inversion and positions
-  persist locally. Restore controls resets the saved layout and camera options.
+- **Focus** uses PS2 L1 and **Weapon** uses D-pad left or right.
+- **Map** (**Mapa**) sends PS2 Start to open the original in-game map.
+- The diamond **Menu** button opens the port options, the Android equivalent of
+  the desktop F1 menu.
+- Select **Menu → Touch controls → Move buttons** to edit positions. Tap **Menu**
+  again to finish. The positions, size, opacity, camera sensitivity and axis
+  inversion persist locally. **Reset controls** restores the defaults.
 
 | PlayStation button | Touch icon | Action |
 | --- | --- | --- |
@@ -31,35 +69,47 @@ The touch camera filters small position jitter and increases the stick response
 for deliberate swipes. Short, slow drags can move the camera past the game's
 40% radial dead zone. Both axes can still be inverted independently.
 
-## Display
+## Port options
 
-**Tela cheia adaptada** is enabled by default for landscape displays wider
-than 4:3. The game adapts its projection to show more of the scene horizontally
-while keeping the menu, subtitles and indicators in their original proportions.
-Prerecorded movies use their original framing. The diamond menu lets you
-switch back to the centered 4:3 view. The display choice is saved separately
-from the touch controls.
+| Page | Available settings |
+| --- | --- |
+| **Graphics quality** | Quality preset, render scale, anti-aliasing (FXAA), texture filtering, model detail and water detail. |
+| **Graphics effects** | Bloom, fog, glow, depth of field, shadows, particles, screen blur, motion trails, reflections and water refraction. |
+| **Display and sound** | Screen mode, VSync, FSR, frame generation, 30 FPS limit, FPS display, volume and menu language. |
+| **Touch controls** | Button positions, size, opacity, camera sensitivity, axis inversion and reset. |
+| **Save states** | Save, load or delete the quick slot and five manual slots. |
 
-## Playing on Android
+The menu reports capabilities from the active runner and renderer. FXAA, FSR,
+frame generation and save states depend on those capabilities. Anisotropic
+texture filtering is limited to the levels the GPU supports. Older
+`.sotcplay` runners may offer fewer settings.
 
-1. Install the public Android ARM64 APK from the same release as the desktop
-   packages. It requires Android 9 or later and OpenGL ES 3.0.
-2. On your computer, prepare `ShadowOfTheColossus.sotcplay` as described below
-   using your own North American PS2 disc image (`SCUS-97472`).
-3. Copy the `.sotcplay` bundle and your `.iso` to the phone. Use **Importar
-   pacote do jogo** and **Importar meu disco** on the launcher, then select
-   **Jogar**. Import requires space for the extracted game data.
+**Adaptive widescreen** is the default for landscape displays wider than 4:3.
+It expands the horizontal view while preserving the proportions of the menus,
+subtitles and HUD. Prerecorded movies use their original framing. Use
+**Display and sound → Screen mode** to switch to centered 4:3, stretch or
+integer scaling.
 
-The launcher activates each replacement after validating it. Saves are kept in
-the app's `files/memcards` directory across bundle, disc and signed APK updates
-under the same application ID. The public APK uses `com.genisson.sotc.mobile`
-and has separate storage from the previous development APK. Keep a backup
-before uninstalling an Android build, which removes its app-private data.
+### Android save states
 
-The game still has the desktop port's campaign limitations. Android builds must
-be validated independently; compilation and HUD tests do not prove playability.
+Open **Menu → Save states** on a compatible Android runner. The slot list
+shows timestamps and sizes for existing states. The game processes a request
+when it can safely run the operation.
 
-### Preparing the private play bundle on a computer
+Android writes `.sotcstate` files atomically in app-private
+`files/savestates`. The Android v2 format records the runner’s GNU build ID
+and the disc executable’s CRC32. Loading requires the same runner build and
+a matching disc and memory card. Use in-game shrine saves on the memory card
+to carry progress between builds.
+
+## Optional legacy play bundle
+
+Portable APKs without the preparation kit expose **Import game package**
+(**Importar pacote do jogo**). For those builds, prepare a compatible private
+`ShadowOfTheColossus.sotcplay` on a computer using your SCUS-97472 disc. Copy the
+bundle and ISO to the phone and import both. Select **Play** when the launcher
+validates the files. Portable APKs with the preparation kit can also reuse a
+compatible package already installed in that app’s storage.
 
 Use the source code from the same release as the APK. For the native build on
 Linux x86-64, install Python 3.10 or later, Git, the Android SDK's NDK
@@ -116,21 +166,26 @@ cd PS2Recomp/android
 ./gradlew assembleDebug assembleDebugAndroidTest
 ```
 
-Without generated sources this builds the native runtime and test harness. Its
-Play button stays unavailable. It is not a playable distribution.
-From `PS2Recomp/android`, build the public variant using its release keystore.
+Without generated sources this builds the native runtime and test harness.
+
+### Portable APK with on-device preparation
+
+Build and stage the ROM-free kit, then pass its output directory as
+`sotcOnDeviceKit`. [Kit build and APK verification](../../tools/android/kit/README.md)
+
+For a signed release, configure its release keystore and run from
+`PS2Recomp/android`. Set the version code and name for the release.
 
 ```sh
 ./gradlew assembleRelease -PsotcPortable=true \
-  -PsotcVersionCode=3 -PsotcVersionName=0.2.1
+  -PsotcOnDeviceKit=/work/sotc-apk-kit \
+  -PsotcVersionCode="$VERSION_CODE" -PsotcVersionName="$VERSION_NAME"
 ```
 
-Use `./gradlew assembleDebug assembleDebugAndroidTest -PsotcPortable=true` to
-build its debug launcher and importer instrumentation. The synthetic test
-cases cover strict manifest parsing, archive entries, SHA-256, ELF architecture
-and alignment, and atomic package replacement. Instrument the portable build
-with `adb shell am instrument -w com.genisson.sotc.mobile.test/com.genisson.sotc.ControlsInstrumentation`
-on a device with the portable debug APKs installed.
+Run the same release command with the kit property omitted to build the
+portable variant that uses private `.sotcplay` packages.
+
+### Private development builds
 
 Prepare generated C++ from the owned disc outside the repository using
 `tools/android/prepare_game.py --help`. That script builds and executes successive
@@ -199,8 +254,9 @@ build paths. To package an already built library, use
 `-PsotcBootSha256=SHA256_OF_SCUS_974_72`; that directory must contain
 `arm64-v8a/libps2EntryRunner.so` and any non-system shared dependencies. Prebuilt
 mode does not rebuild or verify native compilation flags.
-Game builds require the SCUS SHA-256 property. The app verifies that executable;
-the full `NICO.DAT` hash in the validation report is a separate, one-time check.
+Private game builds require the SCUS SHA-256 property to verify the disc
+executable. Check the full `NICO.DAT` hash separately against the validation
+report when preparing a private build.
 
 Public development certificates, APK verification metadata and private release
 signing configuration are documented in [APK signing](signing/README.md).
@@ -217,16 +273,27 @@ ownership, simultaneous actions, camera sensitivity/inversion, neutralization an
 cancellation. `DiscImageImporterTest.java` checks extraction, wrong editions,
 executable mismatch, malformed extents, path traversal and cancellation.
 
-After installing both debug APKs on a device:
+To run the launcher and control instrumentation, install the debug app and
+test APKs for the same variant. Use this command for the development harness.
 
 ```sh
 adb shell am instrument -w -e screenshot true \
   com.genisson.sotc.test/com.genisson.sotc.ControlsInstrumentation
 ```
 
-This runs Android MotionEvent and layout/persistence tests in landscape. Real
-NativeActivity overlay visibility, gameplay camera direction, audio, FMVs,
-save/reload and frame timing still require tests with the owned game.
+For the portable APK, build with `assembleDebug assembleDebugAndroidTest
+-PsotcPortable=true` and pass `sotcOnDeviceKit` to test the kit variant. Use
+`com.genisson.sotc.mobile.test/com.genisson.sotc.ControlsInstrumentation` as
+the instrumentation target.
+
+Instrumentation exercises Android MotionEvent handling, control layout and
+persistence, and the launcher language setting. The portable package tests
+also cover archive structure, manifest parsing, SHA-256, ARM64 ELF alignment
+and atomic package replacement.
+
+Device validation for a fresh ISO-only installation is pending. It covers the
+first full preparation, retry and offline relaunch, the in-game touch overlay,
+FMV and audio, shrine gameplay, memory-card and state save/load, and frame timing.
 
 `tools/android/test_memory_card.sh CMAKE_DEPS_DIR` builds an ARM64 probe with the
 NDK and verifies a synthetic card page in two separate processes on a connected
@@ -237,6 +304,9 @@ For frame timing comparisons, `files/renderer.env` in the app's private storage
 accepts only `SOTC_RENDER_THREAD`, `SOTC_REUSE_NATIVE_FRAME` and
 `SOTC_ANDROID_FRAME_STATS`, each as `0` or `1`. Restart the game process after a
 change. Compare `0/0/1` with `1/1/1` in the same scene and at the same resolution.
-The optional five-second log separates published native frames from host
-presentation, texture uploads, reused frames and readback/handoff time. Normal
-defaults enable parallel rendering and texture reuse, with diagnostics disabled.
+`SOTC_REUSE_NATIVE_FRAME=0` selects CPU readback and uploads the current frame
+on each host query, even when its revision has not changed. With `1`, the host
+uses shared textures when available and otherwise uploads each CPU revision once.
+The optional five-second log reports native publications, host presentation,
+CPU uploads, newly acquired shared frames, reused frames and timing averages.
+Normal defaults enable parallel rendering and texture reuse with diagnostics disabled.

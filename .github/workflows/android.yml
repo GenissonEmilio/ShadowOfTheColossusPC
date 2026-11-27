@@ -2,14 +2,35 @@ name: Android
 on:
   push:
     branches: [main]
-    paths: ['PS2Recomp/**', 'game/overrides/**', 'tests/android/**', 'tools/android/**', '.github/workflows/android.yml']
+    paths:
+      - 'PS2Recomp/**'
+      - 'game/overrides/**'
+      - 'game/scus.toml'
+      - 'game/extra_stubs.txt'
+      - 'tests/android/**'
+      - 'tools/android/**'
+      - 'tools/*.py'
+      - 'tools/stub_deny.txt'
+      - '.github/workflows/android.yml'
   pull_request:
-    paths: ['PS2Recomp/**', 'game/overrides/**', 'tests/android/**', 'tools/android/**', '.github/workflows/android.yml']
+    paths:
+      - 'PS2Recomp/**'
+      - 'game/overrides/**'
+      - 'game/scus.toml'
+      - 'game/extra_stubs.txt'
+      - 'tests/android/**'
+      - 'tools/android/**'
+      - 'tools/*.py'
+      - 'tools/stub_deny.txt'
+      - '.github/workflows/android.yml'
 permissions:
   contents: read
 jobs:
   android-runtime:
     runs-on: ubuntu-24.04
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      FFMPEG_JOBS: '2'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -21,19 +42,47 @@ jobs:
           packages: platform-tools
           log-accepted-android-sdk-licenses: false
       - name: SDK and NDK
-        run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0' 'ndk;28.2.13676358' 'cmake;3.31.6'
-      - name: Input and disc regression tests
+        run: |
+          sdkmanager 'platforms;android-36' 'build-tools;35.0.0' 'ndk;28.2.13676358' 'cmake;3.31.6'
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+          echo "$ANDROID_HOME/cmake/3.31.6/bin" >> "$GITHUB_PATH"
+      - name: Build pinned FFmpeg dependencies for ARM64
+        run: |
+          source_archive="$RUNNER_TEMP/ffmpeg-7.1.5.tar.xz"
+          curl --fail --location --retry 3 --output "$source_archive" https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz
+          printf '%s  %s\n' de668509caf9e35e3cd162473441fdb29538c6d96ed080292b3cf9e6fc5d558f "$source_archive" | sha256sum -c -
+          tar -xJf "$source_archive" -C "$RUNNER_TEMP"
+          bash tools/android/build_ffmpeg.sh "$RUNNER_TEMP/ffmpeg-7.1.5" "$RUNNER_TEMP/sotc-ffmpeg"
+      - name: Build the standalone ARM64 preparation kit without game data
+        run: |
+          cmake -S PS2Recomp -B "$RUNNER_TEMP/sotc-kit-build" -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 -DANDROID_STL=c++_static \
+            -DCMAKE_BUILD_TYPE=Release -DPS2X_BUILD_ANDROID_KIT=ON \
+            -DPS2X_ENABLE_FFMPEG=ON -DPS2X_ANDROID_FFMPEG_ROOT="$RUNNER_TEMP/sotc-ffmpeg" \
+            -DPS2X_ENABLE_AGRESSIVE_LOGS=OFF -DPS2X_ENABLE_IOP_RPC_TRACE=OFF \
+            -DPS2X_ENABLE_DEBUG_UI=OFF
+          cmake --build "$RUNNER_TEMP/sotc-kit-build" --target sotc_android_kit --parallel 2
+          python3 tools/android/stage_on_device_kit.py \
+            --ndk "$ANDROID_NDK_HOME" --runtime-stage "$RUNNER_TEMP/sotc-kit-build/android-kit/stage" \
+            --downloads "$RUNNER_TEMP/sotc-kit-downloads" --output "$RUNNER_TEMP/sotc-apk-kit"
+      - name: Input, disc and preparation cache regression tests
         run: |
           mkdir -p /tmp/sotc-java-tests
           javac -encoding UTF-8 -d /tmp/sotc-java-tests \
             PS2Recomp/android/app/src/main/java/com/genisson/sotc/TouchInputState.java \
             PS2Recomp/android/app/src/main/java/com/genisson/sotc/DiscImageImporter.java \
             PS2Recomp/android/app/src/main/java/com/genisson/sotc/DiscRepository.java \
+            PS2Recomp/android/app/src/main/java/com/genisson/sotc/StageObjectCache.java \
+            PS2Recomp/android/app/src/main/java/com/genisson/sotc/PreparationWorkers.java \
             tests/android/TouchInputStateTest.java tests/android/DiscImageImporterTest.java \
-            tests/android/DiscRepositoryTest.java
+            tests/android/DiscRepositoryTest.java tests/android/StageObjectCacheTest.java \
+            tests/android/PreparationWorkersTest.java
           java -cp /tmp/sotc-java-tests com.genisson.sotc.TouchInputStateTest
           java -cp /tmp/sotc-java-tests com.genisson.sotc.DiscImageImporterTest
           java -cp /tmp/sotc-java-tests com.genisson.sotc.DiscRepositoryTest
+          java -cp /tmp/sotc-java-tests com.genisson.sotc.StageObjectCacheTest
+          java -cp /tmp/sotc-java-tests com.genisson.sotc.PreparationWorkersTest
       - name: Compile ARM64 runtime and Android instrumentation without game data
         working-directory: PS2Recomp/android
         run: bash gradlew assembleDebug assembleDebugAndroidTest lintDebug --no-daemon --max-workers=2
@@ -52,3 +101,62 @@ jobs:
           test "$(unzip -Z1 "$apk" | sed -n '/^lib\//p')" = lib/arm64-v8a/libSotcBootstrap.so
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify "$apk"
           "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 4 "$apk"
+      - name: Build the portable installer with the standalone preparation kit
+        working-directory: PS2Recomp/android
+        run: |
+          bash gradlew assembleDebug -PsotcPortable=true -PsotcOnDeviceKit="$RUNNER_TEMP/sotc-apk-kit" \
+            --no-daemon --max-workers=2
+      - name: Verify the standalone installer contents, signature and alignment
+        run: |
+          apk=PS2Recomp/android/app/build/outputs/apk/debug/app-debug.apk
+          python3 tools/android/verify_on_device_apk.py "$apk"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify "$apk"
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 4 "$apk"
+      - name: Compile GLES, Bionic RNG and state identity fixtures
+        run: |
+          clang="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
+          runtime=PS2Recomp/ps2xRuntime/src/lib
+          headers="$RUNNER_TEMP/sotc-kit-build/android-kit/stage/include"
+          # ARM64 checks the shipping ABI. The Android emulator runs the same
+          # fixtures on its native x86_64 ABI with Bionic and SwiftShader.
+          for abi in aarch64 x86_64; do
+            out="$RUNNER_TEMP/sotc-native-fixtures/$abi"
+            mkdir -p "$out"
+            flags=("--target=$abi-linux-android28" -std=c++20 -O1 -static-libstdc++ -Wl,-z,max-page-size=16384)
+            "$clang" "${flags[@]}" -I"$runtime" tests/android/presentation_gles.cpp \
+              -o "$out/presentation_gles" -lEGL -lGLESv3
+            "$clang" "${flags[@]}" -I"$headers" tests/android/shared_renderer_gles.cpp \
+              "$runtime/native/native_renderer.cpp" "$runtime/native/native_renderer_gl.cpp" \
+              -o "$out/shared_renderer_gles" -Wl,--wrap=glDrawArrays -lEGL -lGLESv3
+            "$clang" "${flags[@]}" -I"$headers" -I"$runtime/Kernel/Stubs" tests/android/libc_rng.cpp \
+              -o "$out/libc_rng"
+          done
+      - name: Enable KVM for the Android emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Run GLES pixels, shared frames, alpha ordering, RNG and state identity on Android
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        timeout-minutes: 15
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          cores: 2
+          emulator-options: -no-window -gpu swiftshader -no-snapshot -noaudio -no-boot-anim
+          script: |
+            adb shell mkdir -p /data/local/tmp/sotc-native-fixtures
+            adb push "$RUNNER_TEMP/sotc-native-fixtures/x86_64/presentation_gles" /data/local/tmp/sotc-native-fixtures/
+            adb push "$RUNNER_TEMP/sotc-native-fixtures/x86_64/shared_renderer_gles" /data/local/tmp/sotc-native-fixtures/
+            adb push "$RUNNER_TEMP/sotc-native-fixtures/x86_64/libc_rng" /data/local/tmp/sotc-native-fixtures/
+            adb shell 'chmod 700 /data/local/tmp/sotc-native-fixtures/*'
+            adb shell /data/local/tmp/sotc-native-fixtures/presentation_gles
+            bash -o pipefail -c 'adb shell /data/local/tmp/sotc-native-fixtures/shared_renderer_gles | tee "$RUNNER_TEMP/alpha-batched.log"'
+            bash -o pipefail -c 'adb shell "SOTC_GL_ALPHA_BATCH=0 /data/local/tmp/sotc-native-fixtures/shared_renderer_gles" | tee "$RUNNER_TEMP/alpha-reference.log"'
+            sed -n 's/.*RGBA hash //p' "$RUNNER_TEMP/alpha-batched.log" > "$RUNNER_TEMP/alpha-batched.hash"
+            sed -n 's/.*RGBA hash //p' "$RUNNER_TEMP/alpha-reference.log" > "$RUNNER_TEMP/alpha-reference.hash"
+            test "$(wc -l < "$RUNNER_TEMP/alpha-batched.hash")" -eq 2
+            diff -u "$RUNNER_TEMP/alpha-batched.hash" "$RUNNER_TEMP/alpha-reference.hash"
+            adb shell /data/local/tmp/sotc-native-fixtures/shared_renderer_gles cpu
+            adb shell /data/local/tmp/sotc-native-fixtures/libc_rng

@@ -16,6 +16,31 @@ set(path "${RAYLIB_SOURCE_DIR}/src/platforms/rcore_android.c")
 file(READ "${path}" original)
 string(REPLACE "\r\n" "\n" source "${original}")
 
+replace_android_source([=[        EGL_CONTEXT_CLIENT_VERSION, 2,]=]
+    [=[        EGL_CONTEXT_CLIENT_VERSION, (rlGetVersion() == RL_OPENGL_ES_30) ? 3 : 2,]=])
+
+replace_android_source([=[static PlatformData platform = { 0 };   // Platform specific data
+
+//----------------------------------------------------------------------------------]=] [=[static PlatformData platform = { 0 };   // Platform specific data
+
+// The presentation loop runs on this same thread. A resize flag or EGL handle
+// alone cannot identify a surface replaced while the host loop is paused.
+static unsigned int sotcSurfaceGeneration = 0;
+unsigned int sotcAndroidSurfaceGeneration(void) { return sotcSurfaceGeneration; }
+
+//----------------------------------------------------------------------------------]=])
+
+replace_android_source([=[        case APP_CMD_INIT_WINDOW:
+        {
+            if (app->window != NULL)
+            {
+                if (platform.contextRebindRequired)]=] [=[        case APP_CMD_INIT_WINDOW:
+        {
+            if (app->window != NULL)
+            {
+                ++sotcSurfaceGeneration;
+                if (platform.contextRebindRequired)]=])
+
 replace_android_source([=[    while (!app->destroyRequested)
     {
         // Poll all events until we reach return value TIMEOUT, meaning no events left to process
@@ -161,6 +186,53 @@ replace_android_source([=[        } break;
         case APP_CMD_GAINED_FOCUS:
         {
             platform.appEnabled = true;]=])
+
+if(NOT source STREQUAL original)
+    file(WRITE "${path}" "${source}")
+endif()
+
+set(path "${RAYLIB_SOURCE_DIR}/src/rlgl.h")
+file(READ "${path}" original)
+string(REPLACE "\r\n" "\n" source "${original}")
+
+# Android exports the GLES3 core entry point. Extension entry points may
+# require runtime lookup and cannot be linked directly against libGLESv3.
+replace_android_source([=[#if defined(GRAPHICS_API_OPENGL_ES3)
+                GL_COLOR_ATTACHMENT0_EXT,
+                GL_COLOR_ATTACHMENT1_EXT,
+                GL_COLOR_ATTACHMENT2_EXT,
+                GL_COLOR_ATTACHMENT3_EXT,
+                GL_COLOR_ATTACHMENT4_EXT,
+                GL_COLOR_ATTACHMENT5_EXT,
+                GL_COLOR_ATTACHMENT6_EXT,
+                GL_COLOR_ATTACHMENT7_EXT,
+#else
+                GL_COLOR_ATTACHMENT0,
+                GL_COLOR_ATTACHMENT1,
+                GL_COLOR_ATTACHMENT2,
+                GL_COLOR_ATTACHMENT3,
+                GL_COLOR_ATTACHMENT4,
+                GL_COLOR_ATTACHMENT5,
+                GL_COLOR_ATTACHMENT6,
+                GL_COLOR_ATTACHMENT7,
+#endif
+            };
+
+#if defined(GRAPHICS_API_OPENGL_ES3)
+            glDrawBuffersEXT(count, buffers);
+#else
+            glDrawBuffers(count, buffers);
+#endif]=] [=[                GL_COLOR_ATTACHMENT0,
+                GL_COLOR_ATTACHMENT1,
+                GL_COLOR_ATTACHMENT2,
+                GL_COLOR_ATTACHMENT3,
+                GL_COLOR_ATTACHMENT4,
+                GL_COLOR_ATTACHMENT5,
+                GL_COLOR_ATTACHMENT6,
+                GL_COLOR_ATTACHMENT7,
+            };
+
+            glDrawBuffers(count, buffers);]=])
 
 if(NOT source STREQUAL original)
     file(WRITE "${path}" "${source}")

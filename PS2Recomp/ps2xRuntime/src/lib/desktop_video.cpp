@@ -4,17 +4,33 @@
 #include "desktop_fsr.h"
 #include "desktop_frame_pacing.h"
 #include "desktop_interpolation.h"
+#include "presentation_shader_source.h"
 #include "runtime/host_menu.h"
 #include "rlgl.h"
 #include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <iterator>
+#if defined(__ANDROID__)
+#include <EGL/egl.h>
+#include "runtime/ps2_android_runtime.h"
+#include "Kernel/Stubs/MPEG.h"
+extern "C" unsigned int sotcAndroidSurfaceGeneration(void);
+#endif
 
 namespace desktop_video
 {
 namespace
 {
+    Shader loadPresentationShader(const char *fragment)
+    {
+#if defined(__ANDROID__)
+        const std::string es = glesPresentationFragment(fragment);
+        return LoadShaderFromMemory(kGlesPresentationVertex, es.c_str());
+#else
+        return LoadShaderFromMemory(nullptr, fragment);
+#endif
+    }
     Shader shader{};
     int sourceLocation = -1, outputLocation = -1, timeLocation = -1, fsrSharpenedLocation = -1;
     int windowWidth = 1024, windowHeight = 720;
@@ -24,6 +40,11 @@ namespace
     int frameLimit = 0;
     int refreshRate = 60;
     double nextRefreshCheck = 0.0;
+#if defined(__ANDROID__)
+    EGLSurface swapSurface = EGL_NO_SURFACE;
+    unsigned int swapSurfaceGeneration = 0;
+    int swapInterval = -1;
+#endif
 
     struct BuiltinShader
     {
@@ -37,7 +58,7 @@ namespace
             if (!attempted)
             {
                 attempted = true;
-                Shader candidate = LoadShaderFromMemory(nullptr, fragment);
+                Shader candidate = loadPresentationShader(fragment);
                 if (candidate.id != rlGetShaderIdDefault())
                 {
                     if (IsShaderValid(candidate))
@@ -160,7 +181,12 @@ Rectangle destination(int width, int height, int sourceWidth, int sourceHeight, 
     float dw = w, dh = h;
     if (mode == hostmenu::kScreenFit || mode == hostmenu::kScreenWidescreen)
     {
-        const float aspect = mode == hostmenu::kScreenWidescreen ? hostmenu::kWidescreenAspect : hostmenu::kOriginalAspect;
+        float aspect = mode == hostmenu::kScreenWidescreen ? hostmenu::kWidescreenAspect : hostmenu::kOriginalAspect;
+#if defined(__ANDROID__)
+        const float adaptive = ps2x::android::activeWidescreenAspect();
+        if (!ps2_stubs::mpegPlaybackActive() && adaptive > 0.0f)
+            aspect = adaptive;
+#endif
         dw = std::min(w, h * aspect);
         dh = std::min(h, w / aspect);
     }
@@ -178,6 +204,10 @@ Rectangle destination(int width, int height, int sourceWidth, int sourceHeight, 
 
 void setWindowResolution(int resolution)
 {
+#if defined(__ANDROID__)
+    (void)resolution; // Android owns the native surface; renderScale is independent.
+    return;
+#endif
     if (resolution == windowResolution) return;
     windowResolution = resolution;
     if (resolution <= 0 || resolution >= kWindowResolutionCount) return;
@@ -194,6 +224,10 @@ void setWindowResolution(int resolution)
 
 void setFullscreen(bool enabled)
 {
+#if defined(__ANDROID__)
+    (void)enabled; // NativeGameActivity controls immersive mode.
+    return;
+#endif
     if (enabled == IsWindowFullscreen()) return;
     nextRefreshCheck = 0.0;
     if (enabled)
@@ -222,6 +256,28 @@ void setFullscreen(bool enabled)
 
 void updatePresentation(bool vsync, bool cap30, bool frameGeneration)
 {
+#if defined(__ANDROID__)
+    const EGLSurface surface = eglGetCurrentSurface(EGL_DRAW);
+    const unsigned int generation = sotcAndroidSurfaceGeneration();
+    const int wantedInterval = vsync ? 1 : 0;
+    if (surface == EGL_NO_SURFACE)
+    {
+        swapSurface = EGL_NO_SURFACE;
+        swapInterval = -1;
+    }
+    else if (swapSurface != surface || swapSurfaceGeneration != generation ||
+             swapInterval != wantedInterval || IsWindowResized())
+    {
+        if (eglSwapInterval(eglGetCurrentDisplay(), wantedInterval))
+        {
+            swapSurface = surface;
+            swapSurfaceGeneration = generation;
+            swapInterval = wantedInterval;
+        }
+    }
+    // Android's raylib backend does not expose monitor enumeration.
+    // Querying refresh through a Java UI thread is unnecessary in this loop.
+#endif
     if (restoreFrames > 0 && --restoreFrames == 0)
     {
         SetWindowSize(windowWidth, windowHeight);
@@ -229,16 +285,22 @@ void updatePresentation(bool vsync, bool cap30, bool frameGeneration)
     }
     // Set the swap interval on the presentation context, not the renderer's
     // worker context. raylib reapplies it when changing fullscreen mode.
+#if !defined(__ANDROID__)
     if (vsync != IsWindowState(FLAG_VSYNC_HINT))
     {
         if (vsync) SetWindowState(FLAG_VSYNC_HINT);
         else ClearWindowState(FLAG_VSYNC_HINT);
     }
+#endif
 
     const double now = GetTime();
     if ((vsync || frameGeneration) && now >= nextRefreshCheck)
     {
+#if defined(__ANDROID__)
+        refreshRate = static_cast<int>(std::lround(ps2x::android::displayRefreshRate()));
+#else
         refreshRate = GetMonitorRefreshRate(GetCurrentMonitor());
+#endif
         if (refreshRate <= 0) refreshRate = 60;
         nextRefreshCheck = now + 1.0;
     }
@@ -297,6 +359,18 @@ bool fxaaAvailable()
     return IsWindowReady() && fxaaShader.initialize(kFxaaFragment, "FXAA", true);
 }
 
+bool frameGenerationAvailable()
+{
+    return IsWindowReady() && motionShader.initialize(kFrameMotionFragment, "frame generation motion", true) &&
+           midpointShader.initialize(kFrameMidpointFragment, "frame generation resolve", true);
+}
+
+bool fsrAvailable()
+{
+    return IsWindowReady() && easu.initialize(kEasuFragment, "FSR 1 EASU", true) &&
+           rcas.initialize(kRcasFragment, "FSR 1 RCAS", false);
+}
+
 bool loadShader(const char *path, std::string &error)
 {
     error.clear();
@@ -319,7 +393,7 @@ bool loadShader(const char *path, std::string &error)
         error = "O shader precisa ser um arquivo de texto GLSL.";
         return false;
     }
-    Shader candidate = LoadShaderFromMemory(nullptr, code.c_str());
+    Shader candidate = loadPresentationShader(code.c_str());
     // Raylib returns its *valid default shader* on a GLSL compile/link error.
     if (!IsShaderValid(candidate) || candidate.id == rlGetShaderIdDefault())
     {
@@ -444,6 +518,10 @@ void shutdown()
     windowResolution = 0;
     restoreFrames = frameLimit = 0;
     nextRefreshCheck = 0.0;
+#if defined(__ANDROID__)
+    swapSurface = EGL_NO_SURFACE;
+    swapInterval = -1;
+#endif
 }
 }
 #endif

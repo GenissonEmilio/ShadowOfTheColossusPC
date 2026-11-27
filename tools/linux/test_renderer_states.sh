@@ -11,3 +11,5 @@ g++ -std=c++20 -O1 -ffunction-sections -fdata-sections \
   "$kit/lib/libps2_runtime.a" "$kit/lib/libraylib.a" -lGL -lX11 -pthread -ldl -lm -o "$out/check"
 xvfb-run -a timeout --kill-after=2s 30s "$out/check"
 xvfb-run -a timeout --kill-after=2s 30s "$out/check" legacy-bloom
+xvfb-run -a timeout --kill-after=2s 30s "$out/check" shared
+xvfb-run -a timeout --kill-after=2s 30s "$out/check" shared legacy-bloom

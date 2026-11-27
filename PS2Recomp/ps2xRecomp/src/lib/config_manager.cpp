@@ -42,6 +42,7 @@ namespace ps2recomp
             config.dynamicImmediatesPath = toml::find_or<std::string>(general, "dynamic_immediates", "");
             config.outputPath = toml::find<std::string>(general, "output");
             config.singleFileOutput = toml::find_or<bool>(general, "single_file_output", false);
+            config.emitInstructionComments = toml::find_or<bool>(general, "emit_instruction_comments", config.emitInstructionComments);
             config.lowMemoryMode = toml::find_or<bool>(general, "low_memory_mode", config.lowMemoryMode);
             const int64_t configuredOutputWorkers = toml::find_or<int64_t>(
                 general,
@@ -291,6 +292,7 @@ namespace ps2recomp
         general["ghidra_output"] = config.ghidraMapPath;
         general["output"] = config.outputPath;
         general["single_file_output"] = config.singleFileOutput;
+        general["emit_instruction_comments"] = config.emitInstructionComments;
         general["low_memory_mode"] = config.lowMemoryMode;
         general["output_worker_threads"] = static_cast<int64_t>(config.outputWorkerThreads);
         general["patch_syscalls"] = config.patchSyscalls;

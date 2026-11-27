@@ -17,6 +17,7 @@ public final class TouchInputStateTest {
     private static void ps2ButtonBits() {
         equal(0x0001, TouchInputState.SELECT, "select bit");
         equal(0x0008, TouchInputState.START, "start bit");
+        equal(TouchInputState.START, TouchInputState.MAP, "map uses PS2 Start");
         equal(0x0020, TouchInputState.RIGHT, "d-pad right bit");
         equal(0x0080, TouchInputState.LEFT, "d-pad left bit");
         equal(0x0400, TouchInputState.L1, "L1 bit");

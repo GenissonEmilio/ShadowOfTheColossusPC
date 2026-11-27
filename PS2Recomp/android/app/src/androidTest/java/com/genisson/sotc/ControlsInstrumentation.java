@@ -47,6 +47,12 @@ public final class ControlsInstrumentation extends Instrumentation {
             activity = startActivitySync(intent);
             Activity launched = activity;
             onMain(() -> launched.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE));
+            onMain(() -> LauncherLanguageInstrumentation.verify(launched));
+            tests++;
+            if (BuildConfig.ON_DEVICE_PREPARATION) {
+                OnDevicePreparationInstrumentation.verify(getTargetContext());
+                tests++;
+            }
             Probe probe = new Probe();
             TouchControlsView view = showHud(activity, preferences, probe);
             verifyReadableLabels(view);
@@ -56,6 +62,8 @@ public final class ControlsInstrumentation extends Instrumentation {
             verifySimultaneousControlsAndIdle(view, probe);
             tests++;
             verifyButtonGesture(view, probe);
+            tests++;
+            verifyMapAndMenu(view, probe);
             tests++;
             verifyLayoutPersistence(activity, view, preferences, probe);
             tests++;
@@ -87,7 +95,7 @@ public final class ControlsInstrumentation extends Instrumentation {
         AtomicReference<TouchControlsView> view = new AtomicReference<>();
         CountDownLatch layout = new CountDownLatch(1);
         onMain(() -> {
-            TouchControlsView controls = new TouchControlsView(activity, preferences);
+            TouchControlsView controls = new TouchControlsView(LauncherLanguage.localized(activity, "pt"), preferences);
             controls.setBackgroundColor(0xff293b37);
             controls.setListener(probe);
             controls.addOnLayoutChangeListener((v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) -> {
@@ -192,7 +200,7 @@ public final class ControlsInstrumentation extends Instrumentation {
                     }
                 }
                 check(maximum - minimum > radius * .9f,
-                        "Agarrar label collapsed into overlapping glyphs");
+                        "Grip label collapsed into overlapping glyphs");
             } finally {
                 image.recycle();
             }
@@ -216,12 +224,42 @@ public final class ControlsInstrumentation extends Instrumentation {
         });
     }
 
+    private void verifyMapAndMenu(TouchControlsView view, Probe probe) throws Exception {
+        onMain(() -> {
+            TouchSequence touch = new TouchSequence(view);
+            RectF mapBounds = view.controlBounds(TouchInputState.MAP);
+            Contact map = Contact.at(4, mapBounds);
+            Contact menu = Contact.at(9, view.menuBounds());
+            int menus = probe.menus;
+            touch.send(MotionEvent.ACTION_DOWN, map);
+            check(probe.buttons == 0x0008, "Map did not send PS2 Start");
+            touch.send(MotionEvent.ACTION_UP, map);
+            check(probe.isNeutral() && probe.menus == menus, "Map opened the port menu");
+
+            Contact grip = Contact.at(4, view.controlBounds(TouchInputState.R1));
+            touch.send(MotionEvent.ACTION_DOWN, grip);
+            touch.send(pointerAction(MotionEvent.ACTION_POINTER_DOWN, 1), grip, menu);
+            check(probe.buttons == TouchInputState.R1, "Menu sent a guest button");
+            touch.send(pointerAction(MotionEvent.ACTION_POINTER_UP, 1), grip, menu);
+            check(probe.isNeutral() && probe.menus == menus + 1, "Menu did not open and release guest input");
+            touch.send(MotionEvent.ACTION_UP, grip);
+
+            touch.send(MotionEvent.ACTION_DOWN, menu);
+            touch.send(MotionEvent.ACTION_MOVE, Contact.at(menu.id, mapBounds));
+            touch.send(MotionEvent.ACTION_CANCEL, menu);
+            check(probe.isNeutral() && probe.menus == menus + 1, "Cancelled Menu gesture activated a control");
+        });
+    }
+
     private void verifyLayoutPersistence(Activity activity, TouchControlsView view,
             SharedPreferences preferences, Probe probe) throws Exception {
         RectF defaults = new RectF();
         RectF moved = new RectF();
+        RectF menuDefault = new RectF();
+        RectF menuMoved = new RectF();
         onMain(() -> {
             defaults.set(view.controlBounds(TouchInputState.TRIANGLE));
+            menuDefault.set(view.menuBounds());
             view.setEditing(true);
             check(view.isEditing(), "could not enter edit mode");
             TouchSequence touch = new TouchSequence(view);
@@ -234,6 +272,16 @@ public final class ControlsInstrumentation extends Instrumentation {
             moved.set(view.controlBounds(TouchInputState.TRIANGLE));
             check(defaults.centerX() - moved.centerX() > defaults.width() * .4f,
                     "drag did not move jump within the HUD");
+            Contact menu = Contact.at(12, menuDefault);
+            Contact newMenu = menu.offset(menuDefault.width() * .75f, menuDefault.height() * .50f);
+            int menus = probe.menus;
+            touch.send(MotionEvent.ACTION_DOWN, menu);
+            touch.send(MotionEvent.ACTION_MOVE, newMenu);
+            touch.send(MotionEvent.ACTION_UP, newMenu);
+            menuMoved.set(view.menuBounds());
+            check(menuMoved.centerX() - menuDefault.centerX() > menuDefault.width() * .65f
+                            && probe.menus == menus && probe.isNeutral(),
+                    "drag did not move Menu without activating it");
             view.setEditing(false);
             view.setControlScale(1.18f);
             view.setOpacity(.55f);
@@ -246,6 +294,9 @@ public final class ControlsInstrumentation extends Instrumentation {
             RectF position = reloaded.controlBounds(TouchInputState.TRIANGLE);
             check(near(position.centerX(), moved.centerX()) && near(position.centerY(), moved.centerY()),
                     "new HUD did not restore the edited position");
+            check(near(reloaded.menuBounds().centerX(), menuMoved.centerX())
+                            && near(reloaded.menuBounds().centerY(), menuMoved.centerY()),
+                    "new HUD did not restore the Menu position");
             check(reloaded.getControlScale() == 1.18f && reloaded.getOpacity() == .55f
                             && reloaded.getCameraSensitivity() == 1.7f && reloaded.isCameraXInverted()
                             && !reloaded.isCameraYInverted(), "new HUD did not restore tuning");
@@ -256,6 +307,9 @@ public final class ControlsInstrumentation extends Instrumentation {
             RectF restored = reloaded.controlBounds(TouchInputState.TRIANGLE);
             check(near(restored.centerX(), defaults.centerX()) && near(restored.centerY(), defaults.centerY())
                     && near(restored.width(), defaults.width()), "full reset did not restore default geometry");
+            check(near(reloaded.menuBounds().centerX(), menuDefault.centerX())
+                            && near(reloaded.menuBounds().centerY(), menuDefault.centerY()),
+                    "full reset did not restore the default Menu position");
             check(reloaded.getControlScale() == 1 && reloaded.getCameraSensitivity() == 1
                             && !reloaded.isCameraXInverted() && !reloaded.isCameraYInverted(),
                     "full reset did not restore default tuning");
@@ -318,6 +372,7 @@ public final class ControlsInstrumentation extends Instrumentation {
 
     private static final class Probe implements TouchControlsView.Listener {
         final CountDownLatch cameraStopped = new CountDownLatch(1);
+        int menus;
         int buttons;
         float moveX;
         float moveY;
@@ -338,7 +393,7 @@ public final class ControlsInstrumentation extends Instrumentation {
         }
 
         @Override
-        public void onMenu() { }
+        public void onMenu() { menus++; }
 
         boolean isNeutral() {
             return buttons == 0 && moveX == 0 && moveY == 0 && cameraX == 0 && cameraY == 0;

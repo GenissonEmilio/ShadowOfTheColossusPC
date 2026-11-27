@@ -1,6 +1,9 @@
 #include "runtime/state_manager.h"
 #include "runtime/ee_scheduler.h"
 #include "ps2_runtime.h"
+#if defined(__ANDROID__)
+#include "runtime/ps2_android_runtime.h"
+#endif
 #include <cstdlib>
 #include <cstdio>
 #include <ctime>
@@ -22,6 +25,11 @@ std::filesystem::path directory()
 #else
     if (const char *path = std::getenv("PS2X_STATE_DIR"); path && *path) return path;
 #endif
+#if defined(__ANDROID__)
+    const auto paths = ps2x::android::launchPaths();
+    if (!paths.saveDirectory.empty())
+        return std::filesystem::path(paths.saveDirectory).parent_path() / "savestates";
+#endif
     return std::filesystem::current_path() / "savestates";
 }
 void bind(PS2Runtime *runtime)
@@ -31,11 +39,21 @@ void bind(PS2Runtime *runtime)
 }
 void request(Action action, int slot)
 {
+    tryRequest(action, slot);
+}
+bool ready()
+{
     std::lock_guard<std::mutex> lock(mutex);
-    if (!active || slot < 0 || slot >= SlotCount || queued || working) return;
+    return active != nullptr;
+}
+bool tryRequest(Action action, int slot)
+{
+    std::lock_guard<std::mutex> lock(mutex);
+    if (!active || slot < 0 || slot >= SlotCount || queued || working) return false;
     pending = action; selected = slot; queued = true;
     message = action == Action::Save ? "Salvando estado…" : action == Action::Load ? "Carregando estado…" : "Removendo estado…";
     active->eeScheduler().notifyStateRequest();
+    return true;
 }
 bool busy() { std::lock_guard<std::mutex> lock(mutex); return queued || working; }
 std::string status() { std::lock_guard<std::mutex> lock(mutex); return message; }

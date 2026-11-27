@@ -22,6 +22,9 @@
 #include <condition_variable>
 #include <deque>
 #include <mutex>
+#ifdef PS2X_DESKTOP_VIDEO
+#include <shared_mutex>
+#endif
 #include <thread>
 #include <unordered_set>
 #if defined(__vita__)
@@ -39,7 +42,7 @@ namespace native_renderer::detail
     Backend *createMetalBackend() { return nullptr; }
 #endif
 #if !defined(PS2X_NATIVE_GL)
-    Backend *createGlBackend(std::function<void()>) { return nullptr; }
+    Backend *createGlBackend(std::function<void()>, bool) { return nullptr; }
 #endif
 }
 
@@ -100,8 +103,7 @@ namespace native_renderer
 #endif
     }
 
-    Tuning *g_tuning = nullptr;
-    Tuning &tuningFirst()
+    static Tuning &initialTuning()
     {
         static Tuning t = []
         {
@@ -166,9 +168,50 @@ namespace native_renderer
             d.preset = static_cast<float>(matchingPreset(d));
             return d;
         }();
+        return t;
+    }
+
+#if defined(__ANDROID__)
+    namespace
+    {
+        std::mutex tuningMutex;
+        std::atomic<unsigned> tuningRevision{1};
+    }
+
+    const Tuning &tuning()
+    {
+        thread_local Tuning snapshot;
+        thread_local unsigned snapshotRevision = 0;
+        if (snapshotRevision != tuningRevision.load(std::memory_order_acquire))
+        {
+            std::lock_guard lock(tuningMutex);
+            snapshot = initialTuning();
+            snapshotRevision = tuningRevision.load(std::memory_order_relaxed);
+        }
+        return snapshot;
+    }
+
+    void updateTuning(const std::function<void(Tuning &)> &change)
+    {
+        std::lock_guard lock(tuningMutex);
+        change(initialTuning());
+        tuningRevision.fetch_add(1, std::memory_order_release);
+    }
+#else
+    Tuning *g_tuning = nullptr;
+    Tuning &tuningFirst()
+    {
+        auto &t = initialTuning();
         g_tuning = &t;
         return t;
     }
+
+    template <typename Change>
+    static void updateTuning(Change change)
+    {
+        change(tuning());
+    }
+#endif
 
     std::string tuningAsEnv()
     {
@@ -583,9 +626,8 @@ namespace native_renderer
         return b;
     }
 
-    void tuningChanged(const TuningItem &item)
+    static void updatePreset(Tuning &t, const TuningItem &item)
     {
-        Tuning &t = tuning();
         if (item.number == &Tuning::preset)
         {
             const int p = std::clamp(static_cast<int>(t.preset + 0.5f), 0, kLastPreset);
@@ -595,9 +637,13 @@ namespace native_renderer
         t.preset = static_cast<float>(matchingPreset(t));
     }
 
-    void tuningStep(const TuningItem &item, int dir)
+    void tuningChanged(const TuningItem &item)
     {
-        Tuning &t = tuning();
+        updateTuning([&](Tuning &t) { updatePreset(t, item); });
+    }
+
+    static void stepTuning(Tuning &t, const TuningItem &item, int dir)
+    {
         if (item.toggle)
         {
             t.*item.toggle = !(t.*item.toggle);
@@ -637,26 +683,34 @@ namespace native_renderer
         t.preset = static_cast<float>(matchingPreset(t));
     }
 
+    void tuningStep(const TuningItem &item, int dir)
+    {
+        updateTuning([&](Tuning &t) { stepTuning(t, item, dir); });
+    }
+
     bool tuningRestore(const char *key, float value)
     {
         for (const TuningItem &item : tuningItems())
         {
             if (std::strcmp(item.key, key) != 0)
                 continue;
-            if (item.env && std::getenv(item.env))
+            if (!std::isfinite(value) || (item.env && std::getenv(item.env)))
                 return false;
-            if (item.toggle)
-                tuning().*item.toggle = value != 0.0f;
-            else if (item.mask)
-                tuning().*item.mask = (tuning().*item.mask & ~(1u << item.bit)) | (value != 0.0f ? 1u << item.bit : 0u);
-            else
-                tuning().*item.number = std::clamp(value, item.min, item.max);
-            if (item.number == &Tuning::preset)
+            updateTuning([&](Tuning &t)
             {
-                tuningChanged(item); // the preset (saved first) applies; the items saved after it override,
-                qualityFromEnv(tuning()); // and so do the variables set at start
-            }
-            tuning().preset = static_cast<float>(matchingPreset(tuning()));
+                if (item.toggle)
+                    t.*item.toggle = value != 0.0f;
+                else if (item.mask)
+                    t.*item.mask = (t.*item.mask & ~(1u << item.bit)) | (value != 0.0f ? 1u << item.bit : 0u);
+                else
+                    t.*item.number = std::clamp(value, item.min, item.max);
+                if (item.number == &Tuning::preset)
+                {
+                    updatePreset(t, item); // Saved preset first, then saved overrides and startup variables.
+                    qualityFromEnv(t);
+                }
+                t.preset = static_cast<float>(matchingPreset(t));
+            });
             return true;
         }
         return false;
@@ -734,9 +788,13 @@ namespace
 
     native_renderer::detail::Backend *g_backend = nullptr;
     std::atomic<native_renderer::detail::Backend *> g_publishedBackend{nullptr};
+#ifdef PS2X_DESKTOP_VIDEO
+    std::shared_mutex g_presentationLifetime;
+#endif
     bool g_tried = false;
     std::atomic<bool> g_shown{false};
     std::function<void()> g_glMakeCurrent;
+    bool g_sharePresentation = false;
     std::function<void(uint32_t, uint32_t, uint32_t)> g_presentHook;
 
     bool wantGl()
@@ -759,7 +817,7 @@ namespace
             g_tried = true;
             if (wantGl() && g_glMakeCurrent)
             {
-                g_backend = native_renderer::detail::createGlBackend(g_glMakeCurrent);
+                g_backend = native_renderer::detail::createGlBackend(g_glMakeCurrent, g_sharePresentation);
                 std::cerr << "[native] OpenGL renderer " << (g_backend ? "up" : "failed") << std::endl;
                 const char *mode = std::getenv("SOTC_NATIVE_GL");
                 if (g_backend && mode && std::string(mode) == "check")
@@ -789,23 +847,29 @@ namespace native_renderer
     bool inEmulator() { return detail::g_inEmulator.load(std::memory_order_relaxed); }
     bool tuningApplies(const TuningItem &item) { return (item.backends & (wantGl() ? 2u : 1u)) != 0u; }
 
-    void setGlContext(std::function<void()> makeCurrent)
+    void setGlContext(std::function<void()> makeCurrent, bool sharePresentation)
     {
         g_glMakeCurrent = std::move(makeCurrent);
+        g_sharePresentation = sharePresentation;
 #if defined(__vita__)
         // The CG compiler needs the main thread's stack: build it now.
         backend();
 #endif
     }
 
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(PS2X_DESKTOP_VIDEO)
     void shutdownGl()
     {
         g_shown.store(false, std::memory_order_relaxed);
+#ifdef PS2X_DESKTOP_VIDEO
+        const std::unique_lock lock(g_presentationLifetime);
+#endif
+        g_publishedBackend.store(nullptr, std::memory_order_release);
         delete g_backend;
         g_backend = nullptr;
         g_tried = false;
         g_glMakeCurrent = {};
+        g_sharePresentation = false;
     }
 #endif
     void setPresentHook(std::function<void(uint32_t, uint32_t, uint32_t)> hook) { g_presentHook = std::move(hook); }
@@ -1178,20 +1242,22 @@ namespace native_renderer
             if (frames++ % static_cast<uint64_t>(cycle) == 0u)
             {
                 static const char *names[] = {"high", "medium", "low", "ultra", "high+msaa8", "high+aniso16", "high+finest", "high+nearest", "high+effects2"};
-                Tuning &t = tuning();
                 const int i = next++ % 9;
-                applyPreset(t, i == 1 ? kPresetMedium : (i == 2 ? kPresetLow : (i == 3 ? kPresetUltra : kPresetHigh)));
-                if (i == 4)
-                    t.msaa = 3.0f;
-                else if (i == 5)
-                    t.textureFilter = 6.0f;
-                else if (i == 6)
-                    t.modelDetail = 2.0f;
-                else if (i == 7)
-                    t.textureFilter = 0.0f;
-                else if (i == 8)
-                    t.effectDetail = 2.0f;
-                t.preset = static_cast<float>(matchingPreset(t));
+                updateTuning([&](Tuning &t)
+                {
+                    applyPreset(t, i == 1 ? kPresetMedium : (i == 2 ? kPresetLow : (i == 3 ? kPresetUltra : kPresetHigh)));
+                    if (i == 4)
+                        t.msaa = 3.0f;
+                    else if (i == 5)
+                        t.textureFilter = 6.0f;
+                    else if (i == 6)
+                        t.modelDetail = 2.0f;
+                    else if (i == 7)
+                        t.textureFilter = 0.0f;
+                    else if (i == 8)
+                        t.effectDetail = 2.0f;
+                    t.preset = static_cast<float>(matchingPreset(t));
+                });
                 std::fprintf(stderr, "[quality] frame %llu: %s\n", static_cast<unsigned long long>(frames - 1u), names[i]);
             }
         }
@@ -1238,14 +1304,45 @@ namespace native_renderer
     bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height)
     {
         // Not backend(): the presenting thread must not create it.
+#ifdef PS2X_DESKTOP_VIDEO
+        const std::shared_lock lock(g_presentationLifetime);
+#endif
         const auto ready = g_publishedBackend.load(std::memory_order_acquire);
         return ready && ready->latestFrame(rgba, width, height);
     }
     FrameRead readFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height, uint64_t &revision)
     {
+#ifdef PS2X_DESKTOP_VIDEO
+        const std::shared_lock lock(g_presentationLifetime);
+#endif
         const auto ready = g_publishedBackend.load(std::memory_order_acquire);
         return ready ? ready->readFrame(rgba, width, height, &revision) : FrameRead::Missing;
     }
+
+#ifdef PS2X_DESKTOP_VIDEO
+    FrameRead readPresentationFrame(PresentationFrame &frame, std::vector<uint8_t> &rgba, uint64_t &revision)
+    {
+        const std::shared_lock lock(g_presentationLifetime);
+        const auto ready = g_publishedBackend.load(std::memory_order_acquire);
+        return ready ? ready->readPresentationFrame(frame, rgba, revision) : FrameRead::Missing;
+    }
+
+    void releasePresentationFrame(uint32_t texture)
+    {
+        if (!texture)
+            return;
+        const std::shared_lock lock(g_presentationLifetime);
+        if (const auto ready = g_publishedBackend.load(std::memory_order_acquire))
+            ready->releasePresentationFrame(texture);
+    }
+
+    bool sharedFrameReady()
+    {
+        const std::shared_lock lock(g_presentationLifetime);
+        const auto ready = g_publishedBackend.load(std::memory_order_acquire);
+        return ready && ready->sharedFrameReady();
+    }
+#endif
 
 #if defined(__ANDROID__)
     bool detail::androidFrameStatsEnabled()

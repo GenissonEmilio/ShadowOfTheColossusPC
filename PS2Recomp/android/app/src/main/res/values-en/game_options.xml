@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="game_runner_incompatible">The prepared runtime is incompatible with this version. Prepare the game again from your disc.</string>
+    <string name="hud_menu">Menu</string>
+    <string name="hud_menu_description">Open game options</string>
+    <string name="hud_focus">Focus</string>
+    <string name="hud_weapon">Weapon</string>
+    <string name="hud_grip">Grip</string>
+    <string name="hud_jump">Jump</string>
+    <string name="hud_attack">Attack</string>
+    <string name="hud_action">Action</string>
+    <string name="hud_agro">Agro</string>
+    <string name="hud_map">Map</string>
+    <string name="hud_editor_drag">Drag controls to move them</string>
+    <string name="hud_editor_finish">Tap Menu to finish</string>
+    <string name="game_options">Game options</string>
+    <string name="game_quality">Graphics quality</string>
+    <string name="game_effects">Graphics effects</string>
+    <string name="game_av">Display and sound</string>
+    <string name="game_controls">Touch controls</string>
+    <string name="game_states">Save states</string>
+    <string name="game_resume">Resume</string>
+    <string name="game_menu_back">Back</string>
+    <string name="game_exit">Exit game</string>
+    <string name="game_exit_confirm">Return to the launcher? Progress since the last save will be lost.</string>
+    <string name="game_starting_options">Wait for the game to finish starting.</string>
+    <string name="game_legacy_options">This game package uses an older runtime. Prepare the game again to access these options.</string>
+    <string name="game_graphics_unavailable">Unavailable on this device’s renderer.</string>
+    <string name="game_anisotropy_limit">The list reflects the GPU’s anisotropy limit.</string>
+    <string name="game_preset">Preset</string>
+    <string name="game_scale">Render scale</string>
+    <string name="game_fxaa">Anti-aliasing (FXAA)</string>
+    <string name="game_texture_filter">Texture filtering</string>
+    <string name="game_model_detail">Model detail (LOD)</string>
+    <string name="game_effect_detail">Water detail</string>
+    <string name="game_bloom">Bloom</string>
+    <string name="game_bloom_strength">Bloom intensity</string>
+    <string name="game_bloom_rounds">Bloom blur passes</string>
+    <string name="game_bloom_spread">Bloom spread</string>
+    <string name="game_vertex_fog">Distance fog</string>
+    <string name="game_fog_amount">Fog intensity</string>
+    <string name="game_depth_fog">Depth fog</string>
+    <string name="game_glow">Glow</string>
+    <string name="game_dof">Depth of field</string>
+    <string name="game_shadows">Shadows</string>
+    <string name="game_particles">Particles</string>
+    <string name="game_screen_blur">Screen blur</string>
+    <string name="game_feedback">Motion trails</string>
+    <string name="game_reflections">Reflections</string>
+    <string name="game_refraction">Water refraction</string>
+    <string name="game_screen">Screen mode</string>
+    <string name="game_vsync">Vertical sync</string>
+    <string name="game_fsr">Upscaling (FSR)</string>
+    <string name="game_frame_generation">Frame generation</string>
+    <string name="game_cap30">Limit to 30 FPS</string>
+    <string name="game_show_fps">Show FPS</string>
+    <string name="game_volume">Volume</string>
+    <string name="game_menu_language">Menu language</string>
+    <string name="game_follow_launcher">Follow the app</string>
+    <string name="game_move_buttons">Move buttons</string>
+    <string name="game_control_scale">Control size</string>
+    <string name="game_control_opacity">Control opacity</string>
+    <string name="game_camera_sensitivity">Camera sensitivity</string>
+    <string name="game_invert_horizontal">Invert horizontal camera</string>
+    <string name="game_invert_vertical">Invert vertical camera</string>
+    <string name="game_reset_controls">Reset controls</string>
+    <string name="game_states_unavailable">Save states are unavailable on this runtime. Use the game’s save feature.</string>
+    <string name="game_states_busy">Wait for the game to finish the operation before trying again.</string>
+    <string name="game_state_quick">Quick slot</string>
+    <string name="game_state_slot">Slot %1$d</string>
+    <string name="game_state_empty">Empty</string>
+    <string name="game_state_save">Save</string>
+    <string name="game_state_confirm">%1$s in %2$s?</string>
+    <string name="game_option_value">%1$s · %2$s</string>
+    <string name="game_times">%1$.2f×</string>
+    <string name="game_percent">%1$d%%</string>
+    <string-array name="game_profiles">
+        <item>Low</item>
+        <item>Original</item>
+        <item>Balanced</item>
+        <item>Enhanced</item>
+        <item>Ultra</item>
+        <item>Custom</item>
+    </string-array>
+    <string-array name="game_filters">
+        <item>Nearest</item>
+        <item>Bilinear</item>
+        <item>Trilinear</item>
+        <item>Anisotropic 2×</item>
+        <item>Anisotropic 4×</item>
+        <item>Anisotropic 8×</item>
+        <item>Anisotropic 16×</item>
+    </string-array>
+    <string-array name="game_model_levels">
+        <item>Original</item>
+        <item>Finer</item>
+        <item>Finest</item>
+    </string-array>
+    <string-array name="game_effect_levels">
+        <item>PS2</item>
+        <item>High</item>
+        <item>Very high</item>
+    </string-array>
+    <string-array name="game_screen_modes">
+        <item>Adaptive widescreen</item>
+        <item>Original 4:3</item>
+        <item>Stretch to fill</item>
+        <item>Integer scaling</item>
+    </string-array>
+    <string-array name="game_state_actions">
+        <item>Save</item>
+        <item>Load</item>
+        <item>Delete</item>
+    </string-array>
+</resources>

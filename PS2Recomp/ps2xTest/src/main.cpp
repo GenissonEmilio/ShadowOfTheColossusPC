@@ -3,6 +3,8 @@
 #include <iostream>
 
 void register_code_generator_tests();
+void register_compact_codegen_tests();
+void register_compact_recompiler_tests();
 void register_r5900_decoder_tests();
 void register_elf_analyzer_tests();
 void register_pad_input_tests();
@@ -28,6 +30,13 @@ int main(int argc, char **argv)
     // runtime/VU/GS suite when CTest compiles and executes this emitted code.
     if (argc == 3 && std::string(argv[1]) == "--signed-branch-fixture")
         return write_signed_branch_execution_fixture(argv[2]) ? 0 : 1;
+
+    if (argc == 2 && std::string(argv[1]) == "--compact-codegen")
+    {
+        register_compact_codegen_tests();
+        register_compact_recompiler_tests();
+        return MiniTest::Run();
+    }
 
     MiniTest::BeforeEach(reset_ps2_test_function_table);
     register_pal_video_timing_tests();

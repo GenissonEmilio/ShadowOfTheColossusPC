@@ -6,8 +6,10 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -140,12 +142,15 @@ namespace ps2recomp
         uint32_t slotCount = 0u;
         if (!entries.empty())
         {
-            tableBase = entries.front().first & ~3u;
-            tableEnd = (entries.back().first + 4u + 3u) & ~3u;
+            if (entries.back().first > std::numeric_limits<uint32_t>::max() - 4u)
+                throw std::runtime_error("Function table end exceeds the address range.");
+            tableBase = entries.front().first;
+            tableEnd = entries.back().first + 4u;
             slotCount = (tableEnd - tableBase) >> 2;
         }
 
         std::stringstream ss;
+        ss << "#include <algorithm>\n";
         ss << "#include \"ps2_runtime.h\"\n";
         ss << "#include <ps2_recompiled_functions.h>\n";
         ss << "#include \"ps2_stubs.h\"\n";
@@ -157,15 +162,38 @@ namespace ps2recomp
         ss << "extern const uint32_t g_ps2RecompiledFunctionTableSlotCount = " << std::dec << slotCount << "u;\n";
         ss << "PS2Runtime::RecompiledFunction g_ps2RecompiledFunctionTable[" << std::dec << (slotCount == 0u ? 1u : slotCount) << "u] = {};\n\n";
 
+        if (entries.empty())
+            return ss.str();
+
+        // A single pointer relocation per wrapper, even for wrappers with
+        // many guest entry PCs. The remaining registration data is integers.
+        std::unordered_map<std::string, uint32_t> functionIndices;
         ss << "namespace {\n";
+        ss << "constexpr PS2Runtime::RecompiledFunction kGeneratedFunctions[] = {\n";
+        for (const auto &entry : entries)
+        {
+            const auto index = static_cast<uint32_t>(functionIndices.size());
+            if (functionIndices.try_emplace(entry.second, index).second)
+                ss << "    " << entry.second << ",\n";
+        }
+        ss << "};\n\n";
+        ss << "struct GeneratedFunctionRange { uint32_t firstSlot, count, functionIndex; };\n";
+        ss << "constexpr GeneratedFunctionRange kGeneratedRanges[] = {\n";
+        for (auto first = entries.begin(); first != entries.end();)
+        {
+            auto next = first + 1;
+            while (next != entries.end() && next->first == (next - 1)->first + 4u && next->second == first->second)
+                ++next;
+            ss << "    {" << ((first->first - tableBase) >> 2) << "u, " << (next - first) << "u, "
+               << functionIndices.at(first->second) << "u},\n";
+            first = next;
+        }
+        ss << "};\n\n";
         ss << "struct GeneratedFunctionTableInitializer {\n";
         ss << "    GeneratedFunctionTableInitializer() {\n";
-        for (const auto &[address, name] : entries)
-        {
-            const uint32_t slot = (address - tableBase) >> 2;
-            ss << "        g_ps2RecompiledFunctionTable[" << std::dec << slot << "] = " << name
-               << "; // 0x" << std::hex << address << std::dec << "\n";
-        }
+        ss << "        for (const auto &range : kGeneratedRanges)\n";
+        ss << "            std::fill_n(g_ps2RecompiledFunctionTable + range.firstSlot, range.count,\n";
+        ss << "                        kGeneratedFunctions[range.functionIndex]);\n";
         ss << "    }\n";
         ss << "};\n";
         ss << "static const GeneratedFunctionTableInitializer g_generatedFunctionTableInitializer;\n";

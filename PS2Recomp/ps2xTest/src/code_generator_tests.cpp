@@ -1,3 +1,4 @@
+#include "GeneratedRegistration.h"
 #include "MiniTest.h"
 #include "ps2recomp/code_generator.h"
 #include "ps2recomp/instructions.h"
@@ -11,6 +12,7 @@
 #include <array>
 
 using namespace ps2recomp;
+using ps2recomp_tests::registeredFunctions;
 
 static Instruction makeBranch(uint32_t address, uint32_t targetOffsetWords)
 {
@@ -344,8 +346,114 @@ int main() {
     }
 }
 
+void register_compact_codegen_tests()
+{
+    MiniTest::Case("CompactCodegen", [](TestCase &tc) {
+        tc.Run("disabling instruction comments leaves executable source intact", [](TestCase &t) {
+            Function fn;
+            fn.name = "comment_toggle";
+            fn.start = 0x9300u;
+            fn.end = 0x9310u;
+            fn.isRecompiled = true;
+            const std::vector<Instruction> instructions{
+                makeBranch(fn.start, 2), makeLw(fn.start + 4u, 5, 6, 12),
+                makeAddiu(fn.start + 8u, 2, 2, 1), makeNop(fn.start + 12u),
+            };
+            CodeGenerator gen({}, {});
+            const auto annotated = gen.generateFunction(fn, instructions, false);
+            gen.setEmitInstructionComments(false);
+            const auto compact = gen.generateFunction(fn, instructions, false);
+            const std::regex commentLine(R"([ \t]*// 0x[0-9a-fA-F]+:[^\n]*\n)");
+            t.IsTrue(std::regex_search(annotated, commentLine) && !std::regex_search(compact, commentLine),
+                     "the option should remove disassembly, including delay-slot comments");
+            t.IsTrue(std::regex_replace(annotated, commentLine, "") == compact,
+                     "disabling disassembly must not change the emitted C++ instructions");
+        });
+
+        tc.Run("resume entry targets register to the owner wrapper", [](TestCase &t) {
+            Function func;
+            func.name = "resume_owner";
+            func.start = 0x7000;
+            func.end = 0x7010;
+            func.isRecompiled = true;
+            func.isStub = false;
+
+            CodeGenerator gen({}, {});
+            gen.setRenamedFunctions({{0x7000u, "resume_owner_0x7000"}});
+            gen.setResumeEntryTargets({{0x7000u, {0x7008u, 0x700Cu}}});
+
+            std::string registration = gen.generateFunctionRegistration({func}, {});
+            printGeneratedCode("resume entry targets register to the owner wrapper", registration);
+
+            const auto entries = registeredFunctions(registration);
+            t.IsTrue(entries.at(0x7008u) == "resume_owner_0x7000",
+                     "resume entry pc should register to the owner wrapper");
+            t.IsTrue(entries.at(0x700cu) == "resume_owner_0x7000",
+                     "multiple resume pcs should register to the same owner wrapper");
+            t.IsTrue(registration.find("{2u, 2u, 0u}") != std::string::npos && !entries.contains(0x7004u),
+                     "contiguous aliases should share a range without filling skipped PCs");
+        });
+
+        tc.Run("dense registration preserves wrapper precedence, gaps, and bounds", [](TestCase &t) {
+            auto function = [](uint32_t start, const char *name, bool stub = false) {
+                Function fn;
+                fn.name = name;
+                fn.start = start;
+                fn.end = start + 4u;
+                fn.isRecompiled = !stub;
+                fn.isStub = stub;
+                return fn;
+            };
+            const auto owner = function(0x1000u, "owner");
+            const auto normal = function(0x1008u, "normal");
+            const auto coveredStub = function(0x100cu, "covered_stub", true);
+            const auto separateStub = function(0x1020u, "separate_stub", true);
+            CodeGenerator gen({}, {});
+            gen.setRenamedFunctions({{owner.start, "owner_wrapper"}, {normal.start, "normal_wrapper"},
+                                     {coveredStub.start, "covered_wrapper"}, {separateStub.start, "stub_wrapper"}});
+            gen.setBootstrapInfo({.valid = true, .entry = owner.start, .entryName = "bootstrap_wrapper"});
+            gen.setResumeEntryTargets({{owner.start, {0x1004u, 0x1008u, 0x100cu, 0x1010u, 0x1010u, 0x1018u}}});
+            const auto code = gen.generateFunctionRegistration({separateStub, owner, normal, coveredStub}, {});
+            const auto entries = registeredFunctions(code);
+            const std::unordered_map<uint32_t, std::string> expected{
+                {0x1000u, "bootstrap_wrapper"}, {0x1004u, "owner_wrapper"}, {0x1008u, "normal_wrapper"},
+                {0x100cu, "owner_wrapper"}, {0x1010u, "owner_wrapper"}, {0x1018u, "owner_wrapper"},
+                {0x1020u, "stub_wrapper"},
+            };
+            t.IsTrue(entries == expected, "boot, real-function, resume, and stub precedence must remain the same");
+            t.IsTrue(code.find("g_ps2RecompiledFunctionTableEnd = 0x1024u;") != std::string::npos &&
+                         code.find("g_ps2RecompiledFunctionTableSlotCount = 9u;") != std::string::npos,
+                     "first and last guest slots must keep the dense table ABI");
+            t.IsTrue(code.find("covered_wrapper,") == std::string::npos &&
+                         code.find("owner_wrapper,") == code.rfind("owner_wrapper,"),
+                     "only selected wrappers may appear, once each");
+
+            CodeGenerator limits({}, {});
+            const auto empty = limits.generateFunctionRegistration({}, {});
+            t.IsTrue(registeredFunctions(empty).empty() &&
+                         empty.find("g_ps2RecompiledFunctionTable[1u] = {};") != std::string::npos,
+                     "empty runner keeps a zero slot count and an ABI backing array");
+            const auto last = function(0xfffffff8u, "last");
+            limits.setRenamedFunctions({{last.start, "last_wrapper"}, {0xfffffffcu, "overflow_wrapper"}});
+            t.IsTrue(registeredFunctions(limits.generateFunctionRegistration({last}, {})).at(last.start) == "last_wrapper",
+                     "highest representable exclusive end must remain valid");
+            bool rejected = false;
+            try
+            {
+                limits.generateFunctionRegistration({function(0xfffffffcu, "overflow")}, {});
+            }
+            catch (const std::runtime_error &)
+            {
+                rejected = true;
+            }
+            t.IsTrue(rejected, "unrepresentable exclusive end must never wrap around");
+        });
+    });
+}
+
 void register_code_generator_tests()
 {
+    register_compact_codegen_tests();
     MiniTest::Case("CodeGenerator", [](TestCase &tc)
                    {
     tc.Run("signed branch families compare the low 64 bits before delay and link", [](TestCase &t) {
@@ -454,9 +562,7 @@ void register_code_generator_tests()
                                     std::vector<uint32_t>(analysis.resumeEntryPoints.begin(),
                                                           analysis.resumeEntryPoints.end())}});
         const std::string registration = gen.generateFunctionRegistration({func}, {});
-        t.IsTrue(registration.find(
-                     "g_ps2RecompiledFunctionTable[1] = syscall_resume_entry_0x9100; // 0x9104") !=
-                     std::string::npos,
+        t.IsTrue(registeredFunctions(registration).at(0x9104u) == "syscall_resume_entry_0x9100",
                  "the syscall continuation must register to the owner wrapper");
     });
 
@@ -904,27 +1010,6 @@ void register_code_generator_tests()
                  "resume pc should force label emission for that instruction");
     });
 
-    tc.Run("resume entry targets register to the owner wrapper", [](TestCase &t) {
-        Function func;
-        func.name = "resume_owner";
-        func.start = 0x7000;
-        func.end = 0x7010;
-        func.isRecompiled = true;
-        func.isStub = false;
-
-        CodeGenerator gen({}, {});
-        gen.setRenamedFunctions({{0x7000u, "resume_owner_0x7000"}});
-        gen.setResumeEntryTargets({{0x7000u, {0x7008u, 0x700Cu}}});
-
-        std::string registration = gen.generateFunctionRegistration({func}, {});
-        printGeneratedCode("resume entry targets register to the owner wrapper", registration);
-
-        t.IsTrue(registration.find("g_ps2RecompiledFunctionTable[2] = resume_owner_0x7000; // 0x7008") != std::string::npos,
-                 "resume entry pc should register to the owner wrapper");
-        t.IsTrue(registration.find("g_ps2RecompiledFunctionTable[3] = resume_owner_0x7000; // 0x700c") != std::string::npos,
-                 "multiple resume pcs should register to the same owner wrapper");
-    });
-
     tc.Run("configured internal guest handlers register to their owner wrapper", [](TestCase &t) {
         Function owner;
         owner.name = "sdk_bootstrap_owner";
@@ -959,9 +1044,10 @@ void register_code_generator_tests()
                  "the owner must enter directly at the first installed handler");
         t.IsTrue(generated.find("case 0x7018u: goto label_7018;") != std::string::npos,
                  "the owner must enter directly at the second installed handler");
-        t.IsTrue(registration.find("sdk_bootstrap_owner_0x7000; // 0x7008") != std::string::npos,
+        const auto entries = registeredFunctions(registration);
+        t.IsTrue(entries.at(0x7008u) == "sdk_bootstrap_owner_0x7000",
                  "the first handler address must dispatch to its owner wrapper");
-        t.IsTrue(registration.find("sdk_bootstrap_owner_0x7000; // 0x7018") != std::string::npos,
+        t.IsTrue(entries.at(0x7018u) == "sdk_bootstrap_owner_0x7000",
                  "the second handler address must dispatch to its owner wrapper");
     });
 
@@ -1006,7 +1092,7 @@ void register_code_generator_tests()
         std::string registration = gen.generateFunctionRegistration({owner}, {});
         printGeneratedCode("external mid-function entry can register to the owner wrapper", registration);
 
-        t.IsTrue(registration.find("g_ps2RecompiledFunctionTable[1] = owner_0x5000; // 0x5004") != std::string::npos,
+        t.IsTrue(registeredFunctions(registration).at(0x5004u) == "owner_0x5000",
                  "mid-function external entry should register back to the owner wrapper");
     });
 

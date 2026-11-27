@@ -5,6 +5,7 @@ import java.util.Arrays;
 final class TouchInputState {
     static final int SELECT = 1;
     static final int START = 1 << 3;
+    static final int MAP = START;
     static final int RIGHT = 1 << 5;
     static final int LEFT = 1 << 7;
     static final int L1 = 1 << 10;
