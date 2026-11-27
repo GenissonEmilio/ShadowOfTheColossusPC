@@ -75,11 +75,12 @@ int main() {
                        {-1,-1,0,0,0,1,0,0,0,255,0,128}, {1,1,0,0,0,1,1,1,0,255,0,128}, {-1,1,0,0,0,1,0,1,0,255,0,128}};
     native_renderer::uploadMesh(7, world, 6);
     float clip[16] = {worldW,0,0,0,0,worldW,0,0,0,0,1,0,0,0,0,worldW};
-    auto frame = [&](bool overlay) {
+    enum class Overlay { None, ScreenCopy, WorldEffect, OtherContext, NoTest };
+    auto frame = [&](Overlay overlay) {
         native_renderer::beginFrame();
         native_renderer::DrawState state; state.order = 2; state.blend = native_renderer::Blend::Opaque;
         native_renderer::draw(7, clip, state);
-        if (overlay) {
+        if (overlay == Overlay::ScreenCopy) {
             // Actual screen-copy assembler path: the copied green world is
             // modulated by red to black. A failed depth test leaves it green.
             g_2d = {}; g_layers = {19}; g_requested = kScreenCopy;
@@ -93,6 +94,28 @@ int main() {
             vertex(1792, 1824, 0, 0); vertex(2304, 1824, 1, 0);
             vertex(1792, 2272, 0, 1); vertex(2304, 2272, 1, 1);
             flush2D();
+        } else if (overlay != Overlay::None) {
+            g_2d = {};
+            g_requested = 0;
+            uint32_t offset = 0x10000;
+            const uint32_t packet = offset;
+            auto writeReg = [&](uint32_t reg, uint64_t value) {
+                std::memcpy(ram.data() + offset, &value, 8);
+                std::memcpy(ram.data() + offset + 8u, &reg, 4);
+                offset += 16u;
+            };
+            if (overlay != Overlay::NoTest)
+                writeReg(overlay == Overlay::OtherContext ? 0x48u : 0x47u, 0x50000u);
+            writeReg(0, 0x46u); // Sprite, blending enabled, GS context 1.
+            writeReg(0x42u, 0x48u); // Additive light.
+            writeReg(1, 0x800000FFu);
+            const auto vertex = [&](uint32_t x, uint32_t y, uint32_t z) {
+                writeReg(5, uint64_t{x * 16u} | (uint64_t{y * 16u} << 16) | (uint64_t{z} << 32));
+            };
+            vertex(1792, 1824, 0xFFFFFFu);
+            vertex(2304, 2272, 60u); // Sprite Z = second vertex, w = 2 behind the wall.
+            feedGlPacket(packet, offset, 25);
+            flush2D();
         }
         native_renderer::endFrame(64, 64);
         std::vector<uint8_t> rgba; uint32_t width = 0, height = 0;
@@ -102,11 +125,18 @@ int main() {
         const size_t pixel = (32u * 64u + 32u) * 4u;
         return std::array<int,3>{rgba[pixel],rgba[pixel+1],rgba[pixel+2]};
     };
-    const auto control = frame(false);
+    const auto control = frame(Overlay::None);
     check(control[0] <= 1 && control[1] >= 254 && control[2] <= 1, "GPU control: near world geometry is visible and writes depth");
-    const auto corrected = frame(true);
+    const auto corrected = frame(Overlay::ScreenCopy);
     std::printf("screen-copy pixel: RGB %d %d %d\n", corrected[0], corrected[1], corrected[2]);
     check(corrected[0] <= 1 && corrected[0] >= 0 && corrected[1] <= 1 && corrected[2] <= 1,
           "GPU: maximum-Z screen copy passes in front of near world geometry");
+    const auto depthTested = frame(Overlay::WorldEffect);
+    const auto otherContext = frame(Overlay::OtherContext);
+    const auto noTest = frame(Overlay::NoTest);
+    check(depthTested == control, "GPU: additive effect with TEST GEQUAL is occluded by the wall");
+    check(otherContext[0] >= 254 && otherContext[1] >= 254 && otherContext[2] <= 1,
+          "GPU: TEST_2 does not affect a context-1 sprite");
+    check(noTest == otherContext, "GPU: a packet without TEST retains the existing overlay behavior");
     std::fflush(nullptr); std::_Exit(failures ? 1 : 0);
 }

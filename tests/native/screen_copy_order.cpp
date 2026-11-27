@@ -18,12 +18,12 @@ namespace {
         std::printf("%s: %s\n", ok ? "PASS" : "FAIL", message);
         if (!ok) ++failures;
     }
-    void uploadQuad(uint64_t id, float left, uint8_t r, uint8_t g, uint8_t b) {
+    void uploadQuad(uint64_t id, float left, uint8_t r, uint8_t g, uint8_t b, float uvScale = 1.0f) {
         using V = native_renderer::Vertex;
         const V vertices[] = {
-            {left,-1,0,0,0,1,0,1,r,g,b,128}, {1,-1,0,0,0,1,1,1,r,g,b,128},
-            {1,1,0,0,0,1,1,0,r,g,b,128}, {left,-1,0,0,0,1,0,1,r,g,b,128},
-            {1,1,0,0,0,1,1,0,r,g,b,128}, {left,1,0,0,0,1,0,0,r,g,b,128}
+            {left,-1,0,0,0,1,0,uvScale,r,g,b,128}, {1,-1,0,0,0,1,uvScale,uvScale,r,g,b,128},
+            {1,1,0,0,0,1,uvScale,0,r,g,b,128}, {left,-1,0,0,0,1,0,uvScale,r,g,b,128},
+            {1,1,0,0,0,1,uvScale,0,r,g,b,128}, {left,1,0,0,0,1,0,0,r,g,b,128}
         };
         native_renderer::uploadMesh(id, vertices, 6);
     }
@@ -147,6 +147,64 @@ int main() {
     const auto directDof = depthOfFieldFrame(false);
     check(!snapshotDof.empty() && directDof == snapshotDof,
           "direct DoF downsample matches the full-size copy pixel for pixel");
+
+    // Repeat a four-texel cell with a black center. A single center tap
+    // loses its red columns and green rows on every 4:1 reduction.
+    std::array<uint8_t, 4 * 4 * 4> pattern{};
+    for (unsigned y = 0; y < 4; ++y) {
+        for (unsigned x = 0; x < 4; ++x) {
+            const bool outerX = x == 0 || x == 3, outerY = y == 0 || y == 3;
+            auto *pixel = pattern.data() + (y * 4 + x) * 4;
+            pixel[0] = outerX ? 255 : 0;
+            pixel[1] = outerY ? 255 : 0;
+            pixel[2] = outerX && outerY ? 255 : 0;
+            pixel[3] = 128;
+        }
+    }
+    native_renderer::uploadTexture(10, 4, 4, pattern.data());
+    uploadQuad(5, -1, 128, 128, 128, 64.0f);
+    uploadQuad(6, -1, 128, 128, 128, 256.0f);
+    auto patternedFrame = [&](uint32_t size, uint64_t mesh, bool dofEnabled, bool snapshot = false) {
+        t.waterSource = snapshot ? 1 : 0;
+        native_renderer::beginFrame();
+        native_renderer::DrawState state;
+        state.order = 2;
+        state.texture = 10;
+        state.blend = native_renderer::Blend::Opaque;
+        state.screen = true;
+        native_renderer::draw(mesh, clip, state);
+        if (snapshot) {
+            native_renderer::DrawState invisible;
+            invisible.order = 9;
+            invisible.refractionSample = true;
+            native_renderer::draw(999, clip, invisible);
+        }
+        native_renderer::DepthOfField dof;
+        dof.enabled = dofEnabled;
+        dof.focusZ = 1;
+        dof.slices = 1;
+        native_renderer::setDepthOfField(dof);
+        native_renderer::endFrame(size, size);
+        std::vector<uint8_t> rgba;
+        uint32_t w = 0, h = 0;
+        const bool read = native_renderer::latestFrame(rgba, w, h) &&
+                          w == size && h == size && rgba.size() == static_cast<size_t>(size) * size * 4;
+        check(read, "patterned DoF readback");
+        check(glGetError() == GL_NO_ERROR, "patterned DoF completes without GL errors");
+        return read ? rgba : std::vector<uint8_t>{};
+    };
+    const auto lowSource = patternedFrame(256, 5, false);
+    check(!lowSource.empty() && patternedFrame(256, 5, true) == lowSource,
+          "DoF at the copy resolution leaves the original pixels intact");
+    const auto highDof = patternedFrame(1024, 6, true);
+    check(!highDof.empty() && patternedFrame(1024, 6, true, true) == highDof,
+          "high-resolution DoF reduction matches for both copy sources");
+    if (!highDof.empty()) {
+        const auto *pixel = highDof.data() + (512 * 1024 + 512) * 4;
+        std::printf("DoF 4:1 RGB sample = %u,%u,%u\n", pixel[0], pixel[1], pixel[2]);
+        check(pixel[0] >= 126 && pixel[0] <= 130 && pixel[1] >= 126 && pixel[1] <= 130 &&
+              pixel[2] >= 62 && pixel[2] <= 66, "high-resolution DoF includes all four regions of the source pixel footprint");
+    }
     std::fflush(nullptr);
     std::_Exit(failures ? 1 : 0);
 }

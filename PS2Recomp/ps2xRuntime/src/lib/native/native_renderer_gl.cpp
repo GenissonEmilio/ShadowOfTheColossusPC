@@ -416,6 +416,15 @@ void main()
         vec2 uv = (0.5 + x * vec2(256.0 / 512.0, 256.0 / 448.0)) / 256.0;
         oColor = vec4(texture(uSrc, vec2(uv.x, 1.0 - uv.y)).rgb * uB.rgb * uB.a, 1.0);
     }
+#ifndef GL_ES
+    else if (uMode == 19) // DoF reduction: one bilinear tap per quadrant of the output pixel
+    {
+        vec2 d = uA.xy;
+        vec3 rgb = texture(uSrc, vUV - d).rgb + texture(uSrc, vUV + d).rgb
+                 + texture(uSrc, vUV + vec2(d.x, -d.y)).rgb + texture(uSrc, vUV + vec2(-d.x, d.y)).rgb;
+        oColor = vec4(rgb * 0.25, 1.0);
+    }
+#endif
     else if (uMode == 12) // zFog: background (uSrc) by the depth's slice; uA = start, width, steps
     {
         float d = texelFetch(uDepth, ivec2(vUV * vec2(textureSize(uDepth, 0))), 0).r;
@@ -3254,7 +3263,19 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             // live color directly unless a later draw reads the full-size snapshot.
             if (usesFullSizeEffectSource)
                 snapshotColor();
-            copy(usesFullSizeEffectSource ? snapshot : colorPlain, refraction);
+            const Target &source = usesFullSizeEffectSource ? snapshot : colorPlain;
+#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+            // At higher resolutions a center tap misses most of the source
+            // texels. Spread four taps across the same 256 x 256 copy.
+            if (source.width >= 2u * refraction.width && source.height >= 2u * refraction.height)
+            {
+                const float offsets[4] = {0.25f / refraction.width, 0.25f / refraction.height, 0.0f, 0.0f};
+                bindTexture(0, source.texture);
+                quad(refraction, 19, QuadBlend::None, offsets);
+            }
+            else
+#endif
+                copy(source, refraction);
             for (int i = 0; i < dof.rounds; ++i)
             {
                 copy(refraction, refractionHalf);
@@ -3630,7 +3651,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #endif
             std::unique_lock<std::mutex> lock(m_mutex);
             while (!m_started)
-                m_idle.wait_for(lock, kRecheck);
+                waitForSignal(m_idle, lock);
             return m_initOk;
         }
 
@@ -4107,7 +4128,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             else
             {
                 while (m_sideBytes > 4u * m_flushBytes)
-                    m_idle.wait_for(lock, kRecheck);
+                    waitForSignal(m_idle, lock);
                 for (Renderer::Upload &u : m_rec.uploads)
                     m_side.push_back(std::move(u));
                 m_rec.uploads.clear();
@@ -4337,7 +4358,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             {
                 std::unique_lock<std::mutex> lock(m_mutex);
                 while (!m_queued && m_side.empty() && !m_stopping && !m_stateCommand)
-                    m_work.wait_for(lock, kRecheck);
+                    waitForSignal(m_work, lock);
                 if (m_stopping)
                 {
 #ifdef PS2X_NATIVE_GL_SHARED
@@ -4365,6 +4386,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     const uint64_t bytes = m_sideBytes;
                     m_sideBytes = 0;
                     m_busy = true;
+#if defined(PS2X_NATIVE_GL_SHARED)
+                    // The queue has room again while these uploads are applied.
+                    m_idle.notify_all();
+#endif
                     lock.unlock();
                     {
                         Lock gl;
@@ -4449,20 +4474,27 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         uint32_t m_flushes = 0, m_evictedAged = 0, m_evictedBudget = 0, m_evictedPressure = 0, m_skipped = 0;
         uint64_t m_evictedBudgetBytes = 0, m_evictedPressureBytes = 0;
         // The hand-over.
-        // One condition each way. The waits also look again every few ms: in
-        // Vita3K a wake-up of the newlib pthread condition got lost now and
-        // then (the game thread waited on an idle render thread for good).
+        // One condition each way. The desktop waits on work or capacity
+        // changes, including the moment the worker takes a queued upload batch.
         std::thread m_worker;
         std::mutex m_mutex;
         std::condition_variable m_work, m_idle; // a frame handed over; the render thread idle
 #if defined(__ANDROID__)
         native_renderer::detail::AndroidFrameStats m_androidFrameStats;
 #endif
-        static constexpr std::chrono::milliseconds kRecheck{2};
+        static void waitForSignal(std::condition_variable &signal, std::unique_lock<std::mutex> &lock)
+        {
+#if defined(PS2X_NATIVE_GL_SHARED)
+            signal.wait(lock);
+#else
+            // Vita3K can lose a newlib pthread wake-up.
+            signal.wait_for(lock, std::chrono::milliseconds(2));
+#endif
+        }
         void waitIdle(std::unique_lock<std::mutex> &lock)
         {
             while (m_queued || m_busy || !m_side.empty() || m_stateCommand)
-                m_idle.wait_for(lock, kRecheck);
+                waitForSignal(m_idle, lock);
         }
         std::function<void()> m_stateCommand;
         bool m_started = false, m_initOk = false, m_stopping = false;
