@@ -214,10 +214,12 @@ class ImportTests(unittest.TestCase):
     def test_cached_executable_is_checked_without_rebuild(self):
         with tempfile.TemporaryDirectory() as t:
             p=Path(t);kit=p/'compiler';kit.mkdir();(kit/'manifest.json').write_text(json.dumps({'build_id':'test','link_inputs':[]}))
-            data=p/'data';work=data/'builds/test';(work/'gamecore').mkdir(parents=True)
-            exe=work/'gamecore/game';exe.write_bytes(b'local executable fixture')
-            (work/'complete.json').write_text(json.dumps({'sha256':hashlib.sha256(exe.read_bytes()).hexdigest()}))
+            data=p/'data'
             pipeline=Pipeline(p,data,{})
+            work=pipeline.work;(work/'gamecore').mkdir(parents=True)
+            exe=work/'gamecore'/executable_name('game');exe.write_bytes(b'local executable fixture')
+            (work/'complete.json').write_text(json.dumps({'build_id':pipeline.build_id,'compiler':pipeline.compiler,
+                                                         'sha256':hashlib.sha256(exe.read_bytes()).hexdigest()}))
             with patch.object(pipeline,'stage',side_effect=AssertionError('must not rebuild')):
                 self.assertEqual(pipeline.prepare(p/'disc'),exe)
             exe.write_bytes(b'corrupt')

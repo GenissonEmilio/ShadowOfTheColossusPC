@@ -2126,6 +2126,10 @@ namespace sotc_native
         uint32_t batchHeader = 0, batchLayer = 0;
     } g_2d;
 
+    // This bit sits between the PRIM flags and ALPHA in the batch key.
+    // Reuse the serialized key so an in-flight batch retains the test on load.
+    constexpr uint64_t kPacketDepthBatch = 1ull << 11;
+
     void flush2D()
     {
         Assembler &a = g_2d;
@@ -2165,17 +2169,26 @@ namespace sotc_native
         static const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
         // (x w, y w, w) -> clip (x w, y w, -, w): the backends take depth from w.
         static const float fromDepth[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0};
-        state.screenDepthTest = state.screenCopy;
+        state.screenDepthTest = state.screenCopy || (a.batchKey & kPacketDepthBatch);
         native_renderer::draw(mesh, state.screenDepthTest ? fromDepth : identity, state);
         ++g_frameDraws;
         a.batch.clear();
         a.batchKey = ~0ull;
     }
 
-    void emit2D(const native_renderer::Vertex &v0, const native_renderer::Vertex &v1, const native_renderer::Vertex &v2)
+    void emit2D(native_renderer::Vertex v0, native_renderer::Vertex v1, native_renderer::Vertex v2,
+                bool packetDepth)
     {
         Assembler &a = g_2d;
-        const uint64_t key = (a.prim & 0x150u) ^ ((a.alpha & 0xFFu) << 12) ^ (static_cast<uint64_t>(a.header) << 20) ^ (static_cast<uint64_t>(a.layer) << 56);
+        const uint64_t key = (a.prim & 0x150u) ^ ((a.alpha & 0xFFu) << 12) ^
+            (static_cast<uint64_t>(a.header) << 20) ^ (static_cast<uint64_t>(a.layer) << 56) ^
+            (packetDepth ? kPacketDepthBatch : 0u);
+        if (packetDepth)
+            for (auto *vertex : {&v0, &v1, &v2})
+            {
+                vertex->x *= vertex->z;
+                vertex->y *= vertex->z;
+            }
         if (key != a.batchKey)
         {
             flush2D();
@@ -2207,7 +2220,7 @@ namespace sotc_native
     }
 
     // z: the GS Z of XYZ2 / XYZ3 (32 bits) or XYZF2 / XYZF3 (24).
-    void vertex2D(uint64_t xyz, bool kick, uint32_t z)
+    void vertex2D(uint64_t xyz, bool kick, uint32_t z, uint32_t packetDepthContexts)
     {
         Assembler &a = g_2d;
         native_renderer::Vertex o{};
@@ -2222,6 +2235,13 @@ namespace sotc_native
             o.y *= w;
             o.z = w;
         }
+        const bool packetDepth = a.header != kScreenCopy && g_cameraContext &&
+            (packetDepthContexts & (1u << ((a.prim >> 9) & 1u)));
+        if (packetDepthContexts && a.header != kScreenCopy)
+            o.z = viewDepth(z);
+        const auto emit = [&](const auto &v0, const auto &v1, const auto &v2) {
+            emit2D(v0, v1, v2, packetDepth);
+        };
         o.r = static_cast<uint8_t>(a.rgbaq);
         o.g = static_cast<uint8_t>(a.rgbaq >> 8);
         o.b = static_cast<uint8_t>(a.rgbaq >> 16);
@@ -2264,8 +2284,8 @@ namespace sotc_native
             q[2].y -= 2.0f / 448.0f;
             q[3].x = q[1].x;
             q[3].y = q[2].y;
-            emit2D(q[0], q[1], q[2]);
-            emit2D(q[1], q[3], q[2]);
+            emit(q[0], q[1], q[2]);
+            emit(q[1], q[3], q[2]);
             v.clear();
             break;
         }
@@ -2281,8 +2301,8 @@ namespace sotc_native
                     native_renderer::Vertex q[4] = {p0, p0, p1, p1};
                     q[0].x += nx; q[0].y += ny; q[1].x -= nx; q[1].y -= ny;
                     q[2].x += nx; q[2].y += ny; q[3].x -= nx; q[3].y -= ny;
-                    emit2D(q[0], q[1], q[2]);
-                    emit2D(q[1], q[3], q[2]);
+                    emit(q[0], q[1], q[2]);
+                    emit(q[1], q[3], q[2]);
                 }
                 if ((a.prim & 7u) == 1u)
                     v.clear();
@@ -2291,17 +2311,17 @@ namespace sotc_native
         case 3: // triangles
             if (n == 3)
             {
-                emit2D(v[0], v[1], v[2]);
+                emit(v[0], v[1], v[2]);
                 v.clear();
             }
             break;
         case 4: // triangle strip
             if (n >= 3)
-                emit2D(v[n - 3], v[n - 2], v[n - 1]);
+                emit(v[n - 3], v[n - 2], v[n - 1]);
             break;
         case 5: // triangle fan
             if (n >= 3)
-                emit2D(v[0], v[n - 2], v[n - 1]);
+                emit(v[0], v[n - 2], v[n - 1]);
             break;
         case 6: // sprite: two opposite corners
             if (n == 2)
@@ -2309,8 +2329,10 @@ namespace sotc_native
                 native_renderer::Vertex q[4] = {v[0], v[1], v[1], v[1]};
                 q[1].y = v[0].y; q[1].v = v[0].v; // (x1, y0)
                 q[2].x = v[0].x; q[2].u = v[0].u; // (x0, y1)
-                emit2D(q[0], q[1], q[2]);
-                emit2D(q[1], q[3], q[2]);
+                if (packetDepth)
+                    q[0].z = v[1].z; // GS sprites use the second vertex's Z.
+                emit(q[0], q[1], q[2]);
+                emit(q[1], q[3], q[2]);
                 v.clear();
             }
             break;
@@ -2346,10 +2368,10 @@ namespace sotc_native
     }
 
     // One GS register write of a 2D draw, as gsReg or an A+D packet gives it.
-    void feed2D(uint32_t reg, uint64_t value)
+    void feed2DAtLayer(uint32_t reg, uint64_t value, uint32_t layer, uint32_t packetDepthContexts)
     {
         Assembler &a = g_2d;
-        a.layer = currentLayer(25u);
+        a.layer = layer;
         a.header = g_requested;
         switch (reg)
         {
@@ -2360,11 +2382,40 @@ namespace sotc_native
             std::memcpy(&a.t, reinterpret_cast<const uint8_t *>(&value) + 4, 4);
             break;
         case 0x03u: a.u = value & 0x3FFFu; a.v = (value >> 16) & 0x3FFFu; break;
-        case 0x04u: vertex2D(value, true, static_cast<uint32_t>(value >> 32) & 0xFFFFFFu); break; // XYZF2
-        case 0x05u: vertex2D(value, true, static_cast<uint32_t>(value >> 32)); break;             // XYZ2
-        case 0x0Cu: vertex2D(value, false, static_cast<uint32_t>(value >> 32) & 0xFFFFFFu); break; // XYZF3: no drawing kick
-        case 0x0Du: vertex2D(value, false, static_cast<uint32_t>(value >> 32)); break;             // XYZ3
+        case 0x04u: vertex2D(value, true, static_cast<uint32_t>(value >> 32) & 0xFFFFFFu, packetDepthContexts); break; // XYZF2
+        case 0x05u: vertex2D(value, true, static_cast<uint32_t>(value >> 32), packetDepthContexts); break;             // XYZ2
+        case 0x0Cu: vertex2D(value, false, static_cast<uint32_t>(value >> 32) & 0xFFFFFFu, packetDepthContexts); break; // XYZF3: no drawing kick
+        case 0x0Du: vertex2D(value, false, static_cast<uint32_t>(value >> 32), packetDepthContexts); break;             // XYZ3
         case 0x42u: a.alpha = value; break;
+        }
+    }
+
+    void feed2D(uint32_t reg, uint64_t value)
+    {
+        feed2DAtLayer(reg, value, currentLayer(25u), 0u);
+    }
+
+    void feedGlPacket(uint32_t start, uint32_t end, uint32_t layer)
+    {
+        // TEST_1/2 emitted inside an immediate packet can request world
+        // occlusion. Keep the test local to the packet and GS context so it
+        // cannot leak into HUD draws or a packet without TEST.
+        uint32_t depthContexts = 0u;
+        for (uint32_t q = start; q + 16u <= end; q += 16u)
+        {
+            uint64_t value;
+            std::memcpy(&value, g_ram + (q & 0x1FFFFF0u), 8);
+            const uint32_t reg = word(q + 8u) & 0xFFu;
+            if (reg == 0x47u || reg == 0x48u)
+            {
+                const uint32_t bit = 1u << (reg - 0x47u);
+                if (((value >> 16) & 7u) == 5u) // ZTE = 1, ZTST = GEQUAL
+                    depthContexts |= bit;
+                else
+                    depthContexts &= ~bit;
+            }
+            else
+                feed2DAtLayer(reg, value, layer, depthContexts);
         }
     }
 
@@ -2715,20 +2766,15 @@ namespace sotc_native
             g_requested = kScreenCopy;
         if (!off && !offScreen && start && end > start + 0x20u && end - start < 0x100000u && word(0x0118B5B0u) == 0u)
         {
+            const uint32_t layer = currentLayer(25u);
             static const bool log = std::getenv("SOTC_NATIVE_LOG") != nullptr;
             if (log)
             {
                 static std::set<uint64_t> seen;
-                const uint32_t layer = currentLayer(25u);
                 if (seen.insert((static_cast<uint64_t>(GPR_U32(ctx, 31)) << 8) | layer).second)
                     std::fprintf(stderr, "[gl] ra %08x layer %u qwords %u\n", GPR_U32(ctx, 31), layer, (end - start) / 16u - 2u);
             }
-            for (uint32_t q = start + 0x20u; q + 16u <= end; q += 16u)
-            {
-                uint64_t value;
-                std::memcpy(&value, g_ram + (q & 0x1FFFFF0u), 8);
-                feed2D(word(q + 8u) & 0xFFu, value);
-            }
+            feedGlPacket(start + 0x20u, end, layer);
         }
         g_requested = requested;
         g_glEnd(rdram, ctx, runtime);
@@ -4012,7 +4058,23 @@ namespace sotc_native
         if (g_palNativeCompare && !palComparisonSpan(packets, 32u))
             return;
         const auto partTable = [&](uint32_t level) { return word(header + 0x30u + level * 4u); };
-        // Use a finer level only when the model supplies packets for it.
+        const uint32_t surfaceBase = word(header + 0x50u);
+        const auto packetSurfaceDrawn = [&](uint32_t surface)
+        {
+            const uint32_t s = surfaceBase + surface * 0x120u;
+            if (!g_palNativeCompare)
+                return surfaceDrawn(s);
+            if (!palComparisonSpan(surfaceBase, 0x120u) || surface >= word(header + 0x54u) ||
+                surface > (PS2_RAM_SIZE - (surfaceBase & 0x1FFFFFFFu) - 0x120u) / 0x120u)
+                return false;
+            // Special surfaces rely on region-specific effect state and passes.
+            const uint32_t flags = word(s + 0x18u);
+            // PAL's modelGetDlLayer may also send bit 6 to layer 22.
+            constexpr uint32_t effects = (1u << 6) | (1u << 17) | (1u << 24) | (1u << 25) | (1u << 26) | (1u << 29);
+            const uint32_t maxTextureMode = g_palNativeSkinCompare ? 2u : 1u;
+            return !(flags & effects) && (flags & 0x2200u) != 0x2200u && word(s + 0x1Cu) <= maxTextureMode;
+        };
+        // A finer level needs a packet on a surface enabled for this draw.
         // The part table is optional for models that skip part clipping.
         const uint32_t gameLod = lod;
         if (const int finer = static_cast<int>(native_renderer::tuning().modelDetail + 0.5f); finer > 0 && lod > 0u)
@@ -4025,6 +4087,8 @@ namespace sotc_native
                     break;
                 const uint32_t candidate = word(pk + 4u);
                 if (candidate < finest || candidate >= lod)
+                    continue;
+                if (!packetSurfaceDrawn(word(pk + 8u)))
                     continue;
                 if (partCulled)
                 {
@@ -4133,24 +4197,10 @@ namespace sotc_native
             const uint32_t part = word(pk + 12u);
             if (partCulled && part != 0xFFFFFFFFu && part < partVisible.size() && partVisible[part] == 1u)
                 continue;
-            const uint32_t surface = word(pk + 8u), surfaceBase = word(header + 0x50u);
-            if (g_palNativeCompare && (!palComparisonSpan(surfaceBase, 0x120u) ||
-                                      surface >= word(header + 0x54u) ||
-                                      surface > (PS2_RAM_SIZE - (surfaceBase & 0x1FFFFFFFu) - 0x120u) / 0x120u))
+            const uint32_t surface = word(pk + 8u);
+            if (!packetSurfaceDrawn(surface))
                 continue;
             const uint32_t s = surfaceBase + surface * 0x120u;
-            if (g_palNativeCompare)
-            {
-                // Special surfaces rely on region-specific effect state and passes.
-                const uint32_t flags = word(s + 0x18u);
-                // PAL's modelGetDlLayer may also send bit 6 to layer 22.
-                constexpr uint32_t effects = (1u << 6) | (1u << 17) | (1u << 24) | (1u << 25) | (1u << 26) | (1u << 29);
-                const uint32_t maxTextureMode = g_palNativeSkinCompare ? 2u : 1u;
-                if ((flags & effects) || (flags & 0x2200u) == 0x2200u || word(s + 0x1Cu) > maxTextureMode)
-                    continue;
-            }
-            else if (!surfaceDrawn(s))
-                continue;
             const uint32_t size = word(pk), data = word(pk + 16u);
             if (g_palNativeCompare && (!palComparisonSpan(data, size) || size % 4u != 0u))
                 continue;

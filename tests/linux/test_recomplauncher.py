@@ -18,6 +18,11 @@ from recomp_cli import run
 
 
 class RecompLauncherTests(unittest.TestCase):
+    def bundled_clang(self, program):
+        clang = program / "compiler/toolchain/bin" / executable_name("clang++")
+        clang.parent.mkdir(parents=True)
+        clang.touch()
+
     def test_profile_uses_real_settings_and_shared_data_path(self):
         profile = json.loads((ROOT / "recomplauncher.json").read_text())
         self.assertEqual(profile["game"]["check"]["iso9660"], "NICO.DAT")
@@ -47,6 +52,7 @@ class RecompLauncherTests(unittest.TestCase):
             (boot.parent / "SYSTEM.CNF").write_text(f"BOOT2 = cdrom0:\\{BOOT};1\n")
             build_id = "v098-test-cache"
             atomic_json(library.program / "compiler/manifest.json", {"build_id": build_id, "link_inputs": []})
+            self.bundled_clang(library.program)
             work = library.directory / "builds" / build_id
             game = work / "gamecore" / executable_name("game")
             game.parent.mkdir(parents=True)
@@ -56,7 +62,8 @@ class RecompLauncherTests(unittest.TestCase):
             graphics.config.parent.mkdir()
             graphics.config.write_text("render_scale=2.500\nfullscreen = 0\nscreen = 3\nvsync = 0\nvolume = 7\nlanguage = 2\n")
             output = io.StringIO()
-            with (patch("recomp_cli.Library", return_value=library),
+            with (patch.dict("os.environ", {"SOTC_BUILD_CLANG": "1"}),
+                  patch("recomp_cli.Library", return_value=library),
                   patch.object(library, "validated_disc", return_value=identify_disc(boot.parent)),
                   patch.object(Pipeline, "helper", side_effect=AssertionError("cached game must not compile")),
                   patch("model.import_disc", side_effect=AssertionError("existing disc must not import twice")),
@@ -81,6 +88,7 @@ class RecompLauncherTests(unittest.TestCase):
             root = Path(folder)
             library = Library(root / "data", root / "program")
             atomic_json(library.program / "compiler/manifest.json", {"build_id": "kit", "link_inputs": []})
+            self.bundled_clang(library.program)
             games = []
             for name in (BOOT, PAL_BOOT):
                 disc = root / name
@@ -99,7 +107,8 @@ class RecompLauncherTests(unittest.TestCase):
                 self.assertEqual(environment["SOTC_NATIVE"], "0" if name == PAL_BOOT else "1")
                 if name == PAL_BOOT:
                     self.assertEqual(environment.get("PS2X_GS_HW"), "1")
-                with (patch.object(library, "validated_disc", return_value=identify_disc(disc)),
+                with (patch.dict("os.environ", {"SOTC_BUILD_CLANG": "1"}),
+                      patch.object(library, "validated_disc", return_value=identify_disc(disc)),
                       patch.object(Pipeline, "helper", side_effect=AssertionError("cached game must not compile"))):
                     self.assertEqual(library.prepare_game(), executable)
                 games.append(executable)

@@ -205,7 +205,12 @@ namespace {
         check(near(firstX(draws[0]), 32), "a later kick cannot rewrite completed draws");
     }
 
-    void verifyModelDetail(unsigned detail, uint32_t gameLod, std::initializer_list<uint32_t> lods,
+    struct ModelDetailPacket {
+        uint32_t lod;
+        bool hidden = false;
+    };
+
+    void verifyModelDetail(unsigned detail, uint32_t gameLod, std::initializer_list<ModelDetailPacket> detailPackets,
                            unsigned clipTables, uint32_t expectedLod, const char *message, bool partCulled = false) {
         setup(false, false, false, false);
         native_renderer::tuning().modelDetail = static_cast<float>(detail);
@@ -215,6 +220,7 @@ namespace {
         }
         put(header + 0x1c, 4u);
         put(instance + 0x250, static_cast<uint64_t>(gameLod) << 40);
+        put(surface + 0x120u + 0x18u, 1u << 29); // Second surface is never drawn by modelDisp.
         constexpr uint32_t clipTable = 0x7000u;
         put(clipTable + 0x20, 0xffffffffu);
         put(clipTable + 0x24, 0xffffffffu);
@@ -224,12 +230,13 @@ namespace {
 
         const uint32_t size = sotc_native::word(packets);
         uint32_t slot = packets;
-        for (const uint32_t lod : lods) {
+        for (const auto &[lod, hidden] : detailPackets) {
             const uint32_t vertices = data + 0x100u * (lod + 1u);
             std::memcpy(ram.data() + vertices, ram.data() + data, size);
             put(vertices + 8, 0.25f * (lod + 1u));
             put(slot, size);
             put(slot + 4, lod);
+            put(slot + 8, hidden ? 1u : 0u);
             put(slot + 12, 0xffffffffu);
             put(slot + 16, vertices);
             slot += 32;
@@ -349,13 +356,16 @@ int main(){
     verifySharedPaletteAtKick(true, true);
     verifySharedPaletteAtKick(true, false);
     verifySharedPaletteAtKick(false, false);
-    verifyModelDetail(0, 3, {0, 3}, 1u << 3, 3, "original detail keeps the game's level");
-    verifyModelDetail(2, 3, {3, 0}, 1u << 3, 0, "a fine unculled packet does not need a clip table");
-    verifyModelDetail(2, 3, {3, 1, 2}, 1u << 0, 1, "finest skips an empty level and picks the finest supplied packet");
-    verifyModelDetail(1, 3, {1, 3}, (1u << 2) | (1u << 3), 3, "finer keeps visible geometry if the next level is missing");
-    verifyModelDetail(1, 3, {0, 2, 3}, 1u << 3, 2, "finer promotes one level even without a clip table");
-    verifyModelDetail(2, 3, {3}, 1u << 0, 3, "finest keeps the game's level when no finer packet exists");
-    verifyModelDetail(2, 3, {0, 1, 3}, (1u << 1) | (1u << 3), 1, "a culled model needs a clip table for the chosen packet", true);
+    verifyModelDetail(0, 3, {{0}, {3}}, 1u << 3, 3, "original detail keeps the game's level");
+    verifyModelDetail(2, 3, {{3}, {0}}, 1u << 3, 0, "a fine unculled packet does not need a clip table");
+    verifyModelDetail(2, 3, {{3}, {1}, {2}}, 1u << 0, 1, "finest skips an empty level and picks the finest supplied packet");
+    verifyModelDetail(1, 3, {{1}, {3}}, (1u << 2) | (1u << 3), 3, "finer keeps visible geometry if the next level is missing");
+    verifyModelDetail(1, 3, {{0}, {2}, {3}}, 1u << 3, 2, "finer promotes one level even without a clip table");
+    verifyModelDetail(2, 3, {{3}}, 1u << 0, 3, "finest keeps the game's level when no finer packet exists");
+    verifyModelDetail(2, 3, {{0}, {1}, {3}}, (1u << 1) | (1u << 3), 1, "a culled model needs a clip table for the chosen packet", true);
+    verifyModelDetail(1, 3, {{2, true}, {3}}, 0u, 3, "finer keeps the game's level if the next level's only surface is hidden");
+    verifyModelDetail(2, 3, {{0, true}, {2}, {3}}, 0u, 2, "finest selects a drawable intermediate level when the highest detail is hidden");
+    verifyModelDetail(2, 3, {{0, true}, {0}, {3}}, 0u, 0, "a hidden surface does not disqualify other packets at the same level");
     verifyAlphaMetadata();
     std::printf("%s: %u checks; %u failures (synthetic skinned/rigid materials, no GPU)\n",failures?"FAIL":"PASS",checks,failures);
     return failures?1:0;
