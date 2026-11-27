@@ -156,13 +156,17 @@ def stage_compiler(build, prefix, root):
                     str(ROOT / "tools/windows/utf8.rc"), str(compiler / "lib/utf8.o")], check=True)
     for source in compiler_files(prefix):
         copy(source, kit / source.relative_to(prefix))
+    clang = prefix / "bin/clang.exe"
+    resource = Path(run(clang, "-print-resource-dir").strip()).resolve()
+    copy(clang, kit / "bin/clang++.exe")
+    shutil.copytree(resource / "include", kit / "lib/clang" / resource.name / "include")
     for name in ("bin/g++.exe", "bin/as.exe", "bin/ld.exe", "bin/windres.exe",
                  "include/stdint.h", "lib/crt2.o", "lib/libstdc++.a"):
         if not (kit / name).is_file():
             raise FileNotFoundError(f"Toolchain file {name} was not staged")
     # The GCC driver emits UTF-8 arguments. Its assembler and linker helpers
     # must use the same code page when Windows turns those arguments into paths.
-    tools = [kit / "bin" / name for name in ("g++.exe", "as.exe", "ld.exe")]
+    tools = [kit / "bin" / name for name in ("g++.exe", "clang++.exe", "as.exe", "ld.exe")]
     tools.extend(exactly_one(kit / "lib/gcc", name) for name in ("cc1plus.exe", "collect2.exe"))
     for executable in tools:
         try:
@@ -228,13 +232,14 @@ def stage_compiler(build, prefix, root):
     )
 
     # Launcher/python/GTK updates need not invalidate the recompiled game.
-    versions = run("pacman", "-Q", *(UCRT_PACKAGE + name for name in (*COMPILER_PACKAGES, "ffmpeg")))
+    kit_packages = (*COMPILER_PACKAGES, "clang", "clang-libs", "llvm-libs", "ffmpeg")
+    versions = run("pacman", "-Q", *(UCRT_PACKAGE + name for name in kit_packages))
     fingerprint = hashlib.sha256(versions.encode("utf-8"))
     helpers = ("tools/desktop/pipeline.py", "tools/build_elf.py", "tools/elfmini.py",
                "tools/funcmap_elf.py", "tools/gen_config.py", "tools/xff.py", "tools/modimage.py",
                "game/scus.toml", "game/sces.toml",
                "tools/windows/compiler_manifest.py", "tools/windows/utf8.manifest")
-    for relative in ("bin/ps2_recomp.exe", "lib/utf8.o", *link_inputs,
+    for relative in ("bin/ps2_recomp.exe", "toolchain/bin/clang++.exe", "lib/utf8.o", *link_inputs,
                      *("source/" + helper for helper in helpers)):
         fingerprint.update(bytes.fromhex(sha256(compiler / relative)))
     (compiler / "manifest.json").write_text(json.dumps({

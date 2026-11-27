@@ -5,9 +5,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools/desktop"))
-from pipeline import GENERATED_HEADER_PREFIX_BYTES, Pipeline, PrecompiledHeader
+from pipeline import GENERATED_HEADER_PREFIX_BYTES, MIB, Pipeline, PrecompiledHeader, build_workers, executable_name
 
 
 class PreparePipelineTests(unittest.TestCase):
@@ -22,15 +23,18 @@ class PreparePipelineTests(unittest.TestCase):
                                  {"SOTC_BUILD_JOBS": "1", "SOTC_BUILD_BATCH_SIZE": "1"})
         self.header = PrecompiledHeader(root)
         self.commands = []
+        self.link_command = None
         self.fail_on_pch = False
         self.pipeline.run = self.run_fixture
 
     def run_fixture(self, args, cwd=None, env=None):
         if "-c" in args or "c++-header" in args:
             self.commands.append(args)
-            if "-include" in args and self.fail_on_pch:
+            if self.fail_on_pch and ("-include" in args or "-include-pch" in args):
                 raise subprocess.CalledProcessError(1, args)
             Path(args[-1]).touch()
+        else:
+            self.link_command = args
 
     def stage(self, name):
         directory = self.pipeline.work / name
@@ -65,3 +69,28 @@ class PreparePipelineTests(unittest.TestCase):
         self.assertFalse(self.header.ready)
         self.assertTrue((boot / "objects/batch-0000.key").is_file())
         self.assertIn("precompiled-header-fallback", self.pipeline.log.read_text(encoding="utf-8"))
+
+    def test_clang_compiles_and_gcc_links(self):
+        toolchain = self.pipeline.bundle / "toolchain"
+        clang = toolchain / "bin" / executable_name("clang++")
+        clang.parent.mkdir(parents=True)
+        clang.touch()
+        (toolchain / "include/c++/16/x86_64-w64-mingw32").mkdir(parents=True)
+        final = self.stage("gamecore")
+        self.pipeline.compile(final, precompiled=self.header)
+
+        commands = [command for command in self.commands if "-c" in command]
+        self.assertTrue(all(Path(command[0]) == clang for command in commands))
+        self.assertIn("-include-pch", commands[0])
+        self.assertIn("-O2", commands[0])
+        self.assertNotIn("-include-pch", commands[1])
+        self.assertEqual(Path(self.link_command[0]).name, executable_name("g++"))
+
+    def test_worker_budget_and_override(self):
+        with patch("pipeline.os.process_cpu_count", return_value=8, create=True):
+            with patch("pipeline.available_memory", return_value=3072 * MIB):
+                self.assertEqual(build_workers({}), 3)
+                self.assertEqual(build_workers({"SOTC_BUILD_JOBS": "6"}), 6)
+                self.assertEqual(build_workers({"SOTC_BUILD_JOBS": "bad"}), 3)
+            with patch("pipeline.available_memory", return_value=1024 * MIB):
+                self.assertEqual(build_workers({}), 1)

@@ -39,7 +39,7 @@ jobs:
           update: true
           install: git
           pacboy: >-
-            gcc:p cmake:p ninja:p pkgconf:p ffmpeg:p zlib:p
+            gcc:p clang:p cmake:p ninja:p pkgconf:p ffmpeg:p zlib:p
             python:p python-gobject:p python-cairo:p gtk3:p SDL2:p libarchive:p
       - name: Download the prior published Windows compiler kit
         if: ${{ env.COMPILER_VERSION != '' || env.COMPILER_SHA256 != '' || env.COMPILER_BUILD_ID != '' }}

@@ -78,8 +78,8 @@ CrashBandicootPC. O código correspondente do port está em compiler/source.
 Licenças: licenses/; versões/fontes: licenses/*/source-packages.tsv.
 Dependências estáticas do recompilador: third-party-sources.tar.gz.
 O runtime e os scripts de build estão em compiler/source.
-GCC 13 e bibliotecas Ubuntu: fontes em https://archive.ubuntu.com/ubuntu/pool/
-(identificadas pelos pacotes em packages.txt); GCC em https://gcc.gnu.org/gcc-13/.
+Clang, GCC 13 e bibliotecas Ubuntu: fontes em https://archive.ubuntu.com/ubuntu/pool/
+(identificadas pelos pacotes em packages.txt).
 
 Artes do launcher: _internal/assets/ARTWORK.md (origem e prompts das adaptações).
 Shadow of the Colossus pertence a Sony / Team Ico. Projeto independente.

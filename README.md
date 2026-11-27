@@ -96,11 +96,11 @@ Select **Play** when you’re ready. **Compile / update** also checks the cache
 and prepares a build for an updated runtime.
 
 The compiler is bundled, so you can play without installing Docker or an SDK
-or running commands. Initial setup can take a while. Up to two compilation
-jobs run in parallel, and the launcher shows their progress. The launcher keeps
-separate caches for each compiler and runtime version and verifies a cache
-before reusing it. Updates limited to the launcher interface, shaders, or
-documentation reuse the existing build.
+or running commands. On desktop, Clang builds the generated game code and
+the launcher chooses the number of parallel jobs based on CPU and available
+memory. The launcher shows progress and verifies the cached executable before
+reusing it. Updates limited to the launcher interface, shaders, or documentation
+reuse the existing build.
 
 ### RecompLauncher
 

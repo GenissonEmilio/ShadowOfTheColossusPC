@@ -24,6 +24,7 @@ STAGE_COUNT = 1 + len(MODULES)
 WINDOWS = os.name == "nt"
 PROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if WINDOWS else 0
 RAM_BYTES = 32 * 1024 * 1024
+MIB = 1024 * 1024
 GENERATED_HEADER_PREFIX = ('#include <stdexcept>\n'
                            '#include "ps2_runtime_macros.h"\n'
                            '#include "ps2_runtime.h"\n')
@@ -51,11 +52,11 @@ class PrecompiledHeader:
         self.ready = None
         self.lock = threading.Lock()
 
-    def flags(self, pipeline, compiler_flags, environment):
+    def flags(self, pipeline, compiler_flags, environment, use_clang):
         with self.lock:
             if self.ready is None:
                 started = time.monotonic()
-                compiled = self.path.with_suffix(".hpp.gch")
+                compiled = self.path.with_suffix(".pch" if use_clang else ".hpp.gch")
                 try:
                     self.path.write_text(GENERATED_HEADER_PREFIX, encoding="utf-8")
                     pipeline.run([*compiler_flags, "-x", "c++-header", self.path,
@@ -65,6 +66,8 @@ class PrecompiledHeader:
                     self.ready = False
                 pipeline.log_timing("precompiled-header", started, ready=self.ready)
             if self.ready:
+                if use_clang:
+                    return ["-include-pch", self.path.with_suffix(".pch")]
                 # GCC can fall back to parsing the same headers if its PCH is
                 # invalid in a child process (for example due to address layout).
                 return ["-include", self.path, "-Winvalid-pch"]
@@ -91,6 +94,49 @@ def executable_name(name):
 
 def compiler_tool(program, name):
     return Path(program) / "compiler" / "bin" / executable_name(name)
+
+
+def available_memory():
+    if WINDOWS:
+        import ctypes
+
+        class MemoryStatus(ctypes.Structure):
+            _fields_ = [("length", ctypes.c_uint32), ("load", ctypes.c_uint32),
+                        ("total_physical", ctypes.c_uint64), ("available_physical", ctypes.c_uint64),
+                        ("total_page", ctypes.c_uint64), ("available_page", ctypes.c_uint64),
+                        ("total_virtual", ctypes.c_uint64), ("available_virtual", ctypes.c_uint64),
+                        ("available_extended", ctypes.c_uint64)]
+
+        status = MemoryStatus()
+        status.length = ctypes.sizeof(status)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return status.available_physical
+        return None
+    try:
+        with open("/proc/meminfo", encoding="ascii") as stream:
+            available = next(int(line.split()[1]) * 1024 for line in stream if line.startswith("MemAvailable:"))
+        cgroup = Path("/sys/fs/cgroup")
+        if (limit := (cgroup / "memory.max")).is_file():
+            quota = limit.read_text().strip()
+            if quota != "max":
+                available = min(available, int(quota) - int((cgroup / "memory.current").read_text()))
+        return available
+    except (OSError, ValueError, StopIteration):
+        return None
+
+
+def build_workers(environment):
+    cpu_count = getattr(os, "process_cpu_count", os.cpu_count)() or 1
+    limit = min(8, cpu_count)
+    requested = environment.get("SOTC_BUILD_JOBS")
+    if requested is not None:
+        try:
+            return max(1, min(limit, int(requested)))
+        except ValueError:
+            pass
+    available = available_memory()
+    by_memory = 2 if available is None else max(1, (available - 512 * MIB) // (768 * MIB))
+    return min(limit, max(1, cpu_count - 1), by_memory)
 
 
 def relative_path(path, directory):
@@ -194,7 +240,7 @@ class Pipeline:
         title = tr("Etapa {step}/{stages} · {name}").format(step=step, stages=STAGE_COUNT, name=name)
         self.progress(PreparationProgress(title, detail, (step - 1 + fraction) / STAGE_COUNT))
 
-    def compile(self, directory, *, step=None, precompiled=None):
+    def compile(self, directory, *, step=None, precompiled=None, capture=False):
         generated = directory / "output"
         cpp = sorted(generated.glob("*.cpp"))
         if not cpp:
@@ -203,19 +249,33 @@ class Pipeline:
         includes = [generated, self.source / "PS2Recomp/ps2xRuntime/include",
                     self.source / "PS2Recomp/ps2xIOP/include", self.source / "raylib",
                     self.source / "PS2Recomp/ps2xRuntime/src/lib/Kernel"]
-        flags = [str(tc / "bin" / executable_name("g++"))]
+        compiler = tc / "bin" / executable_name("g++")
+        clang = tc / "bin" / executable_name("clang++")
+        use_clang = clang.is_file() and self.env.get("SOTC_BUILD_CLANG") != "0"
+        link_flags = [str(compiler)]
         if WINDOWS:
             # C headers must follow GCC's built-ins and C++ wrappers so
             # include_next in <cmath>, <cstdlib> and similar headers works.
-            flags += ["--sysroot=" + tc.as_posix(), "-idirafter", tc.joinpath("include").as_posix(),
-                      "-B" + tc.joinpath("lib").as_posix() + "/"]
+            link_flags += ["--sysroot=" + tc.as_posix(), "-idirafter", tc.joinpath("include").as_posix(),
+                           "-B" + tc.joinpath("lib").as_posix() + "/"]
         else:
-            flags += ["--sysroot="+str(tc / "sysroot"),
-                      "-B"+str(tc / "lib/gcc/x86_64-linux-gnu/13")+"/",
-                      "-nostdinc++", "-isystem", str(tc / "include/c++/13"),
-                      "-isystem", str(tc / "include/x86_64-linux-gnu/c++/13"),
-                      "-isystem", str(tc / "include/c++/13/backward")]
-        flags += ["-std=c++20", "-O2", "-DNDEBUG", "-msse4.1", "-fno-strict-aliasing",
+            link_flags += ["--sysroot=" + str(tc / "sysroot"),
+                           "-B" + str(tc / "lib/gcc/x86_64-linux-gnu/13") + "/",
+                           "-nostdinc++", "-isystem", str(tc / "include/c++/13"),
+                           "-isystem", str(tc / "include/x86_64-linux-gnu/c++/13"),
+                           "-isystem", str(tc / "include/c++/13/backward")]
+        flags = link_flags.copy()
+        if use_clang:
+            if WINDOWS:
+                cxx = next((tc / "include/c++").glob("*/x86_64-w64-mingw32"), None)
+                if cxx is None:
+                    raise ValueError("The Windows compiler kit is missing its GCC C++ headers.")
+                flags = [str(clang), "--target=x86_64-w64-windows-gnu", "--sysroot=" + tc.as_posix(),
+                         "-nostdinc++", "-isystem", str(cxx.parent), "-isystem", str(cxx),
+                         "-isystem", str(cxx.parent / "backward"), "-idirafter", str(tc / "include")]
+            else:
+                flags[0] = str(clang)
+        flags += ["-std=c++20", "-O0" if capture else "-O2", "-DNDEBUG", "-msse4.1", "-fno-strict-aliasing",
                   *["-I"+str(p) for p in includes],
                   "-DPS2_RUNTIME_LOGS=1", "-DPS2X_ENABLE_IOP_RPC_TRACE=0", "-DPS2X_VU1_TRUST_FPU=1"]
         environment = self.compiler_env()
@@ -259,7 +319,7 @@ class Pipeline:
                 # otherwise reuse that partial object as the previous build.
                 stamp.unlink(missing_ok=True)
                 try:
-                    prefix_flags = precompiled.flags(self, flags, environment) if matching_prefix else ()
+                    prefix_flags = precompiled.flags(self, flags, environment, use_clang) if matching_prefix else ()
                     target = ["-c", unity, "-o", obj]
                     try:
                         self.run([*flags, *prefix_flags, *target], env=environment)
@@ -281,7 +341,7 @@ class Pipeline:
                 done=done, total=len(batches), system="Windows" if WINDOWS else "Linux")
             if done < len(batches):
                 if fresh:
-                    # Wall time includes both workers. Cached objects do not count as new work.
+                    # Use aggregate throughput. Cached objects do not count as new work.
                     eta = remaining_time((time.monotonic() - started) * (len(batches) - done) / fresh)
                     template = (tr("Restante estimado: {time}") if step == STAGE_COUNT
                                 else tr("Restante nesta etapa: {time}"))
@@ -291,10 +351,7 @@ class Pipeline:
             self.report_stage(step, detail, done / (len(batches) + 1))
 
         result = [None] * len(batches)
-        try:
-            workers = max(1, min(2, int(self.env.get("SOTC_BUILD_JOBS", "2"))))
-        except ValueError:
-            workers = 1
+        workers = build_workers(self.env)
         started = time.monotonic()
         fresh = 0
         report_batches(0, fresh, started)
@@ -307,7 +364,8 @@ class Pipeline:
                 if done < len(batches):
                     report_batches(done, fresh, started)
         self.log_timing("compile", started, stage=directory.name, built=fresh,
-                        cached=len(batches) - fresh, workers=workers)
+                        cached=len(batches) - fresh, workers=workers,
+                        compiler="clang" if use_clang else "gcc", optimization="O0" if capture else "O2")
         self.report_stage(step, tr("Montando o executável…"), len(batches) / (len(batches) + 1))
         executable = directory / executable_name("game")
         libs = [self.bundle / p for p in self.manifest["link_inputs"]]
@@ -329,7 +387,7 @@ class Pipeline:
                                             for a in inputs), encoding="utf-8")
             inputs = ["@" + str(response)]
         started = time.monotonic()
-        self.run([*flags, *inputs, "-static-libstdc++", "-static-libgcc",
+        self.run([*link_flags, *inputs, "-static-libstdc++", "-static-libgcc",
                   *link, "-pthread", "-o", executable], env=environment)
         self.log_timing("link", started, stage=directory.name)
         return executable
@@ -339,7 +397,7 @@ class Pipeline:
         started = time.monotonic()
         self.run([self.tool("ps2_recomp"), folder / "config.toml"],cwd=folder)
         self.log_timing("generate", started, stage=folder.name)
-        return self.compile(folder, step=step, precompiled=precompiled)
+        return self.compile(folder, step=step, precompiled=precompiled, capture=step < STAGE_COUNT)
 
     def capture(self, executable, disc, name):
         output = self.work / "captures" / (name.lower()+".bin")
@@ -401,7 +459,10 @@ class Pipeline:
                 self.prepare_stages(disc, None)
             else:
                 with tempfile.TemporaryDirectory(dir=self.work, prefix=".pch-") as temporary:
-                    self.prepare_stages(disc, PrecompiledHeader(Path(temporary)))
+                    headers = Path(temporary)
+                    final_headers = headers / "final"
+                    final_headers.mkdir()
+                    self.prepare_stages(disc, PrecompiledHeader(headers), PrecompiledHeader(final_headers))
             self.report_stage(STAGE_COUNT, tr("Verificando a compilação…"), 1.0)
             pending = stamp.with_suffix(".tmp")
             try:
@@ -412,7 +473,7 @@ class Pipeline:
             self.log_timing("total", started)
             return final
 
-    def prepare_stages(self, disc, precompiled):
+    def prepare_stages(self, disc, precompiled, final_header=None):
         self.report_stage(1, tr("Lendo os arquivos do disco…"))
         boot = self.work / "boot"
         boot.mkdir(exist_ok=True)
@@ -441,4 +502,4 @@ class Pipeline:
             if self.boot_name == PAL_BOOT:
                 config_args.append(self.boot_config)
             self.helper("gen_config",config_args)
-            executable = self.stage(folder, step=step, precompiled=precompiled)
+            executable = self.stage(folder, step=step, precompiled=final_header if step == STAGE_COUNT else precompiled)

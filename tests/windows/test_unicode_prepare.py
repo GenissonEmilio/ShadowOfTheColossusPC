@@ -37,7 +37,7 @@ def check_interrupted_object(pipeline, stage):
     try:
         with patch.object(pipeline, "run", side_effect=interrupted):
             try:
-                pipeline.compile(stage)
+                pipeline.compile(stage, capture=True)
             except RuntimeError as error:
                 assert str(error) == "synthetic compiler interruption"
             else:
@@ -47,7 +47,7 @@ def check_interrupted_object(pipeline, stage):
         source.write_bytes(original)
 
     with patch.object(pipeline, "run", wraps=pipeline.run) as commands:
-        pipeline.compile(stage)
+        pipeline.compile(stage, capture=True)
     assert any("-c" in call.args[0] for call in commands.call_args_list), "The restored source reused a partial object"
 
 

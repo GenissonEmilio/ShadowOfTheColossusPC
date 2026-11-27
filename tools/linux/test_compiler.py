@@ -121,14 +121,20 @@ static void check_windows_libc_random() {
     compare(4096);
 }
 
-#if defined(__x86_64__) && defined(__GNUC__) && !defined(__clang__)
+#if defined(__x86_64__) && defined(__GNUC__)
+#if defined(__clang__)
+#define FIXTURE_STACK_BOUNDARY __attribute__((noinline, optnone))
+#else
+#define FIXTURE_STACK_BOUNDARY __attribute__((noipa))
+#endif
+
 struct FixtureDispatcherTransfer {};
 
-__attribute__((noipa)) static void throw_fixture_transfer() {
+FIXTURE_STACK_BOUNDARY static void throw_fixture_transfer() {
     throw FixtureDispatcherTransfer{};
 }
 
-__attribute__((noipa)) static void check_nested_win64_frame(PS2Runtime &runtime) {
+FIXTURE_STACK_BOUNDARY static void check_nested_win64_frame(PS2Runtime &runtime) {
     // Force a large Win64 frame with a nonvolatile XMM spill, like the
     // frame the startup dump failed to unwind.
     volatile char local[2048];
@@ -164,7 +170,7 @@ void original_test_function(uint8_t* ram, R5900Context* ctx, PS2Runtime* runtime
         const ULONG_PTR information[] = {0, 0x1234};
         RaiseException(EXCEPTION_ACCESS_VIOLATION, EXCEPTION_NONCONTINUABLE, 2, information);
     }
-#if defined(__x86_64__) && defined(__GNUC__) && !defined(__clang__)
+#if defined(__x86_64__) && defined(__GNUC__)
     try {
         check_nested_win64_frame(*runtime);
         std::abort();
