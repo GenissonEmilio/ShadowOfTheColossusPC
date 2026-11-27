@@ -108,10 +108,10 @@ for name in ('libstdc++.so.6','libgcc_s.so.1'):
     copy('/usr/lib/x86_64-linux-gnu/'+name,tc / 'lib' / name)
 for original,name in [('/usr/bin/x86_64-linux-gnu-g++-13','g++'),('/usr/bin/x86_64-linux-gnu-as','as'),('/usr/bin/x86_64-linux-gnu-ld.bfd','ld')]:
     copy(original,tc / 'bin' / name);deps(tc / 'bin' / name,tc / 'lib',skip_system=False)
-clang = Path(shutil.which('clang++'))
+clang = Path(shutil.which('clang++')).resolve()
 resource = Path(subprocess.check_output([clang, '-print-resource-dir'], text=True).strip())
 copy(clang, tc / 'bin/clang++')
-deps(tc / 'bin/clang++', tc / 'lib', skip_system=False)
+deps(clang, tc / 'lib', skip_system=False)
 copy(resource / 'include', tc / 'lib/clang' / resource.name / 'include')
 copy('/usr/lib/gcc/x86_64-linux-gnu/13',tc / 'lib/gcc/x86_64-linux-gnu/13')
 for name in ('cc1plus','collect2'):
