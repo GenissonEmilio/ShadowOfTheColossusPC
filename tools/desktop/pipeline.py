@@ -9,6 +9,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import runpy
 import subprocess
 import sys
@@ -96,6 +97,51 @@ def compiler_tool(program, name):
     return Path(program) / "compiler" / "bin" / executable_name(name)
 
 
+def cgroup_memory_headroom(proc=Path("/proc/self")):
+    """Return the smallest memory headroom in the process's cgroup v2 hierarchy."""
+    try:
+        memberships = (proc / "cgroup").read_text(errors="surrogateescape")
+        mounts = (proc / "mountinfo").read_text(errors="surrogateescape")
+    except OSError:
+        return None
+    member = next((Path(line[3:]) for line in memberships.splitlines() if line.startswith("0::/")), None)
+    if member is None or ".." in member.parts:
+        return None
+
+    headroom = None
+    visited = set()
+    for line in mounts.splitlines():
+        mount, separator, filesystem = line.partition(" - ")
+        if not separator or not filesystem.startswith("cgroup2 "):
+            continue
+        fields = mount.split()
+        if len(fields) < 5:
+            continue
+        root, target = (Path(re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), field))
+                        for field in fields[3:5])
+        if not member.is_relative_to(root):
+            continue
+        group = target / member.relative_to(root)
+        for directory in (group, *group.parents):
+            if not directory.is_relative_to(target):
+                break
+            if directory in visited:
+                continue
+            visited.add(directory)
+            for control in ("memory.high", "memory.max"):
+                try:
+                    limit = int((directory / control).read_text(encoding="ascii"))
+                except (OSError, ValueError):
+                    continue
+                try:
+                    current = int((directory / "memory.current").read_text(encoding="ascii"))
+                except (OSError, ValueError):
+                    current = limit
+                available = max(0, limit - current)
+                headroom = available if headroom is None else min(headroom, available)
+    return headroom
+
+
 def available_memory():
     if WINDOWS:
         import ctypes
@@ -115,14 +161,16 @@ def available_memory():
     try:
         with open("/proc/meminfo", encoding="ascii") as stream:
             available = next(int(line.split()[1]) * 1024 for line in stream if line.startswith("MemAvailable:"))
-        cgroup = Path("/sys/fs/cgroup")
-        if (limit := (cgroup / "memory.max")).is_file():
-            quota = limit.read_text().strip()
-            if quota != "max":
-                available = min(available, int(quota) - int((cgroup / "memory.current").read_text()))
-        return available
     except (OSError, ValueError, StopIteration):
-        return None
+        available = None
+    headroom = cgroup_memory_headroom()
+    if available is None:
+        return headroom
+    return available if headroom is None else min(available, headroom)
+
+
+def memory_workers(available):
+    return 2 if available is None else max(1, (available - 512 * MIB) // (768 * MIB))
 
 
 def build_workers(environment):
@@ -131,12 +179,13 @@ def build_workers(environment):
     requested = environment.get("SOTC_BUILD_JOBS")
     if requested is not None:
         try:
-            return max(1, min(limit, int(requested)))
+            workers = max(1, min(limit, int(requested)))
         except ValueError:
             pass
-    available = available_memory()
-    by_memory = 2 if available is None else max(1, (available - 512 * MIB) // (768 * MIB))
-    return min(limit, max(1, cpu_count - 1), by_memory)
+        else:
+            headroom = None if WINDOWS else cgroup_memory_headroom()
+            return workers if headroom is None else min(workers, memory_workers(headroom))
+    return min(limit, max(1, cpu_count - 1), memory_workers(available_memory()))
 
 
 def relative_path(path, directory):
@@ -199,6 +248,13 @@ class Pipeline:
         self.work = self.data / "builds" / self.build_id
         if boot_name == PAL_BOOT:
             self.work /= "SCES-53326"
+        self.clang = self.bundle / "toolchain/bin" / executable_name("clang++")
+        self.use_clang = self.clang.is_file() and self.env.get("SOTC_BUILD_CLANG") != "0"
+        self.compiler = "clang" if self.use_clang else "gcc"
+        # Keep the published Clang kit's existing layout. GCC builds must never
+        # read or overwrite a Clang executable or its intermediate files.
+        if not self.use_clang:
+            self.work /= "gcc"
         self.work.mkdir(parents=True, exist_ok=True)
         self.log = self.data / "last-prepare.log"
 
@@ -250,8 +306,7 @@ class Pipeline:
                     self.source / "PS2Recomp/ps2xIOP/include", self.source / "raylib",
                     self.source / "PS2Recomp/ps2xRuntime/src/lib/Kernel"]
         compiler = tc / "bin" / executable_name("g++")
-        clang = tc / "bin" / executable_name("clang++")
-        use_clang = clang.is_file() and self.env.get("SOTC_BUILD_CLANG") != "0"
+        use_clang = self.use_clang
         link_flags = [str(compiler)]
         if WINDOWS:
             # C headers must follow GCC's built-ins and C++ wrappers so
@@ -270,11 +325,11 @@ class Pipeline:
                 cxx = next((tc / "include/c++").glob("*/x86_64-w64-mingw32"), None)
                 if cxx is None:
                     raise ValueError("The Windows compiler kit is missing its GCC C++ headers.")
-                flags = [str(clang), "--target=x86_64-w64-windows-gnu", "--sysroot=" + tc.as_posix(),
+                flags = [str(self.clang), "--target=x86_64-w64-windows-gnu", "--sysroot=" + tc.as_posix(),
                          "-nostdinc++", "-isystem", str(cxx.parent), "-isystem", str(cxx),
                          "-isystem", str(cxx.parent / "backward"), "-idirafter", str(tc / "include")]
             else:
-                flags[0] = str(clang)
+                flags[0] = str(self.clang)
         flags += ["-std=c++20", "-O0" if capture else "-O2", "-DNDEBUG", "-msse4.1", "-fno-strict-aliasing",
                   *["-I"+str(p) for p in includes],
                   "-DPS2_RUNTIME_LOGS=1", "-DPS2X_ENABLE_IOP_RPC_TRACE=0", "-DPS2X_VU1_TRUST_FPU=1"]
@@ -365,7 +420,7 @@ class Pipeline:
                     report_batches(done, fresh, started)
         self.log_timing("compile", started, stage=directory.name, built=fresh,
                         cached=len(batches) - fresh, workers=workers,
-                        compiler="clang" if use_clang else "gcc", optimization="O0" if capture else "O2")
+                        compiler=self.compiler, optimization="O0" if capture else "O2")
         self.report_stage(step, tr("Montando o executável…"), len(batches) / (len(batches) + 1))
         executable = directory / executable_name("game")
         libs = [self.bundle / p for p in self.manifest["link_inputs"]]
@@ -450,7 +505,11 @@ class Pipeline:
                     manifest = json.loads(stamp.read_text())
                 except (OSError, ValueError):
                     manifest = None
-                if isinstance(manifest, dict) and manifest.get("sha256") == hashlib.sha256(final.read_bytes()).hexdigest():
+                # Markers from the published default Clang pipeline had only
+                # the digest and, optionally, the kit ID.
+                if (isinstance(manifest, dict) and manifest.get("build_id", self.build_id) == self.build_id
+                        and manifest.get("compiler", "clang") == self.compiler
+                        and manifest.get("sha256") == hashlib.sha256(final.read_bytes()).hexdigest()):
                     self.progress(tr("Compilação já pronta. Reutilizando o cache…"))
                     return final
             self.log.write_text("Local static recompilation — "+self.build_id+"\n", encoding="utf-8")
@@ -466,7 +525,8 @@ class Pipeline:
             self.report_stage(STAGE_COUNT, tr("Verificando a compilação…"), 1.0)
             pending = stamp.with_suffix(".tmp")
             try:
-                pending.write_text(json.dumps({"build_id":self.build_id,"sha256":hashlib.sha256(final.read_bytes()).hexdigest()})+"\n")
+                pending.write_text(json.dumps({"build_id": self.build_id, "compiler": self.compiler,
+                                               "sha256": hashlib.sha256(final.read_bytes()).hexdigest()}) + "\n")
                 pending.replace(stamp)
             finally:
                 pending.unlink(missing_ok=True)
@@ -482,7 +542,6 @@ class Pipeline:
         disc_boot = disc / self.boot_name
         self.helper("funcmap_elf",[disc_boot,symbols,boot / "functions.csv"])
         config = (self.source / "game" / (self.boot_config + ".toml")).read_text()
-        import re
         boot_path = relative_path(disc_boot, boot).as_posix() if WINDOWS else str(disc_boot)
         config = re.sub(r'^input = .*$', lambda _: "input = " + json.dumps(boot_path, ensure_ascii=False),
                         config, flags=re.M)
