@@ -35,6 +35,8 @@
 #define GL_GLEXT_PROTOTYPES 1
 #include <GL/gl.h>
 #include <GL/glext.h>
+#define GLFW_INCLUDE_NONE
+#include "GLFW/glfw3.h"
 #include <malloc.h>
 #else
 #include <mutex>
@@ -47,6 +49,10 @@
 std::recursive_mutex &ps2xVitaGlMutex();
 extern "C" unsigned int _pthread_stack_default_user; // ps2_vita_runtime.cpp
 extern "C" unsigned int _newlib_heap_size_user;      // ps2_vita_runtime.cpp
+#endif
+
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+#define PS2X_NATIVE_GL_SHARED 1
 #endif
 
 #include "ThreadNaming.h"
@@ -67,11 +73,30 @@ extern "C" unsigned int _newlib_heap_size_user;      // ps2_vita_runtime.cpp
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace
 {
     constexpr float kNearW = 0.1f;
+#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+    bool alphaBatching()
+    {
+        static const bool enabled = [] {
+            const char *value = std::getenv("SOTC_GL_ALPHA_BATCH");
+            return !value || std::strcmp(value, "0") != 0;
+        }();
+        return enabled;
+    }
+
+    using AlphaPosition = std::array<float, 3>;
+
+    struct AlphaSkinPosition
+    {
+        AlphaPosition position;
+        float bone[3], weight[3];
+    };
+#endif
 #if defined(__ANDROID__)
     // GL_EXT_depth_clamp and GL_NV_depth_clamp use the same enum value.
     constexpr GLenum kGlesDepthClamp = 0x864F;
@@ -615,6 +640,27 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         uint64_t bytes = 0;
         uint8_t alphaMin = 0, alphaMax = 255;
         std::vector<std::array<uint8_t, 2>> triangleAlpha;
+#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+        // The CPU copy keeps only the inputs needed to bound screen coverage.
+        // Frame-arena meshes can use the original frame vertices and indices.
+        std::vector<AlphaPosition> alphaPositions;
+        std::vector<AlphaSkinPosition> alphaSkinPositions;
+        std::vector<uint32_t> alphaIndices;
+
+        uint64_t alphaPositionBytes() const
+        {
+            return alphaPositions.capacity() * sizeof(AlphaPosition) +
+                   alphaSkinPositions.capacity() * sizeof(AlphaSkinPosition) +
+                   alphaIndices.capacity() * sizeof(uint32_t);
+        }
+
+        void clearAlphaPositions()
+        {
+            std::vector<AlphaPosition>().swap(alphaPositions);
+            std::vector<AlphaSkinPosition>().swap(alphaSkinPositions);
+            std::vector<uint32_t>().swap(alphaIndices);
+        }
+#endif
     };
 
     struct Texture
@@ -659,6 +705,100 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         native_renderer::DrawState state;
         float clip[16];
     };
+
+#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+    struct AlphaBounds
+    {
+        double left = 0, right = 0, bottom = 0, top = 0;
+        bool valid = false, computed = false;
+
+        bool overlaps(const AlphaBounds &other) const
+        {
+            return left <= other.right && other.left <= right && bottom <= other.top && other.bottom <= top;
+        }
+
+        bool offscreen() const
+        {
+            return valid && (right < -1 || left > 1 || top < -1 || bottom > 1);
+        }
+    };
+
+    // Bound the shader's 32-bit position arithmetic, including fused and
+    // separately rounded multiply/add. Magnitudes give an absolute error
+    // even when the result nearly cancels. Reject inputs outside the range
+    // covered by the bound, and triangles near the clip plane.
+    constexpr double kAlphaPositionError = 0x1p-18;
+    constexpr float kAlphaPositionLimit = 0x1p32f;
+
+    bool validAlphaInput(float value, float limit = kAlphaPositionLimit)
+    {
+        // Keep the nonfinite check even in builds that enable fast math.
+        uint32_t bits, limitBits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        std::memcpy(&limitBits, &limit, sizeof(limitBits));
+        return (bits & 0x7FFFFFFFu) <= limitBits;
+    }
+
+    AlphaBounds projectAlphaPosition(const AlphaPosition &vertex, const AlphaSkinPosition *skin, const Draw &draw,
+                                     const float *palette, uint32_t paletteCount, double padX, double padY)
+    {
+        std::array<double, 3> position = {vertex[0], vertex[1], vertex[2]}, error = {};
+        if (!std::all_of(vertex.begin(), vertex.end(), [](float n) { return validAlphaInput(n); }))
+            return {};
+        if (skin)
+        {
+            position = {};
+            for (int k = 0; k < 3; ++k)
+            {
+                if (!validAlphaInput(skin->bone[k], static_cast<float>(paletteCount)) || !validAlphaInput(skin->weight[k], 2.0f))
+                    return {};
+                const float bone = skin->bone[k] + 0.5f;
+                if (bone < 0 || bone >= static_cast<float>(paletteCount - 3))
+                    return {};
+                const float *matrix = palette + static_cast<uint32_t>(bone) * 4u;
+                const double weight = skin->weight[k];
+                if (!weight)
+                    continue; // the uploaded palette was checked for finite values
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    const double x = matrix[axis] * static_cast<double>(vertex[0]);
+                    const double y = matrix[axis + 4] * static_cast<double>(vertex[1]);
+                    const double z = matrix[axis + 8] * static_cast<double>(vertex[2]);
+                    const double t = matrix[axis + 12];
+                    position[axis] += weight * (x + y + z + t);
+                    error[axis] += std::abs(weight) * (std::abs(x) + std::abs(y) + std::abs(z) + std::abs(t));
+                }
+            }
+            for (double &v : error)
+                v *= kAlphaPositionError;
+        }
+        double coord[3], margin[3];
+        for (int component = 0; component < 3; ++component)
+        {
+            const int row = component == 2 ? 3 : component; // x, y and w
+            coord[component] = draw.clip[12 + row];
+            double magnitude = std::abs(coord[component]), inputError = 0;
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                const double coefficient = draw.clip[4 * axis + row];
+                const double term = coefficient * position[axis];
+                inputError += std::abs(coefficient) * error[axis];
+                coord[component] += term;
+                magnitude += std::abs(term);
+            }
+            if (!(magnitude + inputError <= kAlphaPositionLimit))
+                return {};
+            margin[component] = inputError + kAlphaPositionError * (magnitude + inputError + 1);
+        }
+        const double w = coord[2] - margin[2];
+        if (w < 2 * kNearW)
+            return {};
+        const double x = coord[0] / coord[2], y = coord[1] / coord[2];
+        const double dx = (margin[0] + std::abs(x) * margin[2]) / w + kAlphaPositionError * (std::abs(x) + 1) + padX;
+        const double dy = (margin[1] + std::abs(y) * margin[2]) / w + kAlphaPositionError * (std::abs(y) + 1) + padY;
+        return {x - dx, x + dx, y - dy, y + dy, true};
+    }
+#endif
 
     // A colour target, with the framebuffer that draws into it (and its
     // depth/stencil when it has one).
@@ -862,6 +1002,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         }
         std::vector<Draw> draws;
         std::vector<uint64_t> drawOrder; // layer << 32 | index: the draws in layer order, stable (sorting the draws themselves moved ~450 bytes each)
+#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+        // Indexed skin vertices are shared by multiple triangles of a draw.
+        std::vector<AlphaBounds> alphaVertexBounds;
+#endif
         // The draw loop's state as last set (pass() forgets it whenever
         // something else may have changed it): a call is made only for a
         // change. vitaGL redoes work on every call (a blend change patches
@@ -1015,6 +1159,22 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 
         native_renderer::detail::FrameOutput output;
         std::vector<uint8_t> readbackPixels;
+#ifdef PS2X_NATIVE_GL_SHARED
+        struct PresentationSlot
+        {
+            Target target;
+            GLsync ready = nullptr;  // producer finished writing
+            GLsync sampled = nullptr; // presenter finished reading
+            bool leased = false;
+        };
+        // The presenter can keep the current and previous frames for
+        // interpolation. Leave room for a published frame and one more write.
+        std::array<PresentationSlot, 4> sharedSlots;
+        int sharedLatest = -1;
+        std::condition_variable sharedFramePublished;
+        uint64_t pixelRevision = 0;
+        bool sharePresentation = false;
+#endif
 #if defined(__ANDROID__)
         uint64_t readbackUs = 0;
 #endif
@@ -1466,8 +1626,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             makeTarget(snapshot, w, h, false);
             makeTarget(shadowMask, w, h, false);
             makeTarget(previous, w, h, false);
-            for (Target &t : shownFrame)
-                makeTarget(t, w, h, false);
+            if (native_renderer::detail::presentHook())
+                for (Target &t : shownFrame)
+                    makeTarget(t, w, h, false);
             makeTarget(glowLayer, w, h, false);
             for (int i = 0; i < 4; ++i)
                 makeTarget(glowSmall[i], i == 0 ? 256u : (i == 1 ? 128u : 64u), i == 0 ? 256u : (i == 1 ? 128u : 64u), false);
@@ -1515,6 +1676,98 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             width = w;
             height = h;
         }
+
+#ifdef PS2X_NATIVE_GL_SHARED
+        bool publishShared(uint32_t w, uint32_t h)
+        {
+            int index = -1;
+            {
+                const std::lock_guard lock(output.mutex);
+                for (size_t i = 0; i < sharedSlots.size(); ++i)
+                    if (static_cast<int>(i) != sharedLatest && !sharedSlots[i].leased)
+                    {
+                        index = static_cast<int>(i);
+                        break;
+                    }
+            }
+            if (index < 0)
+                return false;
+
+            auto &slot = sharedSlots[index];
+            if (slot.ready)
+                glDeleteSync(std::exchange(slot.ready, nullptr));
+            if (slot.sampled)
+            {
+                glWaitSync(slot.sampled, 0, GL_TIMEOUT_IGNORED);
+                glDeleteSync(std::exchange(slot.sampled, nullptr));
+            }
+            auto &target = slot.target;
+            if (target.width != w || target.height != h)
+            {
+                if (!makeTarget(target, w, h, false))
+                {
+                    sharePresentation = false;
+                    return false;
+                }
+                // The PS2's CRTC shows only RGB. Keep the stored alpha for
+                // diagnostic reads, and make the window's sampling opaque.
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_A, GL_ONE);
+            }
+
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, colorPlain.fbo);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, target.fbo);
+            // Match the top-row-first upload used by the other window path.
+            glBlitFramebuffer(0, 0, w, h, 0, h, w, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+            slot.ready = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+            if (!slot.ready)
+            {
+                sharePresentation = false;
+                return false;
+            }
+            glFlush(); // the window context can now wait for this fence
+            {
+                const std::lock_guard lock(output.mutex);
+                sharedLatest = index;
+                output.width = w;
+                output.height = h;
+                ++output.revision;
+            }
+            sharedFramePublished.notify_one();
+            return true;
+        }
+
+        void captureSharedPixels()
+        {
+            // Called on the render worker with output.mutex held. This reads
+            // the published slot even if a state restore resized the scene.
+            const Target &target = sharedSlots[sharedLatest].target;
+            output.pixels.resize(static_cast<size_t>(target.width) * target.height * 4u);
+            glBindFramebuffer(GL_FRAMEBUFFER, target.fbo);
+            glReadPixels(0, 0, target.width, target.height, GL_RGBA, GL_UNSIGNED_BYTE, output.pixels.data());
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            boundFbo = ~0u;
+            pixelRevision = output.revision;
+        }
+
+        void destroySharedFrames()
+        {
+            for (auto &slot : sharedSlots)
+            {
+                if (slot.ready)
+                    glDeleteSync(slot.ready);
+                if (slot.sampled)
+                {
+                    glWaitSync(slot.sampled, 0, GL_TIMEOUT_IGNORED);
+                    glDeleteSync(slot.sampled);
+                }
+                destroyTarget(slot.target);
+            }
+            // The context will be detached immediately after this.
+            glFlush();
+        }
+#endif
 
         bool captureHistory(std::vector<uint8_t> &out, std::string &error)
         {
@@ -1777,6 +2030,67 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 
         void render(uint32_t w, uint32_t h, bool timed);
 
+#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+        const float *alphaSkinPalette(const Draw &d, uint32_t count)
+        {
+            if (count < 4)
+                return nullptr;
+            const size_t at = static_cast<size_t>(d.state.skinPalette - 1u) * 4u;
+            if (at > palettes.size() || count * 4u > palettes.size() - at)
+                return nullptr;
+            const float *palette = palettes.data() + at;
+            return std::all_of(palette, palette + count * 4, [](float v) { return validAlphaInput(v); }) ? palette : nullptr;
+        }
+
+        AlphaBounds alphaTriangleBounds(const Mesh &m, const Draw &d, uint32_t tri, const float *palette, uint32_t paletteCount,
+                                        double padX, double padY)
+        {
+            AlphaBounds bounds;
+            for (uint32_t i = tri * 3u; i < tri * 3u + 3u; ++i)
+            {
+                AlphaBounds v;
+                if (m.dynamic)
+                {
+                    const size_t index = static_cast<size_t>(m.firstIndex) + i;
+                    const size_t vertex = m.indexed ? (index < indexArena.size() ? indexArena.data()[index] : arena.size())
+                                                   : static_cast<size_t>(m.first) + i;
+                    if (vertex >= arena.size())
+                        return {};
+                    const auto &p = arena.data()[vertex];
+                    v = projectAlphaPosition({p.x, p.y, p.z}, nullptr, d, nullptr, 0, padX, padY);
+                }
+                else if (m.skinned)
+                {
+                    const uint32_t vertex = m.alphaIndices[i];
+                    if (vertex >= m.alphaSkinPositions.size())
+                        return {};
+                    auto &cached = alphaVertexBounds[vertex];
+                    if (!cached.computed)
+                    {
+                        const auto &p = m.alphaSkinPositions[vertex];
+                        cached = projectAlphaPosition(p.position, &p, d, palette, paletteCount, padX, padY);
+                        cached.computed = true;
+                    }
+                    v = cached;
+                }
+                else
+                    v = projectAlphaPosition(m.alphaPositions[i], nullptr, d, nullptr, 0, padX, padY);
+                if (!v.valid)
+                    return {};
+                if (!bounds.valid)
+                    bounds = v;
+                else
+                {
+                    bounds.left = std::min(bounds.left, v.left);
+                    bounds.right = std::max(bounds.right, v.right);
+                    bounds.bottom = std::min(bounds.bottom, v.bottom);
+                    bounds.top = std::max(bounds.top, v.top);
+                }
+            }
+            return bounds;
+        }
+#endif
+
         // A mesh's triangles: the list as it is, or the indexed one's
         // indices (the frame's index buffer, bound with the frame's
         // vertices: the indices count from the start of the arena).
@@ -1879,6 +2193,24 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         });
         mesh.bytes = static_cast<uint64_t>(count) * sizeof(native_renderer::Vertex)
                    + mesh.triangleAlpha.capacity() * sizeof(mesh.triangleAlpha[0]);
+#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+        mesh.clearAlphaPositions();
+        if (alphaBatching() && count >= 3u)
+        {
+            try
+            {
+                mesh.alphaPositions.resize(count);
+                std::transform(vertices, vertices + count, mesh.alphaPositions.begin(), [](const native_renderer::Vertex &v) {
+                    return AlphaPosition{v.x, v.y, v.z};
+                });
+            }
+            catch (const std::bad_alloc &)
+            {
+                mesh.clearAlphaPositions();
+            }
+        }
+        mesh.bytes += mesh.alphaPositionBytes();
+#endif
         meshBytes += mesh.bytes;
         cache.buffer = ~0u;
     }
@@ -1907,6 +2239,25 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         });
         mesh.bytes = static_cast<uint64_t>(count) * sizeof(native_renderer::SkinVertex) + static_cast<uint64_t>(indexCount) * 4u
                    + mesh.triangleAlpha.capacity() * sizeof(mesh.triangleAlpha[0]);
+#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+        mesh.clearAlphaPositions();
+        if (alphaBatching() && indexCount >= 3u)
+        {
+            try
+            {
+                mesh.alphaSkinPositions.resize(count);
+                std::transform(vertices, vertices + count, mesh.alphaSkinPositions.begin(), [](const native_renderer::SkinVertex &v) {
+                    return AlphaSkinPosition{{v.x, v.y, v.z}, {v.bone[0], v.bone[1], v.bone[2]}, {v.weight[0], v.weight[1], v.weight[2]}};
+                });
+                mesh.alphaIndices.assign(indices, indices + indexCount);
+            }
+            catch (const std::bad_alloc &)
+            {
+                mesh.clearAlphaPositions();
+            }
+        }
+        mesh.bytes += mesh.alphaPositionBytes();
+#endif
         meshBytes += mesh.bytes;
         skinnedBytes += mesh.bytes;
         cache.buffer = ~0u;
@@ -2009,6 +2360,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             const uint64_t oldAlphaBytes = mesh.triangleAlpha.capacity() * sizeof(mesh.triangleAlpha[0]);
             meshBytes -= oldAlphaBytes;
             mesh.bytes -= oldAlphaBytes;
+#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+            const uint64_t oldPositionBytes = mesh.alphaPositionBytes();
+            meshBytes -= oldPositionBytes;
+            mesh.bytes -= oldPositionBytes;
+            if (oldPositionBytes)
+                mesh.clearAlphaPositions();
+#endif
             meshAlphaBounds(mesh, f.count, [&](uint32_t i) {
                 const size_t offset = static_cast<size_t>(f.firstIndex) + i;
                 const size_t vertex = f.indexed ? (offset < indexArena.size() ? indexArena.data()[offset] : arena.size())
@@ -2026,7 +2384,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     void Renderer::render(uint32_t w, uint32_t h, bool timed)
     {
         ensureTargets(w, h);
-        uint32_t alphaSplitTriangles = 0, alphaRangeDraws = 0;
+        uint32_t alphaSplitTriangles = 0, alphaRangeDraws = 0, alphaDepthDraws = 0, alphaCulledTriangles = 0;
         boundFbo = boundProgram = ~0u;
 #if defined(__linux__) && !defined(__ANDROID__)
         static const bool waterCopyTrace = std::getenv("SOTC_WATER_COPY_TRACE") != nullptr;
@@ -2074,7 +2432,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             if (d.state.screenCopy)
                 screenCopyOrders.push_back(d.state.order);
         }
+        // The copy schedule and the effect draws must use the same choices
+        // throughout a frame, including when the user changes the menu live.
         const auto waterFrom = static_cast<int>(native_renderer::tuning().waterSource + 0.5f);
+        const auto hazeFrom = static_cast<int>(native_renderer::tuning().hazeSource + 0.5f);
         bool enhancedWater = false;
 #if !defined(PS2X_NATIVE_VITA)
         const auto detail = static_cast<unsigned>(std::clamp(native_renderer::tuning().effectDetail + 0.5f, 0.0f, 2.0f));
@@ -2189,8 +2550,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             };
             cache.blend = cache.depthTest = cache.depthMask = -1;
             cache.buffer = cache.texture = ~0u;
-            for (const uint64_t key : drawOrder)
+            // Keys are sorted by layer and then submission index. Visit only
+            // this pass's layers while preserving the original order within each layer.
+            auto first = std::lower_bound(drawOrder.begin(), drawOrder.end(), uint64_t{fromOrder} << 32);
+            const auto last = std::lower_bound(first, drawOrder.end(), uint64_t{toOrder} << 32);
+            for (; first != last; ++first)
             {
+                const uint64_t key = *first;
                 const Draw &d = draws[static_cast<size_t>(key & 0xFFFFFFFFu)];
                 if (backgroundOnly && !d.state.background)
                     continue;
@@ -2199,8 +2565,6 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 if (d.state.reflectionSample && !haveMirror)
                     continue;
                 if (!backgroundOnly && fogOn && d.state.background)
-                    continue;
-                if (d.state.order < fromOrder || d.state.order >= toOrder)
                     continue;
                 if (shadowAmount && d.state.order > shadowOrder)
                     resolveShadows();
@@ -2215,7 +2579,6 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 useProgram(skinned ? skinProgram : mainProgram);
 #if !defined(PS2X_NATIVE_VITA)
                 const float noAlphaTest[4] = {};
-                uniform4(uAlphaTest, noAlphaTest, 1);
 #endif
                 if (skinned)
                 {
@@ -2278,6 +2641,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 {
                     if (backgroundOnly)
                         continue;
+#if !defined(PS2X_NATIVE_VITA)
+                    uniform4(uAlphaTest, noAlphaTest, 1);
+#endif
                     // The count where the faces pass the depth test: front +1, back -1.
                     const float misc[4] = {0, 1, 0, 0}, none[4] = {0, 0, 0, 0};
                     uniform4(uMisc, misc, 1);
@@ -2366,8 +2732,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 }
                 if (textured == 3 || textured == 4)
                 {
-                    const native_renderer::Tuning &t = native_renderer::tuning();
-                    const int source = textured == 4 ? static_cast<int>(t.hazeSource + 0.5f) : waterFrom;
+                    const int source = textured == 4 ? hazeFrom : waterFrom;
                     const auto hazeSource = hazeSourceTextures.find(d.state.order);
                     const GLuint redrawn = textured == 4 ? (hazeSource == hazeSourceTextures.end() ? 0u : hazeSource->second) : waterSource;
                     bindTexture(3, redrawn && source != 2 ? redrawn : (source == 2 ? previous.texture : (source == 1 ? snapshot.texture : refraction.texture)));
@@ -2462,7 +2827,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                                  "opacity=%.6f hazeSource=%.3f redraw=%.3f texture=%d count=%u first=%d\n",
                                  (unsigned long long)arenaFrame, waterCopyTraceFrames, (unsigned long long)d.mesh,
                                  d.state.order, static_cast<unsigned>(d.state.blend), d.state.opacity,
-                                 native_renderer::tuning().hazeSource, native_renderer::tuning().midFrameRedraw,
+                                 static_cast<double>(hazeFrom), native_renderer::tuning().midFrameRedraw,
                                  source, mesh->second.count, firstVertex);
                     if (const Target *sample = waterCopyTraceTarget(source))
                         traceWaterCopy("haze-sample", *sample, nullptr, d.state.order, source);
@@ -2512,11 +2877,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     {
                         const float texMin = tex != textures.end() ? tex->second.alphaMin : 128.0f;
                         const float texMax = tex != textures.end() ? tex->second.alphaMax : 128.0f;
-                        const auto classify = [&](uint32_t triangle) {
+                        const auto classify = [&](const std::array<uint8_t, 2> &range) {
                             if (!d.state.alphaReference) return 1;
                             if (!std::isfinite(d.state.opacity) || d.state.opacity < 0.0f || d.state.opacity > 2.0f) return 0;
-                            const auto range = m.triangleAlpha.empty() ? std::array<uint8_t, 2>{m.alphaMin, m.alphaMax}
-                                                                     : m.triangleAlpha[triangle];
                             // Texture filtering and vertex interpolation stay inside these
                             // bounds. Keep a margin for floating-point interpolation at AREF.
                             const float lo = texMin * (static_cast<float>(range[0]) / 128.0f) * d.state.opacity;
@@ -2525,40 +2888,118 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                             if (hi < d.state.alphaReference - 0.01f) return -1;
                             return 0;
                         };
-                        if (m.count >= 3u)
+                        const uint32_t triangles = m.count / 3u;
+                        const int meshKind = classify({m.alphaMin, m.alphaMax});
+                        if (triangles)
                             bindMeshIndices(m);
-                        for (uint32_t i = 0; i < m.count / 3u;)
+#if !defined(__ANDROID__)
+                        const bool batch = !meshKind && alphaBatching() && target.width && target.height &&
+                                           std::all_of(std::begin(d.clip), std::end(d.clip), [](float v) { return validAlphaInput(v); }) &&
+                                           (m.dynamic ? m.frame == arenaFrame : m.skinned ? m.alphaIndices.size() == m.count : m.alphaPositions.size() == m.count);
+                        const uint32_t paletteCount = std::min(d.state.skinPaletteCount, native_renderer::kSkinPaletteQwords);
+                        const float *palette = batch && m.skinned ? alphaSkinPalette(d, paletteCount) : nullptr;
+                        const double padX = 2.0 / target.width, padY = 2.0 / target.height; // one pixel for clipping and raster subpixel rounding
+                        bool useBounds = batch && (!m.skinned || palette);
+                        if (useBounds && m.skinned)
                         {
-                            const int kind = classify(i);
+                            try
+                            {
+                                alphaVertexBounds.assign(m.alphaSkinPositions.size(), {});
+                            }
+                            catch (const std::bad_alloc &)
+                            {
+                                useBounds = false;
+                            }
+                        }
+                        AlphaBounds nextBounds;
+                        uint32_t nextTriangle = triangles;
+                        const auto bounds = [&](uint32_t triangle) {
+                            if (nextTriangle != triangle)
+                            {
+                                nextBounds = alphaTriangleBounds(m, d, triangle, palette, paletteCount, padX, padY);
+                                nextTriangle = triangle;
+                            }
+                            return nextBounds;
+                        };
+#endif
+                        const auto triangleKind = [&](uint32_t triangle) {
+                            return meshKind || m.triangleAlpha.empty() ? meshKind : classify(m.triangleAlpha[triangle]);
+                        };
+                        bool depthWrites = true;
+                        const auto writeDepth = [&](bool enabled) {
+                            if (enabled != depthWrites)
+                            {
+                                glDepthMask(enabled ? GL_TRUE : GL_FALSE);
+                                depthWrites = enabled;
+                            }
+                        };
+                        for (uint32_t i = 0; i < triangles;)
+                        {
+                            const int kind = triangleKind(i);
                             uint32_t end = i + 1u;
-                            if (kind) // only proven all-pass/all-fail runs can share a draw
-                                while (end < m.count / 3u && classify(end) == kind) ++end;
-                            glDepthMask(kind > 0 ? GL_TRUE : GL_FALSE);
+                            if (meshKind)
+                                end = triangles;
+                            else if (kind)
+                                while (end < triangles && triangleKind(end) == kind) ++end;
+#if !defined(__ANDROID__)
+                            else if (useBounds)
+                            {
+                                const AlphaBounds first = bounds(i);
+                                if (first.offscreen())
+                                {
+                                    ++alphaCulledTriangles;
+                                    ++i;
+                                    continue;
+                                }
+                                if (first.valid)
+                                {
+                                    // The colour-only range and its conditional Z replay
+                                    // can commute solely where their sample coverage is
+                                    // disjoint. Keep submission order within both ranges.
+                                    std::array<AlphaBounds, 16> group;
+                                    group[0] = first;
+                                    while (end < triangles && end - i < group.size() && !triangleKind(end))
+                                    {
+                                        const AlphaBounds next = bounds(end);
+                                        if (!next.valid || std::any_of(group.begin(), group.begin() + (end - i),
+                                                                       [&](const AlphaBounds &previous) { return previous.overlaps(next); }))
+                                            break;
+                                        group[end - i] = next;
+                                        ++end;
+                                    }
+                                }
+                            }
+#endif
+                            writeDepth(kind > 0);
                             drawMeshRange(m, firstVertex, i * 3u, (end - i) * 3u);
                             ++alphaRangeDraws;
                             if (!kind)
                             {
-                                ++alphaSplitTriangles;
-                                // Do not reorder overlapping primitives: finish this
-                                // triangle's conditional Z before the next triangle's colour.
+                                alphaSplitTriangles += end - i;
+                                ++alphaDepthDraws;
                                 glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
-                                glDepthMask(GL_TRUE);
+                                writeDepth(true);
                                 alphaTest[2] = 1.0f;
                                 uniform4(uAlphaTest, alphaTest, 1);
-                                drawMeshRange(m, firstVertex, i * 3u, 3u);
+                                drawMeshRange(m, firstVertex, i * 3u, (end - i) * 3u);
                                 glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
                                 alphaTest[2] = 0.0f;
                                 uniform4(uAlphaTest, alphaTest, 1);
                             }
                             i = end;
                         }
-                        glDepthMask(GL_TRUE);
+                        writeDepth(true);
                         cache.depthMask = 1;
                     }
                 }
                 else
-#endif
+                {
+                    uniform4(uAlphaTest, noAlphaTest, 1);
                     drawMesh(mesh->second, firstVertex);
+                }
+#else
+                drawMesh(mesh->second, firstVertex);
+#endif
 #if defined(__linux__) && !defined(__ANDROID__)
                 if (traceHaze) {
                     if (traceQueryStarted) {
@@ -2757,29 +3198,37 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         if (haveRefraction) copyOrders.push_back(9u);
         std::sort(copyOrders.begin(), copyOrders.end());
         copyOrders.erase(std::unique(copyOrders.begin(), copyOrders.end()), copyOrders.end());
+#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+        const bool usesFullSizeEffectSource = (haveRefraction && waterFrom == 1) ||
+            (!screenCopyOrders.empty() && hazeFrom == 1);
+#else
+        const bool usesFullSizeEffectSource = true;
+#endif
         auto doRefraction = [&]([[maybe_unused]] uint32_t order)
         {
             // The copies the chosen sources need (Tuning hazeSource / waterSource).
-            const native_renderer::Tuning &t = native_renderer::tuning();
-            const int haze = static_cast<int>(t.hazeSource + 0.5f);
-            if (haze == 2 && waterFrom == 2)
+            if (hazeFrom == 2 && waterFrom == 2)
                 return;
 #if defined(__linux__) && !defined(__ANDROID__)
             traceWaterCopy("screen-source", color, nullptr, order);
 #endif
-            snapshotColor();
+            if (usesFullSizeEffectSource)
+                snapshotColor();
 #if defined(__linux__) && !defined(__ANDROID__)
-            traceWaterCopy("screen-snapshot", snapshot, &color, order);
+            if (usesFullSizeEffectSource)
+                traceWaterCopy("screen-snapshot", snapshot, &color, order);
 #endif
+            const Target &source = usesFullSizeEffectSource ? snapshot : colorPlain;
             if (enhancedWater && order == 9u)
-                copyWaterRefraction(snapshot);
-            const bool legacyCopy = enhancedWater ? (haze == 0 && std::binary_search(screenCopyOrders.begin(), screenCopyOrders.end(), order))
-                                                  : (haze == 0 || waterFrom == 0);
+                copyWaterRefraction(source);
+            const bool legacyCopy = enhancedWater
+                ? hazeFrom == 0 && std::binary_search(screenCopyOrders.begin(), screenCopyOrders.end(), order)
+                : hazeFrom == 0 || waterFrom == 0;
             if (legacyCopy)
             {
-                copy(snapshot, refraction);
+                copy(source, refraction);
 #if defined(__linux__) && !defined(__ANDROID__)
-                traceWaterCopy("screen-256", refraction, &snapshot, order);
+                traceWaterCopy("screen-256", refraction, &source, order);
 #endif
                 copy(refraction, refractionHalf);
 #if defined(__linux__) && !defined(__ANDROID__)
@@ -2801,8 +3250,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         };
         auto doDof = [&]
         {
-            snapshotColor();
-            copy(snapshot, refraction);
+            // These targets are separate from the main picture. Downsample the
+            // live color directly unless a later draw reads the full-size snapshot.
+            if (usesFullSizeEffectSource)
+                snapshotColor();
+            copy(usesFullSizeEffectSource ? snapshot : colorPlain, refraction);
             for (int i = 0; i < dof.rounds; ++i)
             {
                 copy(refraction, refractionHalf);
@@ -2924,8 +3376,6 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #endif
         if (redraw)
         {
-            const native_renderer::Tuning &t = native_renderer::tuning();
-            const int hazeFrom = static_cast<int>(t.hazeSource + 0.5f);
             int k = 0, last = -1;
             uint32_t lastOrder = ~0u;
             static const bool share = !std::getenv("SOTC_GL_REDRAW_NOSHARE");
@@ -3052,8 +3502,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         static const bool alphaTrace = std::getenv("SOTC_ALPHA_DEPTH_TRACE") != nullptr;
         static uint32_t alphaTraceRows = 0;
         if (alphaTrace && arenaFrame % 60u == 0u && alphaTraceRows++ < 120u)
-            std::fprintf(stderr, "[alpha-depth] frame=%llu mixed_triangles=%u range_draws=%u extra_depth_draws=%u\n",
-                         static_cast<unsigned long long>(arenaFrame), alphaSplitTriangles, alphaRangeDraws, alphaSplitTriangles);
+            std::fprintf(stderr, "[alpha-depth] frame=%llu mixed_triangles=%u range_draws=%u extra_depth_draws=%u offscreen_mixed_triangles=%u\n",
+                         static_cast<unsigned long long>(arenaFrame), alphaSplitTriangles, alphaRangeDraws, alphaDepthDraws, alphaCulledTriangles);
         if (const auto &hook = native_renderer::detail::presentHook())
         {
             // The host shows a copy of its own: the next frame starts drawing
@@ -3068,6 +3518,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 stats.presentUs += native_renderer::nowUs() - start;
             return;
         }
+#ifdef PS2X_NATIVE_GL_SHARED
+        if (sharePresentation && publishShared(w, h))
+            return;
+#endif
         // Read back, top row first (the GL picture is y-up).
         readbackPixels.resize(static_cast<size_t>(w) * h * 4u);
         glBindFramebuffer(GL_FRAMEBUFFER, color.fbo);
@@ -3089,6 +3543,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             std::memcpy(output.pixels.data() + static_cast<size_t>(y) * row, readbackPixels.data() + static_cast<size_t>(h - 1u - y) * row, row);
         output.width = w;
         output.height = h;
+#ifdef PS2X_NATIVE_GL_SHARED
+        sharedLatest = -1;
+#endif
         ++output.revision;
 #if defined(__ANDROID__)
         if (measureReadback)
@@ -3164,6 +3621,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 loop(makeCurrent, initThere);
 #if defined(__ANDROID__)
                 eglReleaseThread();
+#elif defined(PS2X_NATIVE_GL_SHARED)
+                glfwMakeContextCurrent(nullptr);
 #endif
             });
 #if defined(PS2X_NATIVE_VITA)
@@ -3411,8 +3870,105 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         void holdFrame() override { m_rec.hold = true; }
         native_renderer::FrameRead readFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height, uint64_t *seen) override
         {
+#ifdef PS2X_NATIVE_GL_SHARED
+            {
+                const std::lock_guard lock(r->output.mutex);
+                const auto revision = r->output.revision;
+                if (r->sharedLatest < 0 || r->pixelRevision == revision || (seen && *seen == revision))
+                    return r->output.readLocked(rgba, width, height, seen);
+            }
+            // Screenshots and explicit captures still receive the full RGBA
+            // frame. Only the worker can read its framebuffer object.
+            auto result = native_renderer::FrameRead::Missing;
+            std::string error;
+            stateCommand([&] {
+                const std::lock_guard lock(r->output.mutex);
+                const auto revision = r->output.revision;
+                if (r->sharedLatest >= 0 && r->pixelRevision != revision && (!seen || *seen != revision))
+                    r->captureSharedPixels();
+                result = r->output.readLocked(rgba, width, height, seen);
+                return true;
+            }, error);
+            return result;
+#else
             return r->output.read(rgba, width, height, seen);
+#endif
         }
+
+#ifdef PS2X_NATIVE_GL_SHARED
+        native_renderer::FrameRead readPresentationFrame(native_renderer::PresentationFrame &frame,
+            std::vector<uint8_t> &rgba, uint64_t &revision, bool waitForFreshFrame) override
+        {
+            using native_renderer::FrameRead;
+            static const bool allowWait = [] {
+                if (const char *value = std::getenv("SOTC_NATIVE_SHARED_WAIT"))
+                    return value[0] != '0';
+#if defined(_WIN32)
+                return false;
+#else
+                return true;
+#endif
+            }();
+            GLsync ready = nullptr;
+            {
+                std::unique_lock lock(r->output.mutex);
+                frame = {};
+                // Both loops can run at 60 Hz with slightly different phases.
+                // Give an imminent frame time to arrive before repeating one.
+                if (allowWait && waitForFreshFrame && r->sharedLatest >= 0 && r->output.revision == revision)
+                {
+                    const auto start = native_renderer::nowUs();
+                    const bool arrived = r->sharedFramePublished.wait_for(lock, std::chrono::milliseconds(2), [&] {
+                        return r->output.revision != revision;
+                    });
+                    frame.waitUs = native_renderer::nowUs() - start;
+                    frame.wait = arrived ? native_renderer::PresentationWait::FrameArrived
+                                         : native_renderer::PresentationWait::TimedOut;
+                }
+                if (r->sharedLatest < 0)
+                    return r->output.readLocked(rgba, frame.width, frame.height, &revision);
+                auto &slot = r->sharedSlots[r->sharedLatest];
+                frame.texture = slot.target.texture;
+                frame.width = slot.target.width;
+                frame.height = slot.target.height;
+                if (revision == r->output.revision && slot.leased)
+                    return FrameRead::Unchanged;
+                slot.leased = true;
+                ready = std::exchange(slot.ready, nullptr);
+                revision = r->output.revision;
+            }
+            if (ready)
+            {
+                glWaitSync(ready, 0, GL_TIMEOUT_IGNORED);
+                glDeleteSync(ready);
+            }
+            return FrameRead::Updated;
+        }
+
+        void releasePresentationFrame(uint32_t texture) override
+        {
+            const std::lock_guard lock(r->output.mutex);
+            for (auto &slot : r->sharedSlots)
+                if (slot.leased && slot.target.texture == texture)
+                {
+                    if (slot.sampled)
+                        glDeleteSync(slot.sampled); // the new fence also covers earlier sampling
+                    slot.sampled = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+                    if (slot.sampled)
+                        glFlush();
+                    else
+                        glFinish();
+                    slot.leased = false;
+                    break;
+                }
+        }
+
+        bool sharedFrameReady() override
+        {
+            const std::lock_guard lock(r->output.mutex);
+            return r->sharedLatest >= 0;
+        }
+#endif
 
 #if defined(__ANDROID__)
         native_renderer::detail::AndroidFrameStats androidFrameStats() override
@@ -3756,8 +4312,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             if (makeCurrent)
                 makeCurrent();
             bool contextReady = true;
-#if defined(_WIN32)
-            // GLFW leaves the worker without a current context when WGL rejects the bind.
+#if defined(PS2X_NATIVE_GL_SHARED)
+            // GLFW leaves the worker without a current context if the bind fails.
             contextReady = glfwGetCurrentContext() != nullptr;
             if (!contextReady)
             {
@@ -3783,7 +4339,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 while (!m_queued && m_side.empty() && !m_stopping && !m_stateCommand)
                     m_work.wait_for(lock, kRecheck);
                 if (m_stopping)
+                {
+#ifdef PS2X_NATIVE_GL_SHARED
+                    lock.unlock();
+                    r->destroySharedFrames();
+#endif
                     return;
+                }
                 if (m_stateCommand)
                 {
                     auto operation = std::move(m_stateCommand);
@@ -3917,9 +4479,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 
 namespace native_renderer::detail
 {
-    Backend *createGlBackend(std::function<void()> makeCurrent)
+    Backend *createGlBackend(std::function<void()> makeCurrent, bool sharePresentation)
     {
         auto *renderer = new Renderer();
+#ifdef PS2X_NATIVE_GL_SHARED
+        renderer->sharePresentation = sharePresentation;
+#else
+        (void)sharePresentation;
+#endif
 #if defined(PS2X_NATIVE_VITA)
         // Built here, on the main thread (the CG compiler needs its stack).
         if (!renderer->init())

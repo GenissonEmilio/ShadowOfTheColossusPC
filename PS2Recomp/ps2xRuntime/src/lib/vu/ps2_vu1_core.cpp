@@ -6,6 +6,7 @@
 #include <map>
 #include <set>
 #include "runtime/ps2_stats.h"
+#include "runtime/ps2_pal_profile.h"
 #include "runtime/ps2_vu1.h"
 #include "runtime/ps2_vu1_native.h"
 #include "runtime/gs/ps2_gif_arbiter.h"
@@ -25,6 +26,14 @@
 
 namespace
 {
+    struct Vu1ProfileRun
+    {
+        const VU1Interpreter *owner = nullptr;
+        std::pair<uint64_t, uint32_t> routine{};
+        bool programEnded = true;
+    };
+    thread_local Vu1ProfileRun t_vu1ProfileRun;
+
     constexpr uint8_t laneForComponent(uint32_t component)
     {
         return static_cast<uint8_t>(1u << (3u - component));
@@ -75,6 +84,8 @@ VU1Interpreter::VU1Interpreter(Unit unit)
 
 void VU1Interpreter::resetScheduler()
 {
+    if (t_vu1ProfileRun.owner == this)
+        t_vu1ProfileRun.programEnded = true;
     m_nextCommitCycle = UINT64_MAX;
     m_flagPipeline = {};
     m_fdiv = {};
@@ -1191,7 +1202,7 @@ namespace
     // sends to the GS, to plan native replacements.
     struct Vu1RoutineStats
     {
-        uint64_t calls = 0, kicks = 0, bytes = 0, vertices = 0, instructions = 0;
+        uint64_t calls = 0, kicks = 0, bytes = 0, vertices = 0, pairs = 0, cycles = 0;
         uint64_t prims[8]{};
         uint64_t textured = 0, blended = 0, fogged = 0, gouraud = 0;
         std::map<uint32_t, uint64_t> texPsm; // TEX0 PSM -> count
@@ -1199,8 +1210,6 @@ namespace
     };
     std::mutex g_vu1ProfileMutex;
     std::map<std::pair<uint64_t, uint32_t>, Vu1RoutineStats> g_vu1Profile;
-    thread_local std::pair<uint64_t, uint32_t> t_vu1Routine{0, 0};
-    thread_local bool t_vu1ProgramEnded = true;
     thread_local bool t_vu1Fresh = true;      // the next run() starts a program
     thread_local uint32_t t_vu1StopPc = 0;    // native verify: interpret up to here
     thread_local bool t_vu1InNative = false;
@@ -1277,10 +1286,10 @@ namespace
         return enabled;
     }
 
-    bool vu1SkipCurrent()
+    bool vu1SkipCurrent(const std::pair<uint64_t, uint32_t> &routine)
     {
         for (const auto &[hash, pc] : vu1SkipList())
-            if ((hash == t_vu1Routine.first || (t_vu1Routine.first & 0xFFFFFFFF00000000ull) == (hash << 32)) && pc == t_vu1Routine.second)
+            if ((hash == routine.first || (routine.first & 0xFFFFFFFF00000000ull) == (hash << 32)) && pc == routine.second)
                 return true;
         return false;
     }
@@ -1294,10 +1303,10 @@ namespace
         if (prim & (1u << 6)) st.blended++;
     }
 
-    void vu1ProfileKick(const uint8_t *data, uint32_t size)
+    void vu1ProfileKick(const std::pair<uint64_t, uint32_t> &routine, const uint8_t *data, uint32_t size)
     {
         std::lock_guard<std::mutex> lock(g_vu1ProfileMutex);
-        Vu1RoutineStats &st = g_vu1Profile[t_vu1Routine];
+        Vu1RoutineStats &st = g_vu1Profile[routine];
         st.kicks++;
         st.bytes += size;
         uint32_t off = 0;
@@ -1352,18 +1361,18 @@ namespace
 
     void vu1ProfileReport()
     {
+        // Called with g_vu1ProfileMutex held.
         static double last = 0;
         const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
         if (now - last < 10.0)
             return;
         last = now;
-        std::lock_guard<std::mutex> lock(g_vu1ProfileMutex);
         std::vector<std::pair<std::pair<uint64_t, uint32_t>, Vu1RoutineStats *>> rows;
         for (auto &[key, st] : g_vu1Profile)
             rows.emplace_back(key, &st);
         std::sort(rows.begin(), rows.end(), [](const auto &a, const auto &b)
-                  { return a.second->instructions > b.second->instructions; });
-        std::fprintf(stderr, "[vu1prof] ---- routines by VU instructions (cumulative)\n");
+                  { return a.second->cycles > b.second->cycles; });
+        std::fprintf(stderr, "[vu1prof] ---- routines by VU cycles (cumulative)\n");
         for (const auto &[key, st] : rows)
         {
             std::string psm, regs;
@@ -1372,8 +1381,8 @@ namespace
             for (const auto &[r, n] : st->regs)
                 regs += std::to_string(r) + " ";
             std::fprintf(stderr,
-                         "[vu1prof] %016llx@%04x calls=%llu instr=%llu kicks=%llu KB=%llu verts=%llu prims(pt,ln,ls,tri,ts,tf,spr)=%llu,%llu,%llu,%llu,%llu,%llu,%llu tex=%llu abe=%llu fge=%llu iip=%llu psm={%s} regs={%s}\n",
-                         (unsigned long long)key.first, key.second, (unsigned long long)st->calls, (unsigned long long)st->instructions,
+                         "[vu1prof] %016llx@%04x calls=%llu instr=%llu cycles=%llu kicks=%llu KB=%llu verts=%llu prims(pt,ln,ls,tri,ts,tf,spr)=%llu,%llu,%llu,%llu,%llu,%llu,%llu tex=%llu abe=%llu fge=%llu iip=%llu psm={%s} regs={%s}\n",
+                         (unsigned long long)key.first, key.second, (unsigned long long)st->calls, (unsigned long long)st->pairs, (unsigned long long)st->cycles,
                          (unsigned long long)st->kicks, (unsigned long long)(st->bytes / 1024), (unsigned long long)st->vertices,
                          (unsigned long long)st->prims[0], (unsigned long long)st->prims[1], (unsigned long long)st->prims[2],
                          (unsigned long long)st->prims[3], (unsigned long long)st->prims[4], (unsigned long long)st->prims[5],
@@ -1402,10 +1411,10 @@ void VU1Interpreter::finishXgkick()
             return;
         }
     }
-    if (vu1ProfileEnabled())
+    if (!m_recDisabled && t_vu1ProfileRun.owner == this)
     {
-        vu1ProfileKick(m_xgkick.packet.data(), m_xgkick.totalBytes);
-        if (vu1SkipCurrent())
+        vu1ProfileKick(t_vu1ProfileRun.routine, m_xgkick.packet.data(), m_xgkick.totalBytes);
+        if (vu1SkipCurrent(t_vu1ProfileRun.routine))
         {
             m_xgkick.active = false;
             return;
@@ -1446,7 +1455,18 @@ void VU1Interpreter::advanceOneCycle()
 void VU1Interpreter::advanceTo(uint64_t targetCycle)
 {
     while (m_cycle < targetCycle)
+    {
+        const uint64_t next = std::min(targetCycle, m_nextCommitCycle);
+        if (next > m_cycle + 1u)
+        {
+            // PATH1 is lazy. Bring it as far as the cycle before the
+            // boundary so a store commit sees the same transfer progress
+            // as it would when stepping each elapsed cycle.
+            m_cycle = next - 1u;
+            progressXgkick();
+        }
         advanceOneCycle();
+    }
 }
 
 bool VU1Interpreter::pipelinesPending() const
@@ -2094,6 +2114,15 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                          uint8_t *vuData, uint32_t dataSize,
                          GS &gs, PS2Memory *memory, uint32_t maxCycles)
 {
+    const bool actualVu1 = m_unit == Unit::VU1 && !m_recDisabled;
+    ps2_pal_profile::TimeInto profile{ps2_pal_profile::Vu1, 0, actualVu1};
+    const bool routineProfile = actualVu1 && vu1ProfileEnabled();
+    // A restored runtime clears m_recCode, including when its VU1 worker is
+    // parked on another thread. Its next run establishes the routine again.
+    const bool profileStart = routineProfile &&
+        (t_vu1ProfileRun.owner != this || t_vu1ProfileRun.programEnded ||
+         (t_vu1ProfileRun.routine.first != 0 && !m_recCode));
+    const uint64_t startCycle = m_cycle;
     m_activeVuData = vuData;
     m_activeVuDataSize = dataSize;
     static const bool traceZeroSnap = std::getenv("PS2X_TRACE_ZERO_XYZ") != nullptr;
@@ -2112,7 +2141,15 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     bool programEnded = false;
     bool interpret = true;
     RecVerify *recVerify = nullptr;
-    RecompiledFn recompiled = m_recDisabled ? nullptr : findRecompiled(vuCode, codeSize, memory);
+    uint64_t profileHash = 0;
+    RecompiledFn recompiled = m_recDisabled ? nullptr :
+        findRecompiled(vuCode, codeSize, memory, profileStart ? &profileHash : nullptr, profileStart);
+    if (profileStart)
+    {
+        t_vu1ProfileRun = {this, {profileHash, m_state.pc}, false};
+        std::lock_guard<std::mutex> lock(g_vu1ProfileMutex);
+        g_vu1Profile[t_vu1ProfileRun.routine].calls++;
+    }
     if (t_vu1Fresh && !t_vu1InNative && recompiled && nativeMode() != 0)
     {
         for (const NativeLoop &loop : nativeLoops())
@@ -2137,13 +2174,6 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             }
             break;
         }
-    }
-    const uint64_t profileInstrStart = ps2_stats::vu1Instr.load(std::memory_order_relaxed);
-    if (vu1ProfileEnabled() && t_vu1ProgramEnded)
-    {
-        t_vu1Routine = {m_recHash, m_state.pc};
-        std::lock_guard<std::mutex> lock(g_vu1ProfileMutex);
-        g_vu1Profile[t_vu1Routine].calls++;
     }
     if (RecompiledFn fn = recompiled)
     {
@@ -2376,13 +2406,14 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         ps2_stats::vu1StallCycles.fetch_add(stallCycles, std::memory_order_relaxed);
     if (!t_vu1InNative)
         t_vu1Fresh = programEnded;
-    if (vu1ProfileEnabled())
+    profile.setUnits(interpretedPairs);
+    if (routineProfile)
     {
-        {
-            std::lock_guard<std::mutex> lock(g_vu1ProfileMutex);
-            g_vu1Profile[t_vu1Routine].instructions += ps2_stats::vu1Instr.load(std::memory_order_relaxed) - profileInstrStart;
-        }
-        t_vu1ProgramEnded = programEnded;
+        t_vu1ProfileRun.programEnded = programEnded;
+        std::lock_guard<std::mutex> lock(g_vu1ProfileMutex);
+        Vu1RoutineStats &routine = g_vu1Profile[t_vu1ProfileRun.routine];
+        routine.pairs += interpretedPairs;
+        routine.cycles += m_cycle - startCycle;
         vu1ProfileReport();
     }
     m_state.cycles = m_cycle;

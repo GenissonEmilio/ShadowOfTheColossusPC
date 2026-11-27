@@ -1,8 +1,10 @@
 #include "MiniTest.h"
+#include "runtime/gs/gs_async_backend.h"
+#include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/gs/ps2_gif_arbiter.h"
 #include "runtime/gs/gs_frontend.h"
-#include "runtime/gs/ps2_gs_psmct32.h"
 #include "runtime/ps2_memory.h"
+#include "runtime/ps2_pal_profile.h"
 #include "runtime/ps2_vu1.h"
 
 #include <cmath>
@@ -658,6 +660,36 @@ void register_ps2_vu1_tests()
             t.Equals(vu1.state().q, 5.0f, "WAITQ should expose SQRT after its seven-cycle latency");
         });
 
+        tc.Run("WAITP respects earlier Q commits and a split cycle budget", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            writeVuInstructionPair(fx.code, 0u, makeVuDiv(1u, 2u, 1u, 0u), kVuUpperNop);
+            writeVuInstructionPair(fx.code, 8u, makeVuLowerSpecial(0x70u, 1u), kVuUpperNop); // ESADD
+            writeVuInstructionPair(fx.code, 16u, makeVuLowerSpecial(0x7Bu, 0u), kVuUpperNop); // WAITP
+
+            VU1Interpreter vu1;
+            vu1.state().vf[1][0] = 1.0f;
+            vu1.state().vf[1][1] = 2.0f;
+            vu1.state().vf[1][2] = 3.0f;
+            vu1.state().vf[2][0] = 4.0f;
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                        fx.gs, &fx.mem, 0u, 0u, 0u, 10u);
+
+            t.Equals(vu1.state().cycles, uint64_t{10}, "WAITP should stop at the cycle budget");
+            t.Equals(vu1.state().pc, 16u, "WAITP should remain pending");
+            t.Equals(vu1.state().q, 0.5f, "DIV should commit while WAITP stalls");
+            t.Equals(vu1.state().p, 0.0f, "ESADD should remain pending until cycle twelve");
+
+            vu1.resume(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                       fx.gs, &fx.mem, 0u, 0u, 3u);
+
+            t.Equals(vu1.state().cycles, uint64_t{13}, "WAITP should issue at cycle twelve");
+            t.Equals(vu1.state().pc, 24u, "Execution should advance past WAITP");
+            t.Equals(vu1.state().p, 14.0f, "ESADD should commit before WAITP issues");
+        });
+
         tc.Run("FDIV resource serializes back-to-back scalar operations", [](TestCase &t)
         {
             Vu1Fixture fx;
@@ -1096,6 +1128,13 @@ void register_ps2_vu1_tests()
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
             VU1Interpreter vu1;
+            namespace profile = ps2_pal_profile;
+            const auto &vif = profile::counters[profile::Vif];
+            const auto &mpg = profile::counters[profile::Mpg];
+            const auto &vu = profile::counters[profile::Vu1];
+            const auto vifBytesBefore = vif.units.load();
+            const auto mpgCallsBefore = mpg.calls.load();
+            const auto vuPairsBefore = vu.units.load();
             fx.mem.setVu1MscalCallback([&](uint32_t startPC, uint32_t top, uint32_t itop)
             {
                 vu1.execute(fx.code,
@@ -1119,6 +1158,13 @@ void register_ps2_vu1_tests()
             const uint32_t secondMscal = makeVifCmd(0x14u, 0u, 0u);
             fx.mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&secondMscal), sizeof(secondMscal));
             t.Equals(vu1.state().vi[1], 2, "second MSCAL should see the MPG-updated instruction");
+
+            t.Equals(vif.units.load() - vifBytesBefore, uint64_t{profile::enabled() ? 32u : 0u},
+                     "two MPG packets and two MSCAL commands account for exactly 32 VIF1 bytes");
+            t.Equals(mpg.calls.load() - mpgCallsBefore, uint64_t{profile::enabled() ? 2u : 0u},
+                     "each MPG command contributes one profiling sample when enabled");
+            t.Equals(vu.units.load() - vuPairsBefore, uint64_t{profile::enabled() ? 2u : 0u},
+                     "each one-cycle VU1 run contributes one interpreted pair when enabled");
         });
 
         tc.Run("direct VU1 code writes invalidate cached decode", [](TestCase &t)
@@ -1379,6 +1425,12 @@ void register_ps2_vu1_tests()
 
             GS gs;
             gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+            gs.setRasterBackend(std::make_unique<GSAsyncBackend>(std::make_unique<GSCpuBackend>()));
+            namespace profile = ps2_pal_profile;
+            const auto &transfer = profile::counters[profile::Transfer];
+            const auto &upload = profile::counters[profile::Upload];
+            const auto transferCallsBefore = transfer.calls.load();
+            const auto uploadBytesBefore = upload.units.load();
             GifArbiter arbiter([&](const uint8_t *data, uint32_t sizeBytes)
             {
                 gs.processGIFPacket(data, sizeBytes);
@@ -1434,21 +1486,18 @@ void register_ps2_vu1_tests()
             const uint32_t mscalCmd = makeVifCmd(0x14u, 0u, 0u);
             mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&mscalCmd), sizeof(mscalCmd));
 
-            const uint8_t *vramOut = mem.getGSVRAM();
-            bool imageOk = true;
-            for (uint32_t x = 0; x < 4u && imageOk; ++x)
+            for (uint32_t x = 0; x < 4u; ++x)
             {
-                const uint32_t off = GSPSMCT32::addrPSMCT32(0u, 1u, x, 0u);
-                for (uint32_t c = 0; c < 4u; ++c)
-                {
-                    if (vramOut[off + c] != static_cast<uint8_t>(0x90u + x * 4u + c))
-                    {
-                        imageOk = false;
-                        break;
-                    }
-                }
+                // Read through the backend so pending GS uploads finish first.
+                uint32_t expected = 0;
+                std::memcpy(&expected, vuData + 16u + x * 4u, sizeof(expected));
+                t.Equals(gs.ReadVram(GS_PSM_CT32, 0u, 1u, x, 0u), expected,
+                         "MSCAL-triggered XGKICK should route PATH1 packet into GS VRAM");
             }
-            t.IsTrue(imageOk, "MSCAL-triggered XGKICK should route PATH1 packet into GS VRAM");
+            t.Equals(transfer.calls.load() - transferCallsBefore, uint64_t{profile::enabled() ? 1u : 0u},
+                     "one TRXDIR command contributes one GS transfer sample when enabled");
+            t.Equals(upload.units.load() - uploadBytesBefore, uint64_t{profile::enabled() ? 16u : 0u},
+                     "the GS profiler accounts for exactly one uploaded qword when enabled");
         });
 
         tc.Run("standalone VU1 code honors the nullable PS2Memory API", [](TestCase &t)

@@ -1,7 +1,8 @@
 // ROM-free GPU/CPU contract for TEST GEQUAL/NEVER + AFAIL FB_ONLY, DATE off.
-// CPU reference processes each primitive in submission order. No game assets.
+// The CPU reference processes every covered primitive in submission order.
 #define GL_GLEXT_PROTOTYPES 1
 #define GLFW_INCLUDE_NONE
+#include <GL/gl.h>
 #include "GLFW/glfw3.h"
 #include "raylib.h"
 #include "runtime/native_renderer.h"
@@ -24,6 +25,7 @@ struct Triangle {
     uint8_t alpha=128;
     float u=1;
     float sampledTextureAlpha=128;
+    float x=-1,y=-1,width=4,height=4;
 };
 struct Layer {
     std::vector<Triangle> triangles;
@@ -34,9 +36,12 @@ struct Layer {
     float opacity=1;
 };
 unsigned checks=0,failures=0;
+unsigned calls=0;
+FILE *dump=nullptr;
 uint64_t nextMesh=100;
 const float projection[16]={1,0,0,0, 0,1,0,0, 0,0,0,1, 0,0,0,0};
-const float identity[16]={1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+const float skinPalette[32]={1,0,0,0, 0,1,0,0, 0,0,1,0, 4,-4,2,1,
+                             1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
 void require(bool ok,const char *what) {
     if(!ok){std::fprintf(stderr,"FATAL: %s\n",what);std::fflush(nullptr);std::_Exit(2);}
 }
@@ -46,17 +51,21 @@ const char *kindName(MeshKind k) {
 std::array<uint8_t,3> reference(const std::vector<Layer>&layers,bool probe) {
     std::array<uint8_t,3> colour={0,0,0};float storedDepth=1;
     auto primitive=[&](const Triangle&t,const Layer&l) {
+        const float x=(1.0f/64-t.x)/t.width,y=(-1.0f/64-t.y)/t.height;
+        if(x<0 || y<0 || x+y>1)return;
         const float depth=1-.1f/t.w;
         if(depth>storedDepth)return;
         const float gsAlpha=std::clamp(t.sampledTextureAlpha*(float(t.alpha)/128)*l.opacity,0.f,255.f);
         // Match the existing GS-to-GL modulation convention; TEST uses the
         // unsaturated byte value above, not this blend alpha.
         const float blendAlpha=std::clamp((t.sampledTextureAlpha/255)*2*(float(t.alpha)/128)*l.opacity,0.f,1.f);
+        if(!l.alphaTest && blendAlpha<.02f)return;
         for(unsigned i=0;i<3;++i) {
             const float src=std::clamp((128.f/255)*(float(t.rgb[i])/128),0.f,1.f);
             float value=src;
             if(l.blend==B::Normal)value=src*blendAlpha+(colour[i]/255.f)*(1-blendAlpha);
             else if(l.blend==B::Additive)value=src*blendAlpha+colour[i]/255.f;
+            else if(l.blend==B::Subtract)value=colour[i]/255.f-src*blendAlpha;
             colour[i]=uint8_t(std::lround(std::clamp(value,0.f,1.f)*255));
         }
         if(!l.noDepthWrite && (!l.alphaTest || gsAlpha>=l.reference))storedDepth=depth;
@@ -72,7 +81,7 @@ std::vector<V> vertices(const std::vector<Triangle>&triangles) {
     std::vector<V> v;
     for(const auto&t:triangles) {
         // A fullscreen triangle; all three vertices carry constant attributes.
-        const float xy[3][2]={{-1,-1},{3,-1},{-1,3}};
+        const float xy[3][2]={{t.x,t.y},{t.x+t.width,t.y},{t.x,t.y+t.height}};
         for(const auto&p:xy)v.push_back(V{p[0]*t.w,p[1]*t.w,t.w,0,0,1,t.u,.5f,t.rgb[0],t.rgb[1],t.rgb[2],t.alpha});
     }
     return v;
@@ -105,10 +114,13 @@ uint64_t upload(const std::vector<Triangle>&primitives,MeshKind kind,native_rend
     }
     std::vector<native_renderer::SkinVertex> skin(storage.size());
     for(size_t i=0;i<storage.size();++i) {
-        std::memcpy(&skin[i],&storage[i],sizeof(V));skin[i].bone[0]=0;skin[i].weight[0]=1;
+        std::memcpy(&skin[i],&storage[i],sizeof(V));
+        skin[i].x-=1;skin[i].y+=1;skin[i].z-=.5f;
+        skin[i].bone[0]=0;skin[i].bone[1]=4;
+        skin[i].weight[0]=.25f;skin[i].weight[1]=.75f;
     }
     native_renderer::uploadSkinnedMesh(id,skin.data(),uint32_t(skin.size()),indices.data(),uint32_t(indices.size()));
-    state.skinPalette=native_renderer::framePalette(identity,4);state.skinPaletteCount=4;
+    state.skinPalette=native_renderer::framePalette(skinPalette,8);state.skinPaletteCount=8;
     require(state.skinPalette,"GPU skin palette");return id;
 }
 void frame(const std::string&name,const std::vector<Layer>&layers,MeshKind kind,bool probe) {
@@ -122,20 +134,32 @@ void frame(const std::string&name,const std::vector<Layer>&layers,MeshKind kind,
     };
     unsigned order=1;for(const auto&l:layers)emit(l,kind,order++);
     if(probe){Layer marker;marker.triangles={Triangle{2.5f,{0,0,255},128,1,128}};marker.blend=B::Opaque;marker.alphaTest=false;emit(marker,MeshKind::Static,order);}
+    calls=0;
     native_renderer::endFrame(64,64);
     std::vector<uint8_t> rgba;uint32_t w=0,h=0;
     require(native_renderer::latestFrame(rgba,w,h)&&w==64&&h==64,"frame readback");
+    if(dump)require(std::fwrite(rgba.data(),1,rgba.size(),dump)==rgba.size(),"write frame comparison");
     auto expected=reference(layers,probe);const size_t at=(32*64+32)*4;
     bool pass=true;for(unsigned c=0;c<3;++c)pass&=std::abs(int(rgba[at+c])-int(expected[c]))<=1;
     // For alpha=1, a tolerance of one must not turn a dropped nonzero colour
     // contribution into a false positive; this case uses opaque RGB writes.
     if(name=="low-alpha-one" && !probe)pass&=rgba[at]>0;
     ++checks;if(!pass)++failures;
-    std::printf("%s: %s/%s/%s RGB=%u,%u,%u expected=%u,%u,%u\n",pass?"PASS":"FAIL",name.c_str(),kindName(kind),probe?"depth-probe":"colour",rgba[at],rgba[at+1],rgba[at+2],expected[0],expected[1],expected[2]);
+    std::printf("%s: %s/%s/%s RGB=%u,%u,%u expected=%u,%u,%u calls=%u\n",pass?"PASS":"FAIL",name.c_str(),kindName(kind),probe?"depth-probe":"colour",rgba[at],rgba[at+1],rgba[at+2],expected[0],expected[1],expected[2],calls);
 }
 Layer one(Triangle t,unsigned texture=0,B blend=B::Normal,uint8_t ref=64,float opacity=1,bool mask=false) {
     Layer l;l.triangles={t};l.textureKind=texture;l.blend=blend;l.reference=ref;l.opacity=opacity;l.noDepthWrite=mask;return l;
 }
+}
+extern "C" void __real_glDrawArrays(GLenum,GLint,GLsizei);
+extern "C" void __wrap_glDrawArrays(GLenum mode,GLint first,GLsizei count) {
+    ++calls;
+    __real_glDrawArrays(mode,first,count);
+}
+extern "C" void __real_glDrawElements(GLenum,GLsizei,GLenum,const void*);
+extern "C" void __wrap_glDrawElements(GLenum mode,GLsizei count,GLenum type,const void *indices) {
+    ++calls;
+    __real_glDrawElements(mode,count,type,indices);
 }
 int main() {
     setenv("SOTC_NATIVE_GL","1",1);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);
@@ -144,6 +168,9 @@ int main() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR,3);glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR,3);glfwWindowHint(GLFW_OPENGL_PROFILE,GLFW_OPENGL_CORE_PROFILE);
     auto *worker=glfwCreateWindow(16,16,"alpha worker",nullptr,nullptr);require(worker,"worker context");
     glfwMakeContextCurrent(main);native_renderer::setGlContext([worker]{glfwMakeContextCurrent(worker);});
+    if(const char *path=std::getenv("SOTC_ALPHA_TEST_FRAME_DUMP")) {
+        dump=std::fopen(path,"wb");require(dump,"open frame comparison");
+    }
     auto&t=native_renderer::tuning();t.renderThread=false;t.asyncBuilds=false;t.gpuSkinning=true;t.textureFilter=2;
     const uint8_t uniform[]={128,128,128,128},mixed[]={128,128,128,0,128,128,128,128};
     const uint8_t high[]={128,128,128,200},below[]={128,128,128,190};
@@ -180,10 +207,39 @@ int main() {
         overlap.triangles={Triangle{2,{128,0,0},96,1,128},Triangle{3,{0,128,0},96,.5f,64}};
         run("overlap-near-pass-far-fail-one-mesh",{overlap});
         std::reverse(overlap.triangles.begin(),overlap.triangles.end());run("overlap-far-fail-near-pass-one-mesh",{overlap});
+        Layer islands;
+        islands.textureKind=1;
+        const float locations[8][2]={{-.18f,-.18f},{-.9f,-.9f},{-.45f,-.9f},{.1f,-.9f},
+                                     {.55f,-.9f},{-.9f,.4f},{-.45f,.4f},{.4f,.4f}};
+        for(unsigned i=0;i<8;++i)
+            islands.triangles.push_back({2,{128,90,15},96,i%2?.5f:1.f,i%2?64.f:128.f,
+                                         locations[i][0],locations[i][1],i?.34f:.40f,i?.34f:.40f});
+        run("disjoint-mixed-coverage",{islands,glow});
+        islands.blend=B::Subtract;
+        run("disjoint-mixed-subtract",{scar,islands});
+        islands.blend=B::Opaque;
+        for(auto& t:islands.triangles){t.u=.25f;t.sampledTextureAlpha=0;}
+        run("disjoint-mixed-zero-alpha-rgb",{islands});
+        islands.alphaTest=false;
+        run("ordinary-alpha-cutout",{islands});
+        islands.alphaTest=true;
+        for(auto& t:islands.triangles)t.x+=3;
+        run("offscreen-mixed",{islands});
+        for(unsigned i=0;i<8;++i){islands.triangles[i].x=locations[i][0];islands.triangles[i].w=.15f;}
+        run("disjoint-near-clip-fallback",{islands});
+        // The first two mixed triangles batch. The third shares samples
+        // with the first and is farther, so its colour must see the first Z.
+        Layer boundary;
+        boundary.textureKind=1;
+        boundary.triangles={Triangle{2,{128,0,0},96,1,128,-.18f,-.18f,.40f,.40f},
+                            Triangle{2,{0,0,128},96,.5f,64,-.9f,-.9f,.36f,.36f},
+                            Triangle{3,{0,128,0},96,.5f,64,-.2f,-.2f,.44f,.44f}};
+        run("overlap-after-batched-range",{boundary});
         run("all-mips-high-level-one",{one(Triangle{2,{128,0,0},128,1,128},4)});
         run("all-mips-low-level-one",{one(Triangle{2,{128,0,0},128,1,0},5)});
         run("opacity-crosses-reference",{one(Triangle{2,{128,0,0},128,1,128},0,B::Normal,64,.25f)});
     }
+    if(dump)require(!std::fclose(dump),"close frame comparison");
     std::printf("%s: %u alpha/depth GPU checks; %u failures (synthetic, no ROM)\n",failures?"FAIL":"PASS",checks,failures);
     std::fflush(nullptr);std::_Exit(failures?1:0);
 }

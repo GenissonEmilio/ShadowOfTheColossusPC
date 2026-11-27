@@ -30,6 +30,14 @@ int main(int argc, char **argv)
         return write_signed_branch_execution_fixture(argv[2]) ? 0 : 1;
 
     MiniTest::BeforeEach(reset_ps2_test_function_table);
+    if (argc == 2 && std::string(argv[1]) == "--vu1")
+    {
+        register_ps2_vu1_tests();
+        const int result = MiniTest::Run();
+        std::cout.flush();
+        std::cerr.flush();
+        std::_Exit(result);
+    }
     register_pal_video_timing_tests();
     if (argc == 2 && std::string(argv[1]) == "--pal-video-timing")
         return MiniTest::Run();

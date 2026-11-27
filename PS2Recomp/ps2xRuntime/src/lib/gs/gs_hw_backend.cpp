@@ -3,6 +3,7 @@
 #include "runtime/gs/gs_direct_frame.h"
 #include "runtime/host_menu.h"
 #include "runtime/ps2_stats.h"
+#include "runtime/ps2_pal_profile.h"
 #include "runtime/ps2_thread_load.h"
 
 #include <algorithm>
@@ -2057,6 +2058,9 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
             pendingNonSprite = false;
             return;
         }
+        ps2_pal_profile::TimeInto drawProfile{ps2_pal_profile::GlDraw};
+        const uint64_t initialDrawCalls = drawCalls;
+        uint64_t alphaPasses = 0;
         const DrawKey &key = pendingKey;
         RenderTarget &rt = targets[makeTargetKey(key.fbp, key.fbw, key.fpsm)];
         const uint32_t ztst = (key.test >> 17) & 3u;
@@ -2245,6 +2249,7 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
                 if (d)
                     glDepthMask(GL_FALSE);
                 glDrawArrays(drawMode, first, n);
+                ++alphaPasses;
                 glEnable(GL_BLEND);
                 glUniform1f(uniform("uBlendFix"), static_cast<float>(blendFix));
                 glColorMask(r, g, b, GL_FALSE);
@@ -2319,6 +2324,7 @@ void main() { gl_FragDepth = texelFetch(uZ, ivec2(gl_FragCoord.xy), 0).r; oColor
             else
                 drawRange(0, count);
         }
+        drawProfile.setUnits(drawCalls - initialDrawCalls + alphaPasses);
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glDepthMask(GL_TRUE);
         if (wrapFbo)
