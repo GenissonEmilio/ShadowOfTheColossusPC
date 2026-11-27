@@ -56,6 +56,13 @@ foi publicado pelo PR original e compara com a v1.2.7 nessa rota.
 
 ## Comparação em Windows de entrada
 
+Em um A/B em janela oculta, a 1× no santuário USA, o i7-9750H com RTX 2060
+registrou 52,2 quadros novos/s na v1.2.9, 54,4 na candidata com espera e 56,7
+na candidata sem espera. O p99 mediano por janela foi de 33,7, 41,8 e 33,4 ms,
+respectivamente. O teste usou uma execução por configuração. O padrão no
+Windows usa texturas compartilhadas sem esperar uma publicação nova. No
+Linux, o renderer solicita uma espera de 2 ms.
+
 Use primeiro o Ryzen 7 2700U/RX 560X do relato e um PC com GPU integrada
 compatível com OpenGL 3.3. Compare a v1.2.9 com a candidata, com a mesma
 edição de disco, save, driver, resolução da janela e configuração de energia.
@@ -76,9 +83,10 @@ para o caso do interpretador.
    `SOTC_NATIVE_SHARED_TEXTURE=0` definido antes de abrir o launcher.
    `nativeShared` indica quadros entregues como textura compartilhada e
    `nativeSamples` indica o caminho de cópia pela CPU. Em uma terceira
-   execução, use `SOTC_NATIVE_SHARED_WAIT=0` para isolar o efeito da espera
-   de até 2 ms por um quadro compartilhado. `sharedWaits`, `sharedWaitHits`
-   e `sharedWaitTimeouts` registram tentativas, quadros recebidos e expirações.
+   execução, use `SOTC_NATIVE_SHARED_WAIT=1` para medir o efeito de habilitar
+   a espera de 2 ms por um quadro compartilhado. O valor `0` a desativa.
+   `sharedWaits`, `sharedWaitHits` e `sharedWaitTimeouts` registram tentativas,
+   quadros recebidos e expirações.
    `sharedWaitMs` e `sharedWaitMaxMs` medem o tempo decorrido na thread da janela.
    Faça um perfil separado com `SOTC_FRAME_LOG=1` no USA.
 4. Use 30 quadros novos/s sustentados e p95 de intervalo até 40 ms nas

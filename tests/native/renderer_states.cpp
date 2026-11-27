@@ -24,10 +24,20 @@ namespace {
 }
 int main(int argc, char **argv) {
     bool oldBloom = false, tryShared = false, failedShared = false;
+#if defined(_WIN32)
+    bool expectSharedWait = false;
+#else
+    bool expectSharedWait = true;
+#endif
     for (int i = 1; i < argc; ++i) {
-        oldBloom |= std::string_view(argv[i]) == "legacy-bloom";
-        tryShared |= std::string_view(argv[i]) == "shared";
-        failedShared |= std::string_view(argv[i]) == "failed-shared";
+        const std::string_view option(argv[i]);
+        oldBloom |= option == "legacy-bloom";
+        tryShared |= option == "shared";
+        failedShared |= option == "failed-shared";
+        if (option == "expect-wait")
+            expectSharedWait = true;
+        else if (option == "expect-no-wait")
+            expectSharedWait = false;
     }
     tryShared |= failedShared;
     const bool shared = tryShared && !failedShared;
@@ -128,9 +138,12 @@ int main(int argc, char **argv) {
         std::vector<uint8_t> pixels;
         check(native_renderer::readPresentationFrame(repeated, pixels, windowRevision, true) == FrameRead::Unchanged,
               "the latest frame repeats if the renderer has no new work");
-        check(shared ? repeated.wait == PresentationWait::TimedOut && repeated.waitUs > 0
-                     : repeated.wait == PresentationWait::NotRequested && repeated.waitUs == 0,
-              "only shared presentation waits for a fresh publication");
+        if (shared && expectSharedWait)
+            check(repeated.wait == PresentationWait::TimedOut && repeated.waitUs > 0,
+                  "shared presentation can wait for a fresh publication");
+        else
+            check(repeated.wait == PresentationWait::NotRequested && repeated.waitUs == 0,
+                  "the window repeats the latest frame without waiting");
     }
     if (shared) {
         retained = current;

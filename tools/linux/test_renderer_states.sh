@@ -12,5 +12,6 @@ g++ -std=c++20 -O1 -ffunction-sections -fdata-sections \
 xvfb-run -a timeout --kill-after=2s 30s "$out/check"
 xvfb-run -a timeout --kill-after=2s 30s "$out/check" legacy-bloom
 xvfb-run -a timeout --kill-after=2s 30s "$out/check" shared
-xvfb-run -a timeout --kill-after=2s 30s "$out/check" shared legacy-bloom
+SOTC_NATIVE_SHARED_WAIT=0 xvfb-run -a timeout --kill-after=2s 30s "$out/check" shared expect-no-wait
+SOTC_NATIVE_SHARED_WAIT=1 xvfb-run -a timeout --kill-after=2s 30s "$out/check" shared legacy-bloom expect-wait
 xvfb-run -a timeout --kill-after=2s 30s "$out/check" failed-shared

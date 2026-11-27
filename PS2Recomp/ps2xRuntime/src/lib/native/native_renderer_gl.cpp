@@ -3901,8 +3901,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         {
             using native_renderer::FrameRead;
             static const bool allowWait = [] {
-                const char *value = std::getenv("SOTC_NATIVE_SHARED_WAIT");
-                return !value || value[0] != '0';
+                if (const char *value = std::getenv("SOTC_NATIVE_SHARED_WAIT"))
+                    return value[0] != '0';
+#if defined(_WIN32)
+                return false;
+#else
+                return true;
+#endif
             }();
             GLsync ready = nullptr;
             {
