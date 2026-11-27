@@ -1,4 +1,4 @@
-"""Use GCC's UTF-8 code page throughout the staged Windows toolchain."""
+"""Use UTF-8 throughout the staged Windows toolchain."""
 from __future__ import annotations
 
 import ctypes
@@ -65,7 +65,11 @@ def enable_utf8(executable):
         raise ctypes.WinError(ctypes.get_last_error())
     try:
         if not kernel.EnumResourceLanguagesW(module, manifest_type, manifest_id, remember_language, 0):
-            raise ctypes.WinError(ctypes.get_last_error())
+            error = ctypes.get_last_error()
+            # Some tools (including the MSYS2 Clang driver) lack a manifest.
+            if error not in (1812, 1813, 1814):
+                raise ctypes.WinError(error)
+            updates[0] = ET.tostring(template, encoding="utf-8", xml_declaration=True)
         for language in languages:
             resource = kernel.FindResourceExW(module, manifest_type, manifest_id, language)
             if not resource:
