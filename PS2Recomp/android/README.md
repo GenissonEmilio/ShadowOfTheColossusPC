@@ -50,6 +50,9 @@ from the touch controls.
    pacote do jogo** and **Importar meu disco** on the launcher, then select
    **Jogar**. Import requires space for the extracted game data.
 
+The launcher extracts the ISO on the phone. The separate `.sotcplay` bundle
+provides the locally compiled ARM64 game code needed by the public APK.
+
 The launcher activates each replacement after validating it. Saves are kept in
 the app's `files/memcards` directory across bundle, disc and signed APK updates
 under the same application ID. The public APK uses `com.genisson.sotc.mobile`
@@ -104,6 +107,58 @@ system library dependencies and the JNI and FFmpeg exports before packaging.
 The result is `ShadowOfTheColossus.sotcplay` in `--work`. It contains the
 locally built ARM64 runner and its manifest. Keep it private with your disc
 image and captures.
+
+### On-device preparation research
+
+The target workflow is to select the SCUS-97472 ISO in the public app, prepare
+it locally once, and use the prepared game on subsequent launches. The current
+bundle contains `libps2EntryRunner.so`, with the runtime and the translated
+EE code from the boot ELF and three relocated XFF modules. The public APK
+ships the loader for that library. Extracting the disc on the phone already
+works, but the APK cannot generate the library yet.
+
+The static PS2-to-C++ source generator can now be built as an Android ARM64
+developer tool. With the pinned SDK CMake and Ninja on PATH, run from the
+repository root:
+
+```sh
+cmake -S PS2Recomp -B build/android-recompiler -G Ninja \
+  -DCMAKE_TOOLCHAIN_FILE="$ANDROID_HOME/ndk/28.2.13676358/build/cmake/android.toolchain.cmake" \
+  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 -DANDROID_STL=c++_static \
+  -DCMAKE_BUILD_TYPE=Release -DPS2X_BUILD_ANDROID_RECOMP=ON -DPS2X_BUILD_RUNTIME=OFF
+cmake --build build/android-recompiler --target ps2_recomp
+```
+
+The output is `build/android-recompiler/ps2xRecomp/ps2_recomp`. It accepts the
+same TOML configuration as the desktop tool and emits C++. The tool's Android
+build is opt-in and is separate from the APK. The Android NDK build was checked
+without game data. The existing Java importer extracted a synthetic ISO on
+the JVM. A statically linked ARM64 build of the tool decoded its MIPS ELF and
+emitted the C++ and function table under QEMU user mode. The host NDK then
+compiled the generated function for ARM64, and it returned the expected
+register value and return address under QEMU.
+
+To make the launcher work with the ISO alone:
+
+1. Compile and link generated C++ for ARM64 on-device, starting with a
+   synthetic function loaded by a test app. The production path must work from
+   the app with 16 KiB page sizes and current Android execution restrictions.
+   Android 10 and later restrict launching binaries from the writable app
+   home directory for apps targeting API 29 or newer.
+   [Android execution behavior](https://developer.android.com/about/versions/10/behavior-changes-10#execute-permission)
+2. Replace the desktop preparation scripts in the app workflow. Prepare each
+   stage, execute until the next XFF module loads, and feed its relocated
+   code back into generation for KERNEL, MANAGER and GAMECORE.
+3. Connect preparation to the ISO picker. Keep intermediates in private
+   storage, handle interruption and reuse a complete build for the same
+   verified disc and runtime. Preserve the user's memory cards on retry or
+   rebuild.
+4. Test a fresh APK install on a phone using the ISO as the only input.
+   Verify the first launch, offline relaunch, FMV, shrine gameplay and save/load.
+   Measure preparation time, peak memory and storage on a lower-end device.
+
+The disc-only workflow is still pending. The APK currently uses the
+`.sotcplay` bundle for gameplay.
 
 ## Development build
 
