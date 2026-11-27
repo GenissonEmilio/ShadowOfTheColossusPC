@@ -743,6 +743,7 @@ namespace
     bool g_tried = false;
     std::atomic<bool> g_shown{false};
     std::function<void()> g_glMakeCurrent;
+    std::function<void()> g_glMakeUnsharedCurrent;
     bool g_sharePresentation = false;
     std::function<void(uint32_t, uint32_t, uint32_t)> g_presentHook;
 
@@ -767,6 +768,11 @@ namespace
             if (wantGl() && g_glMakeCurrent)
             {
                 g_backend = native_renderer::detail::createGlBackend(g_glMakeCurrent, g_sharePresentation);
+                if (!g_backend && g_sharePresentation && g_glMakeUnsharedCurrent)
+                {
+                    std::cerr << "[native] shared OpenGL renderer failed; retrying with frame readback" << std::endl;
+                    g_backend = native_renderer::detail::createGlBackend(g_glMakeUnsharedCurrent, false);
+                }
                 std::cerr << "[native] OpenGL renderer " << (g_backend ? "up" : "failed") << std::endl;
                 const char *mode = std::getenv("SOTC_NATIVE_GL");
                 if (g_backend && mode && std::string(mode) == "check")
@@ -796,10 +802,12 @@ namespace native_renderer
     bool inEmulator() { return detail::g_inEmulator.load(std::memory_order_relaxed); }
     bool tuningApplies(const TuningItem &item) { return (item.backends & (wantGl() ? 2u : 1u)) != 0u; }
 
-    void setGlContext(std::function<void()> makeCurrent, bool sharePresentation)
+    void setGlContext(std::function<void()> makeCurrent, bool sharePresentation,
+                      std::function<void()> makeUnsharedCurrent)
     {
         g_glMakeCurrent = std::move(makeCurrent);
         g_sharePresentation = sharePresentation;
+        g_glMakeUnsharedCurrent = std::move(makeUnsharedCurrent);
 #if defined(__vita__)
         // The CG compiler needs the main thread's stack: build it now.
         backend();
@@ -818,6 +826,7 @@ namespace native_renderer
         g_backend = nullptr;
         g_tried = false;
         g_glMakeCurrent = {};
+        g_glMakeUnsharedCurrent = {};
         g_sharePresentation = false;
     }
 #endif

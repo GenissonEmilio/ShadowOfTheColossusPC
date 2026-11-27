@@ -138,7 +138,9 @@ namespace native_renderer
     // thread (the backend's render thread; every call below comes from the
     // game thread).
     // Desktop windows may share texture and sync objects with that context.
-    void setGlContext(std::function<void()> makeCurrent, bool sharePresentation = false);
+    // If the shared backend fails to start, retry with the optional unshared context.
+    void setGlContext(std::function<void()> makeCurrent, bool sharePresentation = false,
+                      std::function<void()> makeUnsharedCurrent = {});
 #if defined(__ANDROID__) || defined(_WIN32) || defined(__linux__)
     void shutdownGl();
 #endif
@@ -384,10 +386,15 @@ namespace native_renderer
     // A presentation consumer owns its own revision, initially zero.
     FrameRead readFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height, uint64_t &revision);
 #if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+    enum class PresentationWait { NotRequested, FrameArrived, TimedOut };
+
     struct PresentationFrame
     {
         uint32_t texture = 0;
         uint32_t width = 0, height = 0;
+        // Elapsed time waiting for a new publication, even if the frame repeated.
+        uint64_t waitUs = 0;
+        PresentationWait wait = PresentationWait::NotRequested;
     };
     // Called on the window's current GL context. An updated texture is leased
     // until releasePresentationFrame, after all draws that sample it. A zero

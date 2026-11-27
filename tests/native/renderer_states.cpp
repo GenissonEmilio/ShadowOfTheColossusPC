@@ -9,7 +9,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -21,11 +23,14 @@ namespace {
     void check(bool ok, const std::string &message) { check(ok, message.c_str()); }
 }
 int main(int argc, char **argv) {
-    bool oldBloom = false, shared = false;
+    bool oldBloom = false, tryShared = false, failedShared = false;
     for (int i = 1; i < argc; ++i) {
         oldBloom |= std::string_view(argv[i]) == "legacy-bloom";
-        shared |= std::string_view(argv[i]) == "shared";
+        tryShared |= std::string_view(argv[i]) == "shared";
+        failedShared |= std::string_view(argv[i]) == "failed-shared";
     }
+    tryShared |= failedShared;
+    const bool shared = tryShared && !failedShared;
 #if defined(_WIN32)
     check(_putenv_s("SOTC_NATIVE_GL", "1") == 0, "set native OpenGL");
     check(_putenv_s("SOTC_BLOOM_OLD", oldBloom ? "1" : "") == 0, "set bloom path");
@@ -38,9 +43,25 @@ int main(int argc, char **argv) {
     auto *host = glfwGetCurrentContext();
     glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE); glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3); glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-    auto *worker = glfwCreateWindow(16, 16, "history RenderThread", nullptr, shared ? host : nullptr); check(worker, "worker GL context");
+    auto *worker = glfwCreateWindow(16, 16, "history RenderThread", nullptr, tryShared ? host : nullptr); check(worker, "worker GL context");
+    GLFWwindow *unshared = nullptr;
+    std::function<void()> bindUnshared;
+    unsigned sharedAttempts = 0, fallbackAttempts = 0;
+    if (tryShared) {
+        unshared = glfwCreateWindow(16, 16, "history RenderThread readback", nullptr, nullptr);
+        check(unshared, "fallback GL context");
+        bindUnshared = [unshared, &fallbackAttempts] {
+            ++fallbackAttempts;
+            glfwMakeContextCurrent(unshared);
+        };
+    }
     glfwMakeContextCurrent(host);
-    native_renderer::setGlContext([worker] { glfwMakeContextCurrent(worker); }, shared);
+    native_renderer::setGlContext([&] {
+        if (tryShared)
+            ++sharedAttempts;
+        if (!failedShared)
+            glfwMakeContextCurrent(worker);
+    }, tryShared, std::move(bindUnshared));
     native_renderer::tuning().renderThread = true; native_renderer::tuning().asyncBuilds = false;
     const float clip[] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     unsigned frameNumber = 0;
@@ -100,6 +121,17 @@ int main(int argc, char **argv) {
         return pixels;
     };
     retainedPixels = frame(220, 20, 10);
+    {
+        using native_renderer::FrameRead;
+        using native_renderer::PresentationWait;
+        native_renderer::PresentationFrame repeated;
+        std::vector<uint8_t> pixels;
+        check(native_renderer::readPresentationFrame(repeated, pixels, windowRevision, true) == FrameRead::Unchanged,
+              "the latest frame repeats if the renderer has no new work");
+        check(shared ? repeated.wait == PresentationWait::TimedOut && repeated.waitUs > 0
+                     : repeated.wait == PresentationWait::NotRequested && repeated.waitUs == 0,
+              "only shared presentation waits for a fresh publication");
+    }
     if (shared) {
         retained = current;
         auto target = LoadRenderTexture(retained.width, retained.height);
@@ -164,9 +196,12 @@ int main(int argc, char **argv) {
         native_renderer::releasePresentationFrame(retained.texture);
         native_renderer::releasePresentationFrame(current.texture);
     }
+    check(sharedAttempts == unsigned(tryShared), "attempt the shared worker once when requested");
+    check(fallbackAttempts == unsigned(failedShared), "retry with the unshared worker only after a shared bind failure");
     native_renderer::shutdownGl();
     glfwDestroyWindow(worker);
+    if (unshared) glfwDestroyWindow(unshared);
     CloseWindow();
     std::printf("PASS: %u native GPU state checks, %s bloom, %s presentation\n",
-                checks, oldBloom ? "legacy" : "GS", shared ? "shared" : "CPU");
+                checks, oldBloom ? "legacy" : "GS", shared ? "shared" : failedShared ? "CPU fallback" : "CPU");
 }

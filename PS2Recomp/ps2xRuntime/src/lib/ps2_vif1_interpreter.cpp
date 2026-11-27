@@ -3,6 +3,7 @@
 #include "runtime/gs/gs_frontend.h"
 #include <cstdio>
 #include "runtime/ps2_stats.h"
+#include "runtime/ps2_pal_profile.h"
 // Based on Blackline Interactive implementation
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_vu1_native.h"
@@ -419,6 +420,7 @@ void Vif1Compactor::feed(const uint8_t *data, uint32_t bytes)
 
 void Vif1Walker::feed(const uint8_t *data, uint32_t bytes)
 {
+    ps2_pal_profile::TimeInto profile{ps2_pal_profile::Walker, bytes};
     m_bytes += bytes;
     VIFRegisters &r = m_regs;
     // Resume a payload split across DMA pieces before reading any VIFcode.
@@ -569,6 +571,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
     if (sizeBytes == 0u)
         return;
 
+    ps2_pal_profile::TimeInto profile{ps2_pal_profile::Vif, sizeBytes};
     uint32_t pos = 0;
     // With the native renderer drawing and the GS rasterizing nothing
     // (GS::skipRaster), VU1 programs only feed the GS: they are not run.
@@ -773,6 +776,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else if (opcode == VIF_MPG)
         {
+            ps2_pal_profile::TimeInto mpgProfile{ps2_pal_profile::Mpg};
             uint32_t destAddr = (uint32_t)imm * 8u;
             const uint32_t instructionCount = (num == 0u) ? 256u : static_cast<uint32_t>(num);
             const uint32_t mpgBytes = instructionCount * 8u;
@@ -797,6 +801,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else if (opcode == VIF_DIRECT || opcode == VIF_DIRECTHL)
         {
+            ps2_pal_profile::TimeInto directProfile{ps2_pal_profile::Direct};
             uint32_t qwCount = imm;
             if (qwCount == 0)
                 qwCount = 65536;
@@ -850,6 +855,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else if ((opcode & 0x60) == 0x60)
         {
+            ps2_pal_profile::TimeInto unpackProfile{ps2_pal_profile::Unpack, 0, !skipVu1};
             ps2_stats::vifUnpack.fetch_add(1, std::memory_order_relaxed);
             if (skipVu1)
             {

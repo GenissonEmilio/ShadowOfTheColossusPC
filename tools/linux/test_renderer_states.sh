@@ -13,3 +13,4 @@ xvfb-run -a timeout --kill-after=2s 30s "$out/check"
 xvfb-run -a timeout --kill-after=2s 30s "$out/check" legacy-bloom
 xvfb-run -a timeout --kill-after=2s 30s "$out/check" shared
 xvfb-run -a timeout --kill-after=2s 30s "$out/check" shared legacy-bloom
+xvfb-run -a timeout --kill-after=2s 30s "$out/check" failed-shared

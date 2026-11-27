@@ -2,6 +2,7 @@
 #include "ThreadNaming.h"
 #include "runtime/ps2_thread_load.h"
 #include "runtime/ps2_stats.h"
+#include "runtime/ps2_pal_profile.h"
 
 #include <chrono>
 #include <cstring>
@@ -204,20 +205,35 @@ void GSAsyncBackend::execute(const Command &command, const Chunk &chunk)
     switch (command.kind)
     {
     case Kind::Draw:
+    {
+        ps2_pal_profile::TimeInto profile{ps2_pal_profile::Draw};
         m_inner->Submit(command.batch);
         break;
+    }
     case Kind::Clut:
+    {
+        ps2_pal_profile::TimeInto profile{ps2_pal_profile::Clut};
         m_inner->LoadClut(command.tex0, command.texclut);
         break;
+    }
     case Kind::VuBatch:
+    {
+        ps2_pal_profile::TimeInto profile{ps2_pal_profile::VuBatch};
         m_inner->SubmitVuBatch(*command.vuBatch);
         break;
+    }
     case Kind::Transfer:
+    {
+        ps2_pal_profile::TimeInto profile{ps2_pal_profile::Transfer};
         m_inner->BeginTransfer(command.transfer);
         break;
+    }
     case Kind::Upload:
+    {
+        ps2_pal_profile::TimeInto profile{ps2_pal_profile::Upload, command.args[1]};
         m_inner->UploadImage(chunk.bytes.data() + command.args[0], command.args[1]);
         break;
+    }
     case Kind::TextureFlush:
         m_inner->TextureFlush();
         break;

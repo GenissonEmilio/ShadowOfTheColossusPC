@@ -2432,7 +2432,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             if (d.state.screenCopy)
                 screenCopyOrders.push_back(d.state.order);
         }
+        // The copy schedule and the effect draws must use the same choices
+        // throughout a frame, including when the user changes the menu live.
         const auto waterFrom = static_cast<int>(native_renderer::tuning().waterSource + 0.5f);
+        const auto hazeFrom = static_cast<int>(native_renderer::tuning().hazeSource + 0.5f);
         bool enhancedWater = false;
 #if !defined(PS2X_NATIVE_VITA)
         const auto detail = static_cast<unsigned>(std::clamp(native_renderer::tuning().effectDetail + 0.5f, 0.0f, 2.0f));
@@ -2729,8 +2732,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 }
                 if (textured == 3 || textured == 4)
                 {
-                    const native_renderer::Tuning &t = native_renderer::tuning();
-                    const int source = textured == 4 ? static_cast<int>(t.hazeSource + 0.5f) : waterFrom;
+                    const int source = textured == 4 ? hazeFrom : waterFrom;
                     const auto hazeSource = hazeSourceTextures.find(d.state.order);
                     const GLuint redrawn = textured == 4 ? (hazeSource == hazeSourceTextures.end() ? 0u : hazeSource->second) : waterSource;
                     bindTexture(3, redrawn && source != 2 ? redrawn : (source == 2 ? previous.texture : (source == 1 ? snapshot.texture : refraction.texture)));
@@ -2825,7 +2827,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                                  "opacity=%.6f hazeSource=%.3f redraw=%.3f texture=%d count=%u first=%d\n",
                                  (unsigned long long)arenaFrame, waterCopyTraceFrames, (unsigned long long)d.mesh,
                                  d.state.order, static_cast<unsigned>(d.state.blend), d.state.opacity,
-                                 native_renderer::tuning().hazeSource, native_renderer::tuning().midFrameRedraw,
+                                 static_cast<double>(hazeFrom), native_renderer::tuning().midFrameRedraw,
                                  source, mesh->second.count, firstVertex);
                     if (const Target *sample = waterCopyTraceTarget(source))
                         traceWaterCopy("haze-sample", *sample, nullptr, d.state.order, source);
@@ -3198,16 +3200,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         copyOrders.erase(std::unique(copyOrders.begin(), copyOrders.end()), copyOrders.end());
 #if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
         const bool usesFullSizeEffectSource = (haveRefraction && waterFrom == 1) ||
-            (!screenCopyOrders.empty() && static_cast<int>(native_renderer::tuning().hazeSource + 0.5f) == 1);
+            (!screenCopyOrders.empty() && hazeFrom == 1);
 #else
         const bool usesFullSizeEffectSource = true;
 #endif
         auto doRefraction = [&]([[maybe_unused]] uint32_t order)
         {
             // The copies the chosen sources need (Tuning hazeSource / waterSource).
-            const native_renderer::Tuning &t = native_renderer::tuning();
-            const int haze = static_cast<int>(t.hazeSource + 0.5f);
-            if (haze == 2 && waterFrom == 2)
+            if (hazeFrom == 2 && waterFrom == 2)
                 return;
 #if defined(__linux__) && !defined(__ANDROID__)
             traceWaterCopy("screen-source", color, nullptr, order);
@@ -3221,8 +3221,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             const Target &source = usesFullSizeEffectSource ? snapshot : colorPlain;
             if (enhancedWater && order == 9u)
                 copyWaterRefraction(source);
-            const bool legacyCopy = enhancedWater ? (haze == 0 && std::binary_search(screenCopyOrders.begin(), screenCopyOrders.end(), order))
-                                                  : (haze == 0 || waterFrom == 0);
+            const bool legacyCopy = enhancedWater
+                ? hazeFrom == 0 && std::binary_search(screenCopyOrders.begin(), screenCopyOrders.end(), order)
+                : hazeFrom == 0 || waterFrom == 0;
             if (legacyCopy)
             {
                 copy(source, refraction);
@@ -3375,8 +3376,6 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #endif
         if (redraw)
         {
-            const native_renderer::Tuning &t = native_renderer::tuning();
-            const int hazeFrom = static_cast<int>(t.hazeSource + 0.5f);
             int k = 0, last = -1;
             uint32_t lastOrder = ~0u;
             static const bool share = !std::getenv("SOTC_GL_REDRAW_NOSHARE");
@@ -3901,20 +3900,32 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             std::vector<uint8_t> &rgba, uint64_t &revision, bool waitForFreshFrame) override
         {
             using native_renderer::FrameRead;
+            static const bool allowWait = [] {
+                const char *value = std::getenv("SOTC_NATIVE_SHARED_WAIT");
+                return !value || value[0] != '0';
+            }();
             GLsync ready = nullptr;
             {
                 std::unique_lock lock(r->output.mutex);
                 frame = {};
                 // Both loops can run at 60 Hz with slightly different phases.
                 // Give an imminent frame time to arrive before repeating one.
-                if (waitForFreshFrame && r->sharedLatest >= 0 && r->output.revision == revision)
-                    r->sharedFramePublished.wait_for(lock, std::chrono::milliseconds(2), [&] {
+                if (allowWait && waitForFreshFrame && r->sharedLatest >= 0 && r->output.revision == revision)
+                {
+                    const auto start = native_renderer::nowUs();
+                    const bool arrived = r->sharedFramePublished.wait_for(lock, std::chrono::milliseconds(2), [&] {
                         return r->output.revision != revision;
                     });
+                    frame.waitUs = native_renderer::nowUs() - start;
+                    frame.wait = arrived ? native_renderer::PresentationWait::FrameArrived
+                                         : native_renderer::PresentationWait::TimedOut;
+                }
                 if (r->sharedLatest < 0)
                     return r->output.readLocked(rgba, frame.width, frame.height, &revision);
                 auto &slot = r->sharedSlots[r->sharedLatest];
-                frame = {slot.target.texture, slot.target.width, slot.target.height};
+                frame.texture = slot.target.texture;
+                frame.width = slot.target.width;
+                frame.height = slot.target.height;
                 if (revision == r->output.revision && slot.leased)
                     return FrameRead::Unchanged;
                 slot.leased = true;
@@ -4296,8 +4307,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             if (makeCurrent)
                 makeCurrent();
             bool contextReady = true;
-#if defined(_WIN32)
-            // GLFW leaves the worker without a current context when WGL rejects the bind.
+#if defined(PS2X_NATIVE_GL_SHARED)
+            // GLFW leaves the worker without a current context if the bind fails.
             contextReady = glfwGetCurrentContext() != nullptr;
             if (!contextReady)
             {

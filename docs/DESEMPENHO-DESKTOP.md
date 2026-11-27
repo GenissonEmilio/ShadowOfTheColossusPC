@@ -75,8 +75,12 @@ para o caso do interpretador.
    da **mesma candidata**, com o comportamento padrão e com
    `SOTC_NATIVE_SHARED_TEXTURE=0` definido antes de abrir o launcher.
    `nativeShared` indica quadros entregues como textura compartilhada e
-   `nativeSamples` indica o caminho de cópia pela CPU. Faça perfis de
-   CPU separados com `SOTC_FRAME_LOG=1` (USA) ou `PS2X_VU1_PROFILE=1` (PAL).
+   `nativeSamples` indica o caminho de cópia pela CPU. Em uma terceira
+   execução, use `SOTC_NATIVE_SHARED_WAIT=0` para isolar o efeito da espera
+   de até 2 ms por um quadro compartilhado. `sharedWaits`, `sharedWaitHits`
+   e `sharedWaitTimeouts` registram tentativas, quadros recebidos e expirações.
+   `sharedWaitMs` e `sharedWaitMaxMs` medem o tempo decorrido na thread da janela.
+   Faça um perfil separado com `SOTC_FRAME_LOG=1` no USA.
 4. Use 30 quadros novos/s sustentados e p95 de intervalo até 40 ms nas
    cenas jogáveis como alvo inicial de comparação. Registre também p99 e
    o maior intervalo, além de verificar velocidade do jogo, áudio, água,
@@ -89,6 +93,50 @@ de comandos consomem a CPU. Se a queda continuar concentrada no PAL, priorize
 perfil de VU1, conversão VIF e lotes GS antes de promover o renderer PAL
 experimental ou os lotes VU1 na GPU. A [documentação PAL][pal] e o
 [plano de VU1][vu1] descrevem os caminhos atuais.
+
+## Perfil do caminho PAL no Linux
+
+1. Prepare a edição PAL e use uma cópia do perfil e do cartão de memória.
+   Compare a última versão estável e a candidata na mesma máquina, com a
+   mesma resolução interna, VSync e taxa de atualização, em janela oculta
+   (`PS2X_HIDDEN_WINDOW=1`). Meça pelo menos um trecho leve e um com mais
+   geometria ou efeitos. Para repetir cada trecho, use o mesmo save e a
+   mesma sequência de entrada indexada por quadros do jogo ou VBlanks.
+2. Faça primeiro a comparação de FPS com a coleta detalhada desativada.
+   Em seguida, execute a candidata no mesmo trecho com `PS2X_PAL_PROFILE=1`
+   e `PS2X_STATS=1`. No launcher Linux, defina as variáveis antes de iniciar
+   `ShadowOfTheColossusPC --play --data-dir <perfil-de-teste>`.
+3. No `last-game.log`, combine as linhas `[palprof]`, `[stats]` e `[display]`
+   com o mesmo `t` e a linha `[load]` que precede esse grupo. `frames` identifica
+   o fim da janela na contagem de cadeias VIF1 e `windowSec` informa a duração da amostra.
+   Compare apenas janelas inteiras da cena escolhida. Registre também
+   `realFps`, `generatedFps`, `repeatedFps` e os percentis dos intervalos
+   de quadros novos.
+
+Cada campo `*Ms` do perfil é a soma do tempo decorrido no host durante a
+janela. `*Calls` indica quantas operações terminaram nesse intervalo.
+`vifMs` inclui a execução síncrona de programas VU1 e os envios ao GIF.
+`unpackMs` mede a conversão UNPACK, `mpgMs` o processamento de microcódigo e
+`directMs` o envio de DIRECT/DIRECTHL. `vu1Pairs` conta pares interpretados.
+`vifWalkMs` aparece quando o caminho que percorre os comandos sem executar a
+geometria é usado.
+
+`gsDrawMs` e `gsVuMs` medem a preparação e o envio de comandos de desenho
+no worker GS. `gsGlDrawMs` mede a emissão de lotes no OpenGL, com
+`gsGlDrawPasses` contando as chamadas de geometria desses lotes.
+`gsTransferMs` cobre a preparação das transferências, `gsUploadMs` a
+entrega dos dados e `gsUploadBytes` o volume entregue. Uma transferência ou
+uma apresentação pode esvaziar a fila de lotes. Por isso, os tempos de
+desenho e de transferência podem se sobrepor, assim como os de VIF1 e VU1.
+No Linux, `[load]` estima a ocupação de cada thread descontando as esperas
+instrumentadas. Para medir CPU diretamente, registre a atividade das threads
+com uma ferramenta de perfil do sistema.
+
+Para identificar rotinas pelo hash do microcódigo e pelo endereço de entrada,
+faça uma execução separada com `PS2X_VU1_PROFILE=1`. As linhas cumulativas
+`[vu1prof]` registram pares interpretados em `instr`, ciclos de VU em
+`cycles` e detalhes dos pacotes XGKICK. A inspeção desses pacotes acrescenta
+trabalho ao caminho medido.
 
 [issue]: https://github.com/GenissonEmilio/ShadowOfTheColossusPC/issues/23
 [rx-log]: https://github.com/user-attachments/files/35373706/last-game.log

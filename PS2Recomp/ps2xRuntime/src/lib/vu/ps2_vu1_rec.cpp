@@ -84,8 +84,14 @@ void VU1Interpreter::noteRecompiledBail()
     }
 }
 
+VU1Interpreter::RecompiledFn VU1Interpreter::findRecompiled(const uint8_t *vuCode, uint32_t codeSize,
+                                                            PS2Memory *memory, uint64_t *nativeImage)
+{
+    return findRecompiled(vuCode, codeSize, memory, nativeImage, false);
+}
+
 VU1Interpreter::RecompiledFn VU1Interpreter::findRecompiled(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory,
-                                                            uint64_t *nativeImage)
+                                                            uint64_t *nativeImage, bool profileLookup)
 {
     static const bool disabled = std::getenv("PS2X_VU1_EXACT") != nullptr ||
                                  std::getenv("PS2X_VU1_NOREC") != nullptr;
@@ -94,39 +100,39 @@ VU1Interpreter::RecompiledFn VU1Interpreter::findRecompiled(const uint8_t *vuCod
     static const bool collecting = std::getenv("PS2X_VU1_DUMP_MISSING") != nullptr;
     if (nativeImage)
         *nativeImage = 0;
-    if (disabled || m_unit != Unit::VU1 || !memory || vuCode != memory->getVU1Code() ||
+    if ((disabled && !profileLookup) || m_unit != Unit::VU1 || !memory || vuCode != memory->getVU1Code() ||
         codeSize != 0x4000u || (registry().empty() && !collecting && !nativeImage))
         return nullptr;
     const uint64_t generation = memory->getVU1CodeGeneration();
-    static uint64_t imageHash = 0;
     if (generation != m_recGeneration || vuCode != m_recCode)
     {
         // Code changes with every microprogram upload; most images recur.
-        static std::unordered_map<std::pair<uint64_t, uint64_t>, uint64_t, FingerprintHash> known;
+        static thread_local std::unordered_map<std::pair<uint64_t, uint64_t>, uint64_t, FingerprintHash> known;
         const auto print = fingerprint(vuCode, codeSize);
         const auto cached = known.find(print);
         if (cached != known.end())
-            imageHash = cached->second;
+            m_recHash = cached->second;
         else
-            imageHash = known.emplace(print, hashImage(vuCode, codeSize)).first->second;
-        m_recHash = imageHash;
-        const auto it = registry().find(imageHash);
+            m_recHash = known.emplace(print, hashImage(vuCode, codeSize)).first->second;
+        const auto it = registry().find(m_recHash);
         m_recFn = it != registry().end() ? it->second : nullptr;
         m_recGeneration = generation;
         m_recCode = vuCode;
     }
     if (nativeImage)
         *nativeImage = m_recHash;
+    if (disabled)
+        return nullptr;
     // PS2X_VU1_DUMP_MISSING=<dir>: save microcode images that have no
     // recompiled version yet, with the pcs they start at, for the generator.
     static const char *missingDir = std::getenv("PS2X_VU1_DUMP_MISSING");
     if (!m_recFn && missingDir)
     {
         static std::set<std::pair<uint64_t, uint32_t>> seen;
-        if (seen.insert({imageHash, m_state.pc}).second)
+        if (seen.insert({m_recHash, m_state.pc}).second)
         {
             char path[1024];
-            std::snprintf(path, sizeof(path), "%s/%016llx.bin", missingDir, static_cast<unsigned long long>(imageHash));
+            std::snprintf(path, sizeof(path), "%s/%016llx.bin", missingDir, static_cast<unsigned long long>(m_recHash));
             if (FILE *existing = std::fopen(path, "rb"))
                 std::fclose(existing);
             else if (FILE *f = std::fopen(path, "wb"))
@@ -134,9 +140,9 @@ VU1Interpreter::RecompiledFn VU1Interpreter::findRecompiled(const uint8_t *vuCod
                 std::fwrite(vuCode, 1, codeSize, f);
                 std::fclose(f);
                 std::fprintf(stderr, "[vu1rec] new microcode image %016llx (interpreted)\n",
-                             static_cast<unsigned long long>(imageHash));
+                             static_cast<unsigned long long>(m_recHash));
             }
-            std::snprintf(path, sizeof(path), "%s/%016llx.entries", missingDir, static_cast<unsigned long long>(imageHash));
+            std::snprintf(path, sizeof(path), "%s/%016llx.entries", missingDir, static_cast<unsigned long long>(m_recHash));
             if (FILE *f = std::fopen(path, "a"))
             {
                 std::fprintf(f, "%04x\n", m_state.pc);

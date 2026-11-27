@@ -233,6 +233,8 @@ public:
 
     Unit m_unit;
     VU1State m_state;
+    RecompiledFn findRecompiled(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory,
+                                uint64_t *nativeImage, bool profileLookup);
     std::array<DecodedInstructionPair, kMaxDecodedPairs> m_decodedCodeCache{};
     std::array<bool, kMaxDecodedPairs> m_decodedCodeCacheValid{};
 

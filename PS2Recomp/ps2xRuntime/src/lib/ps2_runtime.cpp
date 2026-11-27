@@ -6,6 +6,7 @@
 #include <set>
 #include <map>
 #include "runtime/ps2_stats.h"
+#include "runtime/ps2_pal_profile.h"
 #include "runtime/ps2_vu1_native.h"
 #include "ps2_runtime.h"
 #include "runtime/native_renderer.h"
@@ -426,12 +427,15 @@ static Texture2D g_directFrame{};
 
 #ifdef PS2X_DESKTOP_VIDEO
 static GLFWwindow *g_nativeGlContext = nullptr;
+static GLFWwindow *g_nativeUnsharedGlContext = nullptr;
 
 static void shutdownNativeDesktopGl()
 {
     native_renderer::shutdownGl();
     if (g_nativeGlContext)
         glfwDestroyWindow(std::exchange(g_nativeGlContext, nullptr));
+    if (g_nativeUnsharedGlContext)
+        glfwDestroyWindow(std::exchange(g_nativeUnsharedGlContext, nullptr));
 }
 
 static Texture2D viewNativeFrame(const native_renderer::PresentationFrame &frame)
@@ -1109,6 +1113,7 @@ bool PS2Runtime::initialize(const char *title)
             GLFWwindow *mainWindow = glfwGetCurrentContext();
             bool shared = false;
             GLFWwindow *nativeContext = nullptr;
+            std::function<void()> makeUnsharedCurrent;
 #ifdef PS2X_DESKTOP_VIDEO
             const char *sharedTexture = std::getenv("SOTC_NATIVE_SHARED_TEXTURE");
             if (mainWindow && (!sharedTexture || sharedTexture[0] != '0') &&
@@ -1119,6 +1124,17 @@ bool PS2Runtime::initialize(const char *title)
                 shared = nativeContext != nullptr;
                 if (!shared)
                     std::cerr << "[native] could not share the GL context; using frame readback" << std::endl;
+                else
+                {
+                    // GLFW window creation stays on the main thread. Keep an
+                    // unshared context ready in case the worker cannot use the shared one.
+                    g_nativeUnsharedGlContext = glfwCreateWindow(16, 16, "native readback", nullptr, nullptr);
+                    if (g_nativeUnsharedGlContext)
+                        makeUnsharedCurrent = [context = g_nativeUnsharedGlContext]
+                        { glfwMakeContextCurrent(context); };
+                    else
+                        std::cerr << "[native] could not create the fallback OpenGL context" << std::endl;
+                }
             }
 #endif
             if (!nativeContext)
@@ -1130,7 +1146,8 @@ bool PS2Runtime::initialize(const char *title)
 #endif
             if (nativeContext)
                 native_renderer::setGlContext([nativeContext]
-                                              { glfwMakeContextCurrent(nativeContext); }, shared);
+                                              { glfwMakeContextCurrent(nativeContext); }, shared,
+                                              std::move(makeUnsharedCurrent));
             else
                 std::cerr << "[native] could not create the OpenGL context" << std::endl;
         }
@@ -3221,6 +3238,7 @@ void PS2Runtime::run()
     {
         uint64_t readUs = 0, uploadUs = 0, gsUs = 0, gsMaxUs = 0, interpolationUs = 0;
         uint64_t uploads = 0, shared = 0, gsPolls = 0, interpolations = 0;
+        uint64_t sharedWaitUs = 0, sharedWaitMaxUs = 0, sharedWaits = 0, sharedWaitHits = 0;
     } displayTiming;
 #endif
 #if defined(PLATFORM_VITA)
@@ -3400,6 +3418,14 @@ void PS2Runtime::run()
             const auto frameRead = presentingPair ? native_renderer::FrameRead::Unchanged :
                 native_renderer::readPresentationFrame(frame, nativePixels, nativeRevision,
                     !frameGeneration && !hostmenu::isOpen() && !savestates::busy());
+            if (logStats && frame.wait != native_renderer::PresentationWait::NotRequested)
+            {
+                ++displayTiming.sharedWaits;
+                if (frame.wait == native_renderer::PresentationWait::FrameArrived)
+                    ++displayTiming.sharedWaitHits;
+                displayTiming.sharedWaitUs += frame.waitUs;
+                displayTiming.sharedWaitMaxUs = std::max(displayTiming.sharedWaitMaxUs, frame.waitUs);
+            }
             nw = frame.width;
             nh = frame.height;
             cpuFrame = frame.texture == 0;
@@ -3653,6 +3679,11 @@ void PS2Runtime::run()
                       << " nativeUploadMs=" << averageMs(displayTiming.uploadUs, displayTiming.uploads)
                       << " nativeSamples=" << displayTiming.uploads
                       << " nativeShared=" << displayTiming.shared
+                      << " sharedWaits=" << displayTiming.sharedWaits
+                      << " sharedWaitHits=" << displayTiming.sharedWaitHits
+                      << " sharedWaitTimeouts=" << displayTiming.sharedWaits - displayTiming.sharedWaitHits
+                      << " sharedWaitMs=" << averageMs(displayTiming.sharedWaitUs, displayTiming.sharedWaits)
+                      << " sharedWaitMaxMs=" << displayTiming.sharedWaitMaxUs / 1000.0
                       << " gsPollMs=" << averageMs(displayTiming.gsUs, displayTiming.gsPolls)
                       << " gsPollMaxMs=" << displayTiming.gsMaxUs / 1000.0
                       << " gsPolls=" << displayTiming.gsPolls
@@ -3763,6 +3794,7 @@ void PS2Runtime::run()
                 if (const uint64_t n = ps2_stats::vifOpcodes[op].exchange(0))
                     std::cerr << " " << std::hex << op << std::dec << "=" << n;
             std::cerr << std::endl;
+            ps2_pal_profile::report(static_cast<int>(statsTime), statChains, statsWindow);
         }
 
         // PS2X_DUMP_GS_BUFFERS_AT=<s> PS2X_DUMP_GS_BUFFERS="psm:block:bw:w:h;...":
