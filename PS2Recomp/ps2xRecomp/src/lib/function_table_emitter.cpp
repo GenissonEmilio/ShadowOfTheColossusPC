@@ -157,15 +157,28 @@ namespace ps2recomp
         ss << "extern const uint32_t g_ps2RecompiledFunctionTableSlotCount = " << std::dec << slotCount << "u;\n";
         ss << "PS2Runtime::RecompiledFunction g_ps2RecompiledFunctionTable[" << std::dec << (slotCount == 0u ? 1u : slotCount) << "u] = {};\n\n";
 
+        if (entries.empty())
+            return ss.str();
+
+        // Emit data so the compiler does not have to optimize tens of thousands
+        // of individual stores in the static initializer of a large game.
         ss << "namespace {\n";
-        ss << "struct GeneratedFunctionTableInitializer {\n";
-        ss << "    GeneratedFunctionTableInitializer() {\n";
+        ss << "struct GeneratedFunctionEntry {\n";
+        ss << "    uint32_t slot;\n";
+        ss << "    PS2Runtime::RecompiledFunction function;\n";
+        ss << "};\n\n";
+        ss << "constexpr GeneratedFunctionEntry kGeneratedFunctionEntries[] = {\n";
         for (const auto &[address, name] : entries)
         {
             const uint32_t slot = (address - tableBase) >> 2;
-            ss << "        g_ps2RecompiledFunctionTable[" << std::dec << slot << "] = " << name
-               << "; // 0x" << std::hex << address << std::dec << "\n";
+            ss << "    {" << std::dec << slot << "u, " << name
+               << "}, // 0x" << std::hex << address << std::dec << "\n";
         }
+        ss << "};\n\n";
+        ss << "struct GeneratedFunctionTableInitializer {\n";
+        ss << "    GeneratedFunctionTableInitializer() {\n";
+        ss << "        for (const auto &entry : kGeneratedFunctionEntries)\n";
+        ss << "            g_ps2RecompiledFunctionTable[entry.slot] = entry.function;\n";
         ss << "    }\n";
         ss << "};\n";
         ss << "static const GeneratedFunctionTableInitializer g_generatedFunctionTableInitializer;\n";

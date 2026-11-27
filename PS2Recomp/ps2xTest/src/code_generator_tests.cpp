@@ -382,6 +382,18 @@ void register_code_generator_tests()
                  "the registration source must use the same unambiguous stub header");
     });
 
+    tc.Run("an empty function table retains its null storage", [](TestCase &t) {
+        CodeGenerator gen({}, {});
+        const std::string registration = gen.generateFunctionRegistration({}, {});
+
+        t.IsTrue(registration.find("g_ps2RecompiledFunctionTableSlotCount = 0u;") != std::string::npos,
+                 "the runtime must see zero available slots");
+        t.IsTrue(registration.find("g_ps2RecompiledFunctionTable[1u] = {};") != std::string::npos,
+                 "the empty table still needs a standard C++ array definition");
+        t.IsTrue(registration.find("kGeneratedFunctionEntries") == std::string::npos,
+                 "an empty table requires no registration entries");
+    });
+
     tc.Run("unsigned integer loads use explicit zero extension", [](TestCase &t) {
         CodeGenerator gen({}, {});
         const std::string lbu = gen.translateInstruction(makeIType(0x8F10, OPCODE_LBU, 1, 2, 0x10));
@@ -455,7 +467,7 @@ void register_code_generator_tests()
                                                           analysis.resumeEntryPoints.end())}});
         const std::string registration = gen.generateFunctionRegistration({func}, {});
         t.IsTrue(registration.find(
-                     "g_ps2RecompiledFunctionTable[1] = syscall_resume_entry_0x9100; // 0x9104") !=
+                     "{1u, syscall_resume_entry_0x9100}, // 0x9104") !=
                      std::string::npos,
                  "the syscall continuation must register to the owner wrapper");
     });
@@ -919,9 +931,9 @@ void register_code_generator_tests()
         std::string registration = gen.generateFunctionRegistration({func}, {});
         printGeneratedCode("resume entry targets register to the owner wrapper", registration);
 
-        t.IsTrue(registration.find("g_ps2RecompiledFunctionTable[2] = resume_owner_0x7000; // 0x7008") != std::string::npos,
+        t.IsTrue(registration.find("{2u, resume_owner_0x7000}, // 0x7008") != std::string::npos,
                  "resume entry pc should register to the owner wrapper");
-        t.IsTrue(registration.find("g_ps2RecompiledFunctionTable[3] = resume_owner_0x7000; // 0x700c") != std::string::npos,
+        t.IsTrue(registration.find("{3u, resume_owner_0x7000}, // 0x700c") != std::string::npos,
                  "multiple resume pcs should register to the same owner wrapper");
     });
 
@@ -959,9 +971,9 @@ void register_code_generator_tests()
                  "the owner must enter directly at the first installed handler");
         t.IsTrue(generated.find("case 0x7018u: goto label_7018;") != std::string::npos,
                  "the owner must enter directly at the second installed handler");
-        t.IsTrue(registration.find("sdk_bootstrap_owner_0x7000; // 0x7008") != std::string::npos,
+        t.IsTrue(registration.find("{2u, sdk_bootstrap_owner_0x7000}, // 0x7008") != std::string::npos,
                  "the first handler address must dispatch to its owner wrapper");
-        t.IsTrue(registration.find("sdk_bootstrap_owner_0x7000; // 0x7018") != std::string::npos,
+        t.IsTrue(registration.find("{6u, sdk_bootstrap_owner_0x7000}, // 0x7018") != std::string::npos,
                  "the second handler address must dispatch to its owner wrapper");
     });
 
@@ -1006,7 +1018,7 @@ void register_code_generator_tests()
         std::string registration = gen.generateFunctionRegistration({owner}, {});
         printGeneratedCode("external mid-function entry can register to the owner wrapper", registration);
 
-        t.IsTrue(registration.find("g_ps2RecompiledFunctionTable[1] = owner_0x5000; // 0x5004") != std::string::npos,
+        t.IsTrue(registration.find("{1u, owner_0x5000}, // 0x5004") != std::string::npos,
                  "mid-function external entry should register back to the owner wrapper");
     });
 
