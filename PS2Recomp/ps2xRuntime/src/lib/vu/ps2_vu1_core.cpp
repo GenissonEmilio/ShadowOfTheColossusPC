@@ -1446,7 +1446,18 @@ void VU1Interpreter::advanceOneCycle()
 void VU1Interpreter::advanceTo(uint64_t targetCycle)
 {
     while (m_cycle < targetCycle)
+    {
+        const uint64_t next = std::min(targetCycle, m_nextCommitCycle);
+        if (next > m_cycle + 1u)
+        {
+            // PATH1 is lazy. Bring it as far as the cycle before the
+            // boundary so a store commit sees the same transfer progress
+            // as it would when stepping each elapsed cycle.
+            m_cycle = next - 1u;
+            progressXgkick();
+        }
         advanceOneCycle();
+    }
 }
 
 bool VU1Interpreter::pipelinesPending() const
