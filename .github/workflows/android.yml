@@ -22,6 +22,14 @@ jobs:
           log-accepted-android-sdk-licenses: false
       - name: SDK and NDK
         run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0' 'ndk;28.2.13676358' 'cmake;3.31.6'
+      - name: Build the experimental Android ARM64 recompiler
+        run: |
+          export PATH="$ANDROID_HOME/cmake/3.31.6/bin:$PATH"
+          cmake -S PS2Recomp -B build/android-recompiler -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_HOME/ndk/28.2.13676358/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 -DANDROID_STL=c++_static \
+            -DCMAKE_BUILD_TYPE=Release -DPS2X_BUILD_ANDROID_RECOMP=ON -DPS2X_BUILD_RUNTIME=OFF
+          cmake --build build/android-recompiler --target ps2_recomp --parallel 2
       - name: Input and disc regression tests
         run: |
           mkdir -p /tmp/sotc-java-tests
