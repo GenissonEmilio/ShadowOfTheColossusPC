@@ -1,3 +1,4 @@
+from contextlib import ExitStack
 import hashlib
 from http.client import HTTPMessage
 import io
@@ -11,7 +12,7 @@ import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools/desktop"))
@@ -42,11 +43,124 @@ class MetadataResponse(io.BytesIO):
         return self.url
 
 
+class DownloadResponse(io.BytesIO):
+    def __init__(self, data, *, status=200, headers=None, error=None):
+        super().__init__(data)
+        self.status = status
+        self.headers = headers or {}
+        self.error = error
+
+    def geturl(self):
+        return "https://release-assets.githubusercontent.com/package"
+
+    def read1(self, size):
+        block = super().read1(size)
+        if not block and self.error:
+            raise self.error
+        return block
+
+
 def http_error(url, code, headers=None, content=b""):
     message = HTTPMessage()
     for name, value in (headers or {}).items():
         message[name] = value
     return HTTPError(url, code, "test response", message, io.BytesIO(content))
+
+
+class DownloadTests(unittest.TestCase):
+    def setUp(self):
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        folder = stack.enter_context(tempfile.TemporaryDirectory())
+        self.archive = Path(folder) / "asset.tar.gz"
+        self.payload = b"abcdef123456"
+        self.update = updates.Update("1.0.1", LINUX, self.archive.name, "https://github.com/fixture",
+                                     len(self.payload), hashlib.sha256(self.payload).hexdigest())
+        self.progress = []
+        self.open_url = stack.enter_context(patch("updates.urlopen"))
+        self.sleep = stack.enter_context(patch("updates.time.sleep"))
+
+    def download(self, *responses):
+        self.open_url.side_effect = responses
+        updates.download(self.update, self.archive, self.progress.append)
+
+    def stage(self, *responses):
+        root = self.archive.parent
+        program, data = root / "installed", root / "player"
+        program.mkdir()
+        data.mkdir()
+        (program / "release.json").write_text(json.dumps({"version": "1.0.0", "platform": LINUX}))
+        (program / updates.launcher_filename(LINUX)).write_bytes(b"installed")
+        self.open_url.side_effect = responses
+        return updates.stage_update(program, data, "1.0.0", self.update, self.progress.append)
+
+    def assert_install_unchanged(self):
+        root = self.archive.parent
+        executable = root / "installed" / updates.launcher_filename(LINUX)
+        self.assertEqual(executable.read_bytes(), b"installed")
+        self.assertEqual(list(root.glob(".sotc-update-*")), [])
+
+    def ranges(self):
+        requests = [call.args[0] for call in self.open_url.call_args_list]
+        for request in requests:
+            self.assertEqual(request.full_url, self.update.url)
+            self.assertEqual(request.get_header("Accept-encoding"), "identity")
+        return [request.get_header("Range") for request in requests]
+
+    def test_resumes_after_midstream_timeout(self):
+        self.download(DownloadResponse(self.payload[:4], error=TimeoutError("read timed out")),
+                      DownloadResponse(self.payload[4:], status=206, headers={"Content-Range": "bytes 4-11/12"}))
+        self.assertEqual(self.ranges(), [None, "bytes=4-"])
+        self.assertEqual(self.archive.read_bytes(), self.payload)
+        self.assertEqual(self.progress, [4 / 12, 1])
+        self.sleep.assert_called_once_with(1)
+
+    def test_restarts_when_server_returns_full_response(self):
+        self.download(DownloadResponse(b"old!", error=ConnectionResetError()),
+                      DownloadResponse(self.payload))
+        self.assertEqual(self.ranges(), [None, "bytes=4-"])
+        self.assertEqual(self.archive.read_bytes(), self.payload)
+        self.assertEqual(self.progress, [4 / 12, 0, 1])
+
+    def test_restarts_when_server_returns_an_incompatible_range(self):
+        for rejected in (DownloadResponse(b"incorrect", status=206, headers={"Content-Range": "bytes 3-11/12"}),
+                         http_error(self.update.url, 416)):
+            with self.subTest(rejected=rejected):
+                self.open_url.reset_mock()
+                self.progress.clear()
+                self.download(DownloadResponse(self.payload[:4]),
+                              rejected, DownloadResponse(self.payload))
+                self.assertEqual(self.ranges(), [None, "bytes=4-", None])
+                self.assertEqual(self.archive.read_bytes(), self.payload)
+                self.archive.unlink()
+
+    def test_retries_transient_http_status_and_connection_timeout(self):
+        self.download(http_error(self.update.url, 503), URLError(TimeoutError("connect timed out")),
+                      DownloadResponse(self.payload))
+        self.assertEqual(self.ranges(), [None, None, None])
+        self.assertEqual(self.archive.read_bytes(), self.payload)
+        self.assertEqual([call.args for call in self.sleep.call_args_list], [(1,), (2,)])
+
+    def test_rejects_corrupt_resumed_download_before_unpacking(self):
+        with (patch("updates.unpack") as unpack, self.assertRaisesRegex(ValueError, "SHA-256")):
+            self.stage(DownloadResponse(b"old!", error=TimeoutError("read timed out")),
+                       DownloadResponse(self.payload[4:], status=206, headers={"Content-Range": "bytes 4-11/12"}))
+        unpack.assert_not_called()
+        self.assertEqual(self.ranges(), [None, "bytes=4-"])
+        self.assert_install_unchanged()
+
+    def test_refuses_permanent_http_errors(self):
+        with self.assertRaises(HTTPError):
+            self.download(http_error(self.update.url, 404))
+        self.assertEqual(self.ranges(), [None])
+        self.sleep.assert_not_called()
+
+    def test_stage_cleans_partial_after_retry_limit(self):
+        with self.assertRaisesRegex(TimeoutError, "connect timed out"):
+            self.stage(DownloadResponse(self.payload[:4], error=TimeoutError("read timed out")),
+                       TimeoutError("connect timed out"), TimeoutError("connect timed out"))
+        self.assertEqual(self.ranges(), [None, "bytes=4-", "bytes=4-"])
+        self.assert_install_unchanged()
 
 
 class UpdateTests(unittest.TestCase):
@@ -163,28 +277,24 @@ class UpdateTests(unittest.TestCase):
             update = updates.Update("1.0.1", LINUX, archive.name, "https://github.com/fixture",
                                     len(payload), hashlib.sha256(payload).hexdigest())
 
-            class Response(io.BytesIO):
-                def geturl(self):
-                    return update.url
-
-            with patch("updates.urlopen", return_value=Response(payload[:-1] + bytes([payload[-1] ^ 1]))):
+            with patch("updates.urlopen", return_value=DownloadResponse(payload[:-1] + bytes([payload[-1] ^ 1]))):
                 with self.assertRaisesRegex(ValueError, "SHA-256"):
                     updates.stage_update(program, data, "1.0.0", update, lambda *_: None)
             self.assertEqual(list(root.glob(".sotc-update-*")), [])
 
-            with patch("updates.urlopen", return_value=Response(payload)):
+            with patch("updates.urlopen", return_value=DownloadResponse(payload)):
                 staged = updates.stage_update(program, data, "1.0.0", update, lambda *_: None)
             with patch("updates.subprocess.Popen", side_effect=OSError("invalid executable")):
                 with self.assertRaisesRegex(OSError, "invalid executable"):
                     updates.restart_with_update(staged, program, data, "1.0.0", LINUX, root)
             self.assertEqual(executable.read_bytes(), b"old")
-            with patch("updates.urlopen", return_value=Response(payload)):
+            with patch("updates.urlopen", return_value=DownloadResponse(payload)):
                 staged = updates.stage_update(program, data, "1.0.0", update, lambda *_: None)
             (staged / executable.name).write_bytes(b"#!/bin/sh\nexit 33\n")
             with self.assertRaisesRegex(RuntimeError, "exited during startup"):
                 updates.restart_with_update(staged, program, data, "1.0.0", LINUX, root)
             self.assertEqual(executable.read_bytes(), b"old")
-            with patch("updates.urlopen", side_effect=lambda *_args, **_kw: Response(payload)):
+            with patch("updates.urlopen", side_effect=lambda *_args, **_kw: DownloadResponse(payload)):
                 staged = updates.stage_update(program, data, "1.0.0", update, lambda *_: None)
                 stale = updates.stage_update(program, data, "1.0.0", update, lambda *_: None)
             # Keep a reference to the short-lived test process so the test
