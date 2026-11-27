@@ -44,6 +44,11 @@ namespace hostmenu
     void load();
     // Writes them (and the renderer adjustments, native_tuning.h) now.
     void saveSettings();
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+    enum class CampaignLanguage { Cancel, Original, PortugueseBrazil };
+    // Invoked before booting an American disc with an installed translation.
+    CampaignLanguage chooseCampaignLanguage(bool systemPortuguese);
+#endif
     // Reads the controller and keyboard; call once per host frame.
     void update();
     // Draws the menu when open; call inside BeginDrawing/EndDrawing.

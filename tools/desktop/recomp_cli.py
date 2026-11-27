@@ -20,7 +20,7 @@ def run(arguments):
     parser.add_argument("--rom", type=Path)
     parser.add_argument("--data-dir", type=Path, default=os.environ.get("SOTC_DATA_DIR"))
     args = parser.parse_args(arguments)
-    if args.prepare != (args.rom is not None):
+    if (args.prepare and args.rom is None) or (args.play and args.rom is not None):
         parser.error("--prepare requires --rom. --play uses the prepared copy.")
 
     library = Library(args.data_dir)

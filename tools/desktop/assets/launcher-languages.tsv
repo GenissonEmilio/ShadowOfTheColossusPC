@@ -330,3 +330,13 @@ Montando o executável…	Linking the executable…	Enlazando el ejecutable…	�
 Gerando código para compilar…	Generating source code…	Generando el código fuente…	ソースコードを生成中…
 Lendo os arquivos do disco…	Reading disc files…	Leyendo los archivos del disco…	ディスクのファイルを読み込み中…
 Verificando a compilação…	Verifying the build…	Comprobando la compilación…	ビルドを検証中…
+Idioma da campanha	Campaign language	Idioma de la campaña	キャンペーンの言語
+O arquivo da tradução não corresponde à versão verificada.	The translation file does not match the verified version.	El archivo de traducción no coincide con la versión verificada.	翻訳ファイルが確認済みのバージョンと一致しません。
+Não foi possível aplicar a tradução ao disco original.	Could not apply the translation to the original disc.	No se pudo aplicar la traducción al disco original.	元のディスクに翻訳を適用できませんでした。
+Aplicando tradução brasileira… {percent}%	Applying Brazilian Portuguese… {percent}%	Aplicando la traducción brasileña… {percent}%	ブラジルポルトガル語を適用中… {percent}%
+A tradução precisa da edição americana SCUS-97472.	The translation requires the USA edition SCUS-97472.	La traducción requiere la edición de EE. UU. SCUS-97472.	翻訳には米国版 SCUS-97472 が必要です。
+Menu original do jogo	Original game menu	Menú original del juego	ゲーム内の言語メニュー
+Importe sua ROM	Import your disc	Importa tu disco	ディスクをインポート
+A edição importada determina os idiomas. A escolha vale na próxima abertura do jogo.	Languages depend on the imported edition. Changes apply next time you play.	Los idiomas dependen de la edición importada. El cambio se aplica la próxima vez que juegues.	選べる言語はインポートした版によって異なります。選択は次回起動時に適用されます。
+Não foi possível abrir a tradução integrada.	Could not open the bundled translation.	No se pudo abrir la traducción integrada.	同梱の翻訳を開けませんでした。
+Verificando a mídia original da campanha…	Verifying the original campaign disc…	Verificando el disco original de la campaña…	キャンペーンの元のディスクを確認中…

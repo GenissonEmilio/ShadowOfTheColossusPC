@@ -41,6 +41,12 @@ namespace
     Rectangle g_stateConfirmRects[2]{}; // cancel, confirm
     std::string g_stateMessage;
     double g_lastSelect = -1.0;
+#ifdef PS2X_DESKTOP_VIDEO
+    bool g_campaignTranslationAvailable = false;
+    enum CampaignPreference { AskForLanguage, FollowSystemLanguage, English, PortugueseBrazil, CampaignPreferenceCount };
+    int g_campaignPreference = AskForLanguage;
+    const char *const kCampaignLanguages[] = {"Choose on startup", "Automatic", "English", "Português (Brasil)"};
+#endif
 
 #if defined(PLATFORM_VITA)
     const char *kSettingsPath = "ux0:data/celosia/settings.cfg";
@@ -133,6 +139,10 @@ namespace
              "Sincroniza a apresentação dos quadros com o monitor para reduzir cortes na imagem."},
             {"Volume", "Volume"},
             {"Language", "Idioma"},
+            {"Game language", "Idioma do jogo"},
+            {"Choose on startup", "Escolher ao iniciar"},
+            {"The change applies the next time you start the game.", "A mudança vale na próxima vez que você iniciar o jogo."},
+            {"Arrows / Enter", "Setas / Enter"},
             {"Return to launcher", "Voltar ao launcher"},
             {"On", "Ligado"},
             {"Off", "Desligado"},
@@ -193,6 +203,9 @@ namespace
         kVolume,
         kLanguage,
         kQuit,
+#ifdef PS2X_DESKTOP_VIDEO
+        kCampaignLanguage,
+#endif
     };
 
     struct Item
@@ -239,6 +252,9 @@ namespace
     const Item kSystemItems[] = {
         {kLanguage, "Language", "Language of this menu. Automatic follows the system language."},
         {kQuit, "Return to launcher", "Closes the game. Unsaved progress is lost."},
+#ifdef PS2X_DESKTOP_VIDEO
+        {kCampaignLanguage, "Game language", "The change applies the next time you start the game."},
+#endif
     };
     // The Quality, Renderer and Debug tabs list native_renderer::tuningItems()
     // (the same list as the Mac's F10 panel), each with a last "Defaults" row:
@@ -275,6 +291,10 @@ namespace
 
     int itemCount(int tab)
     {
+#ifdef PS2X_DESKTOP_VIDEO
+        if (kTabs[tab].items == kSystemItems && g_campaignTranslationAvailable)
+            return static_cast<int>(sizeof(kSystemItems) / sizeof(kSystemItems[0]));
+#endif
         if (tab == kStatesTab)
             return savestates::SlotCount * 3;
         return isTuningTab(tab) ? static_cast<int>(tuningRows(tab).size()) + 1 : kTabs[tab].count;
@@ -393,6 +413,9 @@ namespace
             static const char *langs[] = {"Automatic", "Português", "English"};
             return T(langs[std::clamp(g_settings.language.load(), 0, 2)]);
         }
+#ifdef PS2X_DESKTOP_VIDEO
+        case kCampaignLanguage: return T(kCampaignLanguages[g_campaignPreference]);
+#endif
         case kQuit: return g_quitArmed ? T("Confirm again to return") : "";
         }
         return "";
@@ -412,6 +435,7 @@ namespace
         std::fprintf(f, "vsync=%d\nwindow_resolution=%d\nupscale_fsr=%d\n", g_settings.vsync ? 1 : 0,
                      g_settings.windowResolution.load(), g_settings.upscaleFsr ? 1 : 0);
         std::fprintf(f, "frame_generation=%d\n", g_settings.frameGeneration ? 1 : 0);
+        std::fprintf(f, "campaign_language=%d\n", g_campaignPreference);
 #endif
         const native_renderer::Tuning &t = native_renderer::tuning();
         for (const native_renderer::TuningItem &item : native_renderer::tuningItems())
@@ -451,6 +475,11 @@ namespace
         case kScreen: g_settings.screenMode = (g_settings.screenMode + kScreenModeCount + dir) % kScreenModeCount; break;
         case kVolume: g_settings.volume = std::clamp(g_settings.volume + dir, 0, 10); break;
         case kLanguage: g_settings.language = (g_settings.language + 3 + dir) % 3; break;
+#ifdef PS2X_DESKTOP_VIDEO
+        case kCampaignLanguage:
+            g_campaignPreference = (g_campaignPreference + CampaignPreferenceCount + dir) % CampaignPreferenceCount;
+            break;
+#endif
         case kQuit:
             if (dir > 0)
             {
@@ -771,12 +800,68 @@ void load()
             g_settings.windowResolution = std::clamp(value, 0, desktop_video::kWindowResolutionCount - 1);
         else if (!std::strcmp(key, "upscale_fsr")) g_settings.upscaleFsr = value != 0;
         else if (!std::strcmp(key, "frame_generation")) g_settings.frameGeneration = value != 0;
+        else if (!std::strcmp(key, "campaign_language")) g_campaignPreference = std::clamp(value, 0, CampaignPreferenceCount - 1);
 #endif
         else if (!std::strcmp(key, "volume")) g_settings.volume = std::clamp(value, 0, 10);
         else if (!std::strcmp(key, "language")) g_settings.language = std::clamp(value, 0, 2);
     }
     std::fclose(f);
 }
+
+#ifdef PS2X_DESKTOP_VIDEO
+CampaignLanguage chooseCampaignLanguage(bool systemPortuguese)
+{
+    g_campaignTranslationAvailable = true;
+    if (g_campaignPreference == AskForLanguage && !std::getenv("PS2X_HIDDEN_WINDOW"))
+    {
+        int selected = FollowSystemLanguage;
+        while (g_campaignPreference == AskForLanguage)
+        {
+            if (WindowShouldClose())
+                return CampaignLanguage::Cancel;
+            ps2pad::pollGamepads();
+            readButtons();
+            if (pressed(kUp)) selected = selected == FollowSystemLanguage ? PortugueseBrazil : selected - 1;
+            if (pressed(kDown)) selected = selected == PortugueseBrazil ? FollowSystemLanguage : selected + 1;
+            const bool clicked = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+            const Vector2 mouse = GetMousePosition();
+            const int width = GetScreenWidth(), height = GetScreenHeight();
+            const int font = std::clamp(std::min(width, height) / 24, 12, 32);
+            const int panelWidth = std::clamp(width - 16, 1, font * 24);
+            const int left = (width - panelWidth) / 2, top = (height - font * 13) / 2;
+            const Color gold{224, 195, 132, 255}, stone{33, 32, 26, 255};
+            auto centered = [&](const char *text, int y, int size, Color color) {
+                DrawText(text, (width - MeasureText(text, size)) / 2, y, size, color);
+            };
+
+            BeginDrawing();
+            ClearBackground(Color{15, 16, 13, 255});
+            centered(T("Game language"), top, font * 3 / 2, gold);
+            for (int i = FollowSystemLanguage; i <= PortugueseBrazil; ++i)
+            {
+                const int y = top + font * (i * 2 + 1);
+                const Rectangle row{float(left), float(y), float(panelWidth), float(font * 3 / 2)};
+                if (clicked && CheckCollisionPointRec(mouse, row))
+                {
+                    selected = i;
+                    g_campaignPreference = selected;
+                }
+                DrawRectangleRec(row, selected == i ? gold : stone);
+                centered(T(kCampaignLanguages[i]), y + font / 4, font, selected == i ? stone : RAYWHITE);
+            }
+            centered(T("Arrows / Enter"), top + font * 9, font * 3 / 4, RAYWHITE);
+            EndDrawing();
+            if (pressed(kCross))
+                g_campaignPreference = selected;
+        }
+        g_holdBlock = anyDown();
+        save();
+    }
+    const bool translated = g_campaignPreference == PortugueseBrazil ||
+                            (g_campaignPreference == FollowSystemLanguage && systemPortuguese);
+    return translated ? CampaignLanguage::PortugueseBrazil : CampaignLanguage::Original;
+}
+#endif
 
 bool isOpen() { return g_open; }
 bool quitRequested() { return g_quit; }

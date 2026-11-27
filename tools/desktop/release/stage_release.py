@@ -15,10 +15,13 @@ from urllib.parse import urlencode
 import zipfile
 
 from update_manifest import MAX_DOWNLOAD, NAME, REPOSITORY, VERSION
+from campaign_locale import PATCH_SHA256, PATCH_SIZE
 
 
 REPO_PATH = f"/repos/{REPOSITORY}"
 METADATA_PATH = f"{NAME}/release.json"
+PATCH_PATHS = {"windows": f"{NAME}/desktop/assets/campaign/pt-BR.xdelta",
+               "linux": f"{NAME}/_internal/assets/campaign/pt-BR.xdelta"}
 PLATFORMS = {"windows": "windows-x86_64.zip", "linux": "linux-x86_64.tar.gz"}
 MAX_RELEASE_METADATA = 4096
 MAX_TAR_MEMBERS = 100_000
@@ -119,34 +122,35 @@ def draft_id(tag, commit):
     return int(release["id"])
 
 
-def read_zip_metadata(package):
+def read_zip_files(package, limits):
     with zipfile.ZipFile(package) as archive:
-        members = [member for member in archive.infolist() if member.filename == METADATA_PATH]
-        if len(members) != 1:
-            raise StageError(f"Expected one {METADATA_PATH} in {package.name}")
-        member = members[0]
-        file_type = stat.S_IFMT(member.external_attr >> 16)
-        if file_type not in (0, stat.S_IFREG) or not 0 < member.file_size <= MAX_RELEASE_METADATA:
-            raise StageError(f"Invalid {METADATA_PATH} in {package.name}")
-        return archive.read(member)
+        files = {}
+        for member in archive.infolist():
+            name = member.filename
+            if name not in limits:
+                continue
+            file_type = stat.S_IFMT(member.external_attr >> 16)
+            if name in files or file_type not in (0, stat.S_IFREG) or not 0 < member.file_size <= limits[name]:
+                raise StageError(f"Invalid {name} in {package.name}")
+            files[name] = archive.read(member)
+        return files
 
 
-def read_tar_metadata(package):
-    data = None
+def read_tar_files(package, limits):
+    files = {}
     expanded = 0
     with tarfile.open(package, "r|gz") as archive:
         for index, member in enumerate(archive, start=1):
             expanded += member.size
             if index > MAX_TAR_MEMBERS or expanded > MAX_TAR_EXPANDED:
                 raise StageError(f"Archive exceeds inspection limits: {package.name}")
-            if member.name == METADATA_PATH:
-                if data is not None or not member.isfile() or not 0 < member.size <= MAX_RELEASE_METADATA:
-                    raise StageError(f"Invalid {METADATA_PATH} in {package.name}")
+            name = member.name
+            if name in limits:
+                if name in files or not member.isfile() or not 0 < member.size <= limits[name]:
+                    raise StageError(f"Invalid {name} in {package.name}")
                 with archive.extractfile(member) as stream:
-                    data = stream.read(MAX_RELEASE_METADATA + 1)
-    if data is None:
-        raise StageError(f"Missing {METADATA_PATH} in {package.name}")
-    return data
+                    files[name] = stream.read(limits[name] + 1)
+    return files
 
 
 def package_paths(root):
@@ -162,8 +166,16 @@ def package_paths(root):
         for file, max_size in ((package, MAX_DOWNLOAD), (sidecar, 1024)):
             if file.is_symlink() or not file.is_file() or not 0 < file.stat().st_size <= max_size:
                 raise StageError(f"Invalid file in the {platform} build artifact: {file.name}")
-        data = read_zip_metadata(package) if platform == "windows" else read_tar_metadata(package)
-        release = json.loads(data)
+        patch_path = PATCH_PATHS[platform]
+        limits = {METADATA_PATH: MAX_RELEASE_METADATA, patch_path: PATCH_SIZE}
+        read_files = read_zip_files if platform == "windows" else read_tar_files
+        files = read_files(package, limits)
+        if files.keys() != limits.keys():
+            raise StageError(f"Missing release metadata or Brazilian Portuguese patch in {package.name}")
+        patch = files[patch_path]
+        if len(patch) != PATCH_SIZE or hashlib.sha256(patch).hexdigest() != PATCH_SHA256:
+            raise StageError(f"Invalid Brazilian Portuguese patch in {package.name}")
+        release = json.loads(files[METADATA_PATH])
         platform_name = f"{platform}-x86_64"
         if (not isinstance(release, dict) or release.get("version") != VERSION
                 or release.get("platform") != platform_name):

@@ -12,7 +12,7 @@ import sys
 import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from model import Library, SAVE_STATES_AVAILABLE, VERSION, assets_directory, atomic_json, program_directory
+from model import Library, SAVE_STATES_AVAILABLE, SERIAL_BY_BOOT, VERSION, assets_directory, atomic_json, program_directory
 from graphics import GRAPHICS_PROFILES, LEGACY_PROFILES, MENU_LANGUAGES, Graphics, WINDOW_RESOLUTIONS
 from gamepad import Gamepad
 from language import LANGUAGES, PREFERENCES, PROMPTS, activate, preferences, translate as tr
@@ -1173,7 +1173,12 @@ class Launcher:
             self.menu_language_choice.append(code, tr(name) if code == "0" else name)
         self.menu_language_choice.set_active_id(self.graphics.menu_language())
         preferences_panel.pack_start(self.menu_language_choice, False, False, 0)
-        preferences_panel.pack_start(label(tr("O texto e o áudio da campanha vêm do disco. Na edição PAL, escolha entre os idiomas disponíveis no menu original do jogo."), "muted", wrap=True), False, False, 0)
+        preferences_panel.pack_start(label(tr("Idioma da campanha"), "panel-title"), False, False, 0)
+        self.campaign_language_choice = style(Gtk.ComboBoxText(), "graphics-select")
+        self.campaign_language_choice.connect("changed", self.save_campaign_language)
+        self.refresh_campaign_languages()
+        preferences_panel.pack_start(self.campaign_language_choice, False, False, 0)
+        preferences_panel.pack_start(label(tr("A edição importada determina os idiomas. A escolha vale na próxima abertura do jogo."), "muted", wrap=True), False, False, 0)
         preferences_panel.pack_start(label(tr("Ícones dos botões no jogo"), "panel-title"), False, False, 0)
         self.prompts_choice = style(Gtk.ComboBoxText(), "graphics-select")
         for mode, text in (("auto", tr("Automático · último dispositivo usado")),
@@ -1436,6 +1441,39 @@ class Launcher:
         else:
             dialog.destroy()
 
+    def refresh_campaign_languages(self):
+        options = self.library.campaign_language_options()
+        choice = self.campaign_language_choice
+        choice.handler_block_by_func(self.save_campaign_language)
+        try:
+            choice.remove_all()
+            for key, name in options.items():
+                choice.append(key, name)
+            selected = self.library.campaign_language_choice(options, self.preferences)
+            if selected:
+                choice.set_active_id(selected)
+            else:
+                choice.append("no-disc", tr("Importe sua ROM"))
+                choice.set_active(0)
+        finally:
+            choice.handler_unblock_by_func(self.save_campaign_language)
+        choice.set_sensitive(bool(options))
+
+    def save_campaign_language(self, choice):
+        boot = self.library.disc
+        selected = choice.get_active_id()
+        if not boot or selected not in self.library.campaign_language_options():
+            return
+        campaign = {**self.preferences["campaign_languages"], SERIAL_BY_BOOT[boot.name]: selected}
+        values = {**self.preferences, "campaign_languages": campaign}
+        try:
+            atomic_json(self.library.directory / PREFERENCES, values)
+        except OSError as exc:
+            self.refresh_campaign_languages()
+            self.error(tr("Não foi possível salvar as configurações"), str(exc))
+        else:
+            self.preferences = values
+
     def dropped(self,widget,context,x,y,selection,info,time):
         uris=selection.get_uris()
         accepted=False
@@ -1468,12 +1506,14 @@ class Launcher:
         self.status.get_style_context().add_class("ready")
         self.play_button.set_sensitive(True)
         self.choose_button.set_label(tr("Trocar ROM…"))
+        self.refresh_campaign_languages()
         self.refresh_prepare_controls()
 
     def refresh_prepare_controls(self):
         idle = not (self.busy or self.process or self.controller_process)
         self.compile_button.set_sensitive(bool(self.library.disc) and idle)
         self.texture_panel.set_sensitive(idle)
+        self.campaign_language_choice.set_sensitive(idle and bool(self.library.disc))
         self.more_options.refresh()
 
     def compile_game(self, *_):
@@ -1500,7 +1540,7 @@ class Launcher:
         self.status.set_tooltip_text(str(event))
         return False
 
-    def prepare(self,path=None):
+    def prepare(self, path=None):
         if self.busy or self.process or self.controller_process: return False
         self.prepare_only = path is None
         self.busy=True; self.failed=False
@@ -1522,11 +1562,11 @@ class Launcher:
                     self.library.prepare(path,progress)
             except Exception as exc:
                 error=exc
-            GLib.idle_add(self.prepared,error)
+            GLib.idle_add(self.prepared, error)
         threading.Thread(target=worker,daemon=False).start()
         return False
 
-    def prepared(self,error):
+    def prepared(self, error):
         self.busy=False; self.progress.hide(); self.choose_button.set_sensitive(True)
         self.prepare_detail.hide()
         self.refresh_prepare_controls()

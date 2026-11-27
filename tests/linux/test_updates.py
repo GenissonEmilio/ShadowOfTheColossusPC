@@ -239,7 +239,7 @@ class PreferencesTests(unittest.TestCase):
             atomic_json(folder / language.PREFERENCES, {"language": "es", "button_prompts": "xbox",
                                                          "launcher_fullscreen": True, "ui_sounds": False})
             selected = language.preferences(folder)
-            self.assertEqual(selected, {"language": "es", "button_prompts": "xbox",
+        self.assertEqual(selected, {"language": "es", "campaign_languages": {}, "button_prompts": "xbox",
                                         "launcher_fullscreen": True, "ui_sounds": False,
                                         "infinite_health": False, "infinite_grip": False})
 
