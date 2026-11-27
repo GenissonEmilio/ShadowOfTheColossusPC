@@ -128,17 +128,30 @@ def cgroup_memory_headroom(proc=Path("/proc/self")):
             if directory in visited:
                 continue
             visited.add(directory)
+            limits = []
             for control in ("memory.high", "memory.max"):
                 try:
-                    limit = int((directory / control).read_text(encoding="ascii"))
+                    limits.append(int((directory / control).read_text(encoding="ascii")))
                 except (OSError, ValueError):
                     continue
-                try:
-                    current = int((directory / "memory.current").read_text(encoding="ascii"))
-                except (OSError, ValueError):
-                    current = limit
-                available = max(0, limit - current)
-                headroom = available if headroom is None else min(headroom, available)
+            if not limits:
+                continue
+            limit = min(limits)
+            try:
+                current = int((directory / "memory.current").read_text(encoding="ascii"))
+            except (OSError, ValueError):
+                current = limit
+            try:
+                # Compiler inputs and completed objects can leave reclaimable
+                # page cache charged to the group between preparation stages.
+                inactive = next(int(line.split()[1]) for line in
+                                (directory / "memory.stat").read_text(encoding="ascii").splitlines()
+                                if line.startswith("inactive_file "))
+                current = max(0, current - max(0, inactive))
+            except (OSError, ValueError, IndexError, StopIteration):
+                pass
+            available = max(0, limit - current)
+            headroom = available if headroom is None else min(headroom, available)
     return headroom
 
 

@@ -132,6 +132,13 @@ class PreparePipelineTests(unittest.TestCase):
         self.assertEqual(cgroup_memory_headroom(proc), 1024 * MIB)
         (full_mount / "memory.high").write_text("max\n")
         self.assertEqual(cgroup_memory_headroom(proc), 2048 * MIB)
+        # Only inactive file cache is reclaimable for this estimate. Active
+        # cache and anonymous memory continue to reduce the effective budget.
+        stat = session / "memory.stat"
+        stat.write_text(f"active_file {512 * MIB}\ninactive_file {256 * MIB}\n")
+        self.assertEqual(cgroup_memory_headroom(proc), 2304 * MIB)
+        stat.write_text("inactive_file invalid\n")
+        self.assertEqual(cgroup_memory_headroom(proc), 2048 * MIB)
         (session / "memory.max").write_text("max\n")
         (leaf / "memory.max").write_text("max\n")
         self.assertIsNone(cgroup_memory_headroom(proc))
