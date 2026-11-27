@@ -22,6 +22,7 @@
 #include <GLES3/gl3.h>
 #include <GLES2/gl2ext.h>
 #include <malloc.h>
+#include "runtime/ps2_android_runtime.h"
 #elif defined(__APPLE__)
 #define GL_SILENCE_DEPRECATION
 #include <OpenGL/gl3.h>
@@ -51,7 +52,7 @@ extern "C" unsigned int _pthread_stack_default_user; // ps2_vita_runtime.cpp
 extern "C" unsigned int _newlib_heap_size_user;      // ps2_vita_runtime.cpp
 #endif
 
-#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+#if defined(_WIN32) || defined(__ANDROID__) || (defined(__linux__) && !defined(__ANDROID__))
 #define PS2X_NATIVE_GL_SHARED 1
 #endif
 
@@ -79,7 +80,7 @@ extern "C" unsigned int _newlib_heap_size_user;      // ps2_vita_runtime.cpp
 namespace
 {
     constexpr float kNearW = 0.1f;
-#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+#if !defined(PS2X_NATIVE_VITA)
     bool alphaBatching()
     {
         static const bool enabled = [] {
@@ -640,7 +641,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         uint64_t bytes = 0;
         uint8_t alphaMin = 0, alphaMax = 255;
         std::vector<std::array<uint8_t, 2>> triangleAlpha;
-#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+#if !defined(PS2X_NATIVE_VITA)
         // The CPU copy keeps only the inputs needed to bound screen coverage.
         // Frame-arena meshes can use the original frame vertices and indices.
         std::vector<AlphaPosition> alphaPositions;
@@ -706,7 +707,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         float clip[16];
     };
 
-#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+#if !defined(PS2X_NATIVE_VITA)
     struct AlphaBounds
     {
         double left = 0, right = 0, bottom = 0, top = 0;
@@ -1002,7 +1003,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         }
         std::vector<Draw> draws;
         std::vector<uint64_t> drawOrder; // layer << 32 | index: the draws in layer order, stable (sorting the draws themselves moved ~450 bytes each)
-#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+#if !defined(PS2X_NATIVE_VITA)
         // Indexed skin vertices are shared by multiple triangles of a draw.
         std::vector<AlphaBounds> alphaVertexBounds;
 #endif
@@ -1350,6 +1351,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #endif
 #if !defined(PS2X_NATIVE_VITA)
             maxAnisotropy = queryMaxAnisotropy();
+#if defined(__ANDROID__)
+            ps2x::android::setMaxAnisotropy(maxAnisotropy);
+#endif
             std::cerr << "[native:gl] maximum texture anisotropy " << maxAnisotropy << 'x' << std::endl;
             glGenVertexArrays(1, &vao);
             glBindVertexArray(vao);
@@ -1767,7 +1771,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 
         bool captureHistory(std::vector<uint8_t> &out, std::string &error)
         {
-#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+#if defined(_WIN32) || defined(__linux__)
             native_renderer::detail::HistoryState state;
             state.width = width; state.height = height;
             state.bloom = bloomHistory; state.gsBloom = gsBloomHistory;
@@ -1815,13 +1819,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             ps2state::Writer writer(out, error, native_renderer::detail::HistoryStateLimit);
             return native_renderer::detail::historyStateCodec(writer, state);
 #else
-            (void)out; error = "Temporal history snapshots require desktop OpenGL on Windows or Linux."; return false;
+            (void)out; error = "Temporal history snapshots are unavailable on this platform."; return false;
 #endif
         }
 
         bool restoreHistory(const native_renderer::detail::HistoryState &state, std::string &error)
         {
-#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+#if defined(_WIN32) || defined(__linux__)
             GLint framebuffer = 0, readFramebuffer = 0, texture = 0, alignment = 0, rowLength = 0, skipRows = 0, skipPixels = 0, buffer = 0;
             glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &framebuffer); glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFramebuffer);
             glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture); glGetIntegerv(GL_UNPACK_ALIGNMENT, &alignment);
@@ -1890,7 +1894,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             boundFbo = boundProgram = ~0u; cache = {};
             return true;
 #else
-            (void)state; error = "Temporal history snapshots require desktop OpenGL on Windows or Linux."; return false;
+            (void)state; error = "Temporal history snapshots are unavailable on this platform."; return false;
 #endif
         }
 
@@ -2026,7 +2030,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 
         void render(uint32_t w, uint32_t h, bool timed);
 
-#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+#if !defined(PS2X_NATIVE_VITA)
         const float *alphaSkinPalette(const Draw &d, uint32_t count)
         {
             if (count < 4)
@@ -2189,7 +2193,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         });
         mesh.bytes = static_cast<uint64_t>(count) * sizeof(native_renderer::Vertex)
                    + mesh.triangleAlpha.capacity() * sizeof(mesh.triangleAlpha[0]);
-#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+#if !defined(PS2X_NATIVE_VITA)
         mesh.clearAlphaPositions();
         if (alphaBatching() && count >= 3u)
         {
@@ -2235,7 +2239,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         });
         mesh.bytes = static_cast<uint64_t>(count) * sizeof(native_renderer::SkinVertex) + static_cast<uint64_t>(indexCount) * 4u
                    + mesh.triangleAlpha.capacity() * sizeof(mesh.triangleAlpha[0]);
-#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+#if !defined(PS2X_NATIVE_VITA)
         mesh.clearAlphaPositions();
         if (alphaBatching() && indexCount >= 3u)
         {
@@ -2356,7 +2360,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             const uint64_t oldAlphaBytes = mesh.triangleAlpha.capacity() * sizeof(mesh.triangleAlpha[0]);
             meshBytes -= oldAlphaBytes;
             mesh.bytes -= oldAlphaBytes;
-#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+#if !defined(PS2X_NATIVE_VITA)
             const uint64_t oldPositionBytes = mesh.alphaPositionBytes();
             meshBytes -= oldPositionBytes;
             mesh.bytes -= oldPositionBytes;
@@ -2886,7 +2890,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         const int meshKind = classify({m.alphaMin, m.alphaMax});
                         if (triangles)
                             bindMeshIndices(m);
-#if !defined(__ANDROID__)
+#if !defined(PS2X_NATIVE_VITA)
                         const bool batch = !meshKind && alphaBatching() && target.width && target.height &&
                                            std::all_of(std::begin(d.clip), std::end(d.clip), [](float v) { return validAlphaInput(v); }) &&
                                            (m.dynamic ? m.frame == arenaFrame : m.skinned ? m.alphaIndices.size() == m.count : m.alphaPositions.size() == m.count);
@@ -2935,7 +2939,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                                 end = triangles;
                             else if (kind)
                                 while (end < triangles && triangleKind(end) == kind) ++end;
-#if !defined(__ANDROID__)
+#if !defined(PS2X_NATIVE_VITA)
                             else if (useBounds)
                             {
                                 const AlphaBounds first = bounds(i);
@@ -3192,7 +3196,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         if (haveRefraction) copyOrders.push_back(9u);
         std::sort(copyOrders.begin(), copyOrders.end());
         copyOrders.erase(std::unique(copyOrders.begin(), copyOrders.end()), copyOrders.end());
-#if !defined(PS2X_NATIVE_VITA) && !defined(__ANDROID__)
+#if !defined(PS2X_NATIVE_VITA)
         const bool usesFullSizeEffectSource = (haveRefraction && waterFrom == 1) ||
             (!screenCopyOrders.empty() && static_cast<int>(native_renderer::tuning().hazeSource + 0.5f) == 1);
 #else
@@ -3845,11 +3849,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         }
         bool validateState(const std::vector<uint8_t> &data, std::string &error) const override
         {
-#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+#if defined(_WIN32) || defined(__linux__)
             native_renderer::detail::HistoryState state;
             return native_renderer::detail::decodeHistoryState(data, state, error);
 #else
-            (void)data; error = "Temporal history snapshots require desktop OpenGL on Windows or Linux."; return false;
+            (void)data; error = "Temporal history snapshots are unavailable on this platform."; return false;
 #endif
         }
         bool restoreState(const std::vector<uint8_t> &data, std::string &error) override

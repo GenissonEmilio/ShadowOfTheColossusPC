@@ -44,23 +44,25 @@ public final class TouchControlsView extends View {
             0xeeffbd4f, 0x00ffbd4f, Shader.TileMode.CLAMP);
     private final Typeface labelTypeface = Typeface.create("sans-serif-medium", Typeface.NORMAL);
 
-    private final Control movement = new Control("movement", "", 0, .225f, .71f, .153f);
-    private final Control menu = new Control("menu", "", 0, -.088f, .086f, .059f);
+    private final Control movement = new Control("movement", 0, 0, .225f, .71f, .153f);
+    private final Control menu = new Control("pause", R.string.hud_menu, 0, .095f, .091f, .060f);
     private final Control[] controls = {
         movement,
-        new Control("focus", "Focar", TouchInputState.L1, .145f, .36f, .070f),
-        new Control("weapon-left", "Arma", TouchInputState.LEFT, .405f, .885f, .065f),
-        new Control("weapon-right", "Arma", TouchInputState.RIGHT, .592f, .885f, .065f),
-        new Control("grip", "Agarrar", TouchInputState.R1, -.177f, .473f, .081f),
-        new Control("jump", "Pular", TouchInputState.TRIANGLE, -.291f, .893f, .078f),
-        new Control("attack", "Atacar", TouchInputState.SQUARE, -.205f, .701f, .076f),
-        new Control("action", "Ação", TouchInputState.CIRCLE, -.392f, .619f, .076f),
-        new Control("agro", "Agro", TouchInputState.CROSS, -.511f, .819f, .076f),
-        new Control("map", "Mapa", TouchInputState.SELECT, -.095f, .091f, .060f),
-        new Control("pause", "Pausa", TouchInputState.START, .095f, .091f, .060f)
+        new Control("focus", R.string.hud_focus, TouchInputState.L1, .145f, .36f, .070f),
+        new Control("weapon-left", R.string.hud_weapon, TouchInputState.LEFT, .405f, .885f, .065f),
+        new Control("weapon-right", R.string.hud_weapon, TouchInputState.RIGHT, .592f, .885f, .065f),
+        new Control("grip", R.string.hud_grip, TouchInputState.R1, -.177f, .473f, .081f),
+        new Control("jump", R.string.hud_jump, TouchInputState.TRIANGLE, -.291f, .893f, .078f),
+        new Control("attack", R.string.hud_attack, TouchInputState.SQUARE, -.205f, .701f, .076f),
+        new Control("action", R.string.hud_action, TouchInputState.CIRCLE, -.392f, .619f, .076f),
+        new Control("agro", R.string.hud_agro, TouchInputState.CROSS, -.511f, .819f, .076f),
+        new Control("map", R.string.hud_map, TouchInputState.MAP, -.095f, .091f, .060f)
     };
 
     private final Runnable cameraIdle = this::onCameraIdle;
+    private String menuDescription;
+    private String editorDrag;
+    private String editorFinish;
     private Listener listener;
     private float controlScale;
     private float opacity;
@@ -71,6 +73,8 @@ public final class TouchControlsView extends View {
     private boolean cameraIdlePosted;
     private boolean touchSequence;
     private int menuPointer = -1;
+    private float menuDownX;
+    private float menuDownY;
     private int dragPointer = -1;
     private Control dragControl;
     private float dragOffsetX;
@@ -104,12 +108,27 @@ public final class TouchControlsView extends View {
         invertCameraX = preferences.getBoolean("invert-camera-x", false);
         invertCameraY = preferences.getBoolean("invert-camera-y", false);
         input.configureCamera(cameraSensitivity, invertCameraX, invertCameraY);
-        for (Control control : controls) {
-            control.savedX = clamp(preferences.getFloat(control.key + "-x", Float.NaN), 0, 1, Float.NaN);
-            control.savedY = clamp(preferences.getFloat(control.key + "-y", Float.NaN), 0, 1, Float.NaN);
-        }
+        for (Control control : controls) restoreControlPosition(control);
+        restoreControlPosition(menu);
         setClickable(true);
-        setContentDescription("Ajustes dos controles de toque");
+        setLabels(context);
+    }
+
+    private void restoreControlPosition(Control control) {
+        control.savedX = clamp(preferences.getFloat(control.key + "-x", Float.NaN), 0, 1, Float.NaN);
+        control.savedY = clamp(preferences.getFloat(control.key + "-y", Float.NaN), 0, 1, Float.NaN);
+    }
+
+    void setLabels(Context labels) {
+        menuDescription = labels.getString(R.string.hud_menu_description);
+        editorDrag = labels.getString(R.string.hud_editor_drag);
+        editorFinish = labels.getString(R.string.hud_editor_finish);
+        menu.localizedLabel = labels.getString(menu.label);
+        for (Control control : controls) {
+            if (control.label != 0) control.localizedLabel = labels.getString(control.label);
+        }
+        setContentDescription(editing ? editorFinish : menuDescription);
+        invalidate();
     }
 
     public void setListener(Listener listener) {
@@ -127,7 +146,7 @@ public final class TouchControlsView extends View {
         if (this.editing != editing) {
             releaseAll();
             this.editing = editing;
-            setContentDescription(editing ? "Concluir edição dos controles" : "Ajustes dos controles de toque");
+            setContentDescription(editing ? editorFinish : menuDescription);
             invalidate();
         }
     }
@@ -200,13 +219,16 @@ public final class TouchControlsView extends View {
     }
 
     private void clearSavedLayout(SharedPreferences.Editor changes) {
-        for (Control control : controls) {
-            control.savedX = Float.NaN;
-            control.savedY = Float.NaN;
-            changes.remove(control.key + "-x").remove(control.key + "-y");
-        }
+        for (Control control : controls) clearControlPosition(control, changes);
+        clearControlPosition(menu, changes);
         changes.apply();
         layoutControls();
+    }
+
+    private static void clearControlPosition(Control control, SharedPreferences.Editor changes) {
+        control.savedX = Float.NaN;
+        control.savedY = Float.NaN;
+        changes.remove(control.key + "-x").remove(control.key + "-y");
     }
 
     public void releaseAll() {
@@ -283,7 +305,7 @@ public final class TouchControlsView extends View {
         for (Control control : controls) {
             layoutControl(control, controlScale);
         }
-        layoutControl(menu, 1);
+        layoutControl(menu, controlScale);
         input.configureGeometry(movement.x, movement.y, .67f * movement.radius, shortSide);
         invalidate();
     }
@@ -298,7 +320,7 @@ public final class TouchControlsView extends View {
     }
 
     private float defaultX(Control control) {
-        if (control.button == TouchInputState.SELECT || control.button == TouchInputState.START) {
+        if (control == menu || control.button == TouchInputState.MAP) {
             return (safeLeft + safeRight) / 2 + shortSide * control.anchorX;
         }
         float edge = control.anchorX < 0 ? safeRight : safeLeft;
@@ -355,6 +377,8 @@ public final class TouchControlsView extends View {
         if (hit(menu, x, y)) {
             if (menuPointer == -1) {
                 menuPointer = id;
+                menuDownX = x;
+                menuDownY = y;
                 invalidate();
             }
             return;
@@ -376,6 +400,17 @@ public final class TouchControlsView extends View {
 
     private void onPointerMove(MotionEvent event) {
         if (editing) {
+            if (dragPointer == -1 && menuPointer != -1) {
+                int index = event.findPointerIndex(menuPointer);
+                if (index >= 0 && Math.hypot(event.getX(index) - menuDownX, event.getY(index) - menuDownY)
+                        > shortSide * .012f) {
+                    dragPointer = menuPointer;
+                    menuPointer = -1;
+                    dragControl = menu;
+                    dragOffsetX = menu.x - menuDownX;
+                    dragOffsetY = menu.y - menuDownY;
+                }
+            }
             if (dragControl != null) {
                 int index = event.findPointerIndex(dragPointer);
                 if (index >= 0) {
@@ -490,6 +525,11 @@ public final class TouchControlsView extends View {
         throw new IllegalArgumentException("Unknown touch control: " + button);
     }
 
+    RectF menuBounds() {
+        return new RectF(menu.x - menu.radius, menu.y - menu.radius,
+                menu.x + menu.radius, menu.y + menu.radius);
+    }
+
     private void onCameraIdle() {
         cameraIdlePosted = false;
         input.expireCamera(SystemClock.uptimeMillis());
@@ -550,10 +590,10 @@ public final class TouchControlsView extends View {
         fill(IVORY, 1);
         float x = (safeLeft + safeRight) / 2;
         float y = safeTop + (safeBottom - safeTop) * .49f;
-        canvas.drawText("Arraste os controles para mover", x, y, paint);
+        canvas.drawText(editorDrag, x, y, paint);
         paint.setTextSize(shortSide * .029f);
         fill(BRONZE, 1);
-        canvas.drawText("Toque no sigilo para concluir", x, y + shortSide * .045f, paint);
+        canvas.drawText(editorFinish, x, y + shortSide * .045f, paint);
     }
 
     private void drawMovement(Canvas canvas) {
@@ -593,6 +633,8 @@ public final class TouchControlsView extends View {
         float visibility = editing ? 1 : opacity;
         drawStoneRim(canvas, visibility, pressed || dragControl == control);
         if (control == menu) {
+            canvas.translate(0, -.18f);
+            canvas.scale(.72f, .72f);
             stroke(IVORY, visibility, .052f);
             drawSigil(canvas);
         } else {
@@ -600,7 +642,7 @@ public final class TouchControlsView extends View {
             drawButtonSymbol(canvas, control.button, pressed ? GOLD : IVORY, visibility);
         }
         canvas.restore();
-        if (control != menu) {
+        if (control.label != 0) {
             // Text at a fractional (< 1 px) paint size loses glyph advances on
             // Android even when the canvas is enlarged. Rasterize at pixel size.
             paint.setTypeface(labelTypeface);
@@ -611,7 +653,12 @@ public final class TouchControlsView extends View {
                 canvas.drawText("L1", control.x, control.y - control.radius * .03f, paint);
             }
             paint.setTextSize(control.radius * .365f);
-            canvas.drawText(control.label, control.x, control.y + control.radius * .60f, paint);
+            String label = control.localizedLabel;
+            float width = paint.measureText(label);
+            if (width > control.radius * 1.54f) {
+                paint.setTextSize(paint.getTextSize() * control.radius * 1.54f / width);
+            }
+            canvas.drawText(label, control.x, control.y + control.radius * .60f, paint);
         }
     }
 
@@ -656,11 +703,7 @@ public final class TouchControlsView extends View {
                 path.lineTo(-direction * .08f, .26f);
                 canvas.drawPath(path, paint);
                 break;
-            case TouchInputState.START:
-                canvas.drawLine(-.13f, -.28f, -.13f, .22f, paint);
-                canvas.drawLine(.13f, -.28f, .13f, .22f, paint);
-                break;
-            case TouchInputState.SELECT:
+            case TouchInputState.MAP:
                 path.rewind();
                 path.moveTo(-.36f, -.18f);
                 path.lineTo(-.12f, -.28f);
@@ -824,7 +867,8 @@ public final class TouchControlsView extends View {
 
     private static final class Control {
         final String key;
-        final String label;
+        final int label;
+        String localizedLabel;
         final int button;
         final float anchorX;
         final float anchorY;
@@ -835,7 +879,7 @@ public final class TouchControlsView extends View {
         float y;
         float radius;
 
-        Control(String key, String label, int button, float anchorX, float anchorY, float baseRadius) {
+        Control(String key, int label, int button, float anchorX, float anchorY, float baseRadius) {
             this.key = key;
             this.label = label;
             this.button = button;

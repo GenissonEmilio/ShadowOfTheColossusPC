@@ -1,6 +1,6 @@
 #pragma once
 
-#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+#if defined(_WIN32) || defined(__ANDROID__) || (defined(__linux__) && !defined(__ANDROID__))
 #define PS2X_DESKTOP_VIDEO 1
 #include "raylib.h"
 #include <array>
@@ -24,6 +24,8 @@ namespace desktop_video
     bool loadShader(const char *path, std::string &error);
     bool shaderActive();
     bool fxaaAvailable();
+    bool frameGenerationAvailable();
+    bool fsrAvailable();
     void draw(Texture2D texture, int width, int height, bool flipY, int mode,
               bool upscaleFsr = false, bool fxaa = false);
     void shutdown();

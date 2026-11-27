@@ -16,6 +16,9 @@ set(path "${RAYLIB_SOURCE_DIR}/src/platforms/rcore_android.c")
 file(READ "${path}" original)
 string(REPLACE "\r\n" "\n" source "${original}")
 
+replace_android_source([=[        EGL_CONTEXT_CLIENT_VERSION, 2,]=]
+    [=[        EGL_CONTEXT_CLIENT_VERSION, (rlGetVersion() == RL_OPENGL_ES_30) ? 3 : 2,]=])
+
 replace_android_source([=[    while (!app->destroyRequested)
     {
         // Poll all events until we reach return value TIMEOUT, meaning no events left to process

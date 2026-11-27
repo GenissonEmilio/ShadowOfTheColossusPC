@@ -29,6 +29,7 @@ Java_com_genisson_sotc_NativeGameActivity_nativeAttachRunner(JNIEnv *env, jclass
     {
         const char *name;
         const char *signature;
+        bool optional = false;
     };
     constexpr Method methods[] = {
         {"nativeHasGame", "()Z"},
@@ -37,19 +38,28 @@ Java_com_genisson_sotc_NativeGameActivity_nativeAttachRunner(JNIEnv *env, jclass
         {"nativeReleaseInput", "()V"},
         {"nativePause", "(Z)V"},
         {"nativeSetWidescreen", "(ZF)V"},
+        {"nativeSetRefreshRate", "(F)V", true},
+        {"nativeOptionValues", "()[F", true},
+        {"nativeApplyOptions", "([F)V", true},
+        {"nativeOptionCapabilities", "()I", true},
+        {"nativeStateSlots", "()[Ljava/lang/String;", true},
+        {"nativeRequestState", "(II)Z", true},
     };
     JNINativeMethod bindings[sizeof(methods) / sizeof(methods[0])]{};
-    for (unsigned i = 0; i < sizeof(methods) / sizeof(methods[0]); ++i)
+    unsigned bindingCount = 0;
+    for (const auto &method : methods)
     {
         char symbol[96];
-        snprintf(symbol, sizeof(symbol), "%s%s", kJniPrefix, methods[i].name);
+        snprintf(symbol, sizeof(symbol), "%s%s", kJniPrefix, method.name);
         void *entry = dlsym(runner, symbol);
         if (entry == nullptr)
         {
+            if (method.optional)
+                continue;
             dlclose(runner);
-            return env->NewStringUTF(methods[i].name);
+            return env->NewStringUTF(method.name);
         }
-        bindings[i] = {const_cast<char *>(methods[i].name), const_cast<char *>(methods[i].signature), entry};
+        bindings[bindingCount++] = {const_cast<char *>(method.name), const_cast<char *>(method.signature), entry};
     }
 
     auto *create = reinterpret_cast<ANativeActivity_createFunc *>(dlsym(runner, "ANativeActivity_onCreate"));
@@ -59,7 +69,7 @@ Java_com_genisson_sotc_NativeGameActivity_nativeAttachRunner(JNIEnv *env, jclass
         dlclose(runner);
         return env->NewStringUTF("ANativeActivity_onCreate / nativeHasGame");
     }
-    if (env->RegisterNatives(activityClass, bindings, sizeof(bindings) / sizeof(bindings[0])) != JNI_OK)
+    if (env->RegisterNatives(activityClass, bindings, bindingCount) != JNI_OK)
     {
         if (env->ExceptionCheck())
             env->ExceptionClear();

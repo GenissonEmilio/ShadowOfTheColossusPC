@@ -1,5 +1,46 @@
 # Android validation
 
+## Standalone mobile update — 2026-11-27
+
+This update starts from desktop v1.2.10 and includes the ARM64 generator from
+PR #45. The portable APK additionally packages the ROM-free runtime archives,
+Clang/LLD and CPython needed by the launcher to prepare its own runner. The
+generator alone does not resolve issue #44.
+
+Local checks on the Android 16 / Adreno 810 device:
+
+| Check | Result |
+| --- | --- |
+| ARM64 runtime and preparation kit build | Passed, NDK 28.2.13676358, API 28 |
+| Portable APK, instrumentation and lint | Passed; no lint errors |
+| APK contents, signature and 16 KiB ZIP/ELF alignment | Passed; debug signing, no game inputs in APK |
+| JVM input, ISO and repository suites | Passed; Windows symlink cases require privileges and were skipped |
+| Installed-app instrumentation | 9 checks passed, including four launcher languages, Map/START separation, multitouch and layout persistence |
+| Installed-app compiler smoke test | CPython helpers, C++ compilation, runtime link, read-only runner and native load probe passed under the app UID |
+| GLES presentation shaders | Six production shader pairs passed pixel checks on Adreno 810 |
+| Shared EGL frame ownership | Passed, including resize and bidirectional synchronization |
+| Renderer alpha ordering and fallback | Shared textures and CPU fallback produced identical RGBA hashes with batching enabled or disabled |
+| Bionic RNG and state identity | Six seeds × 2,051 draws matched; 1,024 draws replayed per seed; malformed state and same-CRC build-ID collision rejected |
+| Preparation cancellation and retry | Passed during boot compilation; child processes stopped, imported disc and 112 completed objects preserved and reused |
+| First standalone stage | Boot library generated, linked and loaded on the phone; KERNEL RAM capture completed |
+| First ISO-only preparation and gameplay | In progress; not yet certified |
+
+The renderer fixture reduced actual GLES draw calls from 15 to 5 in one probe
+and from 16 to 6 in another, preserving the two RGBA hashes
+`245dca6e65b092f4` and `17006dd50fc522e5`. This measures submission reduction
+in those synthetic scenes, **not an FPS improvement for the full game**.
+
+The mobile options menu uses the runtime's actual quality, effects, volume,
+frame generation, FSR, FXAA, anisotropy and state APIs. Shader-dependent
+options use the capabilities detected after GLES initialization. Save states
+use Android format v2 with the complete GNU build ID; desktop format v1 is
+unchanged. Normal game memory cards remain separate from compilation captures.
+
+The initial standalone validation uses the owned SCUS-97472 ISO as the only
+game input. No desktop-generated runner or module capture is imported for this
+check. The historical measurements below concern earlier builds and must not
+be attributed to this update.
+
 Development record: 2026-11-23. Android validation is independent of the desktop
 campaign results in the project README.
 

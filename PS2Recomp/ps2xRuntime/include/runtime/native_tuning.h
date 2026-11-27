@@ -1,6 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#if defined(__ANDROID__)
+#include <functional>
+#endif
 #include <string>
 #include <vector>
 
@@ -8,8 +11,8 @@
 // renderer and the game's hooks, changed by the tuning panel (F10). The
 // strengths multiply the game's own, which it keeps changing by scene and
 // camera; the defaults were set by eye against the PS2 (2026-10-17). The
-// SOTC_* variables set them at start. Plain fields: the panel and the renderer may race on a value for
-// a frame, which only delays the change.
+// SOTC_* variables set them at start. Android readers use a per-thread
+// snapshot so the Java settings menu can update whole presets safely.
 namespace native_renderer
 {
     struct Tuning
@@ -119,9 +122,14 @@ namespace native_renderer
 
     // The settings (made from the environment on first use). Inline: the
     // game's hooks ask for them hundreds of times a frame.
+#if defined(__ANDROID__)
+    const Tuning &tuning();
+    void updateTuning(const std::function<void(Tuning &)> &change);
+#else
     extern Tuning *g_tuning;
     Tuning &tuningFirst();
     inline Tuning &tuning() { return g_tuning ? *g_tuning : tuningFirst(); }
+#endif
     // This platform's defaults (no environment).
     Tuning defaultTuning();
     // The values that differ from the defaults, as environment variables

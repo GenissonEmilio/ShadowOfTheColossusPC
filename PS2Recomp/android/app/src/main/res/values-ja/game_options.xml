@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="game_runner_incompatible">準備済みのランタイムはこのバージョンと互換性がありません。ディスクからゲームを再準備してください。</string>
+    <string name="hud_menu">メニュー</string>
+    <string name="hud_menu_description">ゲーム設定を開く</string>
+    <string name="hud_focus">注目</string>
+    <string name="hud_weapon">武器</string>
+    <string name="hud_grip">つかむ</string>
+    <string name="hud_jump">ジャンプ</string>
+    <string name="hud_attack">攻撃</string>
+    <string name="hud_action">アクション</string>
+    <string name="hud_agro">アグロ</string>
+    <string name="hud_map">マップ</string>
+    <string name="hud_editor_drag">ドラッグしてボタンを移動</string>
+    <string name="hud_editor_finish">メニューをタップして完了</string>
+    <string name="game_options">ゲーム設定</string>
+    <string name="game_quality">グラフィック品質</string>
+    <string name="game_effects">グラフィック効果</string>
+    <string name="game_av">画面と音声</string>
+    <string name="game_controls">タッチ操作</string>
+    <string name="game_states">ステートセーブ</string>
+    <string name="game_resume">再開</string>
+    <string name="game_menu_back">戻る</string>
+    <string name="game_exit">ゲームを終了</string>
+    <string name="game_exit_confirm">ランチャーに戻りますか？最後のセーブ以降の進行状況は失われます。</string>
+    <string name="game_starting_options">ゲームの起動が完了するまでお待ちください。</string>
+    <string name="game_legacy_options">このゲームパッケージは古いランタイムを使用しています。ゲームを再準備すると設定を利用できます。</string>
+    <string name="game_graphics_unavailable">この端末のレンダラーでは利用できません。</string>
+    <string name="game_anisotropy_limit">GPUが対応している異方性レベルが表示されます。</string>
+    <string name="game_preset">プリセット</string>
+    <string name="game_scale">レンダリング倍率</string>
+    <string name="game_fxaa">アンチエイリアス（FXAA）</string>
+    <string name="game_texture_filter">テクスチャフィルター</string>
+    <string name="game_model_detail">モデル詳細度（LOD）</string>
+    <string name="game_effect_detail">水面の詳細度</string>
+    <string name="game_bloom">ブルーム</string>
+    <string name="game_bloom_strength">ブルームの強さ</string>
+    <string name="game_bloom_rounds">ブルームぼかし回数</string>
+    <string name="game_bloom_spread">ブルームの広がり</string>
+    <string name="game_vertex_fog">距離フォグ</string>
+    <string name="game_fog_amount">フォグの強さ</string>
+    <string name="game_depth_fog">深度フォグ</string>
+    <string name="game_glow">グロー</string>
+    <string name="game_dof">被写界深度</string>
+    <string name="game_shadows">影</string>
+    <string name="game_particles">パーティクル</string>
+    <string name="game_screen_blur">画面ぼかし</string>
+    <string name="game_feedback">モーショントレイル</string>
+    <string name="game_reflections">反射</string>
+    <string name="game_refraction">水面の屈折</string>
+    <string name="game_screen">画面モード</string>
+    <string name="game_vsync">垂直同期</string>
+    <string name="game_fsr">アップスケーリング（FSR）</string>
+    <string name="game_frame_generation">フレーム生成</string>
+    <string name="game_cap30">30 FPS に制限</string>
+    <string name="game_show_fps">FPS を表示</string>
+    <string name="game_volume">音量</string>
+    <string name="game_menu_language">メニューの言語</string>
+    <string name="game_follow_launcher">アプリの設定に従う</string>
+    <string name="game_move_buttons">ボタンを移動</string>
+    <string name="game_control_scale">ボタンの大きさ</string>
+    <string name="game_control_opacity">ボタンの不透明度</string>
+    <string name="game_camera_sensitivity">カメラの感度</string>
+    <string name="game_invert_horizontal">カメラの左右を反転</string>
+    <string name="game_invert_vertical">カメラの上下を反転</string>
+    <string name="game_reset_controls">操作設定をリセット</string>
+    <string name="game_states_unavailable">このランタイムではステートセーブを利用できません。ゲーム内のセーブをお使いください。</string>
+    <string name="game_states_busy">ゲームの処理が完了してから再試行してください。</string>
+    <string name="game_state_quick">クイックスロット</string>
+    <string name="game_state_slot">スロット %1$d</string>
+    <string name="game_state_empty">空き</string>
+    <string name="game_state_save">セーブ</string>
+    <string name="game_state_confirm">%2$sで%1$sしますか？</string>
+    <string name="game_option_value">%1$s · %2$s</string>
+    <string name="game_times">%1$.2f×</string>
+    <string name="game_percent">%1$d%%</string>
+    <string-array name="game_profiles">
+        <item>低</item>
+        <item>オリジナル</item>
+        <item>バランス</item>
+        <item>高品質</item>
+        <item>最高</item>
+        <item>カスタム</item>
+    </string-array>
+    <string-array name="game_filters">
+        <item>最近傍</item>
+        <item>バイリニア</item>
+        <item>トライリニア</item>
+        <item>異方性 2×</item>
+        <item>異方性 4×</item>
+        <item>異方性 8×</item>
+        <item>異方性 16×</item>
+    </string-array>
+    <string-array name="game_model_levels">
+        <item>オリジナル</item>
+        <item>高</item>
+        <item>最高</item>
+    </string-array>
+    <string-array name="game_effect_levels">
+        <item>PS2</item>
+        <item>高</item>
+        <item>最高</item>
+    </string-array>
+    <string-array name="game_screen_modes">
+        <item>適応型ワイド画面</item>
+        <item>オリジナル 4:3</item>
+        <item>画面いっぱいに拡大</item>
+        <item>整数倍スケーリング</item>
+    </string-array>
+    <string-array name="game_state_actions">
+        <item>セーブ</item>
+        <item>ロード</item>
+        <item>削除</item>
+    </string-array>
+</resources>

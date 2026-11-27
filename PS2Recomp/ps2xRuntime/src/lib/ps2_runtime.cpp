@@ -425,13 +425,17 @@ namespace
 static Texture2D g_directFrame{};
 
 #ifdef PS2X_DESKTOP_VIDEO
+#if !defined(__ANDROID__)
 static GLFWwindow *g_nativeGlContext = nullptr;
+#endif
 
 static void shutdownNativeDesktopGl()
 {
     native_renderer::shutdownGl();
+#if !defined(__ANDROID__)
     if (g_nativeGlContext)
         glfwDestroyWindow(std::exchange(g_nativeGlContext, nullptr));
+#endif
 }
 
 static Texture2D viewNativeFrame(const native_renderer::PresentationFrame &frame)
@@ -1142,6 +1146,9 @@ bool PS2Runtime::initialize(const char *title)
         native_renderer::setGlContext([] {});
 #endif
         hostmenu::load();
+#if defined(__ANDROID__)
+        ps2x::android::initializeOptions();
+#endif
         desktop_input::initialize();
 #ifdef PS2X_DESKTOP_VIDEO
         desktop_video::setWindowResolution(hostmenu::settings().windowResolution);
@@ -1149,6 +1156,10 @@ bool PS2Runtime::initialize(const char *title)
             desktop_video::setFullscreen(hostmenu::settings().fullscreen);
         std::string shaderError;
         const bool shaderOk = desktop_video::loadShader(std::getenv("SOTC_SHADER"), shaderError);
+#if defined(__ANDROID__)
+        ps2x::android::setPresentationOptions(desktop_video::fxaaAvailable(), desktop_video::frameGenerationAvailable(),
+                                             desktop_video::fsrAvailable());
+#endif
         if (!shaderOk) std::cerr << "[video] " << shaderError << std::endl;
         if (const char *status = std::getenv("SOTC_SHADER_STATUS"))
         {
@@ -3272,7 +3283,8 @@ void PS2Runtime::run()
         desktop_video::setWindowResolution(hostmenu::settings().windowResolution);
         if (!IsWindowHidden()) desktop_video::setFullscreen(hostmenu::settings().fullscreen);
         const bool visible = !IsWindowHidden() && !IsWindowMinimized();
-        const bool frameGeneration = nativeRequested && hostmenu::settings().frameGeneration;
+        const bool frameGeneration = nativeRequested && hostmenu::settings().frameGeneration &&
+                                     desktop_video::frameGenerationAvailable();
         const bool interpolationEnabled = frameGeneration && !hostmenu::isOpen() && !savestates::busy();
         desktop_video::updatePresentation(visible && hostmenu::settings().vsync,
                                           native_renderer::tuning().frameCap30, frameGeneration);
@@ -3463,7 +3475,9 @@ void PS2Runtime::run()
                         ++nativeFrameUploads;
 #if defined(__ANDROID__)
                         uploadedNativeFrame = true;
+#if !defined(PS2X_DESKTOP_VIDEO)
                         nativeFrameSerial = serial;
+#endif
 #endif
                     }
                     else
@@ -3548,6 +3562,7 @@ void PS2Runtime::run()
         const Texture2D &picture = nativeTex;
 #endif
         const Texture2D &shownTex = nativeOnScreen ? picture : (g_directFrame.id ? g_directFrame : frameTex);
+#if !defined(__ANDROID__)
         // F9: the same moment twice, for comparing: the emulated picture (the
         // native one hidden for a few frames so the GS draws), the native one,
         // and the list of the native draws of that frame, in shots/f8_<n>_*.
@@ -3580,6 +3595,7 @@ void PS2Runtime::run()
                 std::fprintf(stderr, "[f8] %s_{emulated,native}.png, %s_draws.txt\n", base.c_str(), base.c_str());
             }
         }
+#endif
 #else
         const Texture2D &shownTex = g_directFrame.id ? g_directFrame : frameTex;
 #endif
@@ -4030,7 +4046,7 @@ void PS2Runtime::run()
         m_debugUiShutdownCallback(*this, m_debugUiUserData);
         m_debugUiInitialized = false;
     }
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) && !defined(PS2X_DESKTOP_VIDEO)
     ps2x::android::shutdownRenderer();
 #endif
     UnloadTexture(frameTex);
@@ -4041,7 +4057,11 @@ void PS2Runtime::run()
     native_renderer::releasePresentationFrame(sharedNative.texture);
     if (previousNativeTex.id) UnloadTexture(previousNativeTex);
     desktop_video::shutdown();
+#if defined(__ANDROID__)
+    ps2x::android::shutdownRenderer();
+#else
     shutdownNativeDesktopGl();
+#endif
 #endif
     CloseWindow();
 

@@ -4,6 +4,9 @@
 #include "LibC.h"
 #include "ps2_log.h"
 #include <stdexcept>
+#if defined(__ANDROID__)
+#include "android_guest_random.h"
+#endif
 
 namespace
 {
@@ -75,6 +78,9 @@ namespace
         std::copy(rng.words.begin() + 1, rng.words.end(), saved.words.begin());
         return true;
     }
+#elif defined(__ANDROID__)
+    using ps2_stubs::detail::AndroidGuestRandom;
+    AndroidGuestRandom g_androidRandom;
 #elif defined(_WIN32)
     // The Windows CRT starts rand() with seed 1. Keep its 32-bit state in
     // guest libc so the exact sequence can be restored with the game.
@@ -1259,6 +1265,8 @@ namespace ps2_stubs
         if (::random_r(&guestRandom().engine, &value) != 0)
             throw std::runtime_error("Cannot advance guest glibc random state.");
         setReturnS32(ctx, value & 0x7FFF);
+#elif defined(__ANDROID__)
+        setReturnS32(ctx, g_androidRandom.next() & 0x7fffu);
 #elif defined(_WIN32)
         g_windowsRandomState = g_windowsRandomState * 214013u + 2531011u;
         setReturnS32(ctx, (g_windowsRandomState >> 16) & 0x7fffu);
@@ -1274,6 +1282,8 @@ namespace ps2_stubs
 #if defined(__linux__) && defined(__GLIBC__)
         if (::srandom_r(getRegU32(ctx, 4), &guestRandom().engine) != 0)
             throw std::runtime_error("Cannot seed guest glibc random state.");
+#elif defined(__ANDROID__)
+        g_androidRandom = AndroidGuestRandom(getRegU32(ctx, 4));
 #elif defined(_WIN32)
         g_windowsRandomState = getRegU32(ctx, 4);
 #else
@@ -1392,6 +1402,8 @@ namespace ps2_stubs {
             uint32_t next = 0;
 #if defined(__linux__) && defined(__GLIBC__)
             LibcRandomSnapshot random;
+#elif defined(__ANDROID__)
+            AndroidGuestRandom random;
 #elif defined(_WIN32)
             uint32_t random = kWindowsRandomDefault;
 #endif
@@ -1400,6 +1412,8 @@ namespace ps2_stubs {
             constexpr uint32_t legacyMagic = 0x3143424c;
 #if defined(__linux__) && defined(__GLIBC__)
             constexpr uint32_t expectedMagic = 0x3243424c;
+#elif defined(__ANDROID__)
+            constexpr uint32_t expectedMagic = 0x3443424c;
 #elif defined(_WIN32)
             constexpr uint32_t expectedMagic = 0x3343424c;
 #else
@@ -1426,6 +1440,8 @@ namespace ps2_stubs {
                 rng.separation != kRandomSeparation || rng.rear >= kRandomDegree)
                 return ar.fail("Invalid guest glibc random metadata.");
             for (auto &word : rng.words) if (!ar.pod(word)) return false;
+#elif defined(__ANDROID__)
+            if (!state.random.archive(ar)) return false;
 #elif defined(_WIN32)
             if (!ar.pod(state.random)) return false;
 #endif
@@ -1441,6 +1457,8 @@ namespace ps2_stubs {
         LibcStateChunk state; state.next = g_next_file_handle;
 #if defined(__linux__) && defined(__GLIBC__)
         if (!captureRandom(state.random, error)) return false;
+#elif defined(__ANDROID__)
+        state.random = g_androidRandom;
 #elif defined(_WIN32)
         state.random = g_windowsRandomState;
 #else
@@ -1465,6 +1483,8 @@ namespace ps2_stubs {
         g_file_map.clear(); g_next_file_handle=state.next;
 #if defined(__linux__) && defined(__GLIBC__)
         g_guestRandom.swap(replacement);
+#elif defined(__ANDROID__)
+        g_androidRandom = state.random;
 #elif defined(_WIN32)
         g_windowsRandomState = state.random;
 #else

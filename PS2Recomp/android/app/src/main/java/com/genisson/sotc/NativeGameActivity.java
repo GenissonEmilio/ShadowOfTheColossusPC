@@ -2,22 +2,24 @@ package com.genisson.sotc;
 
 import android.app.AlertDialog;
 import android.app.NativeActivity;
+import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.PixelFormat;
+import android.hardware.display.DisplayManager;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.Display;
 import android.view.View;
 import android.view.WindowManager;
-import android.widget.CheckBox;
-import android.widget.LinearLayout;
-import android.widget.SeekBar;
-import android.widget.TextView;
 import java.io.File;
 import java.io.IOException;
 
 public final class NativeGameActivity extends NativeActivity {
-    private static final String ADAPTIVE_WIDESCREEN = "adaptive_widescreen";
+    static final String ADAPTIVE_WIDESCREEN = "adaptive_widescreen";
     static { System.loadLibrary(BuildConfig.PORTABLE ? "SotcBootstrap" : "ps2EntryRunner"); }
     private static native String nativeAttachRunner(String path);
     public static native boolean nativeHasGame();
@@ -26,23 +28,39 @@ public final class NativeGameActivity extends NativeActivity {
     public static native void nativeReleaseInput();
     public static native void nativePause(boolean paused);
     private static native void nativeSetWidescreen(boolean enabled, float aspect);
+    private static native void nativeSetRefreshRate(float hz);
+    static native float[] nativeOptionValues();
+    static native void nativeApplyOptions(float[] options);
+    static native int nativeOptionCapabilities();
+    static native String[] nativeStateSlots();
+    static native boolean nativeRequestState(int action, int slot);
     private TouchControlsView controls;
     private boolean editing;
     private boolean gameAttached;
-    private AlertDialog menu;
+    private GameMenu menu;
     private boolean overlayAttached;
     private boolean resumed;
     private SharedPreferences displayPreferences;
+    private DisplayManager displays;
+    private boolean refreshRateSupported;
+    private final DisplayManager.DisplayListener refreshListener = new DisplayManager.DisplayListener() {
+        @Override public void onDisplayAdded(int id) {}
+        @Override public void onDisplayRemoved(int id) {}
+        @Override public void onDisplayChanged(int id) { updateRefreshRate(); }
+    };
     private android.window.OnBackInvokedCallback backCallback;
 
     @Override protected void onCreate(Bundle state) {
+        String launchLanguage = getIntent().getStringExtra(LauncherLanguage.EXTRA_LANGUAGE);
+        Context labels = LauncherLanguage.localized(this, launchLanguage);
         if (BuildConfig.PORTABLE && !attachRunner()) {
             // NativeActivity still needs its lifecycle. The bootstrap has no
             // callbacks to forward when a portable runner failed to attach.
             super.onCreate(state);
-            new AlertDialog.Builder(this).setTitle(R.string.game_start_failed)
-                    .setMessage(R.string.game_player_incompatible)
-                    .setPositiveButton(R.string.game_close, (dialog, which) -> finish())
+            new AlertDialog.Builder(this).setTitle(labels.getString(R.string.game_start_failed))
+                    .setMessage(labels.getString(OnDevicePreparation.isAvailable(this)
+                            ? R.string.game_runner_incompatible : R.string.game_player_incompatible))
+                    .setPositiveButton(labels.getString(R.string.game_close), (dialog, which) -> finish())
                     .setOnCancelListener(dialog -> finish()).show();
             return;
         }
@@ -56,10 +74,19 @@ public final class NativeGameActivity extends NativeActivity {
             nativeConfigure(disc, new File(disc, DiscImageImporter.BOOT_FILE).getAbsolutePath(),
                     saves.getAbsolutePath(), new File(getFilesDir(), "last-game.log").getAbsolutePath(), 100);
         }
+        GameOptions options = new GameOptions(getSharedPreferences("sotc-game-options", MODE_PRIVATE));
         super.onCreate(state);
         gameAttached = true;
+        refreshRateSupported = options.supported();
+        updateRefreshRate();
+        if (refreshRateSupported) {
+            displays = getSystemService(DisplayManager.class);
+            if (displays != null) {
+                displays.registerDisplayListener(refreshListener, new Handler(getMainLooper()));
+            }
+        }
         if (android.os.Build.VERSION.SDK_INT >= 33) {
-            backCallback = this::showMenu;
+            backCallback = this::menuAction;
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
                     android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, backCallback);
         }
@@ -74,17 +101,19 @@ public final class NativeGameActivity extends NativeActivity {
                 updateDisplayMode(width, height);
             }
         });
-        controls = new TouchControlsView(this);
+        controls = new TouchControlsView(labels);
+        menu = new GameMenu(this, controls, options, displayPreferences, launchLanguage,
+                this::refreshDisplayMode, this::editControls, () -> {
+                    nativeReleaseInput();
+                    updatePauseState();
+                    immersive();
+                });
         controls.setListener(new TouchControlsView.Listener() {
             @Override public void onInput(int buttons, float mx, float my, float cx, float cy) {
                 nativeSetInput(buttons, mx, my, cx, cy);
             }
             @Override public void onMenu() {
-                if (editing) {
-                    editing = false;
-                    controls.setEditing(false);
-                    updatePauseState();
-                } else showMenu();
+                menuAction();
             }
         });
         // NativeActivity owns its surface and input queue. A separate application
@@ -108,7 +137,8 @@ public final class NativeGameActivity extends NativeActivity {
 
     private boolean attachRunner() {
         try {
-            File runner = new PlayerPackage(getFilesDir()).installedRunner();
+            File runner = OnDevicePreparation.installedRunner(this);
+            if (runner == null) runner = new PlayerPackage(getFilesDir()).installedRunner();
             if (runner != null && getIntent().getStringExtra("disc") != null) {
                 String error = nativeAttachRunner(runner.getCanonicalPath());
                 if (error == null) return true;
@@ -118,6 +148,12 @@ public final class NativeGameActivity extends NativeActivity {
             Log.e("SOTC", "Could not attach the imported runner", error);
         }
         return false;
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (menu != null) menu.setLaunchLanguage(intent.getStringExtra(LauncherLanguage.EXTRA_LANGUAGE));
     }
 
     private void immersive() {
@@ -134,71 +170,47 @@ public final class NativeGameActivity extends NativeActivity {
         }
     }
 
+    private void refreshDisplayMode() {
+        View gameWindow = getWindow().getDecorView();
+        updateDisplayMode(gameWindow.getWidth(), gameWindow.getHeight());
+    }
+
+    private void updateRefreshRate() {
+        if (!refreshRateSupported) return;
+        Display display = Build.VERSION.SDK_INT >= 30 ? getDisplay() : getWindowManager().getDefaultDisplay();
+        if (display == null) return;
+        try {
+            nativeSetRefreshRate(display.getRefreshRate());
+        } catch (UnsatisfiedLinkError legacyRunner) {
+            refreshRateSupported = false;
+        }
+    }
+
+    private void menuAction() {
+        if (editing) {
+            editing = false;
+            controls.setEditing(false);
+            updatePauseState();
+        } else {
+            showMenu();
+        }
+    }
+
+    private void editControls() {
+        editing = true;
+        controls.setEditing(true);
+        updatePauseState();
+    }
+
     private void showMenu() {
         if (controls == null || isFinishing() || isDestroyed() || (menu != null && menu.isShowing())) return;
         controls.releaseAll();
         nativePause(true);
-        LinearLayout content = new LinearLayout(this);
-        content.setOrientation(LinearLayout.VERTICAL);
-        int padding = (int) (20 * getResources().getDisplayMetrics().density);
-        content.setPadding(padding, padding, padding, padding);
-        CheckBox widescreen = new CheckBox(this);
-        widescreen.setText(R.string.game_adaptive_widescreen);
-        widescreen.setChecked(displayPreferences.getBoolean(ADAPTIVE_WIDESCREEN, true));
-        content.addView(widescreen);
-        widescreen.setOnCheckedChangeListener((button, value) -> {
-            displayPreferences.edit().putBoolean(ADAPTIVE_WIDESCREEN, value).apply();
-            View gameWindow = getWindow().getDecorView();
-            updateDisplayMode(gameWindow.getWidth(), gameWindow.getHeight());
-        });
-        slider(content, "Tamanho dos controles", controls.getControlScale(), .7f, 1.3f, controls::setControlScale);
-        slider(content, "Opacidade", controls.getOpacity(), .2f, 1f, controls::setOpacity);
-        slider(content, "Sensibilidade da câmera", controls.getCameraSensitivity(), .35f, 2.5f, controls::setCameraSensitivity);
-        CheckBox x = new CheckBox(this); x.setText("Inverter câmera horizontal");
-        CheckBox y = new CheckBox(this); y.setText("Inverter câmera vertical");
-        x.setChecked(controls.isCameraXInverted()); y.setChecked(controls.isCameraYInverted());
-        content.addView(x); content.addView(y);
-        x.setOnCheckedChangeListener((button, value) -> controls.setInvertCamera(value, y.isChecked()));
-        y.setOnCheckedChangeListener((button, value) -> controls.setInvertCamera(x.isChecked(), value));
-        android.widget.Button reset = new android.widget.Button(this);
-        reset.setText("RESTAURAR CONTROLES");
-        reset.setOnClickListener(view -> {
-            controls.resetSettings();
-            menu.dismiss();
-        });
-        content.addView(reset);
-        android.widget.ScrollView scrolling = new android.widget.ScrollView(this);
-        scrolling.addView(content);
-        menu = new AlertDialog.Builder(this).setTitle("Seus controles").setView(scrolling)
-                .setPositiveButton("VOLTAR", (dialog, which) -> { })
-                .setNeutralButton("MOVER BOTÕES", (dialog, which) -> {
-                    editing = true; controls.setEditing(true);
-                })
-                .setNegativeButton("SAIR DO JOGO", (dialog, which) -> finish()).create();
-        menu.setOnDismissListener(dialog -> {
-            nativeReleaseInput();
-            updatePauseState();
-            immersive();
-        });
         menu.show();
     }
 
-    private interface FloatSetting { void set(float value); }
     private void updatePauseState() {
         nativePause(!resumed || editing || (menu != null && menu.isShowing()));
-    }
-    private void slider(LinearLayout content, String name, float value, float min, float max, FloatSetting setter) {
-        TextView label = new TextView(this); label.setText(name); content.addView(label);
-        SeekBar slider = new SeekBar(this); slider.setMax(100);
-        slider.setProgress(Math.round((value - min) * 100 / (max - min)));
-        content.addView(slider);
-        slider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
-                if (fromUser) setter.set(min + (max - min) * progress / 100);
-            }
-            public void onStartTrackingTouch(SeekBar bar) { }
-            public void onStopTrackingTouch(SeekBar bar) { }
-        });
     }
     @Override public void onWindowFocusChanged(boolean focused) {
         super.onWindowFocusChanged(focused);
@@ -221,15 +233,13 @@ public final class NativeGameActivity extends NativeActivity {
         if (gameAttached) updatePauseState();
     }
     @Override public void onBackPressed() {
-        if (gameAttached) showMenu();
+        if (gameAttached) menuAction();
         else super.onBackPressed();
     }
     @Override protected void onDestroy() {
         resumed = false;
-        if (menu != null) {
-            menu.setOnDismissListener(null);
-            menu.dismiss();
-        }
+        if (displays != null) displays.unregisterDisplayListener(refreshListener);
+        if (menu != null) menu.dispose();
         if (controls != null) controls.releaseAll();
         if (gameAttached) nativeReleaseInput();
         if (overlayAttached) {

@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="game_runner_incompatible">El runtime preparado no es compatible con esta versión. Vuelve a preparar el juego desde tu disco.</string>
+    <string name="hud_menu">Menú</string>
+    <string name="hud_menu_description">Abrir opciones del juego</string>
+    <string name="hud_focus">Enfocar</string>
+    <string name="hud_weapon">Arma</string>
+    <string name="hud_grip">Agarrar</string>
+    <string name="hud_jump">Saltar</string>
+    <string name="hud_attack">Atacar</string>
+    <string name="hud_action">Acción</string>
+    <string name="hud_agro">Agro</string>
+    <string name="hud_map">Mapa</string>
+    <string name="hud_editor_drag">Arrastra los controles para moverlos</string>
+    <string name="hud_editor_finish">Toca Menú para terminar</string>
+    <string name="game_options">Opciones del juego</string>
+    <string name="game_quality">Calidad gráfica</string>
+    <string name="game_effects">Efectos gráficos</string>
+    <string name="game_av">Pantalla y sonido</string>
+    <string name="game_controls">Controles táctiles</string>
+    <string name="game_states">Estados guardados</string>
+    <string name="game_resume">Continuar</string>
+    <string name="game_menu_back">Atrás</string>
+    <string name="game_exit">Salir del juego</string>
+    <string name="game_exit_confirm">¿Volver al inicio? Se perderá el progreso desde el último guardado.</string>
+    <string name="game_starting_options">Espera a que termine de iniciarse el juego.</string>
+    <string name="game_legacy_options">Este paquete del juego usa un runtime anterior. Prepara el juego de nuevo para acceder a estas opciones.</string>
+    <string name="game_graphics_unavailable">No disponible en el renderizador de este dispositivo.</string>
+    <string name="game_anisotropy_limit">La lista refleja el límite de anisotropía de la GPU.</string>
+    <string name="game_preset">Preajuste</string>
+    <string name="game_scale">Escala de renderizado</string>
+    <string name="game_fxaa">Suavizado de bordes (FXAA)</string>
+    <string name="game_texture_filter">Filtrado de texturas</string>
+    <string name="game_model_detail">Detalle de los modelos (LOD)</string>
+    <string name="game_effect_detail">Detalle del agua</string>
+    <string name="game_bloom">Bloom</string>
+    <string name="game_bloom_strength">Intensidad del bloom</string>
+    <string name="game_bloom_rounds">Pasadas de desenfoque del bloom</string>
+    <string name="game_bloom_spread">Dispersión del bloom</string>
+    <string name="game_vertex_fog">Niebla a distancia</string>
+    <string name="game_fog_amount">Intensidad de la niebla</string>
+    <string name="game_depth_fog">Niebla de profundidad</string>
+    <string name="game_glow">Resplandor</string>
+    <string name="game_dof">Profundidad de campo</string>
+    <string name="game_shadows">Sombras</string>
+    <string name="game_particles">Partículas</string>
+    <string name="game_screen_blur">Desenfoque de pantalla</string>
+    <string name="game_feedback">Estelas de movimiento</string>
+    <string name="game_reflections">Reflejos</string>
+    <string name="game_refraction">Refracción del agua</string>
+    <string name="game_screen">Modo de pantalla</string>
+    <string name="game_vsync">Sincronización vertical</string>
+    <string name="game_fsr">Escalado (FSR)</string>
+    <string name="game_frame_generation">Generación de fotogramas</string>
+    <string name="game_cap30">Limitar a 30 FPS</string>
+    <string name="game_show_fps">Mostrar FPS</string>
+    <string name="game_volume">Volumen</string>
+    <string name="game_menu_language">Idioma del menú</string>
+    <string name="game_follow_launcher">Igual que la aplicación</string>
+    <string name="game_move_buttons">Mover botones</string>
+    <string name="game_control_scale">Tamaño de los controles</string>
+    <string name="game_control_opacity">Opacidad de los controles</string>
+    <string name="game_camera_sensitivity">Sensibilidad de la cámara</string>
+    <string name="game_invert_horizontal">Invertir cámara horizontal</string>
+    <string name="game_invert_vertical">Invertir cámara vertical</string>
+    <string name="game_reset_controls">Restablecer controles</string>
+    <string name="game_states_unavailable">Este runtime no admite estados guardados. Usa el guardado del juego.</string>
+    <string name="game_states_busy">Espera a que el juego termine la operación y vuelve a intentarlo.</string>
+    <string name="game_state_quick">Ranura rápida</string>
+    <string name="game_state_slot">Ranura %1$d</string>
+    <string name="game_state_empty">Vacía</string>
+    <string name="game_state_save">Guardar</string>
+    <string name="game_state_confirm">¿%1$s en %2$s?</string>
+    <string name="game_option_value">%1$s · %2$s</string>
+    <string name="game_times">%1$.2f×</string>
+    <string name="game_percent">%1$d%%</string>
+    <string-array name="game_profiles">
+        <item>Bajo</item>
+        <item>Original</item>
+        <item>Equilibrado</item>
+        <item>Mejorado</item>
+        <item>Ultra</item>
+        <item>Personalizado</item>
+    </string-array>
+    <string-array name="game_filters">
+        <item>Más cercano</item>
+        <item>Bilineal</item>
+        <item>Trilineal</item>
+        <item>Anisotrópico 2×</item>
+        <item>Anisotrópico 4×</item>
+        <item>Anisotrópico 8×</item>
+        <item>Anisotrópico 16×</item>
+    </string-array>
+    <string-array name="game_model_levels">
+        <item>Original</item>
+        <item>Más detallado</item>
+        <item>Máximo</item>
+    </string-array>
+    <string-array name="game_effect_levels">
+        <item>PS2</item>
+        <item>Alta</item>
+        <item>Muy alta</item>
+    </string-array>
+    <string-array name="game_screen_modes">
+        <item>Pantalla ancha adaptativa</item>
+        <item>Formato original 4:3</item>
+        <item>Estirar para llenar</item>
+        <item>Escala entera</item>
+    </string-array>
+    <string-array name="game_state_actions">
+        <item>Guardar</item>
+        <item>Cargar</item>
+        <item>Eliminar</item>
+    </string-array>
+</resources>

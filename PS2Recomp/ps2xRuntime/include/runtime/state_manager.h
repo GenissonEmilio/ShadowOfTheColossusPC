@@ -12,6 +12,8 @@ namespace savestates
     struct Slot { bool exists = false; uint64_t bytes = 0; std::string modified; };
     void bind(PS2Runtime *runtime);
     void request(Action action, int slot = 0);
+    bool tryRequest(Action action, int slot);
+    bool ready();
     bool busy();
     std::string status();
     std::array<Slot, SlotCount> slots();

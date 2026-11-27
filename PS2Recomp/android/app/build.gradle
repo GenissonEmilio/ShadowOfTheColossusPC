@@ -5,6 +5,7 @@ def generatedDir = providers.gradleProperty('sotcGeneratedDir').orNull
 def vu1Dir = providers.gradleProperty('sotcVu1Dir').orNull
 def prebuiltDir = providers.gradleProperty('sotcPrebuiltDir').orNull
 def ffmpegRoot = providers.gradleProperty('sotcFfmpegRoot').orNull
+def onDeviceKit = providers.gradleProperty('sotcOnDeviceKit').orNull
 def captureMissing = providers.gradleProperty('sotcCaptureMissing').getOrElse('false').toBoolean()
 def hasGame = providers.gradleProperty('sotcHasGame').getOrElse(generatedDir != null ? 'true' : 'false').toBoolean()
 def bootSha256 = providers.gradleProperty('sotcBootSha256').getOrElse('')
@@ -17,6 +18,28 @@ if (hasGame && !(bootSha256 ==~ /(?i)[0-9a-f]{64}/)) {
 }
 if (prebuiltDir != null && !new File(file(prebuiltDir), 'arm64-v8a/libps2EntryRunner.so').isFile()) {
     throw new GradleException('sotcPrebuiltDir must contain arm64-v8a/libps2EntryRunner.so.')
+}
+if (onDeviceKit != null) {
+    if (!portable) throw new GradleException('sotcOnDeviceKit requires sotcPortable=true.')
+    def kitDir = file(onDeviceKit)
+    def tools = ['libSotcPrepare.so', 'libSotcRecompile.so', 'libSotcClang.so', 'libSotcLld.so',
+                 'libpython3.14.so', 'libpy__struct.so', 'libpy__bisect.so', 'libpy__json.so', 'libpy_math.so']
+    def required = ['assets/sotc-ondevice.id', 'assets/sotc-ondevice.zip'] +
+        tools.collect { "jniLibs/arm64-v8a/" + it }
+    if (!required.every { new File(kitDir, it).isFile() }) {
+        throw new GradleException('sotcOnDeviceKit must point to a complete stage_on_device_kit.py output.')
+    }
+    def allowedLibraries = tools.collect { new File(kitDir, 'jniLibs/arm64-v8a/' + it).canonicalFile } as Set
+    def foundLibraries = fileTree(new File(kitDir, 'jniLibs')).files.collect { it.canonicalFile } as Set
+    if (foundLibraries != allowedLibraries) {
+        throw new GradleException('sotcOnDeviceKit contains unexpected native libraries or executables.')
+    }
+    def assets = new File(kitDir, 'assets')
+    def allowedAssets = fileTree(new File(assets, 'licenses')) { include '**/*.txt' }.files +
+        ['sotc-ondevice.id', 'sotc-ondevice.zip'].collect { new File(assets, it) }
+    if (fileTree(assets).files != (allowedAssets as Set)) {
+        throw new GradleException('sotcOnDeviceKit contains unexpected assets.')
+    }
 }
 def releaseProperties = new Properties()
 def releasePropertiesFile = rootProject.file('signing.properties')
@@ -49,6 +72,7 @@ android {
         versionName providers.gradleProperty('sotcVersionName').getOrElse('0.2.0')
         manifestPlaceholders = [sotcNativeLib: portable ? 'SotcBootstrap' : 'ps2EntryRunner']
         buildConfigField 'boolean', 'PORTABLE', portable.toString()
+        buildConfigField 'boolean', 'ON_DEVICE_PREPARATION', (onDeviceKit != null).toString()
         testInstrumentationRunner 'com.genisson.sotc.ControlsInstrumentation'
         buildConfigField 'boolean', 'HAS_GAME', hasGame.toString()
         buildConfigField 'String', 'BOOT_SHA256', '"' + bootSha256 + '"'
@@ -81,6 +105,8 @@ android {
         }
     }
     buildFeatures { buildConfig true }
+    // All launcher languages must remain available for offline changes.
+    bundle { language { enableSplit = false } }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
     if (prebuiltDir == null) {
         externalNativeBuild {
@@ -110,8 +136,18 @@ android {
             if (releaseSigningReady) signingConfig signingConfigs.release
         }
     }
-    packaging { jniLibs { useLegacyPackaging = false } }
+    packaging {
+        jniLibs {
+            // The APK installer places the ARM64 compiler executables in
+            // nativeLibraryDir so the app can execute them on Android 10+.
+            useLegacyPackaging = onDeviceKit != null
+        }
+    }
     sourceSets.main.assets.srcDir(layout.buildDirectory.dir('generated/licenseAssets'))
+    if (onDeviceKit != null) {
+        sourceSets.main.assets.srcDir new File(file(onDeviceKit), 'assets')
+        sourceSets.main.jniLibs.srcDir new File(file(onDeviceKit), 'jniLibs')
+    }
 }
 
 tasks.register('collectLicenses', Copy) {

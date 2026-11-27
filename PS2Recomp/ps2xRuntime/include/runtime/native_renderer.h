@@ -383,7 +383,7 @@ namespace native_renderer
     enum class FrameRead { Missing, Unchanged, Updated };
     // A presentation consumer owns its own revision, initially zero.
     FrameRead readFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height, uint64_t &revision);
-#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+#if defined(_WIN32) || defined(__ANDROID__) || (defined(__linux__) && !defined(__ANDROID__))
     struct PresentationFrame
     {
         uint32_t texture = 0;
