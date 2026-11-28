@@ -52,6 +52,13 @@ if(PS2X_IOP_BUILD_TESTS)
     target_include_directories(ps2_iop_emulator_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME ps2_iop_emulator_tests COMMAND ps2_iop_emulator_tests)
 
+    add_executable(ps2_iop_native_sound_mixer_tests tests/native_sound_mixer_tests.cpp)
+    target_link_libraries(ps2_iop_native_sound_mixer_tests PRIVATE ps2_iop)
+    target_include_directories(ps2_iop_native_sound_mixer_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME ps2_iop_native_sound_mixer_tests COMMAND ps2_iop_native_sound_mixer_tests)
+    set_tests_properties(ps2_iop_native_sound_mixer_tests PROPERTIES
+        ENVIRONMENT "PS2X_AUDIO_PULL=1;PS2X_AUDIO_STREAM_GUEST_CLOCK=1")
+
     add_executable(ps2_iop_import_tests tests/iop_import_tests.cpp)
     target_link_libraries(ps2_iop_import_tests PRIVATE ps2_iop)
     target_include_directories(ps2_iop_import_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)

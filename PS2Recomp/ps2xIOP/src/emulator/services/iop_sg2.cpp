@@ -271,6 +271,8 @@ namespace ps2x::iop::detail
             setParam((a & 0xFFFFu) | 0xC80u, static_cast<uint16_t>(c));
             break;
         case 0x16: // 0x2bb0: streams reset
+            for (int core = 0; core < 2; ++core)
+                m_mixer.setStreamVoices(core, 0xffffffu, false);
             m_streams.fill({});
             m_streamOps.fill({});
             m_opWrite = m_opRead = 0;
@@ -296,6 +298,7 @@ namespace ps2x::iop::detail
             {
                 dropStreamOps(static_cast<uint32_t>(voice % 24));
                 m_streams[voice] = {};
+                m_mixer.setStreamVoices(voice / 24, 1u << (voice % 24), false);
             }
             break;
         case 0x1A: // 0x30a8: volume for every voice in the masks
@@ -505,7 +508,10 @@ namespace ps2x::iop::detail
         const uint32_t masks[2] = {op.arg[0], op.arg[1]};
         for (uint32_t core = 0; core < 2u; ++core)
             if (masks[core] != 0u)
+            {
                 setSwitch((on ? 0x1500u : 0x1600u) | core, masks[core]);
+                m_mixer.setStreamVoices(static_cast<int>(core), masks[core] & 0xffffffu, on);
+            }
         for (uint32_t core = 0; core < 2u; ++core)
             for (uint32_t v = 0; v < 24u; ++v)
                 if ((masks[core] >> v) & 1u)
@@ -826,6 +832,15 @@ namespace ps2x::iop::detail
             m_eea = saved.m_eea;
             m_reply = saved.m_reply;
             m_streams = saved.m_streams;
+            for (int core = 0; core < 2; ++core)
+            {
+                uint32_t mask = 0;
+                for (int voice = 0; voice < 24; ++voice)
+                    if (m_streams[core * 24 + voice].state != 0)
+                        mask |= 1u << voice;
+                m_mixer.setStreamVoices(core, 0xffffffu, false);
+                m_mixer.setStreamVoices(core, mask, true);
+            }
             m_streamOps = saved.m_streamOps;
             m_opWrite = saved.m_opWrite;
             m_opRead = saved.m_opRead;

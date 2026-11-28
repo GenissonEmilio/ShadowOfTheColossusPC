@@ -2,10 +2,12 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -82,6 +84,7 @@ namespace ps2x::iop::detail
         void pushInputBlock(int core, const uint8_t *block);
         void clearInput(int core) { m_cores[core].input.clear(); }
         void setInputRefill(std::function<void(int core)> refill) { m_inputRefill = std::move(refill); }
+        void setStreamVoices(int core, uint32_t mask, bool enabled);
 
         void advanceTo(uint64_t iopCycle);
         // Interleaved stereo frames for the host audio device (any thread).
@@ -147,6 +150,8 @@ namespace ps2x::iop::detail
 
         static constexpr uint32_t kRamWords = RamBytes / 2u;
         static constexpr uint32_t kBlock = 64u;
+        static constexpr uint64_t kStreamLeadFrames = 1024u;
+        static constexpr uint64_t kNoStreamTime = std::numeric_limits<uint64_t>::max();
 
         [[nodiscard]] static uint32_t toWords(uint32_t byteAddress) { return (byteAddress >> 1u) & (kRamWords - 1u); }
         [[nodiscard]] static int32_t sweepVolume(uint16_t value);
@@ -155,8 +160,11 @@ namespace ps2x::iop::detail
         void tickEnvelope(Voice &voice);
         void mixVoice(Voice &voice, int32_t *left, int32_t *right, uint32_t frames);
         void reverb(Core &core, int32_t inL, int32_t inR, int32_t &outL, int32_t &outR);
-        void render(int16_t *destination, uint32_t frames);
+        void render(int16_t *destination, uint32_t frames, uint32_t streamFrames = kBlock);
         void pushOutput(const int16_t *frames, size_t count);
+        void resetStreamClock();
+        uint32_t streamBudget(uint32_t frames);
+        void reportStreamStats();
 
         mutable std::mutex m_lock;
         std::vector<uint16_t> m_ram;
@@ -165,6 +173,12 @@ namespace ps2x::iop::detail
         std::function<void(int core)> m_inputRefill;
         uint64_t m_cycle = 0;
         bool m_cycleValid = false;
+        std::atomic<uint64_t> m_streamIopCycle{kNoStreamTime};
+        uint64_t m_streamLastCycle = kNoStreamTime;
+        uint64_t m_streamSample = 0;
+        std::array<uint32_t, 2> m_streamVoices{};
+        uint64_t m_streamFramesMixed = 0, m_streamFramesHeld = 0;
+        std::chrono::steady_clock::time_point m_streamStatsTime{};
 
         static constexpr size_t kRingFrames = 1u << 15u;
         std::vector<int16_t> m_ring;
