@@ -101,10 +101,10 @@ def verify_runs(commit, runs):
                 or run.get("path") not in {workflow_path, f"{workflow_path}@main"}
                 or run.get("head_sha") != commit
                 or run.get("head_branch") != "main"
-                or run.get("event") != "push"
+                or run.get("event") not in {"push", "workflow_dispatch"}
                 or run.get("status") != "completed"
                 or run.get("conclusion") != "success"):
-            raise StageError(f"{platform} run {run_id} must be a successful main push for {commit}")
+            raise StageError(f"{platform} run {run_id} must be a successful main build for {commit}")
 
 
 def verify_draft(release, tag, commit):

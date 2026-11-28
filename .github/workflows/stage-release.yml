@@ -9,11 +9,11 @@ on:
         required: true
         type: string
       windows_run_id:
-        description: Successful Windows push run ID for the release commit
+        description: Successful Windows main build run ID for the release commit
         required: true
         type: string
       linux_run_id:
-        description: Successful Linux push run ID for the release commit
+        description: Successful Linux main build run ID for the release commit
         required: true
         type: string
 

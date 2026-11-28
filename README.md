@@ -109,9 +109,10 @@ port from a SCUS-97472 or SCES-53326 ISO. RecompLauncher runs preparation
 in the background. Its settings cover aspect ratio, full screen, window size,
 VSync, FSR 1, FPS display, and volume.
 
-Both launchers use the same data directory, memory cards, settings, and
-recompilation cache. At startup, the game uses the imported disc and verifies
-the runtime cache.
+By default, both launchers use the same data directory, memory cards, settings,
+and recompilation cache. RecompLauncher explicitly selects its profile for
+setup and play. At startup, the game uses the imported disc and verifies the
+runtime cache.
 
 To update through RecompLauncher’s library, open the **Updates** tab. The
 catalog offers approved versions for each platform. To download approved
@@ -168,12 +169,30 @@ is available, the panel displays **Update**. Select **Check now** to check again
 and see whether the launcher is up to date.
 
 **Update** downloads the package, verifies the SHA-256 published by GitHub,
-updates the launcher directory, and opens the new version. The data directory
-is separate. Install the first version with the updater from a release package.
+updates the launcher in the same location, and opens the new version. The
+updater preserves standard and portable profiles. Updates built with the same
+compiler kit reuse existing disc imports and compiled games. A changed game
+runtime or compiler kit needs a new build the first time you play that edition.
 If v0.4.2 reports HTTP 403 when checking GitHub, install v0.5.0 from the
 [Releases page](https://github.com/GenissonEmilio/ShadowOfTheColossusPC/releases).
 Since v0.5.0 the launcher uses the manifest published with the packages to check
 for new versions.
+
+### Portable mode
+
+In the standalone Windows or Linux launcher, open **Settings → Portable mode**
+and select **Enable**. The folder containing the launcher must be writable.
+The launcher stores the imported disc, compiled game, saves, settings, and
+logs in `data/` beside the executable. To move the installation to another
+folder or drive on the same OS, close the launcher and game, then move the
+whole folder, including `portable.ini` and `data/`.
+
+The standard and portable profiles keep separate data. To bring an existing
+profile over, close the launcher and game, then copy the contents of the
+standard data directory into an empty `data/` beside the launcher. **Settings**
+shows the active path. For just the in-game saves, use **More Options → My
+saves** to export and import the memory card. RecompLauncher continues to
+manage its own profile and cloud saves.
 
 ## Save states
 
@@ -362,6 +381,13 @@ and compilation kit. The packaging checks exclude disc images, PS2 executables,
 XFF modules, generated game code, and saves. The Linux workflow runs these tests
 and builds on every push and pull request. Gameplay is validated locally with a
 user-supplied disc. CI runs without game files.
+
+For a launcher-only release, dispatch **Linux native port** and **Windows native
+port** on the release commit using the prior published `compiler_version`,
+the platform archive's `compiler_sha256`, and the `compiler_build_id` in its
+`compiler/manifest.json`. The workflows verify the compiler inputs and retain
+the existing kit and build ID. Use their successful `main` run IDs when staging
+the release assets. Runtime or compilation-pipeline changes use the full builds.
 
 Both desktop packagers include the authorized v1.0 Xdelta at
 `tools/desktop/assets/campaign/pt-BR.xdelta` as a launcher resource. The launcher
