@@ -23,7 +23,7 @@ frames="$(mktemp -d "$out/frames.XXXXXX")"
 trap 'rm -f -- "$frames/batched.rgba" "$frames/ordered.rgba"; rmdir -- "$frames"' EXIT
 LP_NUM_THREADS=2 SOTC_GL_ALPHA_BATCH=1 SOTC_ALPHA_TEST_FRAME_DUMP="$frames/batched.rgba" \
   xvfb-run -a timeout --kill-after=2s 30s "$out/check" | tee "$out/normal.log"
-LP_NUM_THREADS=2 SOTC_GL_ALPHA_BATCH=0 SOTC_GL_STATIC_VAO=0 SOTC_ALPHA_TEST_FRAME_DUMP="$frames/ordered.rgba" \
+LP_NUM_THREADS=2 SOTC_GL_ALPHA_BATCH=0 SOTC_ALPHA_TEST_FRAME_DUMP="$frames/ordered.rgba" \
   xvfb-run -a timeout --kill-after=2s 30s "$out/check" >"$out/ordered.log"
 cmp "$frames/batched.rgba" "$frames/ordered.rgba"
 awk '
