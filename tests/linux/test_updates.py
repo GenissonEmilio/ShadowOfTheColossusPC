@@ -17,7 +17,7 @@ import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools/desktop"))
 import language
-from model import Library, atomic_json
+from model import Library, PORTABLE_DATA_NAME, PORTABLE_MARKER_NAME, atomic_json
 import updates
 
 
@@ -334,6 +334,133 @@ class UpdateTests(unittest.TestCase):
                     bundle.writestr(path, "bad")
                 with self.assertRaisesRegex(ValueError, "Invalid path"):
                     updates.unpack(archive, root, WINDOWS)
+
+    def test_rejects_packages_that_claim_portable_paths(self):
+        for system, entry in ((LINUX, PORTABLE_DATA_NAME + "/nested/file"),
+                              (LINUX, PORTABLE_MARKER_NAME),
+                              (WINDOWS, PORTABLE_DATA_NAME.upper() + "/"),
+                              (WINDOWS, PORTABLE_MARKER_NAME.upper())):
+            with (self.subTest(system=system, entry=entry),
+                  self.assertRaisesRegex(ValueError, "reserved portable path")):
+                updates.package_path(f"{updates.NAME}/{entry}", system)
+
+
+class PortableUpdateTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.program = self.root / "installed"
+        self.program.mkdir()
+        self.data = self.program / PORTABLE_DATA_NAME
+        self.marker = self.program / PORTABLE_MARKER_NAME
+        self.marker.write_text("portable\n")
+        self.files = {
+            "player/memory-card": b"save",
+            "launcher-preferences.json": b'{"language":"pt"}',
+            "imports/SCUS_974.72": b"disc",
+            "builds/stable/gamecore/game": b"current cache",
+            "builds/previous/gamecore/game": b"previous cache",
+        }
+        for name, payload in self.files.items():
+            target = self.data / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+        self.data_inode = self.data.stat().st_ino
+        self.launcher = updates.launcher_filename(LINUX)
+        (self.program / self.launcher).write_bytes(b"old launcher")
+        (self.program / "release.json").write_text(json.dumps({"version": "1.0.0", "platform": LINUX}))
+
+    def stage(self, script):
+        parent = Path(tempfile.mkdtemp(prefix=".sotc-update-", dir=self.root))
+        stage = parent / updates.NAME
+        stage.mkdir()
+        launcher = stage / self.launcher
+        launcher.write_text("#!/bin/sh\n" + script)
+        launcher.chmod(0o755)
+        (stage / "release.json").write_text(json.dumps({"version": "1.0.1", "platform": LINUX}))
+        return stage
+
+    def restart(self, stage, data=None, *, preserve_data_override=False):
+        return updates.restart_with_update(stage, self.program, data or self.data, "1.0.0", LINUX,
+                                           self.root, preserve_data_override=preserve_data_override)
+
+    def check_profile(self, marker=True):
+        if marker:
+            self.assertEqual(self.marker.read_text(), "portable\n")
+        else:
+            self.assertFalse(self.marker.exists())
+        self.assertEqual(self.data.stat().st_ino, self.data_inode)
+        for name, payload in self.files.items():
+            self.assertEqual((self.data / name).read_bytes(), payload)
+        self.assertEqual(list(self.root.glob(".sotc-update-*")), [])
+
+    def test_portable_update_keeps_profile_and_cache_in_original_folder(self):
+        stage = self.stage(
+            'test -z "${SOTC_DATA_DIR+x}" || exit 20\n'
+            f'test -f "$(dirname "$0")/{PORTABLE_DATA_NAME}/player/memory-card" || exit 21\n'
+            'printf ready > "$SOTC_UPDATE_READY"\n')
+        original_popen = subprocess.Popen
+
+        def keep_process(*args, **kwargs):
+            process = original_popen(*args, **kwargs)
+            self.addCleanup(process.wait, timeout=2)
+            return process
+
+        with (patch("updates.subprocess.Popen", side_effect=keep_process),
+              patch.dict(os.environ, {"SOTC_DATA_DIR": "must-not-be-forwarded"})):
+            self.restart(stage)
+        self.check_profile()
+        backup, = self.root.glob(".installed.previous-*")
+        self.assertEqual((backup / self.launcher).read_bytes(), b"old launcher")
+        self.assertFalse((backup / PORTABLE_DATA_NAME).exists())
+        self.assertFalse((backup / PORTABLE_MARKER_NAME).exists())
+        self.assertNotEqual((self.program / self.launcher).read_bytes(), b"old launcher")
+
+    def test_rollback_preserves_portable_profile_even_if_the_marker_is_disabled(self):
+        self.marker.unlink()
+        stage = self.stage(f'printf recovery > "$(dirname "$0")/{PORTABLE_DATA_NAME}/startup-write"\nexit 20\n')
+        with self.assertRaisesRegex(RuntimeError, "exited during startup"):
+            self.restart(stage, data=self.root / "external")
+        self.check_profile(marker=False)
+        self.assertEqual((self.data / "startup-write").read_text(), "recovery")
+        self.assertEqual((self.program / self.launcher).read_bytes(), b"old launcher")
+        self.assertEqual(list(self.root.glob(".installed.previous-*")), [])
+
+    def test_rolls_back_when_second_portable_entry_fails_to_move(self):
+        stage = self.stage('printf ready > "$SOTC_UPDATE_READY"\n')
+        original_move = updates.move_without_replacing
+
+        def fail_marker(source, destination):
+            if destination == self.marker:
+                raise PermissionError("marker is open")
+            return original_move(source, destination)
+
+        with (patch("updates.move_without_replacing", side_effect=fail_marker),
+              self.assertRaisesRegex(PermissionError, "marker is open")):
+            self.restart(stage)
+        self.check_profile()
+        self.assertEqual((self.program / self.launcher).read_bytes(), b"old launcher")
+
+    def test_rejects_staged_portable_collision_before_exchange(self):
+        stage = self.stage('printf ready > "$SOTC_UPDATE_READY"\n')
+        (stage / PORTABLE_MARKER_NAME).symlink_to(self.root / "missing")
+        with self.assertRaisesRegex(ValueError, "reserved portable path"):
+            self.restart(stage)
+        self.check_profile()
+        self.assertEqual((self.program / self.launcher).read_bytes(), b"old launcher")
+
+    def test_rejects_unmanaged_data_inside_application(self):
+        with self.assertRaisesRegex(ValueError, "portable data directory"):
+            updates.installed_package(self.program, self.program / "custom", "1.0.0", LINUX)
+
+    def test_preserves_explicit_nested_profile_path_when_restarting(self):
+        profile = self.data / "selected"
+        stage = self.stage('printf "%s" "$SOTC_DATA_DIR" > "selected-profile"\nexit 20\n')
+        with self.assertRaisesRegex(RuntimeError, "exited during startup"):
+            self.restart(stage, profile, preserve_data_override=True)
+        self.assertEqual((self.root / "selected-profile").read_text(), str(profile))
+        self.check_profile()
 
 
 class PreferencesTests(unittest.TestCase):

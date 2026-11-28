@@ -83,6 +83,13 @@ Imagem original · sem shader	Original image · no shader	Imagen original · sin
 Ativo: {name}	Active: {name}	Activo: {name}	使用中: {name}
 Não foi possível desativar o shader	Could not disable the shader	No se pudo desactivar el shader	シェーダーを無効化できませんでした
 Configurações do launcher	Launcher settings	Ajustes del iniciador	ランチャー設定
+Modo portátil	Portable mode	Modo portátil	ポータブルモード
+Ativar	Enable	Activar	有効化
+Pasta de dados ativa	Active data folder	Carpeta de datos activa	使用中のデータフォルダー
+A pasta de dados desta sessão foi definida externamente.	This session's data folder was set externally.	La carpeta de datos de esta sesión se configuró externamente.	このセッションのデータフォルダーは外部から指定されています。
+Disco importado, saves, configurações e cache ficam em data, ao lado do launcher. Cada perfil mantém seus próprios dados.	Imported disc files, saves, settings and cache are stored in data next to the launcher. Each profile keeps its own data.	Los archivos del disco importado, las partidas, los ajustes y la caché se guardan en data junto al iniciador. Cada perfil conserva sus propios datos.	取り込んだディスクのファイル、セーブ、設定、キャッシュはランチャーと同じ場所にある data フォルダーに保存されます。データはプロファイルごとに管理されます。
+Não foi possível alterar o modo portátil	Could not change portable mode	No se pudo cambiar el modo portátil	ポータブルモードを変更できませんでした
+Caminho inválido para o modo portátil	Invalid path for portable mode	Ruta no válida para el modo portátil	ポータブルモードで使用できないパスです
 Idioma do launcher	Launcher language	Idioma del iniciador	ランチャーの言語
 Idioma do menu F1	F1 settings language	Idioma del menú F1	F1 設定の言語
 Automático	Automatic	Automático	自動

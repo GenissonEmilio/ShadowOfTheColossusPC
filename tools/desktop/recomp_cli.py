@@ -23,7 +23,11 @@ def run(arguments):
     if (args.prepare and args.rom is None) or (args.play and args.rom is not None):
         parser.error("--prepare requires --rom. --play uses the prepared copy.")
 
-    library = Library(args.data_dir)
+    try:
+        library = Library(args.data_dir)
+    except OSError as error:
+        print(error, file=sys.stderr, flush=True)
+        return 74
     activate(preferences(library.directory)["language"])
     graphics = Graphics(library)
     try:

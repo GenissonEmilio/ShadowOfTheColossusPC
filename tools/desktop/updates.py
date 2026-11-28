@@ -24,6 +24,7 @@ from urllib.request import Request, urlopen
 import zipfile
 
 from desktop_services import host_environment
+from model import PORTABLE_DATA_NAME, PORTABLE_MARKER_NAME
 
 NAME = "ShadowOfTheColossusPC"
 REPOSITORY = f"GenissonEmilio/{NAME}"
@@ -36,6 +37,7 @@ DOWNLOAD_BLOCK = 1024 * 1024
 MAX_EXPANDED = 8 * 1024**3
 MAX_METADATA = 2 * 1024**2
 STARTUP_MARKER = "launcher-ready"
+PORTABLE_ENTRIES = {PORTABLE_DATA_NAME: stat.S_IFDIR, PORTABLE_MARKER_NAME: stat.S_IFREG}
 LINUX_CA_BUNDLES = (
     Path("/etc/ssl/certs/ca-certificates.crt"),
     Path("/etc/pki/tls/certs/ca-bundle.crt"),
@@ -257,6 +259,10 @@ def package_path(name, system):
                        for part in parts)
     if invalid or parts[0] != NAME:
         raise ValueError(f"Invalid path in update archive: {name}")
+    if len(parts) > 1:
+        entry = parts[1].casefold() if system.startswith("windows") else parts[1]
+        if entry in PORTABLE_ENTRIES:
+            raise ValueError(f"The update archive contains a reserved portable path: {name}")
     return Path(*parts)
 
 
@@ -305,8 +311,8 @@ def launcher_filename(system):
 
 
 def installed_package(program, data, current, system):
-    if data.is_relative_to(program):
-        raise ValueError("Move your launcher data directory outside the application before updating")
+    if data.is_relative_to(program) and not data.is_relative_to(program / PORTABLE_DATA_NAME):
+        raise ValueError("Move your launcher data to the portable data directory or outside the application before updating")
     try:
         manifest = json.loads((program / "release.json").read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -317,8 +323,26 @@ def installed_package(program, data, current, system):
         raise ValueError("The installed launcher executable is missing")
 
 
+def portable_entries(directory, *, require_empty=False):
+    entries = []
+    for name, kind in PORTABLE_ENTRIES.items():
+        path = directory / name
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            continue
+        if require_empty:
+            raise ValueError(f"The staged update contains a reserved portable path: {path}")
+        if (stat.S_IFMT(metadata.st_mode) != kind
+                or getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+            raise ValueError(f"Invalid portable path in the installation: {path}")
+        entries.append(name)
+    return entries
+
+
 def stage_update(program, data, current, update, progress):
     installed_package(program, data, current, update.system)
+    portable_entries(program)
     work = Path(tempfile.mkdtemp(prefix=".sotc-update-", dir=program.parent))
     try:
         archive = work / update.name
@@ -333,32 +357,45 @@ def stage_update(program, data, current, update, progress):
         raise
 
 
-def exchange_directories(first, second):
-    # Keep the installation path valid throughout, even with symlinked shortcuts.
+def linux_rename(first, second, flags):
     libc = ctypes.CDLL(None, use_errno=True)
     rename = libc.renameat2
     rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
     rename.restype = ctypes.c_int
-    if rename(-100, os.fsencode(first), -100, os.fsencode(second), 2) != 0:
+    if rename(-100, os.fsencode(first), -100, os.fsencode(second), flags) != 0:
         error = ctypes.get_errno()
-        raise OSError(error, os.strerror(error))
+        raise OSError(error, os.strerror(error), first, None, second)
 
 
-def restart_with_update(stage, program, data, current, system, assets):
+def exchange_directories(first, second):
+    # Keep the installation path valid throughout, even with symlinked shortcuts.
+    linux_rename(first, second, 2)  # RENAME_EXCHANGE
+
+
+def move_without_replacing(first, second):
+    linux_rename(first, second, 1)  # RENAME_NOREPLACE
+
+
+def restart_with_update(stage, program, data, current, system, assets, *, preserve_data_override=True):
     backup = program.with_name(f".{program.name}.previous-{current}-{stage.parent.name.rsplit('-', 1)[-1]}")
     executable = program / launcher_filename(system)
     environment = host_environment()
-    environment["SOTC_DATA_DIR"] = str(data)
+    if preserve_data_override:
+        environment["SOTC_DATA_DIR"] = str(data)
+    else:
+        environment.pop("SOTC_DATA_DIR", None)
     environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
     ready = stage.parent / STARTUP_MARKER
     environment["SOTC_UPDATE_READY"] = str(ready)
     if system.startswith("windows"):
         script = stage.parent / "apply-update.ps1"
         try:
+            portable_entries(stage, require_empty=True)
             shutil.copyfile(assets / script.name, script)
             receipt = {"target": str(program), "staged": str(stage), "backup": str(backup),
                        "current": current, "lock": str(program.with_name(f".{program.name}.update.lock")),
                        "exe": str(executable), "data": str(data), "pid": os.getpid(),
+                       "portableData": PORTABLE_DATA_NAME, "portableMarker": PORTABLE_MARKER_NAME,
                        "shimPid": int(os.environ.get("SOTC_LAUNCHER_PID", "0"))}
             (stage.parent / "update.json").write_text(json.dumps(receipt), encoding="utf-8")
             powershell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
@@ -376,41 +413,55 @@ def restart_with_update(stage, program, data, current, system, assets):
         with lock_path.open("a+b") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             installed_package(program, data, current, system)
+            entries = portable_entries(program)
+            portable_entries(stage, require_empty=True)
             applying = True
-            apply_linux_update(stage, program, backup, executable, environment, ready)
+            apply_linux_update(stage, program, backup, executable, environment, ready, entries)
     except Exception:
         if not applying:
             shutil.rmtree(stage.parent, ignore_errors=True)
         raise
 
 
-def apply_linux_update(stage, program, backup, executable, environment, ready):
+def apply_linux_update(stage, program, backup, executable, environment, ready, entries):
     swapped = False
+    previous = stage
+    moved = []
+    child = None
     try:
         exchange_directories(program, stage)
         swapped = True
-        stage.rename(backup)
+        for name in entries:
+            move_without_replacing(stage / name, program / name)
+            moved.append(name)
+        move_without_replacing(stage, backup)
+        previous = backup
         child = subprocess.Popen([str(executable)], cwd=program.parent, env=environment, start_new_session=True)
         deadline = time.monotonic() + 30
         while not ready.is_file():
             if child.poll() is not None:
                 raise RuntimeError("The updated launcher exited during startup")
             if time.monotonic() >= deadline:
-                child.terminate()
-                try:
-                    child.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    child.kill()
-                    child.wait()
                 raise RuntimeError("The updated launcher did not finish starting")
             time.sleep(0.1)
     except Exception:
         if swapped:
+            if child is not None:
+                if child.poll() is None:
+                    child.terminate()
+                    try:
+                        child.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        child.wait()
+                # The replacement may have created a previously absent profile.
+                moved = portable_entries(program)
             # If rollback itself fails, preserve both directories for recovery.
-            previous = backup if backup.exists() else stage
+            for name in reversed(moved):
+                move_without_replacing(program / name, previous / name)
             exchange_directories(program, previous)
             if previous == backup:
-                backup.rename(stage)
+                move_without_replacing(backup, stage)
         shutil.rmtree(stage.parent, ignore_errors=True)
         raise
     shutil.rmtree(stage.parent, ignore_errors=True)

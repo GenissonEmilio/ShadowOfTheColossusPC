@@ -149,7 +149,7 @@ class Launcher:
         self.update = None
         self.checking = False
         self.updating = False
-        self.restart_language = False
+        self.restart_settings = False
         self.update_timer = None
         self.menu_open = False
         self.menu_restore_focus = None
@@ -1160,6 +1160,7 @@ class Launcher:
         apply.connect("clicked", self.apply_preferences)
         title.pack_end(apply, False, False, 0)
         page.pack_start(title, False, False, 0)
+        page.pack_start(self.portable_settings(), False, False, 0)
         preferences_panel = box(spacing=12, classes=("panel", "graphics-panel"))
         preferences_panel.pack_start(label(tr("Idioma do launcher"), "panel-title"), False, False, 0)
         self.language_choice = style(Gtk.ComboBoxText(), "graphics-select")
@@ -1204,6 +1205,36 @@ class Launcher:
         page.pack_start(preferences_panel, False, False, 0)
         return page
 
+    def portable_settings(self):
+        panel = box(spacing=8, classes=("panel", "graphics-panel"))
+        row = box(Gtk.Orientation.HORIZONTAL, spacing=12)
+        row.pack_start(label(tr("Modo portátil"), "panel-title"), True, True, 0)
+        if self.library.has_data_override:
+            detail = tr("A pasta de dados desta sessão foi definida externamente.")
+        else:
+            action = tr("Desativar") if self.library.portable else tr("Ativar")
+            button = style(FocusButton(label=action), "secondary")
+            button.connect("clicked", self.toggle_portable)
+            row.pack_end(button, False, False, 0)
+            detail = tr("Disco importado, saves, configurações e cache ficam em data, ao lado do launcher. Cada perfil mantém seus próprios dados.")
+        panel.pack_start(row, False, False, 0)
+        panel.pack_start(label(tr("Pasta de dados ativa") + ": " + str(self.library.directory),
+                               "muted", wrap=True), False, False, 0)
+        panel.pack_start(label(detail, "muted", wrap=True), False, False, 0)
+        return panel
+
+    def toggle_portable(self, *_):
+        if self.busy or self.process or self.controller_process:
+            self.error(tr("Feche o jogo"), tr("Feche o jogo ou termine a preparação antes de aplicar."))
+            return
+        try:
+            self.library.set_portable(not self.library.portable)
+        except OSError as exc:
+            self.error(tr("Não foi possível alterar o modo portátil"), str(exc))
+            return
+        self.restart_settings = True
+        Gtk.main_quit()
+
     def updates_panel(self):
         panel = box(spacing=3, classes=("update-panel",))
         row = box(Gtk.Orientation.HORIZONTAL, spacing=12)
@@ -1241,10 +1272,10 @@ class Launcher:
         except OSError as exc:
             self.error(tr("Não foi possível salvar as configurações"), str(exc))
             return
-        self.restart_language = values["language"] != self.preferences["language"]
+        self.restart_settings = values["language"] != self.preferences["language"]
         self.preferences = values
         self.feedback.set_enabled(values["ui_sounds"])
-        if self.restart_language:
+        if self.restart_settings:
             Gtk.main_quit()
         else:
             self.preferences_status.set_text(tr("Configurações salvas."))
@@ -1318,7 +1349,8 @@ class Launcher:
                 stage = stage_update(self.library.program, self.library.directory, VERSION, update,
                                      lambda fraction: GLib.idle_add(self.update_downloaded, fraction))
                 restart_with_update(stage, self.library.program, self.library.directory,
-                                    VERSION, update.system, assets_directory())
+                                    VERSION, update.system, assets_directory(),
+                                    preserve_data_override=self.library.has_data_override)
             except Exception as exc:
                 GLib.idle_add(self.update_finished, str(exc))
             else:
@@ -1812,7 +1844,7 @@ def main():
                 GLib.source_remove(launcher.update_timer)
             launcher.gamepad.suspend()
             launcher.window.destroy()
-        if not launcher.restart_language:
+        if not launcher.restart_settings:
             return int(launcher.failed)
         args.page = "settings"
 
