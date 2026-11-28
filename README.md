@@ -180,19 +180,20 @@ for new versions.
 
 ### Portable mode
 
-In the standalone Windows or Linux launcher, open **Settings → Portable mode**
-and select **Enable**. The folder containing the launcher must be writable.
-The launcher stores the imported disc, compiled game, saves, settings, and
-logs in `data/` beside the executable. To move the installation to another
-folder or drive on the same OS, close the launcher and game, then move the
-whole folder, including `portable.ini` and `data/`.
+The standalone Windows and Linux launcher uses portable mode by default. Extract
+it to a writable folder. The imported disc, compiled game, saves, settings, and
+logs are stored in `data/` beside the executable. To move the installation to
+another folder or drive on the same OS, close the launcher and game, then move
+the whole folder, including `data/` and `portable.ini` if present.
 
-The standard and portable profiles keep separate data. To bring an existing
-profile over, close the launcher and game, then copy the contents of the
-standard data directory into an empty `data/` beside the launcher. **Settings**
-shows the active path. For just the in-game saves, use **More Options → My
-saves** to export and import the memory card. RecompLauncher continues to
-manage its own profile and cloud saves.
+When the standalone launcher opens with no portable profile yet, it copies
+the existing standard profile's game data and compatible completed builds
+into `data/`. Allow enough space for the copy. The earlier profile stays
+available for rollback and for RecompLauncher. After updating from an older
+launcher, close it and open the new executable normally to start the transfer.
+**Settings → Portable mode** shows the active path and lets you switch profiles.
+For memory-card transfers, use **More Options → My saves**. RecompLauncher
+continues to manage its own profile and cloud saves.
 
 ## Save states
 
@@ -382,12 +383,10 @@ XFF modules, generated game code, and saves. The Linux workflow runs these tests
 and builds on every push and pull request. Gameplay is validated locally with a
 user-supplied disc. CI runs without game files.
 
-For a launcher-only release, dispatch **Linux native port** and **Windows native
-port** on the release commit using the prior published `compiler_version`,
-the platform archive's `compiler_sha256`, and the `compiler_build_id` in its
-`compiler/manifest.json`. The workflows verify the compiler inputs and retain
-the existing kit and build ID. Use their successful `main` run IDs when staging
-the release assets. Runtime or compilation-pipeline changes use the full builds.
+The desktop workflows compare the compiler inputs against the latest stable
+release by default. When compatible, they verify and reuse its platform kit
+and build ID. Runtime or compilation-pipeline changes use the full builds.
+Use the successful `main` run IDs when staging the release assets.
 
 Both desktop packagers include the authorized v1.0 Xdelta at
 `tools/desktop/assets/campaign/pt-BR.xdelta` as a launcher resource. The launcher

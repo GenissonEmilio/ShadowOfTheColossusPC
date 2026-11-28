@@ -24,11 +24,15 @@ def run(arguments):
         parser.error("--prepare requires --rom. --play uses the prepared copy.")
 
     try:
-        library = Library(args.data_dir)
+        library = Library.for_launch(args.data_dir)
     except OSError as error:
         print(error, file=sys.stderr, flush=True)
         return 74
     activate(preferences(library.directory)["language"])
+    if library.portable_error:
+        print(tr("Não foi possível abrir o perfil portátil") + "\n"
+              + tr("O launcher está usando o perfil anterior. Você pode tentar novamente em Configurações.")
+              + "\n" + str(library.portable_error), file=sys.stderr, flush=True)
     graphics = Graphics(library)
     try:
         if args.prepare:

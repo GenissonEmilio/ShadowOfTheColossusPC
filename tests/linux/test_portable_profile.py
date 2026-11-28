@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT / "tools/desktop"))
 from graphics import Graphics
 from import_disc import identify_disc
 from language import PREFERENCES, preferences
-from model import Library, PORTABLE_DATA_NAME, PORTABLE_MARKER_NAME, atomic_json
+from model import Library, PORTABLE_DATA_NAME, PORTABLE_DISABLED, PORTABLE_MARKER_NAME, atomic_json, publish_profile
 from pipeline import BOOT, Pipeline, executable_name
 from recomp_cli import run
 
@@ -29,6 +29,102 @@ class PortableProfileTests(unittest.TestCase):
         standard_profile.start()
         self.addCleanup(standard_profile.stop)
 
+    def make_package(self):
+        atomic_json(self.program / "release.json", {"version": "1.2.14", "platform": "linux-x86_64"})
+
+    def write_legacy(self, name, value):
+        destination = self.standard / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(value)
+        return destination
+
+    def test_standard_installation_migrates_on_launch_only_once(self):
+        self.make_package()
+        boot = self.write_legacy(f"discs/fixture/{BOOT}", b"disc")
+        atomic_json(self.standard / "launcher.json", {"disc": str(boot)})
+        atomic_json(self.standard / PREFERENCES, {"language": "es"})
+        migrated_paths = (
+            "controllers/keyboard-mouse.cfg", "player/celosia_settings.cfg",
+            "player/memcards/Mcd001.ps2", "player/memcards/backups/backup.ps2",
+            "player/savestates/save", "player/mc0/slot", "shaders/fixture.frag",
+            "textures/exported/fixture.png", "campaign-languages/fixture/pt-BR/NICO.DAT",
+        )
+        for entry in migrated_paths:
+            self.write_legacy(entry, entry.encode())
+        excluded_paths = ("last-game.log", "game-test/frame_0.png", "android/key.jks",
+                          "builds/obsolete/gamecore/game", "builds/current/boot/object.o", "player/logs/log")
+        for entry in excluded_paths:
+            self.write_legacy(entry, b"excluded")
+        atomic_json(self.program / "compiler/manifest.json", {"build_id": "current"})
+        filename = executable_name("game")
+        game = self.write_legacy(f"builds/current/gamecore/{filename}", b"verified game")
+        stamp_path = Path("builds/current/complete.json")
+        stamp = {"sha256": hashlib.sha256(game.read_bytes()).hexdigest()}
+        atomic_json(self.standard / stamp_path, stamp)
+        self.write_legacy(f"builds/current/gcc/gamecore/{filename}", b"modified game")
+        atomic_json(self.standard / "builds/current/gcc/complete.json", {**stamp, "compiler": "gcc"})
+
+        selected = Library(program=self.program)
+        self.assertTrue(selected.portable)
+        self.assertFalse(selected.directory.exists())
+        migrated = Library.for_launch(program=self.program)
+        self.assertTrue(migrated.portable)
+        self.assertIsNone(migrated.portable_error)
+        self.assertEqual(migrated.state["disc"], f"discs/fixture/{BOOT}")
+        self.assertEqual(migrated.disc.read_bytes(), b"disc")
+        self.assertEqual(preferences(migrated.directory)["language"], "es")
+        for entry in migrated_paths:
+            self.assertEqual((migrated.directory / entry).read_bytes(), entry.encode())
+        for entry in (*excluded_paths, f"builds/current/gcc/gamecore/{filename}"):
+            self.assertFalse((migrated.directory / entry).exists())
+            self.assertTrue((self.standard / entry).exists())
+        self.assertEqual((migrated.directory / game.relative_to(self.standard)).read_bytes(), b"verified game")
+        self.assertTrue((migrated.directory / stamp_path).is_file())
+        self.assertEqual(Library(self.standard, self.program).disc, boot)
+        atomic_json(self.standard / PREFERENCES, {"language": "ja"})
+        self.assertEqual(preferences(Library.for_launch(program=self.program).directory)["language"], "es")
+
+    def test_explicit_standard_override_and_update_acknowledgment_skip_migration(self):
+        self.make_package()
+        atomic_json(self.standard / PREFERENCES, {"language": "es"})
+        with patch.dict(os.environ, {"SOTC_UPDATE_READY": "ready"}):
+            self.assertEqual(Library.for_launch(self.standard, self.program).directory, self.standard)
+            self.assertEqual(Library.for_launch(program=self.program).directory, self.standard)
+        self.assertFalse((self.program / PORTABLE_DATA_NAME).exists())
+        self.assertTrue(Library.for_launch(program=self.program).portable)
+
+    def test_failed_copy_leaves_old_profile_active_and_can_retry(self):
+        self.make_package()
+        saved = self.write_legacy("player/memcards/Mcd001.ps2", b"save")
+        with patch("model.shutil.copy2", side_effect=OSError("no space")):
+            fallback = Library.for_launch(program=self.program)
+        self.assertEqual(fallback.directory, self.standard)
+        self.assertFalse(fallback.portable)
+        self.assertFalse(fallback.has_data_override)
+        self.assertIn("no space", str(fallback.portable_error))
+        self.assertFalse(fallback.portable_directory.exists())
+        self.assertEqual(list(self.program.glob(".sotc-profile-*")), [])
+        self.assertEqual(saved.read_bytes(), b"save")
+        fallback.set_portable(True)
+        portable = Library.for_launch(program=self.program)
+        self.assertTrue(portable.portable)
+        self.assertEqual((portable.player_directory / "memcards/Mcd001.ps2").read_bytes(), b"save")
+
+    def test_concurrent_existing_portable_directory_wins(self):
+        self.make_package()
+        atomic_json(self.standard / PREFERENCES, {"language": "es"})
+
+        def publish_with_race(source, target):
+            target.mkdir()
+            publish_profile(source, target)
+
+        with patch("model.publish_profile", side_effect=publish_with_race):
+            portable = Library.for_launch(program=self.program)
+        self.assertTrue(portable.portable)
+        self.assertIsNone(portable.portable_error)
+        self.assertFalse((portable.directory / PREFERENCES).exists())
+        self.assertEqual(preferences(self.standard)["language"], "es")
+
     def test_activation_and_deactivation_keep_both_profiles(self):
         standard = Library(program=self.program)
         self.assertEqual(standard.directory, self.standard)
@@ -42,7 +138,7 @@ class PortableProfileTests(unittest.TestCase):
         portable.set_portable(False)
         self.assertEqual(preferences(Library(program=self.program).directory)["language"], "es")
         self.assertEqual(preferences(portable.directory)["language"], "ja")
-        self.assertFalse(portable.portable_marker.exists())
+        self.assertEqual(portable.portable_marker.read_text().strip(), PORTABLE_DISABLED)
         standard.set_portable(True)
         self.assertEqual(preferences(Library(program=self.program).directory)["language"], "ja")
 

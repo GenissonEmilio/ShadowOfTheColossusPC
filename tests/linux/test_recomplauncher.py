@@ -63,7 +63,7 @@ class RecompLauncherTests(unittest.TestCase):
             graphics.config.write_text("render_scale=2.500\nfullscreen = 0\nscreen = 3\nvsync = 0\nvolume = 7\nlanguage = 2\n")
             output = io.StringIO()
             with (patch.dict("os.environ", {"SOTC_BUILD_CLANG": "1"}),
-                  patch("recomp_cli.Library", return_value=library),
+                  patch("recomp_cli.Library.for_launch", return_value=library),
                   patch.object(library, "validated_disc", return_value=identify_disc(boot.parent)),
                   patch.object(Pipeline, "helper", side_effect=AssertionError("cached game must not compile")),
                   patch("model.import_disc", side_effect=AssertionError("existing disc must not import twice")),

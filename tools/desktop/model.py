@@ -1,5 +1,6 @@
 """SotC launcher state/process boundary, adapted from ForbiddenMemoriesPC (MIT)."""
 from __future__ import annotations
+import ctypes
 import hashlib
 import json
 import os
@@ -10,14 +11,15 @@ import subprocess
 import sys
 import tempfile
 from import_disc import PROFILES, import_disc, validate_disc
-from language import preferences, translate as tr
-from pipeline import CompilationError, PAL_BOOT, Pipeline, PROCESS_FLAGS, WINDOWS, compiler_tool
+from language import PREFERENCES, preferences, translate as tr
+from pipeline import CompilationError, PAL_BOOT, Pipeline, PROCESS_FLAGS, WINDOWS, compiler_tool, executable_name
 
-VERSION = "1.2.13"
+VERSION = "1.2.14"
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 APPLICATION_ID = "io.github.GenissonEmilio.ShadowOfTheColossusPC"
 PORTABLE_MARKER_NAME = "portable.ini"
 PORTABLE_DATA_NAME = "data"
+PORTABLE_DISABLED = "disabled"
 SAVE_STATES_AVAILABLE = WINDOWS or sys.platform.startswith("linux")
 SERIAL_BY_BOOT = {profile.boot: profile.serial for profile in PROFILES.values()}
 PAL_CAMPAIGN_LANGUAGES = {"en": "English", "fr": "Français", "de": "Deutsch",
@@ -56,16 +58,94 @@ def check_portable_path(path, kind):
 
 
 def atomic_json(path, value):
+    atomic_text(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+
+
+def atomic_text(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=".launcher-", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump(value, stream, ensure_ascii=False, indent=2)
-            stream.write("\n")
+            stream.write(text)
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def publish_profile(source, target):
+    if WINDOWS:
+        source.rename(target)  # Windows fails if the target already exists.
+        return
+    # Unlike os.rename on POSIX, RENAME_NOREPLACE also preserves an empty
+    # profile that appeared while another launcher was copying the old one.
+    rename = ctypes.CDLL(None, use_errno=True).renameat2
+    rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+    rename.restype = ctypes.c_int
+    if rename(-100, os.fsencode(source), -100, os.fsencode(target), 1):
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), str(target))
+
+
+def copy_profile_entry(source, target):
+    try:
+        info = source.lstat()
+    except FileNotFoundError:
+        return
+    kind = stat.S_IFMT(info.st_mode)
+    if kind not in (stat.S_IFREG, stat.S_IFDIR) or getattr(
+            info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        raise OSError(tr("Caminho inválido para o modo portátil") + f": {source}")
+    if kind == stat.S_IFDIR:
+        target.mkdir(parents=True, exist_ok=True)
+        for child in source.iterdir():
+            copy_profile_entry(child, target / child.name)
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        after = source.stat()
+        if (info.st_size, info.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            raise OSError(tr("O perfil anterior mudou durante a cópia") + f": {source}")
+
+
+def copy_completed_builds(program, source, target):
+    manifest_path = program / "compiler/manifest.json"
+    try:
+        build_id = json.loads(manifest_path.read_text(encoding="utf-8"))["build_id"]
+    except (FileNotFoundError, KeyError, TypeError, ValueError):
+        return
+    if not isinstance(build_id, str) or not build_id or PureWindowsPath(build_id).name != build_id or build_id == "..":
+        return
+    for edition in (Path(), Path(SERIAL_BY_BOOT[PAL_BOOT])):
+        for compiler, folder in (("clang", edition), ("gcc", edition / "gcc")):
+            relative = Path("builds", build_id, folder)
+            work = source / relative
+            if not all(check_portable_path(source / parent, stat.S_IFDIR)
+                       for parent in (*reversed(relative.parents), relative) if parent != Path()):
+                continue
+            stamp = work / "complete.json"
+            binary = work / "gamecore" / executable_name("game")
+            if not (check_portable_path(stamp, stat.S_IFREG)
+                    and check_portable_path(binary.parent, stat.S_IFDIR)
+                    and check_portable_path(binary, stat.S_IFREG)):
+                continue
+            try:
+                manifest = json.loads(stamp.read_text(encoding="utf-8"))
+            except (FileNotFoundError, ValueError):
+                continue
+            if (not isinstance(manifest, dict) or manifest.get("build_id", build_id) != build_id
+                    or manifest.get("compiler", "clang") != compiler):
+                continue
+            copied = target / relative / "gamecore" / binary.name
+            copy_profile_entry(binary, copied)
+            digest = hashlib.sha256()
+            with copied.open("rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(block)
+            if digest.hexdigest() == manifest.get("sha256"):
+                atomic_json(target / relative / stamp.name, manifest)
+            else:
+                copied.unlink()
 
 
 class Library:
@@ -74,11 +154,38 @@ class Library:
         self.portable_marker = self.program / PORTABLE_MARKER_NAME
         self.portable_directory = self.program / PORTABLE_DATA_NAME
         self.has_data_override = directory is not None
-        self.portable = not self.has_data_override and check_portable_path(self.portable_marker, stat.S_IFREG)
+        self.packaged = (self.program / "release.json").is_file()
+        self.portable_error = None
+        self.portable = not self.has_data_override and self.portable_enabled()
         if self.portable:
             check_portable_path(self.portable_directory, stat.S_IFDIR)
         if directory is None:
             directory = self.portable_directory if self.portable else data_directory()
+        self.load_profile(directory)
+
+    @classmethod
+    def for_launch(cls, directory=None, program=None):
+        try:
+            library = cls(directory, program)
+            if library.portable:
+                if (os.environ.get("SOTC_UPDATE_READY") and not library.directory.exists()
+                        and data_directory().is_dir()):
+                    # The updater waits for GTK to acknowledge startup. Leave
+                    # the old profile available until the next ordinary launch.
+                    library.portable = False
+                    library.load_profile(data_directory())
+                else:
+                    library.initialize_portable()
+            return library
+        except OSError as error:
+            if directory is not None:
+                raise
+            library = cls(data_directory(), program)
+            library.has_data_override = False
+            library.portable_error = error
+            return library
+
+    def load_profile(self, directory):
         self.directory = Path(directory).resolve()
         self.config = self.directory / "launcher.json"
         self.state = {}
@@ -89,21 +196,53 @@ class Library:
         except (OSError, ValueError):
             pass
 
+    def portable_enabled(self):
+        if check_portable_path(self.portable_marker, stat.S_IFREG):
+            value = self.portable_marker.read_text(encoding="utf-8-sig", errors="replace")
+            return value.strip().lower() != PORTABLE_DISABLED
+        return self.packaged
+
+    def initialize_portable(self):
+        if not check_portable_path(self.portable_directory, stat.S_IFDIR):
+            legacy = data_directory().resolve()
+            with tempfile.TemporaryDirectory(prefix=".sotc-profile-", dir=self.program) as temporary:
+                staged = Path(temporary) / PORTABLE_DATA_NAME
+                staged.mkdir()
+                if self.packaged and legacy.is_dir():
+                    check_portable_path(legacy / "player", stat.S_IFDIR)
+                    for entry in (
+                        "launcher.json", PREFERENCES, "controllers", "shader.json", "shaders",
+                        "texture-mods.json", "textures", "discs", "campaign-languages",
+                        "player/celosia_settings.cfg", "player/memcards", "player/savestates",
+                        "player/mc0", "player/mc1",
+                    ):
+                        copy_profile_entry(legacy / entry, staged / entry)
+                    copy_completed_builds(self.program, legacy, staged)
+                    previous = Library(legacy, self.program)
+                    migrated = Library(staged, self.program)
+                    migrated.portable = True
+                    boot = migrated.disc
+                    if previous.disc and not boot:
+                        raise OSError(tr("Não foi possível copiar o disco do perfil anterior"))
+                    if boot:
+                        migrated.state["disc"] = boot.relative_to(staged).as_posix()
+                        atomic_json(migrated.config, migrated.state)
+                try:
+                    publish_profile(staged, self.portable_directory)
+                except FileExistsError:
+                    check_portable_path(self.portable_directory, stat.S_IFDIR)
+        with tempfile.TemporaryFile(dir=self.portable_directory):
+            pass
+        if self.portable:
+            self.load_profile(self.portable_directory)
+
     def set_portable(self, enabled):
         if self.has_data_override:
             raise ValueError("The current profile was selected externally")
-        if not enabled:
-            self.portable_marker.unlink(missing_ok=True)
-            return
-        marked = check_portable_path(self.portable_marker, stat.S_IFREG)
-        check_portable_path(self.portable_directory, stat.S_IFDIR)
-        self.portable_directory.mkdir(exist_ok=True)
-        # Verify the data folder is writable before changing the next session.
-        with tempfile.TemporaryFile(dir=self.portable_directory):
-            pass
-        if not marked:
-            with self.portable_marker.open("x", encoding="ascii"):
-                pass
+        check_portable_path(self.portable_marker, stat.S_IFREG)
+        if enabled:
+            self.initialize_portable()
+        atomic_text(self.portable_marker, "" if enabled else PORTABLE_DISABLED + "\n")
 
     @property
     def disc(self):

@@ -6,6 +6,10 @@ on:
     paths-ignore: ['docs/**', 'README.md', '.recomp.json']
   workflow_dispatch:
     inputs:
+      force_compiler_build:
+        description: 'Build a new compiler kit even when the stable kit is compatible'
+        type: boolean
+        default: false
       compiler_version:
         description: 'Prior published version (e.g. v1.2.12) for a launcher-only package'
         type: string
@@ -24,10 +28,6 @@ jobs:
   linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    env:
-      COMPILER_VERSION: ${{ inputs.compiler_version }}
-      COMPILER_SHA256: ${{ inputs.compiler_sha256 }}
-      COMPILER_BUILD_ID: ${{ inputs.compiler_build_id }}
     steps:
       - uses: actions/checkout@v4
       - name: Import, cache and desktop shortcut checks (synthetic data only)
@@ -36,23 +36,25 @@ jobs:
           python3 -m unittest discover -s tests/linux -v
           python3 tools/linux/test_launcher_gamepad.py
           python3 -m compileall -q tools/desktop tools/linux
+      - name: Select the previous stable compiler kit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPILER_VERSION: ${{ inputs.compiler_version }}
+          COMPILER_SHA256: ${{ inputs.compiler_sha256 }}
+          COMPILER_BUILD_ID: ${{ inputs.compiler_build_id }}
+          FORCE_COMPILER_BUILD: ${{ inputs.force_compiler_build }}
+        run: |
+          options=()
+          [[ "$FORCE_COMPILER_BUILD" != true ]] || options+=(--force-build)
+          python3 tools/desktop/release/select_compiler.py linux-x86_64 \
+            "$RUNNER_TEMP/sotc-previous-linux.tar.gz" "${options[@]}"
       - name: Build ROM-free compiler and desktop package
-        if: ${{ env.COMPILER_VERSION == '' && env.COMPILER_SHA256 == '' && env.COMPILER_BUILD_ID == '' }}
+        if: ${{ env.COMPILER_VERSION == '' }}
         run: tools/linux/build.sh
       - name: Package a launcher update with the prior compiler kit
-        if: ${{ env.COMPILER_VERSION != '' || env.COMPILER_SHA256 != '' || env.COMPILER_BUILD_ID != '' }}
+        if: ${{ env.COMPILER_VERSION != '' }}
         run: |
-          [[ "$COMPILER_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          [[ "$COMPILER_SHA256" =~ ^[0-9a-f]{64}$ && "$COMPILER_BUILD_ID" =~ ^[0-9a-f]{24}$ ]]
-          git fetch --no-tags --depth=1 origin "refs/tags/$COMPILER_VERSION"
-          git diff --exit-code FETCH_HEAD HEAD -- PS2Recomp game celosia \
-            tools/build_elf.py tools/elfmini.py tools/funcmap_elf.py tools/gen_config.py tools/xff.py tools/modimage.py \
-            tools/desktop/pipeline.py tools/linux/build.sh tools/linux/Dockerfile tools/linux/prepare_compiler.py \
-            tools/linux/compiler_key.py tools/linux/stage_source.py tools/linux/input_tool.cpp tools/linux/video_tool.cpp
-          archive="ShadowOfTheColossusPC-${COMPILER_VERSION#v}-linux-x86_64.tar.gz"
-          curl --fail --location --retry 3 --output "$RUNNER_TEMP/$archive" \
-            "https://github.com/$GITHUB_REPOSITORY/releases/download/$COMPILER_VERSION/$archive"
-          python3 tools/linux/reuse_compiler.py "$RUNNER_TEMP/$archive" "$COMPILER_VERSION" \
+          python3 tools/linux/reuse_compiler.py "$RUNNER_TEMP/sotc-previous-linux.tar.gz" "$COMPILER_VERSION" \
             "$COMPILER_SHA256" "$COMPILER_BUILD_ID" artifacts
           docker build -t sotc-linux-builder -f tools/linux/Dockerfile .
           docker build -t sotc-desktop-builder -f tools/desktop/release/Dockerfile .

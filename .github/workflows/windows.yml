@@ -6,6 +6,10 @@ on:
     paths-ignore: ['docs/**', 'README.md', '.recomp.json']
   workflow_dispatch:
     inputs:
+      force_compiler_build:
+        description: 'Build a new compiler kit even when the stable kit is compatible'
+        type: boolean
+        default: false
       compiler_version:
         description: 'Prior published version (e.g. v1.2.0) for a launcher-only package'
         type: string
@@ -24,10 +28,6 @@ jobs:
   windows:
     runs-on: windows-2022
     timeout-minutes: 75
-    env:
-      COMPILER_VERSION: ${{ inputs.compiler_version }}
-      COMPILER_SHA256: ${{ inputs.compiler_sha256 }}
-      COMPILER_BUILD_ID: ${{ inputs.compiler_build_id }}
     defaults:
       run:
         shell: msys2 {0}
@@ -41,28 +41,20 @@ jobs:
           pacboy: >-
             gcc:p clang:p cmake:p ninja:p pkgconf:p ffmpeg:p zlib:p
             python:p python-gobject:p python-cairo:p gtk3:p SDL2:p libarchive:p
-      - name: Download the prior published Windows compiler kit
-        if: ${{ env.COMPILER_VERSION != '' || env.COMPILER_SHA256 != '' || env.COMPILER_BUILD_ID != '' }}
+      - name: Select the previous stable compiler kit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPILER_VERSION: ${{ inputs.compiler_version }}
+          COMPILER_SHA256: ${{ inputs.compiler_sha256 }}
+          COMPILER_BUILD_ID: ${{ inputs.compiler_build_id }}
+          FORCE_COMPILER_BUILD: ${{ inputs.force_compiler_build }}
         shell: pwsh
         run: |
-          if ($env:COMPILER_VERSION -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$' -or
-              $env:COMPILER_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
-              $env:COMPILER_BUILD_ID -cnotmatch '^[0-9a-f]{24}$') {
-            throw 'Provide the prior version, lowercase ZIP SHA-256 and compiler build_id together'
-          }
-          $version = $env:COMPILER_VERSION.TrimStart('v')
-          $zip = "ShadowOfTheColossusPC-$version-windows-x86_64.zip"
-          $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:COMPILER_VERSION/$zip"
-          Invoke-WebRequest -Uri $url -OutFile (Join-Path $env:RUNNER_TEMP 'sotc-previous-windows.zip')
-      - name: Check that the prior compiler inputs are unchanged
-        if: ${{ env.COMPILER_VERSION != '' }}
-        run: |
-          git fetch --no-tags --depth=1 origin "refs/tags/$COMPILER_VERSION"
-          git diff --exit-code FETCH_HEAD HEAD -- PS2Recomp game celosia \
-            tools/build_elf.py tools/elfmini.py tools/funcmap_elf.py tools/gen_config.py tools/xff.py tools/modimage.py \
-            tools/desktop/pipeline.py tools/linux/stage_source.py tools/linux/input_tool.cpp tools/linux/video_tool.cpp \
-            tools/windows/CMakeLists.txt tools/windows/utf8.rc tools/windows/utf8.manifest \
-            tools/windows/package.py tools/windows/compiler_manifest.py
+          $options = @()
+          if ($env:FORCE_COMPILER_BUILD -eq 'true') { $options += '--force-build' }
+          python tools/desktop/release/select_compiler.py windows-x86_64 `
+            (Join-Path $env:RUNNER_TEMP 'sotc-previous-windows.zip') @options
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Configure the native Windows build
         run: |
           cmake -S PS2Recomp -B build/windows -G Ninja \

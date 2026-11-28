@@ -11,14 +11,15 @@ import traceback
 from model import Library
 
 main_script = Path(__file__).with_name("main.py")
-if sys.argv[1:2] in (["--prepare"], ["--play"]):
+if sys.argv[1:2] in (["--prepare"], ["--play"]) or "--install-shortcut" in sys.argv:
     runpy.run_path(str(main_script), run_name="__main__")
 
 parser = argparse.ArgumentParser(add_help=False)
 parser.add_argument("--data-dir", type=Path, default=os.environ.get("SOTC_DATA_DIR"))
 args, _ = parser.parse_known_args()
 try:
-    log_directory = Library(args.data_dir).directory
+    library = Library.for_launch(args.data_dir)
+    log_directory = library.directory
     log_path = log_directory / "last-launcher.log"
     log_directory.mkdir(parents=True, exist_ok=True)
     log = log_path.open("w", encoding="utf-8")
@@ -29,7 +30,7 @@ except OSError as error:
     raise SystemExit(1)
 with log, contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
     try:
-        runpy.run_path(str(main_script), run_name="__main__")
+        runpy.run_path(str(main_script), init_globals={"BOOTSTRAP_LIBRARY": library}, run_name="__main__")
     except Exception:
         traceback.print_exc()
         log.flush()

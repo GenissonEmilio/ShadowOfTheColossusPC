@@ -131,9 +131,9 @@ class Artwork(Gtk.DrawingArea):
 
 
 class Launcher:
-    def __init__(self, args):
+    def __init__(self, args, library=None):
         self.args = args
-        self.library = Library(args.data_dir)
+        self.library = library if library is not None else Library.for_launch(args.data_dir)
         self.preferences = preferences(self.library.directory)
         self.last_input_style = "keyboard"
         activate(self.preferences["language"])
@@ -259,6 +259,10 @@ class Launcher:
             detail = error_file.read_text(encoding="utf-8-sig", errors="replace")
             error_file.unlink()
             GLib.idle_add(self.error, tr("A atualização falhou"), detail)
+        if self.library.portable_error:
+            GLib.idle_add(self.error, tr("Não foi possível abrir o perfil portátil"),
+                          tr("O launcher está usando o perfil anterior. Você pode tentar novamente em Configurações.")
+                          + "\n\n" + str(self.library.portable_error))
 
     def connect_feedback(self, widget):
         if isinstance(widget, Gtk.Button):
@@ -1212,11 +1216,16 @@ class Launcher:
         if self.library.has_data_override:
             detail = tr("A pasta de dados desta sessão foi definida externamente.")
         else:
-            action = tr("Desativar") if self.library.portable else tr("Ativar")
+            if self.library.portable_error:
+                action = tr("Tentar novamente")
+            else:
+                action = tr("Desativar") if self.library.portable else tr("Ativar")
             button = style(FocusButton(label=action), "secondary")
             button.connect("clicked", self.toggle_portable)
             row.pack_end(button, False, False, 0)
             detail = tr("Disco importado, saves, configurações e cache ficam em data, ao lado do launcher. Cada perfil mantém seus próprios dados.")
+            if self.library.portable_error:
+                detail = tr("O launcher está usando o perfil anterior. Você pode tentar novamente em Configurações.")
         panel.pack_start(row, False, False, 0)
         panel.pack_start(label(tr("Pasta de dados ativa") + ": " + str(self.library.directory),
                                "muted", wrap=True), False, False, 0)
@@ -1830,10 +1839,13 @@ def main():
     args=parser.parse_args()
     if args.install_shortcut:
         print(Library(args.data_dir).install_desktop_entry()); return 0
-    if args.test_game and not args.rom and not Library(args.data_dir).disc:
-        parser.error("--test-game requires an imported disc or --rom")
+    library = globals().pop("BOOTSTRAP_LIBRARY", None)
     while True:
-        launcher=Launcher(args)
+        if library is None:
+            library = Library.for_launch(args.data_dir)
+        if args.test_game and not args.rom and not library.disc:
+            parser.error("--test-game requires an imported disc or --rom")
+        launcher=Launcher(args, library)
         confirm_startup(launcher.library.program)
         try:
             Gtk.main()
@@ -1846,6 +1858,7 @@ def main():
             launcher.window.destroy()
         if not launcher.restart_settings:
             return int(launcher.failed)
+        library = None
         args.page = "settings"
 
 
