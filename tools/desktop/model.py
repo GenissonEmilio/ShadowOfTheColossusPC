@@ -14,7 +14,7 @@ from import_disc import PROFILES, import_disc, validate_disc
 from language import PREFERENCES, preferences, translate as tr
 from pipeline import CompilationError, PAL_BOOT, Pipeline, PROCESS_FLAGS, WINDOWS, compiler_tool, executable_name
 
-VERSION = "1.2.14"
+VERSION = "1.2.15"
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 APPLICATION_ID = "io.github.GenissonEmilio.ShadowOfTheColossusPC"
 PORTABLE_MARKER_NAME = "portable.ini"
@@ -344,6 +344,9 @@ class Library:
         if pal:
             environment["PS2X_NATIVE_IOP_BOOT"] = "0"
             environment.setdefault("PS2X_GS_HW", "1")
+        elif boot is not None:
+            # Native SG2 streams follow the scene when a slow frame stalls EE progress.
+            environment.setdefault("PS2X_AUDIO_STREAM_GUEST_CLOCK", "1")
         selected_preferences = preferences(self.directory)
         environment["SOTC_BUTTON_PROMPTS"] = selected_preferences["button_prompts"]
         environment["SOTC_INFINITE_HEALTH"] = "1" if selected_preferences["infinite_health"] else "0"

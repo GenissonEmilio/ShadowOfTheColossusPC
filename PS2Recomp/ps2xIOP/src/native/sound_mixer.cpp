@@ -2,6 +2,7 @@
 #include "ps2x/iop/save_state_archive.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -16,6 +17,24 @@ namespace ps2x::iop::detail
         inline int16_t clamp16(int32_t value)
         {
             return static_cast<int16_t>(std::clamp<int32_t>(value, -32768, 32767));
+        }
+
+        bool guestStreamClock()
+        {
+            static const bool enabled = [] {
+                const char *value = std::getenv("PS2X_AUDIO_STREAM_GUEST_CLOCK");
+                return value && std::atoi(value) != 0;
+            }();
+            return enabled;
+        }
+
+        bool streamStats()
+        {
+            static const bool enabled = [] {
+                const char *value = std::getenv("PS2X_AUDIO_STREAM_STATS");
+                return value && std::atoi(value) != 0;
+            }();
+            return enabled;
         }
     }
 
@@ -44,12 +63,75 @@ namespace ps2x::iop::detail
 
     void SoundMixer::reset()
     {
+        auto lock = hold();
         std::fill(m_ram.begin(), m_ram.end(), uint16_t{0});
         m_voices.fill({});
         for (Core &core : m_cores)
             core = Core{};
         m_inputRefill = nullptr;
         m_cycleValid = false;
+        m_streamVoices.fill(0u);
+        resetStreamClock();
+    }
+
+    void SoundMixer::resetStreamClock()
+    {
+        m_streamIopCycle.store(kNoStreamTime, std::memory_order_relaxed);
+        m_streamLastCycle = kNoStreamTime;
+        m_streamSample = 0u;
+        m_streamFramesMixed = m_streamFramesHeld = 0u;
+        m_streamStatsTime = {};
+    }
+
+    void SoundMixer::setStreamVoices(int core, uint32_t mask, bool enabled)
+    {
+        const bool wasActive = (m_streamVoices[0] | m_streamVoices[1]) != 0u;
+        if (enabled)
+            m_streamVoices[core] |= mask;
+        else
+            m_streamVoices[core] &= ~mask;
+        if (!wasActive && enabled)
+        {
+            m_streamLastCycle = m_streamIopCycle.load(std::memory_order_relaxed);
+            if (m_streamLastCycle != kNoStreamTime)
+                m_streamSample = m_streamLastCycle / CyclesPerSample;
+        }
+    }
+
+    uint32_t SoundMixer::streamBudget(uint32_t frames)
+    {
+        const uint64_t cycle = m_streamIopCycle.load(std::memory_order_relaxed);
+        if (cycle == kNoStreamTime)
+            return 0;
+        const uint64_t guestSample = cycle / CyclesPerSample;
+        if (m_streamLastCycle == kNoStreamTime || cycle < m_streamLastCycle)
+            m_streamSample = guestSample;
+        m_streamLastCycle = cycle;
+        // Absorb callback bursts without letting stream completion run far
+        // ahead of the EE. Stale credit after a host audio pause is discarded.
+        m_streamSample = std::max(m_streamSample, guestSample > kStreamLeadFrames
+                                                  ? guestSample - kStreamLeadFrames : 0u);
+        const uint64_t limit = guestSample + kStreamLeadFrames;
+        const uint32_t available = static_cast<uint32_t>(std::min<uint64_t>(frames, limit - m_streamSample));
+        m_streamSample += available;
+        return available;
+    }
+
+    void SoundMixer::reportStreamStats()
+    {
+        if (!m_streamFramesMixed && !m_streamFramesHeld)
+            return;
+        const auto now = std::chrono::steady_clock::now();
+        if (m_streamStatsTime == std::chrono::steady_clock::time_point{})
+            m_streamStatsTime = now;
+        if (now - m_streamStatsTime < std::chrono::seconds(1))
+            return;
+        const int count = std::popcount(m_streamVoices[0]) + std::popcount(m_streamVoices[1]);
+        std::fprintf(stderr, "[audio-stream] mode=%s voices=%d mixedFrames=%llu heldFrames=%llu\n",
+                     guestStreamClock() ? "guest" : "pull", count,
+                     static_cast<unsigned long long>(m_streamFramesMixed), static_cast<unsigned long long>(m_streamFramesHeld));
+        m_streamFramesMixed = m_streamFramesHeld = 0u;
+        m_streamStatsTime = now;
     }
 
     int32_t SoundMixer::sweepVolume(uint16_t value)
@@ -438,7 +520,7 @@ namespace ps2x::iop::detail
     // Mixes frames in blocks: every playing voice over the block first
     // (into its core's dry / reverb sums), then the two cores sample by
     // sample (input, reverb, core 0 into core 1, master volume).
-    void SoundMixer::render(int16_t *destination, uint32_t frames)
+    void SoundMixer::render(int16_t *destination, uint32_t frames, uint32_t streamFrames)
     {
         int32_t sums[2][4][kBlock]; // per core: dry L, dry R, wet L, wet R
         int32_t left[kBlock], right[kBlock];
@@ -455,19 +537,20 @@ namespace ps2x::iop::detail
                     Voice &voice = m_voices[c * 24 + v];
                     if (voice.phase == Phase::Off)
                         continue;
-                    mixVoice(voice, left, right, n);
                     const uint32_t bit = 1u << v;
+                    const uint32_t count = m_streamVoices[c] & bit ? std::min(n, streamFrames) : n;
+                    mixVoice(voice, left, right, count);
                     if (core.dryL & bit)
-                        for (uint32_t i = 0; i < n; ++i)
+                        for (uint32_t i = 0; i < count; ++i)
                             sums[c][0][i] += left[i];
                     if (core.dryR & bit)
-                        for (uint32_t i = 0; i < n; ++i)
+                        for (uint32_t i = 0; i < count; ++i)
                             sums[c][1][i] += right[i];
                     if (core.wetL & bit)
-                        for (uint32_t i = 0; i < n; ++i)
+                        for (uint32_t i = 0; i < count; ++i)
                             sums[c][2][i] += left[i];
                     if (core.wetR & bit)
-                        for (uint32_t i = 0; i < n; ++i)
+                        for (uint32_t i = 0; i < count; ++i)
                             sums[c][3][i] += right[i];
                 }
             }
@@ -549,7 +632,11 @@ namespace ps2x::iop::detail
     void SoundMixer::advanceTo(uint64_t iopCycle)
     {
         if (pullMode())
+        {
+            if (guestStreamClock())
+                m_streamIopCycle.store(iopCycle, std::memory_order_relaxed);
             return;
+        }
         auto lock = hold();
         if (!m_cycleValid)
         {
@@ -578,14 +665,28 @@ namespace ps2x::iop::detail
     {
         if (pullMode())
         {
+            const bool guestClock = guestStreamClock();
+            const bool trace = streamStats();
             // A block at a time: the game thread's driver calls wait at most one block.
             for (size_t done = 0; done < frames;)
             {
                 const uint32_t n = static_cast<uint32_t>(std::min<size_t>(frames - done, kBlock));
                 auto lock = hold();
-                render(destination + done * 2u, n);
+                const bool active = (m_streamVoices[0] | m_streamVoices[1]) != 0u;
+                const uint32_t streamFrames = guestClock && active ? streamBudget(n) : n;
+                render(destination + done * 2u, n, streamFrames);
                 pushOutput(destination + done * 2u, n);
                 done += n;
+                if (trace)
+                {
+                    if (active)
+                    {
+                        m_streamFramesMixed += streamFrames;
+                        m_streamFramesHeld += n - streamFrames;
+                    }
+                    if (done == frames)
+                        reportStreamStats();
+                }
             }
             return frames;
         }
@@ -714,6 +815,7 @@ namespace ps2x::iop::detail
             // Discard host output belonging to the abandoned timeline. The audio
             // callback holds m_lock too, so it cannot race this cursor reset.
             m_ringRead.store(0); m_ringWrite.store(0); m_outputStarted = false;
+            resetStreamClock();
         }
         return true;
     }

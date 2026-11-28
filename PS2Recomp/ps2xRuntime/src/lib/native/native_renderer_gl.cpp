@@ -644,6 +644,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         uint32_t firstIndex = 0;
         GLuint indexBuffer = 0;
         bool skinned = false; // uploadSkinnedMesh: SkinVertex, posed by skinProgram
+#ifdef PS2X_NATIVE_GL_SHARED
+        GLuint vertexArray = 0;
+#endif
         uint64_t frame = 0;   // the arena it went into (debugging)
         uint64_t used = 0;    // the last frame that drew it (eviction)
         uint64_t bytes = 0;
@@ -1148,6 +1151,19 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         std::vector<Upload> uploads;
         std::vector<FrameMesh> frameMeshes;
         std::vector<GLuint> deadBuffers, deadTextures; // evicted (GlBackend::evictKept): deleted before the next frame
+#ifdef PS2X_NATIVE_GL_SHARED
+        std::vector<GLuint> deadVertexArrays;
+        GLuint boundVertexArray = 0;
+
+        void bindVertexArray(GLuint array)
+        {
+            if (array != boundVertexArray)
+            {
+                glBindVertexArray(array);
+                boundVertexArray = array;
+            }
+        }
+#endif
         void applyUploads();
         void applyUploadList(std::vector<Upload> &list); // and empties it
         void uploadMesh(uint64_t id, const native_renderer::Vertex *vertices, uint32_t count);
@@ -1362,7 +1378,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             maxAnisotropy = queryMaxAnisotropy();
             std::cerr << "[native:gl] maximum texture anisotropy " << maxAnisotropy << 'x' << std::endl;
             glGenVertexArrays(1, &vao);
+#ifdef PS2X_NATIVE_GL_SHARED
+            bindVertexArray(vao);
+#else
             glBindVertexArray(vao);
+#endif
 #endif
             const float tri[6] = {-1, -1, 3, -1, -1, 3};
             glGenBuffers(1, &quadBuffer);
@@ -2100,11 +2120,85 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         }
 #endif
 
+        static void setMeshVertexLayout(GLuint buffer, bool skinned)
+        {
+            const GLsizei stride = skinned ? sizeof(native_renderer::SkinVertex) : sizeof(native_renderer::Vertex);
+            glBindBuffer(GL_ARRAY_BUFFER, buffer);
+            glEnableVertexAttribArray(0);
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::Vertex, x)));
+            glEnableVertexAttribArray(1);
+            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::Vertex, nx)));
+            glEnableVertexAttribArray(2);
+            glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::Vertex, r)));
+            glEnableVertexAttribArray(3);
+            glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::Vertex, u)));
+            for (GLuint i = 4; i < 6; ++i)
+            {
+                if (!skinned)
+                {
+                    glDisableVertexAttribArray(i);
+                    continue;
+                }
+                glEnableVertexAttribArray(i);
+                glVertexAttribPointer(i, 3, GL_FLOAT, GL_FALSE, stride,
+                                      reinterpret_cast<const void *>(i == 4 ? offsetof(native_renderer::SkinVertex, bone) : offsetof(native_renderer::SkinVertex, weight)));
+            }
+        }
+
+        void bindMeshVertices(Mesh &mesh)
+        {
+#ifdef PS2X_NATIVE_GL_SHARED
+            static const bool useStaticVertexArrays = [] {
+                const char *value = std::getenv("SOTC_GL_STATIC_VAO");
+                // Without the arena, transient meshes also use individual VBOs.
+                return !std::getenv("SOTC_GL_NOARENA") && (!value || std::strcmp(value, "0") != 0);
+            }();
+            if (useStaticVertexArrays && !mesh.dynamic)
+            {
+                if (mesh.vertexArray)
+                {
+                    bindVertexArray(mesh.vertexArray);
+                    return;
+                }
+                // Immutable vertex and index buffers keep the layout in a
+                // worker-context VAO until the mesh is replaced or evicted.
+                glGenVertexArrays(1, &mesh.vertexArray);
+                if (mesh.vertexArray)
+                {
+                    bindVertexArray(mesh.vertexArray);
+                    setMeshVertexLayout(mesh.buffer, mesh.skinned);
+                    if (mesh.indexed)
+                        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.indexBuffer);
+                    return;
+                }
+            }
+            bindVertexArray(vao); // dynamic meshes share the current arena buffer
+#endif
+            const GLuint buffer = mesh.dynamic ? arenaBuffers[arenaIndex] : mesh.buffer;
+            if (buffer != cache.buffer)
+            {
+                setMeshVertexLayout(buffer, mesh.skinned);
+                cache.buffer = buffer;
+            }
+        }
+
+#ifdef PS2X_NATIVE_GL_SHARED
+        void retireVertexArray(Mesh &mesh)
+        {
+            if (mesh.vertexArray)
+                deadVertexArrays.push_back(std::exchange(mesh.vertexArray, 0u));
+        }
+#endif
+
         // A mesh's triangles: the list as it is, or the indexed one's
         // indices (the frame's index buffer, bound with the frame's
         // vertices: the indices count from the start of the arena).
         void bindMeshIndices(const Mesh &mesh)
         {
+#ifdef PS2X_NATIVE_GL_SHARED
+            if (!mesh.dynamic && mesh.vertexArray)
+                return; // captured by this mesh's VAO
+#endif
             if (mesh.indexed)
                 glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.dynamic ? indexBuffers[arenaIndex] : mesh.indexBuffer);
         }
@@ -2189,6 +2283,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     void Renderer::uploadMesh(uint64_t id, const native_renderer::Vertex *vertices, uint32_t count)
     {
         Mesh &mesh = meshes[id];
+#ifdef PS2X_NATIVE_GL_SHARED
+        retireVertexArray(mesh);
+#endif
         forget(mesh);
         mesh.used = arenaFrame;
         mesh.dynamic = mesh.indexed = mesh.skinned = false;
@@ -2227,6 +2324,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     void Renderer::uploadSkinned(uint64_t id, const native_renderer::SkinVertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount)
     {
         Mesh &mesh = meshes[id];
+#ifdef PS2X_NATIVE_GL_SHARED
+        retireVertexArray(mesh);
+#endif
         forget(mesh);
         mesh.used = arenaFrame;
         mesh.dynamic = false;
@@ -2349,6 +2449,12 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     // asked for it: what eviction let go, the uploads, the per-frame meshes.
     void Renderer::applyUploads()
     {
+#ifdef PS2X_NATIVE_GL_SHARED
+        bindVertexArray(vao);
+        if (!deadVertexArrays.empty())
+            glDeleteVertexArrays(static_cast<GLsizei>(deadVertexArrays.size()), deadVertexArrays.data());
+        deadVertexArrays.clear();
+#endif
         if (!deadBuffers.empty())
             glDeleteBuffers(static_cast<GLsizei>(deadBuffers.size()), deadBuffers.data());
         if (!deadTextures.empty())
@@ -2359,6 +2465,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         for (const FrameMesh &f : frameMeshes)
         {
             Mesh &mesh = meshes[f.id];
+#ifdef PS2X_NATIVE_GL_SHARED
+            retireVertexArray(mesh);
+#endif
             mesh.dynamic = true;
             mesh.frame = arenaFrame;
             mesh.first = f.first;
@@ -2541,6 +2650,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     return;
                 }
                 // Darken where the count is not 0, and clear it.
+#ifdef PS2X_NATIVE_GL_SHARED
+                bindVertexArray(vao);
+#endif
                 glEnable(GL_STENCIL_TEST);
                 glStencilFunc(GL_NOTEQUAL, 0, 0xFF);
                 glStencilOp(GL_KEEP, GL_KEEP, GL_ZERO);
@@ -2609,37 +2721,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         std::fprintf(stderr, "[arena] mesh %016llx drawn in arena %llu, uploaded in %llu (order %u)\n", (unsigned long long)d.mesh,
                                      (unsigned long long)arenaFrame, (unsigned long long)mesh->second.frame, d.state.order);
                 }
-                const GLsizei stride = skinned ? sizeof(native_renderer::SkinVertex) : sizeof(native_renderer::Vertex);
-                // A dynamic mesh is a range of the frame's buffer: its start goes
-                // to glDrawArrays (vitaGL keeps a pointer offset in GXM's 16-bit
-                // attribute offset: past 64 KB it read garbage).
-                const size_t base = 0u;
+                // Dynamic meshes pass the arena offset as the first vertex.
+                // vitaGL stores attribute offsets in 16 bits.
                 const GLint firstVertex = mesh->second.dynamic ? static_cast<GLint>(mesh->second.first) : 0;
-                const GLuint vertexBuffer = mesh->second.dynamic ? arenaBuffers[arenaIndex] : mesh->second.buffer;
-                if (vertexBuffer != cache.buffer) // the frame's dynamic meshes share one buffer: set once
-                {
-                    cache.buffer = vertexBuffer;
-                    glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer);
-                    glEnableVertexAttribArray(0);
-                    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, x)));
-                    glEnableVertexAttribArray(1);
-                    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, nx)));
-                    glEnableVertexAttribArray(2);
-                    glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, r)));
-                    glEnableVertexAttribArray(3);
-                    glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, u)));
-                    for (GLuint i = 4; i < 6; ++i)
-                    {
-                        if (!skinned)
-                        {
-                            glDisableVertexAttribArray(i);
-                            continue;
-                        }
-                        glEnableVertexAttribArray(i);
-                        glVertexAttribPointer(i, 3, GL_FLOAT, GL_FALSE, stride,
-                                              reinterpret_cast<const void *>(i == 4 ? offsetof(native_renderer::SkinVertex, bone) : offsetof(native_renderer::SkinVertex, weight)));
-                    }
-                }
+                bindMeshVertices(mesh->second);
                 uniform4(uClip, d.clip, 4);
                 if (d.state.lit || d.state.fresnel) // read by the vertex program only then
                 {
@@ -3024,6 +3109,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #endif
             }
             resolveShadows();
+#ifdef PS2X_NATIVE_GL_SHARED
+            bindVertexArray(vao);
+#endif
             for (GLuint i = 1; i < 6; ++i)
                 glDisableVertexAttribArray(i);
         };
@@ -4299,6 +4387,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 else
                 {
                     auto it = r->meshes.find(c.id);
+#ifdef PS2X_NATIVE_GL_SHARED
+                    r->retireVertexArray(it->second);
+#endif
                     if (it->second.buffer)
                         r->deadBuffers.push_back(it->second.buffer);
                     if (it->second.indexBuffer)

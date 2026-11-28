@@ -1511,19 +1511,19 @@ uint64_t VU1Interpreter::calculatePairReadyCycle(const DecodedInstructionPair &d
         for (uint32_t index = 0; index < usage->vfReadCount; ++index)
         {
             const VfAccess &access = usage->vfRead[index];
-            for (uint32_t component = 0; component < 4u; ++component)
-            {
-                if ((access.lanes & laneForComponent(component)) != 0u)
-                    ready = std::max(ready, m_vfReady[access.reg][component]);
-            }
+            const auto &laneReady = m_vfReady[access.reg];
+            const uint32_t lanes = access.lanes & 0xFu;
+            if (lanes == 0xFu)
+                ready = std::max(ready, std::max(std::max(laneReady[0], laneReady[1]),
+                                                std::max(laneReady[2], laneReady[3])));
+            else
+                for (uint32_t bits = lanes; bits != 0u; bits &= bits - 1u)
+                    ready = std::max(ready, laneReady[3u - __builtin_ctz(bits)]);
         }
         for (uint32_t bits = usage->viRead & 0xFFFEu; bits != 0u; bits &= bits - 1u)
             ready = std::max(ready, m_viReady[__builtin_ctz(bits)]);
-        for (uint32_t component = 0; component < 4u; ++component)
-        {
-            if ((usage->accRead & laneForComponent(component)) != 0u)
-                ready = std::max(ready, m_accReady[component]);
-        }
+        for (uint32_t bits = usage->accRead & 0xFu; bits != 0u; bits &= bits - 1u)
+            ready = std::max(ready, m_accReady[3u - __builtin_ctz(bits)]);
     }
 
     if (decoded.lowerUsage.pipeline == PipelineFdiv && m_fdiv.valid)
@@ -2195,9 +2195,12 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     uint64_t stallCycles = 0;
     if (interpret && !m_recDisabled)
         ps2_stats::vu1InterpRuns.fetch_add(1, std::memory_order_relaxed);
+    // Resume or enter from generated code with all current-cycle writes visible.
+    // After each interpreted pair, advanceOneCycle already commits the new cycle.
+    if (interpret && m_cycle < budgetEnd && !m_stopRequested)
+        commitReadyPipelines();
     while (interpret && m_cycle < budgetEnd && !m_stopRequested)
     {
-        commitReadyPipelines();
         if (t_vu1StopPc != 0 && m_state.pc == t_vu1StopPc && !m_state.branchPending)
             break;
         if (m_state.pc + 8u > codeSize)
